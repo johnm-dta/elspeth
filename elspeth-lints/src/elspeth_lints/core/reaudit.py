@@ -55,6 +55,7 @@ from elspeth_lints.core.allowlist import (
 )
 from elspeth_lints.core.judge import (
     TRANSPORT_OPENROUTER,
+    AgentToolScope,
     JudgeContractError,
     JudgeRequest,
     JudgeTransportError,
@@ -672,6 +673,7 @@ def reaudit_entries(
     reference_time: datetime | None = None,
     progress_callback: Callable[[ReauditProgress], None] | None = None,
     transport: str = TRANSPORT_OPENROUTER,
+    tool_scope: AgentToolScope | None = None,
 ) -> ReauditReport:
     """Re-judge entries in ``allowlist_dir`` against current source in ``root``.
 
@@ -811,6 +813,7 @@ def reaudit_entries(
                 reference_time=reference_time,
                 judge_call_budget=judge_call_budget,
                 transport=transport,
+                tool_scope=tool_scope,
             )
         except _JudgeCallBudgetExhausted:
             # This is a graceful operator-requested stop, not a
@@ -909,6 +912,7 @@ def _reaudit_one_entry(
     reference_time: datetime,
     judge_call_budget: _JudgeCallBudget,
     transport: str = TRANSPORT_OPENROUTER,
+    tool_scope: AgentToolScope | None = None,
 ) -> ReauditOutcome:
     """Classify one entry, calling the judge unless the entry is obsolete."""
     if entry.judge_recorded_at is not None and entry.judge_recorded_at > reference_time:
@@ -1116,7 +1120,7 @@ def _reaudit_one_entry(
 
     judge_call_budget.reserve_call()
     try:
-        response = call_judge(request, transport=transport)
+        response = call_judge(request, transport=transport, tool_scope=tool_scope)
     except JudgeConfigurationError:
         # JudgeConfigurationError is NOT a transport failure — it's an
         # operator misconfiguration (missing API key, missing SDK). Keep

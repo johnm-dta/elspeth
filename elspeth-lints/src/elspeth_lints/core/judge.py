@@ -46,6 +46,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from elspeth_lints.core.allowlist import JudgeVerdict
@@ -982,7 +983,13 @@ def _build_user_message_blocks(request: JudgeRequest) -> list[dict[str, str]]:
     ]
 
 
-def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
+def _call_openrouter(
+    request: JudgeRequest,
+    model_id: str,
+    max_tokens: int,
+    *,
+    tool_scope: AgentToolScope | None = None,
+) -> _TransportResult:
     """OpenRouter transport: OpenAI-compatible SDK pointed at OpenRouter.
 
     Transport: the OpenAI SDK pointed at OpenRouter's chat-completions
@@ -1001,7 +1008,12 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
             ``OPENROUTER_API_KEY`` env var missing.
         JudgeTransportError: OpenRouter / SDK transport failed after
             configuration succeeded.
+        ValueError: a tool scope was supplied — OpenRouter has no agentic
+            tool loop, so ``--judge-tools readonly`` is only valid with the
+            agent transport. Crash rather than silently ignore the scope.
     """
+    if tool_scope is not None:
+        raise ValueError("the openrouter transport cannot use judge tools; --judge-tools readonly requires --judge-transport agent")
     # Lazy import: keeping ``openai`` out of module-level scope means
     # importing ``elspeth_lints.core.judge`` does not require the SDK to
     # be installed; only callers of ``call_judge`` do. This mirrors the
@@ -1111,17 +1123,249 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
     )
 
 
-def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
-    """Claude Agent SDK transport: a no-tools, single-shot query.
+# --------------------------------------------------------------------------
+# Tool-augmented ("investigation") agent transport — read-only, path-scoped.
+# --------------------------------------------------------------------------
+#
+# The blinded agent transport (``tool_scope is None``) judges only the static
+# excerpt — identical input to the OpenRouter path. The tool-augmented mode
+# (``tool_scope`` set) lets the judge READ the surrounding source to resolve a
+# question the excerpt can't answer (e.g. "where does this parameter come
+# from?", "is the audit event recorded before this ceremony?"). It is
+# reaudit-only and NEVER signs anything, so it carries zero CI-correctness
+# hazard; the only thing it trades away is verdict reproducibility (so the
+# deterministic temperature=0 OpenRouter path stays canonical for decay
+# sweeps). See elspeth-ab5e093fa3.
+#
+# SECURITY — the load-bearing guard. ``permission_mode="default"``
+# auto-approves read-only tools, so a ``can_use_tool`` callback is NEVER
+# consulted for Read/Grep/Glob (spiked against claude-agent-sdk==0.2.87). The
+# enforcement primitive that fires for EVERY tool call regardless of
+# auto-approval is a **PreToolUse hook** returning ``permissionDecision:
+# "deny"``. The hook is fail-closed: anything it cannot positively prove is
+# an in-scope read of an allowed tool is denied.
 
-    The system prompt is the ``claude_code`` preset with our static policy
-    block appended (design §4.2): the preset is the one intentional
-    Anthropic-side influence; its era is bounded by the signed ``recorded_at``
-    timestamp. No tools are allowed and no project settings are loaded
-    (``setting_sources=[]``), so the judge sees only the excerpt in the prompt
-    — identical to the OpenRouter path. The assistant emits the verdict JSON
-    per the policy block's output schema; that text feeds the shared
-    ``_parse_judge_payload`` through ``call_judge``.
+# The only tools the investigation mode permits. Everything else (Bash, Write,
+# Edit, Web*, Task, …) is denied by the hook AND listed in ``disallowed_tools``
+# as a redundant first layer. ``Grep`` is included but is the most dangerous —
+# ``output_mode: "content"`` reads file *contents* directly with no ``Read`` —
+# so the hook scopes its ``path`` too (and a pathless Grep is confined to
+# ``cwd``, which is itself an allowed root).
+_TOOL_SCOPE_READONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
+
+# Bound the investigation so a pathological run cannot loop or spend
+# unboundedly. Hitting the cap before a verdict is classified as a failure
+# (see ``_drain_agent_query``), never a silent partial.
+_AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
+
+# Basenames that must never be read even if they somehow sit inside an allowed
+# root — defense in depth. The HMAC signing key lived in a repo ``.env`` once
+# (the O1 breach); the roots already exclude the repo root, but a belt-and-
+# braces basename denylist costs nothing.
+_TOOL_SCOPE_FORBIDDEN_BASENAMES: frozenset[str] = frozenset({".env"})
+
+# Appended to the system prompt ONLY in tool mode, OUTSIDE ``_STATIC_POLICY_BLOCK``
+# so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged and no
+# corpus re-sign is triggered. Tool mode is reaudit-only / non-signing, so the
+# signed policy hash never needs to capture this addendum.
+_TOOL_MODE_ADDENDUM: str = """
+TOOL-AUGMENTED INVESTIGATION MODE (read-only)
+
+You may use the Read, Grep, and Glob tools to investigate the source tree when
+the excerpt alone does not let you decide. This exists so you can resolve a
+would-be "block pending more context" by going and looking — e.g. read the
+callers of the function, the definition of a type, or the call site that
+establishes an invariant. You can only read within the project source; writes,
+shell, and network are unavailable.
+
+Two rules govern how investigation feeds your verdict:
+
+1. CITE WHAT YOU READ. When a fact you discovered by reading is load-bearing
+   for your verdict, name it in your rationale with file:line (e.g. "the caller
+   at query.py:102 passes row_data[...], so `extracted` is Tier-2 pipeline
+   data"). An unsupported claim is still unsupported even if you read the file.
+
+2. THE RATIONALE MUST STILL STAND ALONE. Tools let you VERIFY a claim; they do
+   not relieve the recorded rationale of its duty to an auditor who will read
+   the allowlist entry months from now WITHOUT re-running you. Write the
+   rationale so that auditor can follow it from the entry alone.
+
+OUTPUT: After you finish investigating, your FINAL message MUST be ONLY the
+verdict JSON object specified by the output schema above — no prose, no
+markdown fences, nothing before or after it. Intermediate messages may contain
+your investigation; the final one is parsed as the verdict and must be pure
+JSON.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolScope:
+    """Read-only filesystem scope for the tool-augmented agent transport.
+
+    ``allowed_roots`` and ``cwd`` are stored already realpath-resolved (symlinks
+    and ``..`` collapsed) so the PreToolUse guard's containment check is a pure
+    prefix test against canonical paths. ``cwd`` MUST itself be one of
+    ``allowed_roots`` — a pathless Grep/Glob searches ``cwd``, so confining
+    ``cwd`` to an allowed root is what keeps pathless searches safe.
+    """
+
+    allowed_roots: tuple[Path, ...]
+    cwd: Path
+    max_turns: int
+
+    def __post_init__(self) -> None:
+        if not self.allowed_roots:
+            raise ValueError("AgentToolScope requires at least one allowed root")
+        if self.max_turns <= 0:
+            raise ValueError(f"AgentToolScope.max_turns must be positive, got {self.max_turns}")
+        if self.cwd not in self.allowed_roots:
+            raise ValueError(
+                f"AgentToolScope.cwd {self.cwd!r} must be one of allowed_roots "
+                f"{[str(r) for r in self.allowed_roots]!r} (a pathless Grep/Glob searches cwd)"
+            )
+
+
+def build_readonly_tool_scope(
+    *,
+    root: Path,
+    allowlist_dir: Path,
+    max_turns: int = _AGENT_TOOL_MODE_DEFAULT_MAX_TURNS,
+) -> AgentToolScope:
+    """Build the canonical read-only scope: the source tree + the allowlist dir.
+
+    Both roots are realpath-resolved so symlink/``..`` escapes are caught by the
+    prefix test in ``_tool_scope_decision``. ``cwd`` is the source ``root`` so a
+    pathless Grep/Glob defaults to scanning the source tree, never the repo root.
+    """
+    src_root = Path(os.path.realpath(root))
+    allow_root = Path(os.path.realpath(allowlist_dir))
+    # De-dup while preserving order (root first, so it is a valid cwd).
+    roots: list[Path] = [src_root]
+    if allow_root != src_root:
+        roots.append(allow_root)
+    return AgentToolScope(allowed_roots=tuple(roots), cwd=src_root, max_turns=max_turns)
+
+
+def _tool_scope_candidate_paths(tool_name: str, tool_input: dict[str, Any], cwd: Path) -> list[Path]:
+    """Resolve the filesystem target(s) a tool call would touch, realpath-resolved.
+
+    Returns an empty list for a pathless Grep/Glob — those default to ``cwd``,
+    which the scope guarantees is an allowed root, so there is nothing extra to
+    check. ``tool_input`` is the SDK's external, model-authored dict (a Tier-3
+    boundary): defensive ``.get`` access is correct here, and a Read with no
+    ``file_path`` raises so the caller fails closed.
+    """
+    if tool_name == "Read":
+        raw = tool_input.get("file_path")
+        if not isinstance(raw, str) or not raw:
+            raise ValueError("Read tool call has no usable 'file_path'")
+        targets = [raw]
+    elif tool_name in {"Grep", "Glob"}:
+        raw = tool_input.get("path")
+        if raw is None:
+            return []  # defaults to cwd (an allowed root)
+        if not isinstance(raw, str) or not raw:
+            raise ValueError(f"{tool_name} tool call has a non-string 'path'")
+        targets = [raw]
+    else:  # pragma: no cover - tool_name gate in _tool_scope_decision precedes this
+        raise ValueError(f"unexpected tool {tool_name!r}")
+
+    resolved: list[Path] = []
+    for t in targets:
+        p = Path(t)
+        if not p.is_absolute():
+            p = cwd / p
+        resolved.append(Path(os.path.realpath(p)))
+    return resolved
+
+
+def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict[str, Any]) -> tuple[bool, str]:
+    """Fail-closed allow/deny for one tool call. Pure logic; unit-testable.
+
+    Allows ONLY a read-only tool whose realpath-resolved target sits inside an
+    allowed root and is not a forbidden basename. Any uncertainty (unknown tool,
+    unparseable input, out-of-root target, ``.env``) denies.
+    """
+    if tool_name not in _TOOL_SCOPE_READONLY_TOOLS:
+        return False, (f"tool {tool_name!r} is not permitted in read-only judge-tools mode (allowed: {sorted(_TOOL_SCOPE_READONLY_TOOLS)})")
+    try:
+        candidates = _tool_scope_candidate_paths(tool_name, tool_input, scope.cwd)
+    except Exception as exc:  # fail closed on any extraction failure
+        return False, f"could not establish an in-scope target for {tool_name} (denied fail-closed): {exc}"
+    for cand in candidates:
+        if cand.name in _TOOL_SCOPE_FORBIDDEN_BASENAMES:
+            return False, f"{cand} is a forbidden file (basename denylist)"
+        if not any(cand == r or cand.is_relative_to(r) for r in scope.allowed_roots):
+            return False, (f"{cand} is outside the permitted roots {[str(r) for r in scope.allowed_roots]} (read-only judge-tools scope)")
+    return True, "in-scope read"
+
+
+def _build_pretooluse_scope_hook(scope: AgentToolScope) -> Callable[..., Any]:
+    """Build the async PreToolUse hook enforcing ``scope`` (the load-bearing guard).
+
+    Fires for every tool call (including auto-approved reads) and returns the
+    SDK's PreToolUse decision dict. The hook itself never raises — any internal
+    failure denies, so a bug here fails closed rather than opening the boundary.
+    """
+
+    async def _hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        try:
+            tool_name = input_data.get("tool_name")
+            tool_input = input_data.get("tool_input")
+            if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+                allowed, reason = False, "PreToolUse input missing tool_name/tool_input (denied fail-closed)"
+            else:
+                allowed, reason = _tool_scope_decision(scope, tool_name, tool_input)
+        except Exception as exc:  # never let a guard bug open the boundary
+            allowed, reason = False, f"judge-tools guard error (denied fail-closed): {exc}"
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow" if allowed else "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+
+    return _hook
+
+
+async def _one_user_message_stream(text: str) -> Any:
+    """A one-item async stream carrying the user prompt (enables streaming mode).
+
+    The Claude Agent SDK only consults the PreToolUse hook in *streaming* input
+    mode, which requires the ``prompt`` to be an async-iterable of message dicts
+    rather than a plain string. This wraps the single judge prompt accordingly.
+    """
+    yield {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _call_agent_sdk(
+    request: JudgeRequest,
+    model_id: str,
+    max_tokens: int,
+    *,
+    tool_scope: AgentToolScope | None = None,
+) -> _TransportResult:
+    """Claude Agent SDK transport.
+
+    Two modes, selected by ``tool_scope``:
+
+    * ``tool_scope is None`` (default) — the BLINDED, no-tools, single-shot
+      query (design §4.2). No tools are allowed and no project settings are
+      loaded (``setting_sources=[]``), so the judge sees only the excerpt in
+      the prompt — identical to the OpenRouter path.
+    * ``tool_scope`` set — the TOOL-AUGMENTED investigation mode: Read/Grep/Glob
+      are available but routed through a fail-closed PreToolUse guard scoped to
+      ``tool_scope`` (see ``_build_pretooluse_scope_hook``). Streaming-input is
+      used (the hook only fires in streaming mode); the agent investigates over
+      several turns and its FINAL message is the verdict JSON.
+
+    Either way the system prompt is the ``claude_code`` preset with our static
+    policy block appended (the preset is the one intentional Anthropic-side
+    influence; its era is bounded by the signed ``recorded_at`` timestamp). The
+    tool-mode addendum is appended OUTSIDE ``_STATIC_POLICY_BLOCK`` so
+    ``JUDGE_POLICY_HASH`` is unchanged. The final assistant text feeds the
+    shared ``_parse_judge_payload`` through ``call_judge``.
 
     Determinism caveat (design §7): the SDK does not expose ``temperature``, so
     agent verdicts are less reproducible than the temperature=0 OpenRouter
@@ -1177,17 +1421,56 @@ def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _T
     # without a version chase. The model that actually answered is recorded
     # from ResultMessage.model_usage (see _agent_served_model), so the audit
     # still captures which model served the verdict.
-    options = sdk.ClaudeAgentOptions(
-        system_prompt={"type": "preset", "preset": "claude_code", "append": _STATIC_POLICY_BLOCK},
-        allowed_tools=[],
-        disallowed_tools=["Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"],
-        setting_sources=[],
-        permission_mode="bypassPermissions",
-    )
     prompt_text = "\n\n".join(block["text"] for block in _build_user_message_blocks(request))
 
+    if tool_scope is None:
+        # Blinded path — UNCHANGED. No tools, single-shot string prompt; the
+        # judge sees only the excerpt, identical to the OpenRouter path.
+        options = sdk.ClaudeAgentOptions(
+            system_prompt={"type": "preset", "preset": "claude_code", "append": _STATIC_POLICY_BLOCK},
+            allowed_tools=[],
+            disallowed_tools=["Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"],
+            setting_sources=[],
+            permission_mode="bypassPermissions",
+        )
+        prompt: Any = prompt_text
+        final_message_only = False
+        max_turns: int | None = None
+    else:
+        # Tool-augmented path. Read/Grep/Glob are NOT in allowed_tools (that
+        # list auto-approves and bypasses the hook); they are left available
+        # and routed through the fail-closed PreToolUse guard. The tool-mode
+        # addendum rides OUTSIDE _STATIC_POLICY_BLOCK so JUDGE_POLICY_HASH is
+        # unchanged. Streaming-input prompt is required for the hook to fire.
+        options = sdk.ClaudeAgentOptions(
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": _STATIC_POLICY_BLOCK + "\n\n" + _TOOL_MODE_ADDENDUM,
+            },
+            allowed_tools=[],
+            disallowed_tools=["Bash", "Write", "Edit", "WebSearch", "WebFetch"],
+            setting_sources=[],
+            permission_mode="default",
+            hooks={"PreToolUse": [sdk.HookMatcher(hooks=[_build_pretooluse_scope_hook(tool_scope)])]},
+            max_turns=tool_scope.max_turns,
+            cwd=str(tool_scope.cwd),
+        )
+        prompt = _one_user_message_stream(prompt_text)
+        final_message_only = True
+        max_turns = tool_scope.max_turns
+
     try:
-        return asyncio.run(_drain_agent_query(sdk, prompt_text, options, model_id))
+        return asyncio.run(
+            _drain_agent_query(
+                sdk,
+                prompt,
+                options,
+                model_id,
+                final_message_only=final_message_only,
+                max_turns=max_turns,
+            )
+        )
     except (JudgeConfigurationError, JudgeContractError, JudgeTransportError):
         # Already-classified failures from the drain (in-band error mapping,
         # errored ResultMessage, usage-contract guards) pass through unchanged
@@ -1231,13 +1514,64 @@ def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _T
 _AGENT_AUTH_INBAND_ERRORS: frozenset[str] = frozenset({"authentication_failed", "billing_error"})
 
 
-async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested_model: str) -> _TransportResult:
+def _extract_trailing_verdict_json(text: str) -> str | None:
+    """Extract the trailing balanced JSON object from a tool-mode final message.
+
+    Tool-augmented mode RELAXES the blinded path's pure-JSON contract: an
+    investigating agent naturally narrates its reasoning before emitting the
+    verdict in the SAME final message (empirically confirmed against the live
+    SDK), so the verdict is the LAST top-level ``{...}`` object, not the whole
+    message. The blinded path keeps the strict ``_parse_judge_payload`` contract
+    — this relaxation is scoped to tool mode only.
+
+    Returns the substring that is the trailing JSON object (it is then handed to
+    the SAME strict ``_parse_judge_payload`` for exact-schema validation), or
+    ``None`` if the message contains no object that decodes cleanly to the end.
+    Discriminates the verdict object from incidental ``{...}`` inside the prose
+    by requiring a ``"verdict"`` key and that it consumes the rest of the text.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    decoder = json.JSONDecoder()
+    # Scan candidate object starts left-to-right; accept the first one that
+    # decodes to a dict carrying "verdict" AND consumes the remainder (so the
+    # verdict object is the trailing object, not an early fragment).
+    for idx, ch in enumerate(stripped):
+        if ch != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(stripped, idx)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "verdict" in obj and stripped[end:].strip() == "":
+            return stripped[idx:end]
+    return None
+
+
+async def _drain_agent_query(
+    sdk: Any,
+    prompt: Any,
+    options: Any,
+    requested_model: str,
+    *,
+    final_message_only: bool = False,
+    max_turns: int | None = None,
+) -> _TransportResult:
     """Drain the async query stream into a ``_TransportResult``.
 
-    Accumulate assistant text blocks; capture the terminal ``ResultMessage``
-    for usage + served-model accounting. Classification of in-band failures
-    (before the empty-text contract check) is deliberate and exhaustive over
-    the SDK's error surface:
+    ``prompt`` is a plain string (blinded single-shot) or an async-iterable of
+    message dicts (tool-augmented streaming mode). When ``final_message_only``
+    is set (tool mode), only the LAST assistant message's text is kept, and the
+    trailing verdict JSON object is extracted from it (the agent narrates its
+    investigation before the verdict in that same message) via
+    ``_extract_trailing_verdict_json``. In single-shot mode there is exactly one
+    assistant message whose whole text is the verdict, so the strict parser sees
+    it unchanged.
+
+    Capture the terminal ``ResultMessage`` for usage + served-model accounting.
+    Classification of in-band failures (before the empty-text contract check) is
+    deliberate and exhaustive over the SDK's error surface:
 
     * ``AssistantMessage.error`` auth/billing literal -> ``JudgeConfigurationError``;
       any other ``error`` literal -> ``JudgeTransportError`` (carrying the literal).
@@ -1251,11 +1585,16 @@ async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested
     """
     text_parts: list[str] = []
     result_message: Any = None
-    async for message in sdk.query(prompt=prompt_text, options=options):
+    async for message in sdk.query(prompt=prompt, options=options):
         if isinstance(message, sdk.AssistantMessage):
             inband_error = message.error
             if inband_error is not None:
                 _raise_for_agent_inband_error(inband_error)
+            if final_message_only:
+                # Keep only THIS (latest) assistant message's text; the verdict
+                # is the final message after any tool-use turns. Resetting here
+                # discards intermediate investigation narration.
+                text_parts = []
             for block in message.content:
                 if isinstance(block, sdk.TextBlock):
                     text_parts.append(block.text)
@@ -1265,7 +1604,33 @@ async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested
     if result_message is None:
         raise JudgeContractError("agent transport produced no ResultMessage; cannot account usage.")
     raw_text = "".join(text_parts)
-    if not raw_text.strip():
+    stripped = raw_text.strip()
+
+    if final_message_only and stripped:
+        # Tool mode: the verdict is the trailing JSON object in a final message
+        # that also carries investigation narration. Extract it for the strict
+        # parser. If there is no trailing verdict object, classify why:
+        #   * cap hit + no verdict  -> turn budget exhausted (explicit, per review)
+        #   * cap not hit + no verdict -> the model narrated without deciding;
+        #     a contract violation (recorded verbatim as JUDGE_CALL_FAILED).
+        verdict_json = _extract_trailing_verdict_json(stripped)
+        if verdict_json is not None:
+            raw_text = verdict_json
+            stripped = verdict_json
+        else:
+            num_turns = getattr(result_message, "num_turns", None)
+            if isinstance(num_turns, int) and max_turns is not None and num_turns >= max_turns:
+                raise JudgeContractError(
+                    f"agent turn budget (max_turns={max_turns}) exhausted before a verdict "
+                    f"(num_turns={num_turns}); the final assistant message contained no "
+                    f"verdict JSON object. raw: {stripped[:200]!r}"
+                )
+            raise JudgeContractError(
+                "tool-augmented judge produced a final message with no trailing verdict "
+                f"JSON object; cannot extract a verdict. raw: {stripped[:200]!r}"
+            )
+
+    if not stripped:
         # Before calling empty text a contract violation, consult the terminal
         # ResultMessage's own error signal: an errored ResultMessage with no
         # text is a TRANSPORT failure (provider/transport fault), not a
@@ -1439,7 +1804,7 @@ def _is_agent_auth_error(exc: Exception) -> bool:
     return any(cls.__name__ in auth_names for cls in type(exc).__mro__)
 
 
-_TRANSPORTS: dict[str, Callable[[JudgeRequest, str, int], _TransportResult]] = {
+_TRANSPORTS: dict[str, Callable[..., _TransportResult]] = {
     TRANSPORT_OPENROUTER: _call_openrouter,
     TRANSPORT_AGENT: _call_agent_sdk,
 }
@@ -1454,7 +1819,8 @@ def call_judge(
     model_id: str | None = None,
     max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS,
     transport: str = TRANSPORT_OPENROUTER,
-    transport_impl: Callable[[JudgeRequest, str, int], _TransportResult] | None = None,
+    tool_scope: AgentToolScope | None = None,
+    transport_impl: Callable[..., _TransportResult] | None = None,
 ) -> JudgeResponse:
     """Send a judge request through the selected transport and return the verdict.
 
@@ -1466,6 +1832,13 @@ def call_judge(
     a real provider call. Both transports funnel their extracted assistant text
     through the identical ``_parse_judge_payload`` → validators path, so a
     verdict is validated the same way regardless of origin.
+
+    ``tool_scope`` (agent transport only) enables the read-only tool-augmented
+    investigation mode, confined to that filesystem scope. The OpenRouter
+    transport rejects a non-None ``tool_scope`` (it has no tool loop). When
+    ``tool_scope`` is None every transport is called exactly as before — the
+    blinded path is unchanged — which also keeps the ``transport_impl`` test
+    seam backward-compatible (fakes are invoked with the old 3-arg signature).
 
     Raises:
         JudgeConfigurationError: transport SDK not installed, or auth missing.
@@ -1485,7 +1858,13 @@ def call_judge(
         model_id = DEFAULT_AGENT_JUDGE_MODEL if transport == TRANSPORT_AGENT else DEFAULT_JUDGE_MODEL
 
     impl = transport_impl if transport_impl is not None else _TRANSPORTS[transport]
-    result = impl(request, model_id, max_tokens)
+    # Pass tool_scope only when set, so existing 3-arg fakes and call sites are
+    # invoked exactly as before (backward-compatible test seam). The blinded
+    # path never reaches the keyword form.
+    if tool_scope is not None:
+        result = impl(request, model_id, max_tokens, tool_scope=tool_scope)
+    else:
+        result = impl(request, model_id, max_tokens)
 
     parsed = _parse_judge_payload(result.raw_text)
     verdict = _verdict_from_string(parsed["verdict"])

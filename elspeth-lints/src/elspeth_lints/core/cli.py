@@ -27,7 +27,12 @@ from elspeth_lints.core.emitters.github import render_github
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.emitters.sarif import render_sarif
 from elspeth_lints.core.emitters.text import render_text
-from elspeth_lints.core.judge import TRANSPORT_AGENT, TRANSPORT_OPENROUTER
+from elspeth_lints.core.judge import (
+    TRANSPORT_AGENT,
+    TRANSPORT_OPENROUTER,
+    AgentToolScope,
+    build_readonly_tool_scope,
+)
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope, Severity
 from elspeth_lints.core.registry import DEFAULT_REGISTRY, RuleRegistry
 
@@ -70,6 +75,29 @@ def _add_judge_transport_arg(parser: argparse.ArgumentParser) -> None:
             "Claude subscription); it cannot pin temperature, so agent verdicts are "
             "less reproducible (see reaudit). Requires the [judge-agent] extra and "
             "Claude Code auth."
+        ),
+    )
+
+
+def _add_judge_tools_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``--judge-tools`` flag (read-only investigation mode).
+
+    'none' (default) keeps the blinded judge — it sees only the excerpt. 'readonly'
+    lets the agent transport Read/Grep/Glob within the source tree + allowlist dir
+    (fail-closed PreToolUse guard) to resolve a would-be block for lack of context.
+    Requires ``--judge-transport agent`` (the OpenRouter path has no tool loop) and
+    is reaudit-only / non-signing, so it never affects the signed corpus or CI.
+    """
+    parser.add_argument(
+        "--judge-tools",
+        choices=("none", "readonly"),
+        default="none",
+        help=(
+            "Read-only tool access for the judge. 'none' (default) is blinded "
+            "(excerpt only). 'readonly' lets the agent transport Read/Grep/Glob "
+            "within src + allowlist dir to investigate; requires --judge-transport "
+            "agent. Less reproducible than blinded mode; use for hard-case "
+            "adjudication, not deterministic decay sweeps."
         ),
     )
 
@@ -568,6 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_judge_transport_arg(reaudit)
+    _add_judge_tools_arg(reaudit)
 
     migrate_judge_scope = subparsers.add_parser(
         "migrate-judge-scope",
@@ -2615,6 +2644,16 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     # ``--judge-transport agent`` sweep re-judges through the Agent SDK.
     transport: str = _CLI_TRANSPORT_CHOICES[args.judge_transport]
 
+    # Read-only tool-augmented investigation mode. Only valid with the agent
+    # transport (OpenRouter has no tool loop); the scope confines reads to the
+    # source tree + allowlist dir via a fail-closed PreToolUse guard.
+    tool_scope: AgentToolScope | None = None
+    if args.judge_tools == "readonly":
+        if transport != TRANSPORT_AGENT:
+            sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
+            return 2
+        tool_scope = build_readonly_tool_scope(root=args.root.resolve(), allowlist_dir=allowlist_dir)
+
     if args.render_incomplete_run_id is not None:
         sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
         try:
@@ -2790,6 +2829,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
                 reference_time=(resume_state["header"].started_at if is_resume else header.started_at),
                 progress_callback=_emit_reaudit_progress,
                 transport=transport,
+                tool_scope=tool_scope,
             )
             if report.entries_dispatched >= report.total_entries:
                 writer.commit_trailer()

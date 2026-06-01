@@ -1390,3 +1390,151 @@ class TestRecipeSpecFrozenInvariants:
             slot.required = False  # type: ignore[misc]
         with pytest.raises(FrozenInstanceError):
             slot.slot_type = "int"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# Regression: fixed CSV schema authored in the documented single-key
+# ``{col: type}`` YAML form must NOT emit a false
+# ``csv_fixed_schema_omits_observed_columns`` blocking diagnostic.
+#
+# Bug (now fixed in generation.py): ``compute_proof_diagnostics`` used to hand
+# the RAW source-option field specs (e.g. ``[{"order_id": "str"}, ...]``)
+# straight to ``_declared_field_name``, which does ``field.get("name")`` ->
+# ``None`` for the ``{col: type}`` form. With every declared name reading as
+# ``None``, ``derive_extra_column_risk`` saw the observed CSV headers as
+# *undeclared* "extra" columns and — combined with
+# ``on_validation_failure="discard"`` — emitted a FALSE blocking diagnostic
+# claiming a fixed schema silently drops every row. The fix bridges the raw
+# specs through ``get_raw_schema_config(...).to_dict()["fields"]`` (canonical
+# ``{"name": ..., "type": ...}`` form) so ``_declared_field_name`` recovers
+# the names and the declared columns are correctly recognised as matching the
+# observed headers.
+#
+# This test pins the bug at its ACTUAL trigger point: it constructs a
+# CompositionState whose CSV ``source.options.schema`` carries the raw
+# ``{col: type}`` field form (the durable shape ``compute_proof_diagnostics``
+# reads). Constructing the state directly — rather than routing through
+# ``set_pipeline`` prevalidation — is load-bearing: prevalidation can
+# normalise ``{col: type}`` into ``{name, type}``, which would let the OLD
+# (buggy) ``.get("name")`` path *also* recover the names, so the false
+# diagnostic would never fire and the test would pass on broken code. The raw
+# form is exactly what must reach the production bridge to exercise the fix.
+# --------------------------------------------------------------------------
+
+
+class TestFixedSchemaSingleKeyFormNoFalseOmitDiagnostic:
+    """A fixed CSV schema whose fields use the ``{col: type}`` form and match
+    the bound blob's header row must produce NO false-omit diagnostic.
+    """
+
+    @pytest.fixture
+    def _seeded_blob(self, tmp_path):
+        from datetime import UTC, datetime
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(engine)
+        session_id = str(uuid4())
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        storage_path = storage_dir / f"{blob_id}_orders.csv"
+        # Header row is exactly the columns the fixed schema declares below.
+        body = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=blob_id,
+                    session_id=session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+        return engine, session_id, blob_id
+
+    def test_single_key_form_fixed_schema_matching_header_emits_no_false_omit(self, _seeded_blob) -> None:
+        from elspeth.web.composer.state import (
+            CompositionState,
+            PipelineMetadata,
+            SourceSpec,
+        )
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        engine, session_id, blob_id = _seeded_blob
+
+        # Fixed schema with fields in the documented single-key {col: type}
+        # form — the exact authoring shape that triggered the false diagnostic.
+        # The declared columns are exactly the blob's header row, and
+        # on_validation_failure="discard" arms the omit-diagnostic emit site.
+        source = SourceSpec(
+            plugin="csv",
+            on_success="classified",
+            options={
+                "blob_ref": blob_id,
+                "schema": {
+                    "mode": "fixed",
+                    "fields": [
+                        {"order_id": "str"},
+                        {"customer": "str"},
+                        {"price": "float"},
+                    ],
+                },
+            },
+            on_validation_failure="discard",
+        )
+        state = CompositionState(
+            source=source,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        codes = [d["code"] for d in diagnostics]
+        # The load-bearing assertion: the false omit diagnostic must NOT fire.
+        # On the reverted (buggy) code, the {col: type} declared names read as
+        # None, the observed headers look undeclared, and this code is emitted.
+        assert "csv_fixed_schema_omits_observed_columns" not in codes, diagnostics
+        # The task also requires the sibling required-header mismatch code to be
+        # absent (it does not fire here even on the buggy path, but assert it so
+        # the test fully pins the "declared {col:type} fields match observed
+        # headers" contract).
+        assert "csv_source_blob_header_mismatch" not in codes, diagnostics

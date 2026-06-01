@@ -14,7 +14,8 @@ from opentelemetry import metrics
 from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.schema import get_aggregation_contract_options
+from elspeth.contracts.schema import get_aggregation_contract_options, get_raw_schema_config
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.contracts.value_source import get_catalog_values
 from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
 from elspeth.plugins.infrastructure.manager import (
@@ -68,6 +69,15 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter("elspeth.web.composer.tools").
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="CSV-source 'delimiter' option from external / LLM-authored composer source options",
+    source_param="options",
+    suppresses=("R1",),
+    invariant="raises ValueError when 'delimiter' is present but not a single-character str; never coerces",
+    test_ref="tests/unit/web/composer/test_generation_source_option_boundaries.py::test_csv_source_delimiter_rejects_non_string",
+    test_fingerprint="70dcc85656bdccb86ef9d40258841bfbb2ef3123bbe836f9a7ca4266091d3716",
+)
 def _csv_source_delimiter(options: Mapping[str, Any]) -> str:
     raw = options.get("delimiter")
     if raw is None:
@@ -79,6 +89,15 @@ def _csv_source_delimiter(options: Mapping[str, Any]) -> str:
     return raw
 
 
+@trust_boundary(
+    tier=3,
+    source="CSV-source 'skip_rows' option from external / LLM-authored composer source options",
+    source_param="options",
+    suppresses=("R1",),
+    invariant="raises ValueError when 'skip_rows' is present but not a non-negative int; never coerces",
+    test_ref="tests/unit/web/composer/test_generation_source_option_boundaries.py::test_csv_source_skip_rows_rejects_non_int",
+    test_fingerprint="975c5318f2f88801e228ad4934c33851d6bf6ecb82891032a22d305ccf7b2f21",
+)
 def _csv_source_skip_rows(options: Mapping[str, Any]) -> int:
     raw = options.get("skip_rows")
     if raw is None:
@@ -90,6 +109,15 @@ def _csv_source_skip_rows(options: Mapping[str, Any]) -> int:
     return raw
 
 
+@trust_boundary(
+    tier=3,
+    source="CSV-source 'columns' option from external / LLM-authored composer source options",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant="raises ValueError when 'columns' is present but not a list/tuple of str; never coerces",
+    test_ref="tests/unit/web/composer/test_generation_source_option_boundaries.py::test_csv_source_columns_rejects_non_sequence",
+    test_fingerprint="b5bb902a03d873d14c816d002ab58e9dd8d99c5f51c2136166480bdaf6ac94e6",
+)
 def _csv_source_columns(options: Mapping[str, Any]) -> tuple[str, ...] | None:
     raw = options.get("columns")
     if raw is None:
@@ -104,6 +132,15 @@ def _csv_source_columns(options: Mapping[str, Any]) -> tuple[str, ...] | None:
     return tuple(columns)
 
 
+@trust_boundary(
+    tier=3,
+    source="CSV-source 'field_mapping' option from external / LLM-authored composer source options",
+    source_param="options",
+    suppresses=("R5",),
+    invariant="raises ValueError when 'field_mapping' is present but not a Mapping of str→str; never coerces",
+    test_ref="tests/unit/web/composer/test_generation_field_mapping.py::test_csv_source_field_mapping_rejects_non_mapping",
+    test_fingerprint="0b60b2320a348028e1b74cecfe0ed49335417a9844e7478f1a652eb2725e68ac",
+)
 def _csv_source_field_mapping(options: Mapping[str, Any]) -> dict[str, str] | None:
     raw = options["field_mapping"] if "field_mapping" in options else None
     if raw is None:
@@ -124,6 +161,15 @@ def _csv_source_field_mapping(options: Mapping[str, Any]) -> dict[str, str] | No
     return mapping
 
 
+@trust_boundary(
+    tier=3,
+    source="source 'schema.required_fields' from external / LLM-authored composer source options",
+    source_param="schema",
+    suppresses=("R1", "R5"),
+    invariant="raises ValueError when 'required_fields' is present but not a list/tuple of str; never coerces",
+    test_ref="tests/unit/web/composer/test_generation_source_option_boundaries.py::test_schema_required_fields_rejects_non_sequence",
+    test_fingerprint="b3c30bf7a9ac3f09269f01b4d43a3330440da5a4f2046abf025b1ab272c047ee",
+)
 def _schema_required_fields(schema: Mapping[str, Any]) -> tuple[str, ...]:
     raw = schema.get("required_fields")
     if raw is None:
@@ -1056,7 +1102,18 @@ def _numeric_aggregation_diagnostics_for_observed_csv(
         if not _source_field_reaches_connection_without_type_change(state, node.input, field_name=value_field):
             continue
 
-        inferred_type = inferred_types.get(value_field) if inferred_types is not None else None
+        # ``inferred_types`` is our own Tier-2 derived inspection output. When
+        # present it is built by ``_inspect_csv`` as ``{h: ... for h in
+        # headers}`` against the SAME ``headers`` tuple it returns as
+        # ``observed_headers`` — i.e. it carries exactly one entry per observed
+        # header, never omitting one (``_merge_types`` always yields a type).
+        # The whole map can legitimately be absent (None) for an empty/parse-
+        # error blob, so that absence is handled explicitly. But ``value_field``
+        # was already confirmed present in ``observed_header_set`` above, so a
+        # non-None map is GUARANTEED to contain it: a missing key would be a
+        # Tier-2 invariant break in our own inspection output, which must crash
+        # (subscript), not be silently coerced to None by ``.get()``.
+        inferred_type = inferred_types[value_field] if inferred_types is not None else None
         diagnostics.append(
             _blocking_diagnostic(
                 code="aggregation_numeric_value_field_type_mismatch_against_source_schema",
@@ -1210,91 +1267,100 @@ def compute_proof_diagnostics(
 
     # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
     if facts.source_kind in {"csv", "json", "jsonl"}:
-        # source.options is Tier-1 (Mapping[str, Any]); the *value* at "schema"
-        # is unstructured and may be absent, so the inner shape probes below
-        # remain.
-        schema = source.options.get("schema")
-        if isinstance(schema, Mapping) and schema.get("mode") in {"fixed", "flexible"}:
-            declared = schema.get("fields") or ()
-            if isinstance(declared, (list, tuple)):
-                headerless_columns = source.plugin == "csv" and source.options.get("columns") is not None
-                field_mapping: dict[str, str] | None = None
-                field_resolution_failed = False
-                if source.plugin == "csv" and not headerless_columns:
-                    try:
-                        field_mapping = _csv_source_field_mapping(source.options)
-                    except ValueError as exc:
-                        diagnostics.append(
-                            _csv_source_field_resolution_error_diagnostic(
-                                blob_id=blob_id,
-                                facts=facts,
-                                exc=exc,
-                            )
-                        )
-                        field_resolution_failed = True
-
-                missing_declared: tuple[str, ...] = ()
-                if not field_resolution_failed and not headerless_columns and facts.source_kind == "csv":
-                    try:
-                        missing_declared = derive_required_header_mismatch_risk(
-                            facts,
-                            tuple(declared),
-                            explicit_required_fields=_schema_required_fields(schema),
-                            field_mapping=field_mapping,
-                        )
-                    except ValueError as exc:
-                        diagnostics.append(
-                            _csv_source_field_resolution_error_diagnostic(
-                                blob_id=blob_id,
-                                facts=facts,
-                                exc=exc,
-                            )
-                        )
-                        field_resolution_failed = True
-                if missing_declared and source.on_validation_failure == "discard":
+        # ``source.options`` is a first-party (Tier-1) Mapping whose nested
+        # "schema" config is validated ONCE, at the config-loading boundary,
+        # by ``get_raw_schema_config`` — the same offensive parse that
+        # ``_prevalidate_source`` already ran before this state was stored, so
+        # on the happy path it never raises here. A ``ValueError`` at this point
+        # is a genuine invariant break (state persisted with a schema that no
+        # longer parses) and is allowed to propagate per the offensive-
+        # programming policy, rather than being papered over by an inline
+        # isinstance/``.get()`` shape-probe that silently skips the diagnostic.
+        # The typed ``SchemaConfig`` it returns replaces the prior raw-dict
+        # probing of mode/fields; declared field specs are bridged back into the
+        # spec form ``derive_*_risk`` consumes via ``to_dict()`` so the typed
+        # field names/required flags flow through unchanged.
+        schema_config = get_raw_schema_config(source.options, owner=f"source:{source.plugin}")
+        if schema_config is not None and schema_config.mode in {"fixed", "flexible"}:
+            declared: tuple[Mapping[str, Any], ...] = tuple(schema_config.to_dict()["fields"] or ())
+            headerless_columns = source.plugin == "csv" and _csv_source_columns(source.options) is not None
+            field_mapping: dict[str, str] | None = None
+            field_resolution_failed = False
+            if source.plugin == "csv" and not headerless_columns:
+                try:
+                    field_mapping = _csv_source_field_mapping(source.options)
+                except ValueError as exc:
                     diagnostics.append(
-                        _blocking_diagnostic(
-                            code="csv_source_blob_header_mismatch",
-                            message=(
-                                f"CSV source declares required field(s) {list(missing_declared)} "
-                                f"but the bound blob's header parses as {list(facts.observed_headers or ())}, "
-                                "with no overlapping field names. Every row will fail validation; "
-                                "with on_validation_failure='discard', the run will terminate empty. "
-                                "Either prepend a header row containing the declared field names or set "
-                                "source options.columns to those names for headerless CSV input."
-                            ),
-                            suggested_repair=(
-                                "For headered CSV, update the blob so line 1 contains the declared "
-                                "schema field names. For headerless CSV, patch_source_options with "
-                                "`columns` set to the declared field names, then re-run preview_pipeline. "
-                                "See pipeline_composer.md rule 10."
-                            ),
-                            evidence_locator={
-                                "source": "blob",
-                                "blob_id": str(blob_id),
-                                "declared_required_fields": list(missing_declared),
-                                "observed_headers": list(facts.observed_headers or ()),
-                                "source_plugin": source.plugin,
-                            },
+                        _csv_source_field_resolution_error_diagnostic(
+                            blob_id=blob_id,
+                            facts=facts,
+                            exc=exc,
                         )
                     )
-                elif schema.get("mode") == "fixed" and not field_resolution_failed:
-                    missing: tuple[str, ...] = ()
-                    if not headerless_columns:
-                        try:
-                            missing = derive_extra_column_risk(
-                                facts,
-                                tuple(declared),
-                                field_mapping=field_mapping if source.plugin == "csv" else None,
+                    field_resolution_failed = True
+
+            missing_declared: tuple[str, ...] = ()
+            if not field_resolution_failed and not headerless_columns and facts.source_kind == "csv":
+                try:
+                    missing_declared = derive_required_header_mismatch_risk(
+                        facts,
+                        declared,
+                        explicit_required_fields=schema_config.required_fields or (),
+                        field_mapping=field_mapping,
+                    )
+                except ValueError as exc:
+                    diagnostics.append(
+                        _csv_source_field_resolution_error_diagnostic(
+                            blob_id=blob_id,
+                            facts=facts,
+                            exc=exc,
+                        )
+                    )
+                    field_resolution_failed = True
+            if missing_declared and source.on_validation_failure == "discard":
+                diagnostics.append(
+                    _blocking_diagnostic(
+                        code="csv_source_blob_header_mismatch",
+                        message=(
+                            f"CSV source declares required field(s) {list(missing_declared)} "
+                            f"but the bound blob's header parses as {list(facts.observed_headers or ())}, "
+                            "with no overlapping field names. Every row will fail validation; "
+                            "with on_validation_failure='discard', the run will terminate empty. "
+                            "Either prepend a header row containing the declared field names or set "
+                            "source options.columns to those names for headerless CSV input."
+                        ),
+                        suggested_repair=(
+                            "For headered CSV, update the blob so line 1 contains the declared "
+                            "schema field names. For headerless CSV, patch_source_options with "
+                            "`columns` set to the declared field names, then re-run preview_pipeline. "
+                            "See pipeline_composer.md rule 10."
+                        ),
+                        evidence_locator={
+                            "source": "blob",
+                            "blob_id": str(blob_id),
+                            "declared_required_fields": list(missing_declared),
+                            "observed_headers": list(facts.observed_headers or ()),
+                            "source_plugin": source.plugin,
+                        },
+                    )
+                )
+            elif schema_config.mode == "fixed" and not field_resolution_failed:
+                missing: tuple[str, ...] = ()
+                if not headerless_columns:
+                    try:
+                        missing = derive_extra_column_risk(
+                            facts,
+                            declared,
+                            field_mapping=field_mapping if source.plugin == "csv" else None,
+                        )
+                    except ValueError as exc:
+                        diagnostics.append(
+                            _csv_source_field_resolution_error_diagnostic(
+                                blob_id=blob_id,
+                                facts=facts,
+                                exc=exc,
                             )
-                        except ValueError as exc:
-                            diagnostics.append(
-                                _csv_source_field_resolution_error_diagnostic(
-                                    blob_id=blob_id,
-                                    facts=facts,
-                                    exc=exc,
-                                )
-                            )
+                        )
                     if missing and source.on_validation_failure == "discard":
                         diagnostics.append(
                             _blocking_diagnostic(

@@ -2261,7 +2261,7 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/composer/tools/blobs.py:R1:_set_nested_option:fp=9606870cec567eb9
+- key: web/composer/tools/blobs.py:R1:_set_nested_option:fp=9e58784935875dc0
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2269,7 +2269,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R5:_set_nested_option:fp=984ed68ceb1df11f
+- key: web/composer/tools/blobs.py:R5:_set_nested_option:fp=96640a4192412d72
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2277,7 +2277,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R1:_execute_wire_blob_inline_ref:fp=b158f3692e8bbf5d
+- key: web/composer/tools/blobs.py:R1:_execute_wire_blob_inline_ref:fp=f7acd19deaf734c2
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2285,7 +2285,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R5:_execute_wire_blob_inline_ref:fp=3658d54a8721ac96
+- key: web/composer/tools/blobs.py:R5:_execute_wire_blob_inline_ref:fp=2ef2bf69d0781cc3
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2293,7 +2293,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R1:_execute_wire_blob_inline_ref:fp=79391f3b16bd3db6
+- key: web/composer/tools/blobs.py:R1:_execute_wire_blob_inline_ref:fp=854b2f8bbe34c853
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2301,7 +2301,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R1:_state_source_blob_ref:fp=9f3a080fbddec2a0
+- key: web/composer/tools/blobs.py:R1:_state_source_blob_ref:fp=a822d6da673fa225
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2309,130 +2309,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R5:_state_source_blob_ref:fp=e8ea24c6f35c3e3c
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=df3f9d3f9790ca88
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: description=arguments.get("description"),'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=1b80b2f85d944ac6
-  owner: composer-tools-rearchitect
-  reason: |-
-    AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b composition). Pattern preserved: Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:02.438676+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    This is a legitimate get-or-create pattern on a process-local registry: `_SESSION_BLOB_LOCKS.get(session_id)` returns None on miss, which is the explicit signal to enter the registry mutex and install a new lock. The `.get()` is not defensive against malformed external data — it's the canonical double-checked-locking idiom where None-as-miss is load-bearing control flow. The data is not Tier-3 (the dict is a process-local lock registry we own), so the @trust_boundary decorator does not apply. Replacing with subscript access would force a try/except KeyError that is strictly worse than the current form. Rationale wording is duplicated from a prior entry but the code excerpt independently justifies the suppression.
-  judge_signature_version: 2
-  scope_fingerprint: cbf305ceb6b793c1b5e57885b3af51a39354caf4ed78f0d8af20085eb2f96473
-  judge_transport: openrouter
-  ast_path: 'body[63]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:03a1a4d714d5d858e4cf0aea18781852892037613da435214bce3cb67ea1e6e3'
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=1572f749e0721c8d
-  owner: composer-tools-rearchitect
-  reason: |-
-    AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b composition). Pattern preserved: Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:38:56.266829+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    This is a textbook double-checked locking pattern on a process-local registry dict (_SESSION_BLOB_LOCKS). The .get() call is not defensive handling of external/Tier-3 data — session_id is a string key, and .get() returning None is the correct semantic primitive for 'is there an existing lock?' that drives the create-if-absent branch. Using direct subscript would force a try/except KeyError that expresses exactly the same control flow more awkwardly. The decorator nudge does not apply: this is not a Tier-3 boundary function and the subject is a module-level dict, not an external parameter. Rationale wording is boilerplate from a refactor merge, but the code excerpt independently supports the suppression.
-  judge_signature_version: 2
-  scope_fingerprint: cbf305ceb6b793c1b5e57885b3af51a39354caf4ed78f0d8af20085eb2f96473
-  judge_transport: openrouter
-  ast_path: 'body[63]/body[3]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:a182000baa56794109d6785c3b126e7af534ef52c470dbf17ddd11a7fed8678e'
-- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=96d73b682ad0a226
-  owner: composer-tools-rearchitect
-  reason: |-
-    AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b composition). Pattern preserved: Exception swallowed without re-raise or explicit error: except OSError as rollback_exc:
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:15.376015+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    The except OSError block does not silently swallow the error — it attaches a detailed note to primary_exc via add_note() and then re-raises via the bare 'raise' on line 1351. This is the correct offensive-programming pattern for rollback-failure handling at a filesystem boundary: the primary exception propagates with enriched diagnostic context about the storage/DB divergence, and the narrow OSError catch (rather than Exception) ensures programmer bugs still propagate. The R6 'exception swallowed without re-raise' rule is misfiring here because the re-raise is at the outer except's tail rather than inside the inner handler. The rationale accurately describes an AST-shift preservation of an already-correct pattern.
-  judge_signature_version: 2
-  scope_fingerprint: 9a3e2c22b441959f6a0e2950f395e70a427f9a341178d5576946a427c4c18f00
-  judge_transport: openrouter
-  ast_path: 'body[66]/body[10]/body[10]/body[1]/handlers[2]/body[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:7a394f77c6c7ada73deb0cea2985220c1c341bcb8f18df92746dc5bec9439f98'
-- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=bf8563c850ca9a87
-  owner: composer-tools-rearchitect
-  reason: |-
-    AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b composition). Pattern preserved: Exception swallowed without re-raise or explicit error: except OSError as rollback_exc:
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:08.512571+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    The flagged except OSError block does not silently swallow the rollback failure: it attaches a detailed note to primary_exc via add_note() (recording the rollback path, exception type/message, and the divergence warning for manual reconciliation), and the outer handler then re-raises primary_exc on line 1487. This is the correct pattern for a best-effort rollback inside an exception handler — re-raising rollback_exc would mask the primary failure, while annotating-and-re-raising preserves both. R6's 'swallowed without re-raise' heuristic misfires here because the re-raise is at the enclosing handler scope. The audit trail is preserved through exception chaining and the explicit note.
-  judge_signature_version: 2
-  scope_fingerprint: 5e587422ebb499a3461d4723f78c649d855acf0a293caf7de7b664206f2e2102
-  judge_transport: openrouter
-  ast_path: 'body[68]/body[9]/handlers[0]/body[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:f27d6ef513955589c3f90ab4ba9fc08d31b5dc1324685c70692cf0dca8f1cf78'
-- key: web/composer/tools/generation.py:R1:_csv_source_delimiter:fp=a46f1ac16266c1ba
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_csv_source_skip_rows:fp=5e95739f36d9eda1
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_csv_source_columns:fp=556a65c1e6ad5068
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_csv_source_columns:fp=f89d44e37975a3cc
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_csv_source_field_mapping:fp=176985867214e183
+- key: web/composer/tools/blobs.py:R5:_state_source_blob_ref:fp=407d362dc9724726
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2661,64 +2538,7 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[85]/body[75]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:19862f656033e133a4865b07efc0ece59dc57eb3d163b4972e45dc0f080459f5'
-- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=327fe9a5a3e59ac5
-  owner: web-composer
-  reason: |-
-    Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied blob content. JSONDecodeError on a single line is the documented Tier-3 failure mode; the line is counted as a parse failure and surfaced via the "N jsonl line(s) failed to parse" warning. Subsequent lines still inspected.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:37:03.328177+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    This is a legitimate Tier-3 trust boundary: the function parses operator-supplied JSONL sample bytes line-by-line during source inspection. Catching JSONDecodeError per-line is the correct boundary behavior — malformed lines are counted as parse failures and surfaced via a warning, while parsing continues for remaining lines. The exception is narrow (JSONDecodeError, not bare except), the failure is recorded rather than swallowed, and crashing the whole inspection on one bad line would defeat the purpose of inspecting untrusted blob content. R6 (silent exception handling) does not apply meaningfully here because the failure is explicitly counted and reported.
-  judge_signature_version: 2
-  scope_fingerprint: 90d7774ca2babc4f9ad46302552c3144920adf872e804ac8ab4f86625194ce35
-  judge_transport: openrouter
-  ast_path: 'body[37]/body[6]/body[3]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:49fdf675accfcb8a8b10819803086a9f9a07aa8497d28a6860a058fd1cf2dece'
-- key: web/composer/source_inspection.py:R6:_inspect_json:fp=314ea348e863a6f4
-  owner: web-composer
-  reason: |-
-    Tier-3 trust boundary — full JSON document parsing of operator-supplied blob content. JSONDecodeError is expected when the 8 KiB peek truncates mid-object on a large file. Surfaced via warning.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:36:56.787651+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    This is a legitimate Tier-3 trust boundary: the function parses operator-supplied blob bytes that may be truncated at an 8 KiB peek or malformed. JSONDecodeError is an expected outcome of parsing untrusted external content, and the handler distinguishes the truncated-vs-malformed cases and surfaces both via warnings rather than silently swallowing. The exception is narrowly typed (json.JSONDecodeError only), the failure is recorded in operator-visible warnings, and loaded=None then flows through type-checked branches — this matches the 'validate at the boundary, record what we got' guidance for Tier-3. R6 (broad/silent exception handling) does not fit here because the catch is specific and observable.
-  judge_signature_version: 2
-  scope_fingerprint: 47679111231fb11564682e72e00c9136faa736815094e693c033f14581bc0c2c
-  judge_transport: openrouter
-  ast_path: 'body[38]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:f3be703fa6ec01c1c8765c11ba28e5c4f712345d4e9e5e7f2839808ba4464054'
-- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=03c72d42852801e5
-  owner: web-composer
-  reason: |-
-    Tier-3 trust boundary — `objects: list[dict[str, Any]]` is the natural shape of parsed JSON sample rows and serves as the input contract to the type-inference helper. A TypedDict cannot describe arbitrary external JSON without enumerating every possible operator-supplied schema.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:37:11.000212+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    R8 (likely the dict[str, Any] / loosely-typed mapping rule) is being suppressed on a function whose explicit role is to ingest parsed JSON sample rows from external sources — genuine Tier-3 data with arbitrary operator-supplied schemas. A TypedDict cannot model arbitrary external JSON, and the function correctly performs offensive type-narrowing via isinstance dispatch on each value before use. The rationale is site-specific and accurately identifies the trust tier and the structural reason a stricter type cannot apply. R8 is not in the @trust_boundary decorator's suppressible set (R1/R5), so the decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: e48ecdfe27c111852d79e9a31d5ee2132650aa2f391eea96f7e4f01b30387fe1
-  judge_transport: openrouter
-  ast_path: 'body[39]/body[3]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:68b712f8e6dd895fef5aaae7d82116f60a4829f4806749901fc9c1a939cf7147'
-- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=839f884f581b26d0
+- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=a42b2527d38b93e2
   owner: web-composer
   reason: Tier-3 trust boundary — `obj.get(h)` for membership probing on operator-supplied
     JSON. Returns None for absent fields (not a fabricated default — None is "absence"
@@ -2726,26 +2546,7 @@ allow_hits:
   safety: None values caught explicitly by the isinstance(v, list/dict) gate; no fabrication,
     no coercion.
   expires: null
-- key: web/composer/source_inspection.py:R5:_declared_field_name:fp=684a0b8827dc898e
-  owner: web-composer
-  reason: |-
-    Union-arm discrimination on `DeclaredFieldSpec = str | Mapping[str, Any]` introduced by commit 5cab72f3b "handle structured schema fields in preview". The isinstance(field, str) check is mandatory typed dispatch — the two arms extract the field name differently (split on ":" for the legacy "name:type" string form, lookup "name" key for the structured-spec form). Not defensive programming; without it the str-only `.split` branch cannot be reached safely.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:36:49.549042+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    The isinstance check here is genuine union-type discrimination on `DeclaredFieldSpec = str | Mapping[str, Any]`, not a defensive shape guard against untrusted data. The two arms genuinely differ in how they extract the field name (string-split on ":" vs. mapping lookup of "name"), which is exactly the typed-dispatch pattern Python requires for tagged-union handling. This is not the R5 pattern the policy forbids (an isinstance used to silently coerce or recover from malformed Tier-3 input); it is mandatory control flow over a well-typed sum type defined in our own code. The decorator nudge does not apply — `field` is not rooted at an external function parameter carrying Tier-3 data; `DeclaredFieldSpec` is a typed contract.
-  judge_signature_version: 2
-  scope_fingerprint: 98e08c26c0059a0173b722e1fc938565c092006816292edb71183f396301c936
-  judge_transport: openrouter
-  ast_path: 'body[49]/body[0]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:b31fe2709a15535a474e4e640d81ed7122e1874830625f8dab98f579a9c01206'
-- key: web/composer/source_inspection.py:R1:_declared_field_name:fp=ec99754b8b1fc32a
+- key: web/composer/source_inspection.py:R1:_declared_field_name:fp=e6252b5381ad3e07
   owner: web-composer
   reason: Tier-3 trust boundary — `field.get("name")` probes an operator-supplied
     declared-field Mapping for an optional "name" key. Returns None when absent (manifesto
@@ -2754,7 +2555,7 @@ allow_hits:
   safety: None is the documented "field has no name" path; subsequent isinstance(name_raw,
     str) gate prevents any non-string value from leaking through as a name.
   expires: '2026-08-20'
-- key: web/composer/source_inspection.py:R5:_declared_field_name:fp=c2d07dc1c5c6d068
+- key: web/composer/source_inspection.py:R5:_declared_field_name:fp=61f9e4be883aff78
   owner: web-composer
   reason: Tier-3 value validation — `isinstance(name_raw, str)` guards against operator-supplied
     non-string "name" values (numeric, null, list, nested object). Without the guard,
@@ -2763,22 +2564,6 @@ allow_hits:
   safety: Non-str name values return None (absence), not a coerced string. No fabrication,
     no crash.
   expires: '2026-08-20'
-- key: web/composer/source_inspection.py:R5:_declared_field_is_required:fp=61f9e4be883aff78
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/source_inspection.py:R1:_declared_field_is_required:fp=431bc71e5d5e137e
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3aba7cf3d76c43d9
   owner: web-execution
   reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
@@ -3197,37 +2982,21 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_schema_required_fields:fp=170da3b1e8b91a7c
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_schema_required_fields:fp=42a2049f51f41ad5
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=be409e72085e2f59
+- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=97d34ac37373771c
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: issue_code = args.get("issue_code")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=abc6ef78029ec544
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=ac899cd6915d83d1
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: provider = args.get("provider")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=1f07af64510ad515
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=5f5da5c287f672de
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: limit = args.get("limit",
@@ -3235,7 +3004,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=2d3a8b87d9ca51f3
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=dd1a0312d8e19a4b
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(limit, int)
@@ -3243,7 +3012,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=9e1243b28dd8b86f
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=5d23abcd140a1f2a
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if provider is not None and
@@ -3251,7 +3020,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=e0bc2bf3936637b4
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=809e9ae6c8ca9e34
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options`` (a ``Mapping[str, Any]``
     from :class:`SourceSpec` — the type is Tier-1 but the *values* under each key
@@ -3260,7 +3029,7 @@ allow_hits:
   safety: Returns None at line 568, which the caller treats as 'observed' (the default
     inference path); no diagnostics are silently dropped.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=30e852fafe54278d
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=74851ba44d3bd95d
   owner: composer-tools-generation
   reason: Tier-3 type narrow on the LLM-authored ``schema`` value (any JSON type is
     possible at this boundary). When ``schema`` is not a Mapping, the diagnostic helper
@@ -3268,26 +3037,7 @@ allow_hits:
   safety: Wrong-shape schema fails the narrow and returns None at line 568; the caller's
     downstream diagnostics treat that as 'mode unknown' (no false negatives).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=23513e8813c297f6
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping at line 567). The ``mode`` key is optional; absence means the operator declared a schema without a mode (likely a partial composer state) and the helper returns None to signal 'mode-unknown' to the caller.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:25:16.553147+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    The helper operates on source.options['schema'], which is operator/LLM-authored composer state — Tier-3 external data whose shape is not contractually guaranteed (the preceding isinstance(schema, Mapping) guard at line 848 confirms the shape is untrusted). Within that Tier-3 mapping, 'mode' is genuinely optional, and the function honestly records absence by returning None rather than fabricating a default — consistent with the fabrication-decision test. The function is not @trust_boundary-decorated, but the parameter is a SourceSpec (a first-party typed contract), not the external dict itself; the externally-sourced value is reached via source.options.get('schema'), so source_param wouldn't cleanly apply here. The .get on the schema mapping is a legitimate Tier-3 optional-field read.
-  judge_signature_version: 2
-  scope_fingerprint: 7a086e9017c794e2bde236a2c322d36c1910459cd74b8db0b755e1e6f8b58a47
-  judge_transport: openrouter
-  ast_path: 'body[53]/body[2]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:ada3c8b678d1d9c80176dfbf121fe2e17830f0481bae3b08d26cf9d3e2e0b336'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=a198571c1b9ad526
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=28159f3e018e3ba8
   owner: composer-tools-generation
   reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
     Non-string modes (e.g. a number, dict, or None) return None at line 568 — same
@@ -3295,7 +3045,7 @@ allow_hits:
   safety: Non-string returns None; no exception; downstream diagnostics handle the
     mode-unknown case identically to absent-schema.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=20dc866451ce18cc
+- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=91175c90886d7936
   owner: composer-tools-generation
   reason: 'Tier-3 CSV-row boundary: ``csv.DictReader`` can yield rows where ``key``
     is None (ragged rows where extra fields land in the implicit ``None`` key). The
@@ -3305,197 +3055,7 @@ allow_hits:
     are silently dropped from the sample, which is correct — they have no header to
     attribute to.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=fb7e9f0ac5e38ba3
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Subscript)`` is the canonical way to filter Subscript nodes from the walk. This is sum-type dispatch over ``ast.AST``, not a defensive type check on untrusted data.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:38.916756+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.95
-  judge_rationale: |-
-    The isinstance checks here are sum-type dispatch over ast.AST node variants produced by ast.parse — the canonical Python idiom for walking an AST and filtering by node kind. This is not a defensive type guard on untrusted data; ast.walk yields a heterogeneous union and isinstance is how you discriminate variants. The condition string itself is operator-supplied configuration, but the isinstance checks are about AST shape, not data trust. R5 is misfiring on legitimate structural pattern matching.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[0]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:158ab92cc7b5673a8106295ed6e2e63485894bd39315b155f594146413704207'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=1988212271415914
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination within the Subscript branch: ``isinstance(node.value, ast.Name)`` filters subscripts of the form ``<Name>[<slice>]`` (e.g. ``row['field']``).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:42.641743+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance check is performing legitimate AST node-type discrimination, not a Tier-3 shape guard on external data. ast.walk yields heterogeneous node types and isinstance is the canonical, correct way to narrow ast.Subscript's .value field to ast.Name before accessing .id. This is structural pattern-matching on a typed AST, equivalent to a match/case discriminator — exactly the kind of offensive type narrowing the policy permits. R5 misfires on AST visitor patterns; suppression is site-appropriate.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[0]/test/values[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:d5e6f7d4183faa1153a4f25b40c36071ffc394d09fffc4e1293014df41395be2'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=42dc2828b0e57306
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination: ``isinstance(node.slice, ast.Constant)`` filters Subscript slices that are literal constants (vs. computed expressions like ``row[some_var]``).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:03.857983+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    The isinstance checks are discriminating between AST node variants (ast.Constant vs other expression types in a Subscript slice), which is the canonical and correct use of isinstance for sum-type/variant discrimination over Python's ast module. This is not a defensive guard against malformed data — it's structural pattern matching on a typed AST to extract literal string field references from user-authored gate conditions. The R5 rule targets shape-guarding of external data; here the subject is an ast node tree produced by ast.parse, and isinstance is the standard idiom. No fabrication, no trust-tier confusion, no upward import.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[0]/test/values[3]'
-  judge_metadata_signature: 'hmac-sha256:v2:ccdba2d303a43f2011defe8c9ca40714ae17de82e3df06c9ee59040d92321bea'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=d8ccc95d7f3fafec
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination: ``isinstance(node.slice.value, str)`` further narrows the Constant slice to strings (we only collect string-keyed row references).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:33.336228+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance check is operating on Python AST nodes, which are a polymorphic union type by design — ast.Constant.value can be any literal type (str, int, float, bytes, None, etc.). Discriminating the variant via isinstance is the canonical, type-correct way to walk an AST; this is not a defensive shape-guard against malformed external data but offensive narrowing of a legitimately heterogeneous typed structure. R5's intent (suppressing Tier-3 boundary shape guards) does not apply to AST traversal of a parsed expression. The decorator nudge does not apply: the parameter is a condition string, not external row data, and the isinstance is on AST nodes derived from parsing, not on the parameter itself.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[0]/test/values[4]'
-  judge_metadata_signature: 'hmac-sha256:v2:182db2192dede366694623d0257d7ce115077cc4dd964f4297f962ea76e92a85'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=3cf8de969f916272
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Call)`` selects the ``row.get('field')`` sibling pattern that the Subscript branch above doesn't cover.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:56.598595+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance checks here are AST node-type discrimination during ast.walk traversal, not defensive shape-guarding of external data. Selecting ast.Call vs ast.Subscript nodes from a parsed AST is exactly the offensive, structural pattern Python's ast module is designed for — there is no Tier-3 data flowing through these checks (the AST nodes are produced by ast.parse on a config-supplied condition string, and the discrimination is on node identity, not value coercion). R5's defensive-isinstance prohibition does not apply to AST visitor dispatch.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[1]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:cf62c2635df6465b3790d4c2664dd3992294a7135dd482ed8c6740aeb7fdba64'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=788462ae239e2501
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination within the Call branch: ``isinstance(node.func, ast.Attribute)`` filters calls of the form ``<obj>.<method>(...)`` — required to match ``row.get(...)``.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:09.981642+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    The isinstance checks here are AST node-type discrimination on a parsed Python expression tree, not defensive programming on data values. Walking an ast tree and using isinstance to distinguish ast.Call/ast.Attribute/ast.Name/ast.Constant nodes is the canonical, type-correct way to use the ast module — these are sum-type tags, not trust-tier guards. R5's 'shape guard at boundary' framing doesn't apply: there is no Tier-3 data being shape-checked, only structural pattern-matching on a heterogeneous AST. The rationale accurately describes the code.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[1]/test/values[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:1fe726e90656cf2b8f6ab2870da908d9d26e8a53e43e74bbe64dc1dae3020e5b'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8218c1e27d444b5d
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination: ``isinstance(node.func.value, ast.Name)`` requires the method-receiver to be a bare Name (so we match ``row.get(...)`` but not ``obj.row.get(...)``).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:18.344008+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    The isinstance check is being used for AST node-shape discrimination during structural pattern matching of a parsed Python expression — this is the canonical legitimate use of isinstance (type-narrowing on a tagged-union AST), not defensive programming on data values. The R5 rule targets shape-guarding of external Tier-3 data; here the subject is an ``ast`` node from ``ast.parse``, and the isinstance is required to access ``.id`` safely on the union of possible ``func.value`` node types. There is no fabrication, no silent default, no trust-tier confusion — removing the check would either miscategorise expressions or crash on legitimate AST shapes.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[1]/test/values[3]'
-  judge_metadata_signature: 'hmac-sha256:v2:107a6ddee2806c33e3e91a82f097c08928a377d48ce365bef95d79a53dd78914'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=2780ab37f5f2d489
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination: ``isinstance(node.args[0], ast.Constant)`` filters ``row.get(<literal>)`` calls (vs ``row.get(var)``).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:39:50.642558+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance check is a legitimate AST node-shape discriminator, not a defensive guard on Tier-2/3 data. ast.walk yields heterogeneous node types and ast.Call.args is a list of arbitrary expression nodes; filtering for ast.Constant with a str value is the standard way to distinguish row.get('literal') from row.get(variable). This is offensive programming — narrowing to the exact AST shape the code can handle — and matches the policy's allowance for isinstance as type-narrowing on union types rather than as a trust-boundary shape guard on external data. Rule R5 is in the decorator-suppressible set, but the subject is an AST node from ast.parse on a project-controlled condition string, not an external parameter, so the decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[1]/test/values[6]'
-  judge_metadata_signature: 'hmac-sha256:v2:0d3ec7814e133a94739f12e7516fbd1f6dfe0842ad726a259477f33483b1ae2b'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9481bb581f0a388f
-  owner: composer-tools-generation
-  reason: |-
-    Standard ``ast`` field discrimination: ``isinstance(node.args[0].value, str)`` narrows the Constant arg to strings (only string-keyed row.get calls are collected).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:25.706296+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance check is genuine AST node-shape discrimination, not a Tier-3 data shape guard. The code is walking a Python AST produced by ast.parse on a condition string, and ast.Constant.value can legitimately be any of str/int/float/bytes/None — narrowing to str is type discrimination on a sum-type union, which is the correct offensive use of isinstance. R5 (defensive shape guard at boundary) does not apply here; this is structural pattern matching against the AST grammar.
-  judge_signature_version: 2
-  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
-  judge_transport: openrouter
-  ast_path: 'body[55]/body[2]/body[1]/test/values[7]'
-  judge_metadata_signature: 'hmac-sha256:v2:b3a6f25246b0e80b2e1e2fa567f7370cbbbe20cd0f0fb34971708f575aa80212'
-- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=1a4634d0d4e540a1
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 conversion of LLM-authored gate-expression evaluation failure into a structured diagnostic. ``parser.evaluate(row)`` is running the LLM-authored gate condition (an ``ExpressionParser`` of a user expression) against a sampled CSV row; a failure means the expression is type-mismatched for the data shape (e.g. comparing a string CSV value to an int). The except clause captures the exception, emits a ``_blocking_diagnostic`` with the original error text in ``message``, and breaks out of the row loop — the diagnostic is the audit record, not a silent swallow.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:41:00.972494+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    The except clause catches a specific, narrowly-typed ExpressionEvaluationError raised when an LLM-authored gate condition is evaluated against a Tier-3 sampled CSV row. The exception is not silently swallowed: it is converted into a structured _blocking_diagnostic that records the original error text, node id, field, and sample row index — this is exactly the offensive-programming pattern of converting a runtime failure at a trust boundary into an informative audit record. The expression and the row are both external/untrusted (LLM-authored expression vs. observed-mode CSV with no declared types), so a typed-exception capture at this boundary is appropriate. R6 (broad-ish exception handling) is not in the decorator's suppressible set {R1, R5}, so the decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: 1b0484a99d220068f7c6bd04bbe92e9c67d35ddb0cc819b287d5edf0736e9dd7
-  judge_transport: openrouter
-  ast_path: 'body[56]/body[6]/body[6]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:228f92e130a9acb1ca171bb74a08f0fa1d82db9f0f3914429c6087c411342817'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=e2665599a03a84d5
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=c41637dcf592e391
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``node.options`` (NodeSpec.options is ``Mapping[str,
     Any]``; the values at each key are LLM-supplied). ``operations`` is the value-transform
@@ -3504,14 +3064,14 @@ allow_hits:
   safety: Returns False at line 698; the proof helper's caller treats False as 'abstain'
     (no transformation inferred) so the proof step doesn't fabricate a result.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=7236ffc455b6c7be
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=839a894b5bb72ca8
   owner: composer-tools-generation
   reason: 'Tier-3 narrow on the LLM-authored ``operations`` value: must be a list
     or tuple to be iterable as a transform sequence. Anything else (mapping, scalar,
     None) returns False to signal ''cannot prove preservation''.'
   safety: Wrong-shape operations returns False; proof helper abstains.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=aa5808f615d3af9a
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=9163e128ad236a3d
   owner: composer-tools-generation
   reason: 'Tier-3 narrow on each operation entry within the LLM-authored ``operations``
     list: a non-Mapping entry means we cannot reason about the operation''s target
@@ -3519,7 +3079,7 @@ allow_hits:
   safety: Non-Mapping entries return False (abstain); proof helper does not synthesise
     a result from malformed input.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=c1946cc969215bd2
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=c8522bb1defb2382
   owner: composer-tools-generation
   reason: Tier-3 read of LLM-authored ``operation.target`` (the field this operation
     writes to). Absence is permitted by the schema; matching the current field_name
@@ -3527,26 +3087,7 @@ allow_hits:
   safety: A missing target is treated as 'this op does not write to field_name' (preservation
     possibly intact); the loop continues to the next op.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=9c1695c48f0efa04
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 read of LLM-authored aggregation contract options. ``value_field`` is required for numeric aggregations but the helper handles absence gracefully — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field) is not str``).
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:25:08.700062+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.7
-  judge_rationale: |-
-    The function reads aggregation contract options that originate from LLM-authored composition input — Tier-3 external data whose shape is not contractually guaranteed by an ELSPETH typed contract. The .get('value_field') is followed immediately by a strict type/non-empty check (``type(value_field) is not str or not value_field.strip()``) that abstains on absence or wrong shape rather than fabricating a default, which is the honest Tier-3 guard pattern. R1 (dict.get) is the flagged rule and the subject is rooted at options derived from LLM-authored node.options, so the suppression addresses exactly the pattern the rule targets. The decorator nudge does not cleanly apply here because ``options`` is not a direct function parameter but a value derived via get_aggregation_contract_options from state.nodes; the per-line allowlist is the appropriate granularity.
-  judge_signature_version: 2
-  scope_fingerprint: ab316c620d080b0230e1937f336866c1c28b9c15ea50434bcde9192ef8fc113e
-  judge_transport: openrouter
-  ast_path: 'body[60]/body[4]/body[2]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:7c3e070f0f5a768d8266ac0a867d373089fc4168c53b29e47e1eaa60e785ca5a'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=f179b12ee165ade2
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=c1a966ded6f69ee5
   owner: composer-tools-generation
   reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
     str] | None`` we computed from sampled CSV data; a missing ``value_field`` key
@@ -3557,26 +3098,7 @@ allow_hits:
     message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
     'unknown' from 'str' (the runtime type).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=0945f207a98cbbff
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema- optional — present only when set_source_from_blob (or inline_blob in set_pipeline) wired a blob into the source; for path-based sources it is absent. The function abstains from blob-backed proof checks when absent.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:25:23.145534+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    The code accesses `source.options` which is LLM-authored composer state — the options dict is shaped by tool calls from the composer model, and `blob_ref` is schema-optional (present only when set_source_from_blob wired a blob, absent for path-based sources). The `.get()` returning None is exactly the legitimate Tier-3 boundary pattern: absence is recorded as None, the function abstains (returns empty diagnostics) rather than fabricating. The rationale correctly identifies the schema-optional nature and the abstain-on-absent behaviour, and the surrounding comments distinguish this from the Tier-1 BlobToolRecord access below (which correctly uses direct subscript).
-  judge_signature_version: 2
-  scope_fingerprint: b0da7c8beb18943dc878dfd9ddfc9d681db8e617806e1ac0c87b8e2cc67fd711
-  judge_transport: openrouter
-  ast_path: 'body[61]/body[4]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:2e2632aba276476302cfdd429152fc84f398ce5a099a4866a514a753daa415e4'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=78003676a01b62e7
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=f818c54fa5f0bca8
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
     Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
@@ -3584,83 +3106,7 @@ allow_hits:
   safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
     emitted.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=2e46bb891c34ebf7
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``: the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking diagnostic when schema is a Mapping with mode='fixed'.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:46.370871+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.7
-  judge_rationale: |-
-    The excerpt shows ``schema = source.options.get("schema")`` where source.options is Tier-1 but the value at "schema" is LLM-authored unstructured config — genuinely Tier-3 at this nested level. The R5 isinstance(schema, Mapping) check is a legitimate shape probe at the boundary between trusted config keys and untrusted nested values. The rationale correctly identifies the narrow scope and explains the diagnostic's purpose. The decorator nudge doesn't apply cleanly here: the external data isn't a function parameter but a nested value pulled from a Tier-1 mapping, so @trust_boundary's source_param mechanism doesn't fit.
-  judge_signature_version: 2
-  scope_fingerprint: b0da7c8beb18943dc878dfd9ddfc9d681db8e617806e1ac0c87b8e2cc67fd711
-  judge_transport: openrouter
-  ast_path: 'body[61]/body[14]/body[1]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:8dc752926c3d22b95da5a3325e5a301de4cc72184e36ac9092ddfd4e02c0b8aa'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=f0e165ac927832cd
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping). ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the discriminator for the blocking-diagnostic branch.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:25:38.858654+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.7
-  judge_rationale: |-
-    The flagged `.get('mode')` is on `schema`, a value extracted from `source.options` where the LLM (composer model) authored the configuration. While `source.options` itself is a Mapping by contract, the inner `schema` value's contents are LLM-authored and shape-unguaranteed — the code has already narrowed `schema` to `Mapping` via `isinstance`, and now probes for an optional `mode` discriminator whose presence and type are not guaranteed. This is the Tier-3 boundary pattern: guard the shape of externally-sourced unstructured nested data. The rationale correctly identifies the trust tier and addresses R1 specifically (discriminator probe on absent/non-string key).
-  judge_signature_version: 2
-  scope_fingerprint: b0da7c8beb18943dc878dfd9ddfc9d681db8e617806e1ac0c87b8e2cc67fd711
-  judge_transport: openrouter
-  ast_path: 'body[61]/body[14]/body[1]/test/values[1]/left'
-  judge_metadata_signature: 'hmac-sha256:v2:0aa70eb13e333c4d32c82713b7f7942e5feadf3190480dbda1beb8bc221dcae9'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=157afff4c5b89efd
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared column list. ``schema.get('fields') or ()`` coerces an absent or falsy value to an empty tuple so the downstream isinstance check at line 925 has a normalised value to test.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:25:32.057804+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.62
-  judge_rationale: |-
-    The excerpt's own comment establishes that source.options is Tier-1 but the value at 'schema' is LLM-authored unstructured data (Tier-3) — the schema mapping came from an LLM tool call, not a first-party typed contract. The surrounding code already shape-guards with isinstance(schema, Mapping) before any .get, and the flagged schema.get('fields') reads an optional declared-fields key from that untrusted mapping before the next isinstance check at line 1219 validates the shape. This is the legitimate Tier-3 boundary pattern: guard shape, then validate. The 'or ()' coerces a falsy/absent value to an empty tuple which still flows through the isinstance check, so no fabrication is smuggled into audit data. The function is not obviously a single-parameter trust_boundary candidate (schema is reached via source.options, not a direct external param), so the decorator nudge does not cleanly apply.
-  judge_signature_version: 2
-  scope_fingerprint: b0da7c8beb18943dc878dfd9ddfc9d681db8e617806e1ac0c87b8e2cc67fd711
-  judge_transport: openrouter
-  ast_path: 'body[61]/body[14]/body[1]/body[0]/value/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:6a3daa61abf282ee72b896d9ac9b02e5b3a237a99f99c4b5fe3c1a96de5f7c65'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=69025a61f1c28d9f
-  owner: composer-tools-generation
-  reason: |-
-    Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass the diagnostic branch.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:40:53.541643+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.6
-  judge_rationale: |-
-    The excerpt shows schema is read from source.options at an LLM-authored config boundary; the comment at lines 1213-1215 explicitly notes that the value at 'schema' is unstructured. The isinstance(declared, (list, tuple)) check is a Tier-3 shape probe on an LLM-authored value before iterating it as a sequence — exactly the boundary-validation pattern policy permits. R5 is in the decorator's suppressible set, but the function compute_proof_diagnostics does not take the external data as a direct parameter (it's reached via source.options on a parameter whose origin isn't visible), and the excerpt does not show the function signature, so a decorator nudge would be speculative. Accepting the per-line suppression on the visible evidence.
-  judge_signature_version: 2
-  scope_fingerprint: b0da7c8beb18943dc878dfd9ddfc9d681db8e617806e1ac0c87b8e2cc67fd711
-  judge_transport: openrouter
-  ast_path: 'body[61]/body[14]/body[1]/body[1]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:b942b9b8c014c003c4fd68e8e70127b2745b717c309b00d490808bf24da0d166'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=65bfa9c0c7279e67
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=e192af8426155eed
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -3668,7 +3114,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=fd05b8a30100c68c
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=4b7e0010c666b3c0
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -3676,23 +3122,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=0939dce5f06ef7cb
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=2d23380aa7ea7a24
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=2dadfe65b888003f
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=5ea6b1a5885d0de3
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -4252,6 +3682,329 @@ allow_hits:
     message; no model id or hash is fabricated. Type check guards the strict equality
     below.
   expires: '2026-08-24'
+- key: web/composer/source_inspection.py:R6:_inspect_json:fp=7ac9c954381a870b
+  owner: web-composer
+  reason: |-
+    This is a legitimate Tier-3 trust boundary: the function parses operator-supplied blob bytes that may be truncated at an 8 KiB peek or malformed. JSONDecodeError is an expected outcome of parsing untrusted external content, and the handler distinguishes the truncated-vs-malformed cases and surfaces both via warnings rather than silently swallowing. The exception is narrowly typed (json.JSONDecodeError only), the failure is recorded in operator-visible warnings, and loaded=None then flows through type-checked branches — this matches the 'validate at the boundary, record what we got' guidance for Tier-3. R6 (broad/silent exception handling) does not fit here because the catch is specific and observable.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:20:40.540925+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    This is a legitimate Tier-3 boundary suppression. The function parses external blob bytes (sample) that may be truncated or malformed — the exact case where validate-at-boundary applies. The exception catch is narrowly typed to json.JSONDecodeError (not bare/broad), distinguishes truncated vs malformed via operator-visible warnings, and sets loaded=None which flows through subsequent type-checked branches rather than fabricating a default. This is the 'record what we got, including absence' pattern, not silent swallowing — R6's concern (errors disappearing unobservably) does not apply here.
+  judge_signature_version: 2
+  scope_fingerprint: 47679111231fb11564682e72e00c9136faa736815094e693c033f14581bc0c2c
+  judge_transport: openrouter
+  ast_path: 'body[39]/body[5]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:b1ce39eff8b226deb5e91220ef7404f6d0f59b64168c39d9d496479c5f7d2114'
+- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=4e2ec0402671ae1e
+  owner: web-composer
+  reason: |-
+    This is a legitimate Tier-3 trust boundary: the function parses operator-supplied JSONL sample bytes line-by-line during source inspection. Catching JSONDecodeError per-line is the correct boundary behavior — malformed lines are counted as parse failures and surfaced via a warning, while parsing continues for remaining lines. The exception is narrow (JSONDecodeError, not bare except), the failure is recorded rather than swallowed, and crashing the whole inspection on one bad line would defeat the purpose of inspecting untrusted blob content. R6 (silent exception handling) does not apply meaningfully here because the failure is explicitly counted and reported.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:20:47.136081+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    This is a genuine Tier-3 boundary: _inspect_jsonl parses operator-supplied JSONL sample bytes line-by-line. The except is narrow (json.JSONDecodeError only, not bare), the failure is explicitly counted into parse_failures and surfaced via a warning string in the returned facts, and the line is skipped rather than swallowed silently. R6's concern is swallowing errors without re-raise or explicit error result; here the error becomes an explicit counted result recorded in the inspection output, which is the correct boundary behavior for sample inspection where one bad line must not abort the whole inspection. The decorator nudge does not apply (R6 is not in {R1, R5}).
+  judge_signature_version: 2
+  scope_fingerprint: 90d7774ca2babc4f9ad46302552c3144920adf872e804ac8ab4f86625194ce35
+  judge_transport: openrouter
+  ast_path: 'body[38]/body[6]/body[3]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:790ecc9a8b43779075364352bfb73c92deeabec9a0a56c979d68c241bf4a1f17'
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=6f346528de4eff44
+  owner: composer-tools-rearchitect
+  reason: |-
+    The flagged except OSError block does not silently swallow the rollback failure: it attaches a detailed note to primary_exc via add_note() (recording the rollback path, exception type/message, and the divergence warning for manual reconciliation), and the outer handler then re-raises primary_exc on line 1487. This is the correct pattern for a best-effort rollback inside an exception handler — re-raising rollback_exc would mask the primary failure, while annotating-and-re-raising preserves both. R6's 'swallowed without re-raise' heuristic misfires here because the re-raise is at the enclosing handler scope. The audit trail is preserved through exception chaining and the explicit note.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:20:53.342965+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    The except OSError block does not swallow the rollback failure: it calls primary_exc.add_note() to record the rollback path, exception type/message, and divergence warning, and the enclosing handler unconditionally re-raises primary_exc on line 1497. This is the canonical annotate-and-propagate pattern for best-effort rollback inside an exception handler — re-raising rollback_exc instead would mask the primary cause. R6's heuristic misfires because the re-raise lives at the outer handler scope, not inside the inner except. Audit trail is preserved via exception chaining plus the explicit note. Not a Tier-3 boundary case, so the decorator does not apply.
+  judge_signature_version: 2
+  scope_fingerprint: 5e587422ebb499a3461d4723f78c649d855acf0a293caf7de7b664206f2e2102
+  judge_transport: openrouter
+  ast_path: 'body[69]/body[9]/handlers[0]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1589b42ca4f27fd331eea184bcda4bb300551b690b00898f22ee816fc290d3a9'
+- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=7ebc32f4e7eeeb5c
+  owner: composer-tools-rearchitect
+  reason: |-
+    The except OSError block does not silently swallow the error — it attaches a detailed note to primary_exc via add_note() and then re-raises via the bare 'raise' on line 1351. This is the correct offensive-programming pattern for rollback-failure handling at a filesystem boundary: the primary exception propagates with enriched diagnostic context about the storage/DB divergence, and the narrow OSError catch (rather than Exception) ensures programmer bugs still propagate. The R6 'exception swallowed without re-raise' rule is misfiring here because the re-raise is at the outer except's tail rather than inside the inner handler. The rationale accurately describes an AST-shift preservation of an already-correct pattern.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:00.132673+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The inner `except OSError` block does not swallow the exception — it calls `primary_exc.add_note(...)` to enrich the in-flight exception with rollback-divergence diagnostics, and the outer handler's `raise` at line 1361 re-raises `primary_exc` with the attached note. This is the correct offensive pattern: the primary DB-layer fault propagates with full context about storage/DB divergence, narrow OSError catch preserves programmer bugs, and the comment block documents the design intent including a referenced test. R6 is misfiring because the re-raise is structurally at the outer handler's tail rather than inside the inner block, but the control flow guarantees re-raise on every path through this handler.
+  judge_signature_version: 2
+  scope_fingerprint: 9a3e2c22b441959f6a0e2950f395e70a427f9a341178d5576946a427c4c18f00
+  judge_transport: openrouter
+  ast_path: 'body[67]/body[10]/body[10]/body[1]/handlers[2]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1cd45f0a4eba36f0c20c6453c6e10c2fe9d5792b196b419117e60e6a8e1661d0'
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=c5b8692b1242fdb4
+  owner: composer-tools-rearchitect
+  reason: |-
+    This is a legitimate get-or-create pattern on a process-local registry: `_SESSION_BLOB_LOCKS.get(session_id)` returns None on miss, which is the explicit signal to enter the registry mutex and install a new lock. The `.get()` is not defensive against malformed external data — it's the canonical double-checked-locking idiom where None-as-miss is load-bearing control flow. The data is not Tier-3 (the dict is a process-local lock registry we own), so the @trust_boundary decorator does not apply. Replacing with subscript access would force a try/except KeyError that is strictly worse than the current form. Rationale wording is duplicated from a prior entry but the code excerpt independently justifies the suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:07.097491+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    This is a textbook double-checked-locking get-or-create pattern on a process-local registry (`_SESSION_BLOB_LOCKS`) that ELSPETH owns and constructs itself. The `.get()` is not defensive shape-guarding of external data; None-as-miss is the load-bearing control-flow signal that triggers the registry-mutex slow path to install a new lock. Replacing with `dict[key]` would force a try/except KeyError that is semantically identical but uglier, and the fabrication test doesn't apply (no external field, no auditor question). The decorator nudge does not apply — this is not Tier-3 data and the function does not take external input.
+  judge_signature_version: 2
+  scope_fingerprint: cbf305ceb6b793c1b5e57885b3af51a39354caf4ed78f0d8af20085eb2f96473
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:9bf78e3705074b385aadba7029187a5fd38abb848a99601f205770964486e216'
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=1ff926b2bf15f5b6
+  owner: composer-tools-rearchitect
+  reason: |-
+    This is a textbook double-checked locking pattern on a process-local registry dict (_SESSION_BLOB_LOCKS). The .get() call is not defensive handling of external/Tier-3 data — session_id is a string key, and .get() returning None is the correct semantic primitive for 'is there an existing lock?' that drives the create-if-absent branch. Using direct subscript would force a try/except KeyError that expresses exactly the same control flow more awkwardly. The decorator nudge does not apply: this is not a Tier-3 boundary function and the subject is a module-level dict, not an external parameter. Rationale wording is boilerplate from a refactor merge, but the code excerpt independently supports the suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:13.212648+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    This is a textbook double-checked locking pattern on a process-local registry dict (_SESSION_BLOB_LOCKS), not Tier-3 external data. The .get() call here is semantic — 'is there an existing lock for this session?' driving create-if-absent — not defensive shape-guarding of untrusted input. Forcing direct subscript would require try/except KeyError to express identical control flow, which is strictly worse. The decorator nudge doesn't apply: this is not a boundary function and the subject is a module-level dict, not rooted at an external parameter. The surrounding comment block independently demonstrates the author thought carefully about the concurrency invariant.
+  judge_signature_version: 2
+  scope_fingerprint: cbf305ceb6b793c1b5e57885b3af51a39354caf4ed78f0d8af20085eb2f96473
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[3]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:f4579280be5c1cdc9a9ecc4d511b034cdbee163bdd021953dea3ad597a900ea1'
+- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=dbe640b4339f7059
+  owner: composer-tools-generation
+  reason: |-
+    The except clause catches a specific, narrowly-typed ExpressionEvaluationError raised when an LLM-authored gate condition is evaluated against a Tier-3 sampled CSV row. The exception is not silently swallowed: it is converted into a structured _blocking_diagnostic that records the original error text, node id, field, and sample row index — this is exactly the offensive-programming pattern of converting a runtime failure at a trust boundary into an informative audit record. The expression and the row are both external/untrusted (LLM-authored expression vs. observed-mode CSV with no declared types), so a typed-exception capture at this boundary is appropriate. R6 (broad-ish exception handling) is not in the decorator's suppressible set {R1, R5}, so the decorator nudge does not apply.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:19.667139+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The except catches a narrowly-typed ExpressionEvaluationError (not bare Exception), and the exception is not silently swallowed — it is converted into a structured _blocking_diagnostic capturing the original error message, node id, field, sample row index, and a suggested repair. This is the offensive-programming pattern of turning a runtime failure at a Tier-3 boundary (LLM-authored gate expression evaluated against observed-mode CSV rows with no declared types) into an informative audit record, which is the correct remediation per R6 ('return an explicit error/quarantine result'). R6 is not in the decorator's suppressible set {R1, R5}, so the structural alternative does not apply. The rationale speaks directly to the flagged pattern.
+  judge_signature_version: 2
+  scope_fingerprint: 1b0484a99d220068f7c6bd04bbe92e9c67d35ddb0cc819b287d5edf0736e9dd7
+  judge_transport: openrouter
+  ast_path: 'body[57]/body[6]/body[6]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:511237ca695debd8b12ed8d4bec0820e6f83c63fc7301218051a78a9d512582e'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=d2ce1314623cf084
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance checks here are sum-type dispatch over ast.AST node variants produced by ast.parse — the canonical Python idiom for walking an AST and filtering by node kind. This is not a defensive type guard on untrusted data; ast.walk yields a heterogeneous union and isinstance is how you discriminate variants. The condition string itself is operator-supplied configuration, but the isinstance checks are about AST shape, not data trust. R5 is misfiring on legitimate structural pattern matching.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:33.743056+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance checks here discriminate ast.AST node variants returned by ast.walk — a heterogeneous union where isinstance is the canonical and only correct way to pattern-match node kinds. This is structural sum-type dispatch, not a defensive shape guard on untrusted data; the AST node types are guaranteed by the stdlib ast module's contract. R5's concern (masking contract violations) does not apply: there is no contract being hidden — ast.walk genuinely yields a union and the code must branch on variant. No fabrication, no silent recovery, no upward import.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[0]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:7da305b24d784d162c748b4c604f32e710bf4e50b0548ea362e502d813209e11'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=a853c4d37e0ab0f4
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance check is performing legitimate AST node-type discrimination, not a Tier-3 shape guard on external data. ast.walk yields heterogeneous node types and isinstance is the canonical, correct way to narrow ast.Subscript's .value field to ast.Name before accessing .id. This is structural pattern-matching on a typed AST, equivalent to a match/case discriminator — exactly the kind of offensive type narrowing the policy permits. R5 misfires on AST visitor patterns; suppression is site-appropriate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:40.844647+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance check is genuine type discrimination over the heterogeneous ast.AST node hierarchy: ast.walk yields a union of node types, and ast.Subscript.value is typed as ast.expr (a union), so narrowing to ast.Name before accessing .id is the canonical, correct AST-visitor pattern — equivalent to match/case on node type. This is offensive structural dispatch, not a defensive shape guard hiding a contract violation. R5's concern (masking contract violations) does not apply because no ELSPETH contract guarantees these AST subtypes; the stdlib ast module legitimately produces a union. Suppression is site-appropriate.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[0]/test/values[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:229e20d9e9b47b83ed25de0cee9eed3d1eb29a8dc5d30768a576928b4b336628'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9e3396be69940de5
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance checks are discriminating between AST node variants (ast.Constant vs other expression types in a Subscript slice), which is the canonical and correct use of isinstance for sum-type/variant discrimination over Python's ast module. This is not a defensive guard against malformed data — it's structural pattern matching on a typed AST to extract literal string field references from user-authored gate conditions. The R5 rule targets shape-guarding of external data; here the subject is an ast node tree produced by ast.parse, and isinstance is the standard idiom. No fabrication, no trust-tier confusion, no upward import.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:49.967921+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The isinstance checks are discriminating between variants of Python's ast sum type (ast.Subscript, ast.Name, ast.Constant, ast.Call, ast.Attribute) produced by ast.parse — this is the canonical idiom for walking an AST and matching on node kind, not a defensive shape-guard against malformed external data. While the `condition` string itself is user-authored, ast.parse returns a typed tree whose node-variant discrimination genuinely requires isinstance (there is no other Pythonic way to pattern-match ast variants pre-3.10 match-statement adoption, and even then isinstance remains idiomatic). The code does not silently swallow malformed input — non-matching nodes are simply skipped during the walk, which is the correct semantics for 'extract row[...] field references'. R5's concern (isinstance hiding contract violations) does not apply to sum-type discrimination over a stdlib-typed AST.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[0]/test/values[3]'
+  judge_metadata_signature: 'hmac-sha256:v2:856bc3c1690dff69a03d45c231cf78a10e4509f7af75fd36d88e533c83c185fb'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=46721045f0f20130
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance check is operating on Python AST nodes, which are a polymorphic union type by design — ast.Constant.value can be any literal type (str, int, float, bytes, None, etc.). Discriminating the variant via isinstance is the canonical, type-correct way to walk an AST; this is not a defensive shape-guard against malformed external data but offensive narrowing of a legitimately heterogeneous typed structure. R5's intent (suppressing Tier-3 boundary shape guards) does not apply to AST traversal of a parsed expression. The decorator nudge does not apply: the parameter is a condition string, not external row data, and the isinstance is on AST nodes derived from parsing, not on the parameter itself.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:21:57.768299+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The isinstance check is discriminating variants of a polymorphic AST node union (ast.Constant.value can legitimately be str, int, float, bytes, None, etc.), which is the canonical, offensive way to narrow Python's AST type hierarchy — not a defensive shape-guard against malformed external data. R5's concern is isinstance masking contract violations; here there is no contract that node.slice.value is a str, because the AST deliberately exposes a heterogeneous Constant.value. The decorator nudge does not apply: the parameter is a condition string, the isinstance operates on parsed AST nodes, and R5 on AST-walk variant discrimination is not the Tier-3 boundary pattern the decorator targets. Suppression is site-appropriate and the audit record is interpretable.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[0]/test/values[4]'
+  judge_metadata_signature: 'hmac-sha256:v2:2f5e3441f8790e92caa4baf4e21d13d6d7307f35baa027d01eb0b63a72002bea'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=d7042c58e9f9964c
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance checks here are AST node-type discrimination during ast.walk traversal, not defensive shape-guarding of external data. Selecting ast.Call vs ast.Subscript nodes from a parsed AST is exactly the offensive, structural pattern Python's ast module is designed for — there is no Tier-3 data flowing through these checks (the AST nodes are produced by ast.parse on a config-supplied condition string, and the discrimination is on node identity, not value coercion). R5's defensive-isinstance prohibition does not apply to AST visitor dispatch.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:04.751333+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance checks here are AST node-type discrimination during ast.walk traversal — the canonical, idiomatic use of isinstance with Python's ast module to dispatch on node kind (ast.Subscript vs ast.Call vs ast.Attribute vs ast.Constant). This is structural pattern-matching on a heterogeneous tree where the union of possible types is the ast module's contract, not defensive shape-guarding of untrusted data values. R5 targets isinstance used to hide contract violations or coerce data shapes; AST visitor dispatch is the offensive, intended pattern. The rationale correctly identifies the rule's scope does not apply here.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:0ff046791e1d9b6cb3121e0817b63662de3a8c76d2d09daa5157b6ea9b72b5dd'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=29bd2e75e6cdf05f
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance checks here are AST node-type discrimination on a parsed Python expression tree, not defensive programming on data values. Walking an ast tree and using isinstance to distinguish ast.Call/ast.Attribute/ast.Name/ast.Constant nodes is the canonical, type-correct way to use the ast module — these are sum-type tags, not trust-tier guards. R5's 'shape guard at boundary' framing doesn't apply: there is no Tier-3 data being shape-checked, only structural pattern-matching on a heterogeneous AST. The rationale accurately describes the code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:11.336909+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance checks here are AST node-type discrimination on a parsed Python expression tree, which is the canonical, idiomatic way to use the ast module — these are sum-type tags distinguishing ast.Subscript/ast.Call/ast.Attribute/ast.Name/ast.Constant variants, not Tier-3 shape guards on external data values. R5's concern (masking contract violations) does not apply: there is no contract that says an arbitrary ast node is already a specific subclass; pattern-matching on node kind is intrinsic to AST traversal. The rationale accurately describes the code and correctly identifies why R5's framing is inapplicable here.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[1]/test/values[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:e0f15b29997f9d0056284495b8371072fcf44ba5bd1c824204672b5018831610'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=f04db137fa0f3f6f
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance check is being used for AST node-shape discrimination during structural pattern matching of a parsed Python expression — this is the canonical legitimate use of isinstance (type-narrowing on a tagged-union AST), not defensive programming on data values. The R5 rule targets shape-guarding of external Tier-3 data; here the subject is an ``ast`` node from ``ast.parse``, and the isinstance is required to access ``.id`` safely on the union of possible ``func.value`` node types. There is no fabrication, no silent default, no trust-tier confusion — removing the check would either miscategorise expressions or crash on legitimate AST shapes.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:19.361762+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance check is type-narrowing on a Python AST tagged-union node (ast.Call.func can be Attribute, Name, etc.), which is the canonical legitimate use of isinstance: the ast module's API exposes a sum type and Python's type system requires isinstance to narrow to the variant that has a .id attribute. This is not shape-guarding Tier-3 data values; the AST node graph is a first-party structural contract from the stdlib parser, and the checks discriminate node kinds rather than swallow malformed input. Removing the isinstance would produce either an AttributeError on legitimate non-Name func values or a miscategorisation. R5's concern (masking contract violations) does not apply because there is no contract that node.func.value is a Name — the AST union genuinely permits other variants.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[1]/test/values[3]'
+  judge_metadata_signature: 'hmac-sha256:v2:48eacc4fae94afae0692993c6bbcab3ccc0db799776644aa423377d0a0381eba'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=326106a6c4ebfdfa
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance check is a legitimate AST node-shape discriminator, not a defensive guard on Tier-2/3 data. ast.walk yields heterogeneous node types and ast.Call.args is a list of arbitrary expression nodes; filtering for ast.Constant with a str value is the standard way to distinguish row.get('literal') from row.get(variable). This is offensive programming — narrowing to the exact AST shape the code can handle — and matches the policy's allowance for isinstance as type-narrowing on union types rather than as a trust-boundary shape guard on external data. Rule R5 is in the decorator-suppressible set, but the subject is an AST node from ast.parse on a project-controlled condition string, not an external parameter, so the decorator nudge does not apply.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:26.215497+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance checks here are AST node-type discrimination on the heterogeneous union returned by ast.walk and on ast.Call.args (a list of arbitrary expression nodes). This is type-narrowing on a genuine union, not a Tier-2/3 trust-boundary shape guard — the standard Pythonic way to pattern-match AST shapes. The subject is a parsed AST from a project-controlled condition string, so the @trust_boundary decorator is not the right remediation, and the rationale correctly identifies this. R5's concern (masking contract violations) does not apply: there is no contract that ast.Call.args[0] must be ast.Constant.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[1]/test/values[6]'
+  judge_metadata_signature: 'hmac-sha256:v2:724a27d82a2ea4c6fc32528870ad9e894b2b5efc0010841b03f081c68fe3aeb2'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=1ee8b77a6b6e4453
+  owner: composer-tools-generation
+  reason: |-
+    The isinstance check is genuine AST node-shape discrimination, not a Tier-3 data shape guard. The code is walking a Python AST produced by ast.parse on a condition string, and ast.Constant.value can legitimately be any of str/int/float/bytes/None — narrowing to str is type discrimination on a sum-type union, which is the correct offensive use of isinstance. R5 (defensive shape guard at boundary) does not apply here; this is structural pattern matching against the AST grammar.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:33.246825+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance check is discriminating among legitimate variants of the Python AST grammar: ast.Constant.value is a sum type (str|int|float|bytes|None|bool), and narrowing to str is the correct way to identify string-literal subscript keys versus numeric or other constants. This is structural pattern matching against a well-defined union type, not a defensive shape guard on Tier-2/Tier-3 data. R5's concern (masking contract violations) does not apply — there is no contract that ast.Constant.value is always str, and crashing on non-str would be wrong since `row.get(0)` is valid Python the walker should simply skip. The rationale correctly identifies this as offensive type discrimination on a union.
+  judge_signature_version: 2
+  scope_fingerprint: 8334f8dde16d85ca8d79dad8c834fe69a8fb8401f97a5feceaacf45a589a7d10
+  judge_transport: openrouter
+  ast_path: 'body[56]/body[2]/body[1]/test/values[7]'
+  judge_metadata_signature: 'hmac-sha256:v2:13afce5ad8de5530c21138ad224d537899ab5af1b1724f5f4c069f4ecdf8718d'
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=8009b82001221272
+  owner: composer-tools-generation
+  reason: |-
+    The helper operates on source.options['schema'], which is operator/LLM-authored composer state — Tier-3 external data whose shape is not contractually guaranteed (the preceding isinstance(schema, Mapping) guard at line 848 confirms the shape is untrusted). Within that Tier-3 mapping, 'mode' is genuinely optional, and the function honestly records absence by returning None rather than fabricating a default — consistent with the fabrication-decision test. The function is not @trust_boundary-decorated, but the parameter is a SourceSpec (a first-party typed contract), not the external dict itself; the externally-sourced value is reached via source.options.get('schema'), so source_param wouldn't cleanly apply here. The .get on the schema mapping is a legitimate Tier-3 optional-field read.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T23:22:40.172166+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The function operates on source.options['schema'], which is operator/LLM-authored composer configuration — Tier-3 external data whose internal shape is not contractually guaranteed (confirmed by the preceding isinstance(schema, Mapping) guard). Reading optional 'mode' via .get() and honestly returning None on absence rather than fabricating a default is the correct Tier-3 boundary pattern per the fabrication-decision test. The decorator nudge does not cleanly apply: the function parameter is a first-party SourceSpec typed contract, not the external dict; the external data is reached through source.options, so source_param would not match the rule's data-flow root. The shape guard plus honest None return establishes trust correctly at this site.
+  judge_signature_version: 2
+  scope_fingerprint: 7a086e9017c794e2bde236a2c322d36c1910459cd74b8db0b755e1e6f8b58a47
+  judge_transport: openrouter
+  ast_path: 'body[54]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:4c342192a3ff07af0412bedef840e5a8f0f4f6377cf2e7ecc7ceee27c3992f2b'
 per_file_rules:
 - pattern: web/composer/tools/_common.py
   rules:

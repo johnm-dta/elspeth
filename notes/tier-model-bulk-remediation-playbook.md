@@ -176,6 +176,92 @@ keyless commit passes once the gate is green; CI re-verifies cryptographically w
 
 ---
 
+## 6b. Decorator-bucket (outcome B) field notes — from batch 2
+
+Batch 2 (2026-06-01, commit `582f6cf99`) was the **first production use** of `@trust_boundary`:
+14 R1 findings on 5 functions migrated (oidc JWKS validators ×4 / 5 findings; azure
+`_parse_response` / 9 findings). Hard-won specifics:
+
+- **The eligibility reality: most R1 `.get()`s are NOT decorator-eligible.** The honesty gate
+  (`trust_boundary.tests`, `has_raising_assertion`) needs a test that drives the function to
+  **raise** on some malformed input. Two whole shapes fail this and must be **reclassified, not
+  forced**: (a) coerce-and-record-`None` extractors (`_extract_usage_from_provider_response`,
+  `optional_profile_claim`, http `_parse_response_body` — they return sentinels/`None`, never
+  raise); (b) the **composer validation model** (`state.py` `_validate_web_scrape_*` — they
+  *return* `ValidationEntry`/`()`/`None`, never raise). A "Tier 3 boundary" docstring does NOT
+  imply the function raises — verify the body.
+- **The eligible shape:** raises on gross structural malformation **and** the suppressed `.get()`s
+  are the param-rooted coerce-and-record path (e.g. azure raises on missing `'value'`; the
+  per-item `item.get(...)` skips are "record what we didn't get"). The raise the test exercises
+  may be on a *different code path* than the suppressed `.get()`s — that's fine and honest.
+- **Dataflow rooting — the rule is ASYMMETRIC (read the oracle, not your intuition).** Source of
+  truth: `compute_derived_names` / `subject_is_rooted` in
+  `rules/trust_tier/tier_model/trust_boundary_suppress.py`.
+  - **`Assign` / `AnnAssign` / `NamedExpr` use a LOOSE scan** (`_expr_contains_derived_reference`):
+    if the RHS subtree *mentions* a derived name **anywhere**, the LHS becomes derived. So
+    `payload = decode_token(token, jwks); payload.get(...)` **DOES root** `payload` to `token` (the
+    RHS call mentions `token`). A `.get()` on a value from a local call IS rooted. *(This corrects an
+    earlier draft of this note that claimed the opposite.)*
+  - **`For` / `With` / comprehension use a STRICT check** (`subject_is_rooted`): the iterable/context
+    must be rooted *at* the param — `for item in response_data["value"]:` roots `item` to
+    `response_data` (subscript chain), but `for i, x in enumerate(param):` does NOT root `x` (the
+    iter is rooted at `enumerate`, not `param`).
+  - **NOT rooted regardless:** `self.x` (instance attr), values from no-param calls / module
+    constants.
+  - **Rooted ≠ eligible.** Rooting only governs the `trust_boundary.scope` suppression. A function
+    can be rooted yet still ineligible because (a) it never raises, (b) no *direct* raising test
+    exists (`R_TB_TESTS_IRRELEVANT_INPUT`, below), or (c) the "external" value is actually first-party
+    buried in an aggregate (a non-mechanically-checked Tier-3 mislabel — exclude these; don't ship a
+    green-but-dishonest decorator). The oidc/entra provider methods (`authenticate`,
+    `get_user_info`, `decode_token`) are rooted but excluded on (b)/(c), NOT on rooting.
+  - The live gate is the final oracle — apply the decorator and confirm the finding lands in
+    `R_TB_SUPPRESSED`.
+- **The `test_fingerprint` loop is self-correcting.** Decorate with `test_fingerprint=""`, run the
+  gate; `RULE_FINGERPRINT_MISSING` prints the exact `resolution.fingerprint`. Paste it. The test
+  must `pytest.raises(<exc in invariant>)` and call the decorated fn **directly** with malformed
+  data as `source_param` — an indirect drive (through `authenticate`) is rejected
+  (`R_TB_TESTS_IRRELEVANT_INPUT`). Pre-existing shape tests usually drive *indirectly* → expect to
+  write new direct tests.
+- **`@staticmethod` goes OUTSIDE `@trust_boundary`** (so `inspect.signature` sees the real params
+  at decoration time).
+- **AST-shift on the decorated file rotates fp of *undecorated* neighbour allowlist entries** in
+  the same module (import line + decorator lines shift body indices). Rotate those (unsigned-only!)
+  in the same commit — same gotcha as `feedback_ast_shift_fingerprint_rotation`. Confirm none are
+  *signed* before rotating (a signed entry's fp is in the HMAC payload; rotating it silently breaks
+  the signature, invisible to the keyless gate). Verify: `git diff <yaml> | grep -E
+  'judge_verdict|scope_fingerprint|judge_rationale|judge_transport|file_fingerprint|ast_path'`
+  over the diff must be EMPTY.
+- **★ HARD BLOCKER (batch 3, 2026-06-01): the import-add rotates SIGNED downstream entries' KEYS,
+  and that is NOT keyless-fixable.** The allowlist key is `file:rule:symbol:fp`, and `fp =
+  rule_id|ast_path|node_dump` where `ast_path` is **module-root-rooted** (`rule.py:84`,
+  `body[N]/...`). The mandatory `from elspeth.contracts.trust_boundary import trust_boundary` adds a
+  `Module.body[0]` element → shifts `body[N]→body[N+1]` → rotates the key fp of **every** entry
+  below it, **signed ones included**. v2 `scope_fingerprint` decoupled the *signature* but NOT the
+  *key match* (two different surfaces). For an unsigned neighbour you just rotate the key (keyless,
+  fine). For a **signed** neighbour the key is inside the HMAC payload, so re-keying breaks the
+  signature; `rotate` hard-refuses judge-gated entries and no mechanical "re-sign same verdict at
+  new ast_path" verb exists — the only honest fix is **delete + operator re-`justify`** (LLM re-run,
+  flip-flop risk, operator-only). **So decorator migration is keyless-safe ONLY on files with zero
+  signed entries below the import insertion point.** Batch 2 (oidc/azure) was clean by luck; most
+  `web/` files carry signed entries (web.yaml had 130) → BLOCKED keyless. BEFORE picking a decorator
+  batch, check: `grep -B<n> 'judge_verdict' <yaml>` for signed entries in the target file, or probe
+  by applying ONE decorator+import and running the gate (`fail_on_stale=True` reports the count).
+  The principled fix is a tooling feature: make the key match fall back to `scope_fingerprint` when
+  `ast_path` drifts but the scope is stable (would retroactively make this note moot). Until then,
+  this is an operator decision — see the campaign memory.
+- **NB reify vs decorator:** plain **reify** does NOT add a module-level import (it edits one
+  function body), so it does NOT shift module-body indices of *other* functions → keyless-safe in
+  any file (the "coupling dissolved" memory is right *for reify*). Only **decorator migration** adds
+  the import and hits the blocker above.
+- **Decorator migration is `fingerprint_baseline.json`-neutral** — a decorator-suppressed finding
+  leaves the violation set into `R_TB_SUPPRESSED` (same place an allowlist-suppressed one already
+  was), so the baseline capture is unchanged. (Reification is NOT baseline-neutral — it deletes
+  findings → regen required.)
+- **No signing.** The decorator is keyless; commit in any shell. Producer/reviewer loop applies as
+  in §3 — the reviewer's top job is the signed-entry-fp check and the manufactured-raise check
+  (did the producer add a `raise` to the function to fake eligibility? only the decorator+import
+  may change in the source).
+
 ## 7. Key facts about the signing scheme
 
 - **v1 `file_fingerprint`** = whole-file SHA-256. Editing *any* byte of the file breaks

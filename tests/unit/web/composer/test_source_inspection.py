@@ -26,12 +26,79 @@ import pytest
 
 from elspeth.web.composer.source_inspection import (
     SourceInspectionFacts,
+    _declared_field_is_required,
+    _declared_field_name,
     derive_extra_column_risk,
     derive_required_header_mismatch_risk,
     facts_to_dict,
     inspect_blob_content,
     inspect_csv_source_content,
 )
+
+
+class TestDeclaredFieldIsRequiredBoundary:
+    """Trust-boundary honesty tests for ``_declared_field_is_required``.
+
+    A declared field spec arrives inside external / LLM-authored composer
+    source options (Tier-3): it is either a ``str`` (``"name"`` / ``"name?"``)
+    or a ``Mapping`` carrying an optional ``required`` flag. A non-bool
+    ``required`` flag must be rejected with ``ValueError`` (offensive
+    validation at the boundary), never coerced. Binds the invariant claimed
+    by the ``@trust_boundary(source_param='field', suppresses=('R1','R5'))``
+    decorator.
+    """
+
+    def test_rejects_non_bool_required_flag(self) -> None:
+        with pytest.raises(ValueError, match="required flag must be bool when present"):
+            _declared_field_is_required({"name": "id", "required": "yes"})
+
+    def test_string_spec_optional_suffix(self) -> None:
+        # "name:type?" form — the optional marker follows the type after the colon.
+        assert _declared_field_is_required("email:str?") is False
+        assert _declared_field_is_required("name:str") is True
+        # No colon → treated as required (the suffix only applies to the typed form).
+        assert _declared_field_is_required("email?") is True
+
+    def test_mapping_spec_bool_required(self) -> None:
+        assert _declared_field_is_required({"name": "id", "required": False}) is False
+        assert _declared_field_is_required({"name": "id"}) is True
+
+
+class TestDeclaredFieldName:
+    """``_declared_field_name`` over the ``str | Mapping`` field-spec union.
+
+    The string arm and the two legitimate no-name Mapping cases (the
+    single-key YAML form ``{"col": "type"}`` carrying no ``name`` key, and an
+    empty/whitespace name) return ``None`` so the caller drops the entry. A
+    Mapping spec whose ``name`` is *present but not a str* is an upstream-
+    validation invariant break — every authoring path is parsed by
+    ``FieldDefinition.parse`` / ``_normalize_field_spec`` at the config-
+    loading boundary, which raise on a non-str name — so it is asserted
+    offensively here rather than silently skipped behind an isinstance guard.
+    """
+
+    def test_string_spec_returns_name(self) -> None:
+        assert _declared_field_name("id: int") == "id"
+        assert _declared_field_name("price: float?") == "price"
+
+    def test_named_mapping_spec_returns_name(self) -> None:
+        assert _declared_field_name({"name": "id", "type": "int", "required": True, "nullable": False}) == "id"
+        # The JSON-Schema authoring shape (field_type) is also a str-named Mapping.
+        assert _declared_field_name(MappingProxyType({"name": "price", "field_type": "float"})) == "price"
+
+    def test_single_key_yaml_form_has_no_name_key(self) -> None:
+        # ``{"id": "int"}`` (unquoted YAML form) carries no "name" key — honest
+        # absence, not a malformed name; the caller recovers the name elsewhere.
+        assert _declared_field_name({"id": "int"}) is None
+
+    def test_empty_name_returns_none(self) -> None:
+        assert _declared_field_name({"name": "   "}) is None
+        assert _declared_field_name("   : int") is None
+
+    def test_non_str_name_raises(self) -> None:
+        with pytest.raises(ValueError, match="declared field spec 'name' must be str when present"):
+            _declared_field_name({"name": 123})
+
 
 # --------------------------------------------------------------------------
 # Source-kind detection
@@ -269,6 +336,31 @@ class TestJsonInspection:
         body = json.dumps([{"id": 1, "tags": ["a", "b"]}]).encode()
         f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
         assert any("nested structures" in w for w in f.warnings)
+
+    def test_observed_headers_union_preserves_first_seen_order(self) -> None:
+        """``observed_headers`` is the first-seen-order union of keys across all
+        sampled objects, including keys that only appear in a later object.
+
+        Heterogeneous JSON rows (sparse / superset keys) are valid Tier-3 input.
+        The first object fixes the leading order; a key introduced only by a
+        later object is appended at the position it is first seen, never
+        reordered or dropped. This pins the ordered-dedup union semantics so a
+        future refactor of the accumulation idiom cannot silently regress
+        ordering or de-duplication.
+        """
+        body = json.dumps(
+            [
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob", "city": "NYC"},
+                {"name": "Carol", "id": 3, "country": "AU"},
+            ]
+        ).encode()
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+        # id, name from row 1; city first seen in row 2; country first seen in
+        # row 3. Repeated keys (id/name in later rows) are de-duplicated and do
+        # not perturb the first-seen order.
+        assert f.observed_headers == ("id", "name", "city", "country")
+        assert f.sample_row_count == 3
 
     def test_top_level_dict_without_list_value_emits_disambiguation_warning(self) -> None:
         """Wrapped-object detection probed and rejected — operator must see
@@ -524,6 +616,19 @@ class TestDeriveExtraColumnRisk:
             MappingProxyType({"name": "id", "field_type": "str"}),
             MappingProxyType({"name": "name", "field_type": "str"}),
             MappingProxyType({"name": "price", "field_type": "float"}),
+        )
+        assert derive_extra_column_risk(f, declared) == ()
+
+    def test_round_trip_dict_form_no_false_extras(self) -> None:
+        # The to_dict() bridge in compute_proof_diagnostics feeds field specs
+        # in {"name","type","required","nullable"} form. Each carries a str
+        # name, so every declared column is matched and no observed header is a
+        # false "extra".
+        f = self._facts_with_headers(("id", "name", "price"))
+        declared = (
+            {"name": "id", "type": "int", "required": True, "nullable": False},
+            {"name": "name", "type": "str", "required": True, "nullable": False},
+            {"name": "price", "type": "float", "required": True, "nullable": False},
         )
         assert derive_extra_column_risk(f, declared) == ()
 

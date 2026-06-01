@@ -45,6 +45,7 @@ from elspeth.contracts.blobs_inline import (
 from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_modality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import (
     _ACTIVE_RUN_COMPOSITION_COLUMNS,
@@ -617,6 +618,15 @@ def _check_blob_quota(
     return None
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM-supplied create_blob-style tool arguments (filename / mime_type / content / optional description)",
+    source_param="arguments",
+    suppresses=("R1",),
+    invariant="raises ToolArgumentError on a disallowed MIME type, unsanitizable filename, or non-UTF-8-encodable content; never coerces malformed arguments",
+    test_ref="tests/integration/web/composer/test_inline_source_provenance.py::test_non_utf8_content_raises_tool_argument_error",
+    test_fingerprint="0ba34e12e1e4291965b7a438789c3b877f8a9f1a2add72e9c8d1fe51628f3ab3",
+)
 def _prepare_blob_create(
     arguments: Mapping[str, Any],
     *,

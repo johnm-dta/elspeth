@@ -9,6 +9,7 @@ This is the ONLY place in the pipeline where coercion is allowed.
 from __future__ import annotations
 
 import csv
+import enum
 import io
 import itertools
 import json
@@ -47,6 +48,16 @@ if TYPE_CHECKING:
     from azure.storage.blob import BlobClient
 
 logger = structlog.get_logger(__name__)
+
+# Sentinel distinguishing "iterator exhausted" from a real CSV row when peeking
+# with next(it, _ROW_EXHAUSTED). Lets us treat end-of-file as ordinary control
+# flow instead of catching StopIteration, while csv.Error still propagates. An
+# Enum member (not a bare object()) so mypy narrows the union on `is` checks.
+class _RowSentinel(enum.Enum):
+    EXHAUSTED = enum.auto()
+
+
+_ROW_EXHAUSTED = _RowSentinel.EXHAUSTED
 
 
 class CSVOptions(BaseModel):
@@ -579,14 +590,16 @@ class AzureBlobSource(BaseSource):
         # Determine headers
         if has_header:
             try:
-                raw_headers = next(reader)
-            except StopIteration:
-                # Empty file — quarantine as structural failure (Tier 3)
+                # next(..., sentinel) turns end-of-file into ordinary control
+                # flow (no StopIteration handler); csv.Error still propagates.
+                raw_headers = next(reader, _ROW_EXHAUSTED)
+            except csv.Error as e:
+                # Header parse failure at source boundary (Tier 3)
                 raw_row = {
                     "__raw_blob_preview__": text_data[:200],
                     "__encoding__": encoding,
                 }
-                error_msg = "CSV parse error: empty file contains no header row"
+                error_msg = f"CSV parse error in blob header: {e}"
                 ctx.record_validation_error(
                     row=raw_row,
                     error=error_msg,
@@ -600,13 +613,14 @@ class AzureBlobSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return
-            except csv.Error as e:
-                # Header parse failure at source boundary (Tier 3)
+
+            if raw_headers is _ROW_EXHAUSTED:
+                # Empty file — quarantine as structural failure (Tier 3)
                 raw_row = {
                     "__raw_blob_preview__": text_data[:200],
                     "__encoding__": encoding,
                 }
-                error_msg = f"CSV parse error in blob header: {e}"
+                error_msg = "CSV parse error: empty file contains no header row"
                 ctx.record_validation_error(
                     row=raw_row,
                     error=error_msg,
@@ -670,10 +684,11 @@ class AzureBlobSource(BaseSource):
                 headers = self._field_resolution.final_headers
             else:
                 # No headers, no columns, no schema — peek at first row
-                # to generate numeric column names (matching pandas behavior)
-                try:
-                    first_row = next(reader)
-                except StopIteration:
+                # to generate numeric column names (matching pandas behavior).
+                # next(..., sentinel) makes end-of-file ordinary control flow;
+                # csv.Error still propagates (matching prior behavior).
+                first_row = next(reader, _ROW_EXHAUSTED)
+                if first_row is _ROW_EXHAUSTED:
                     return  # Empty headerless file — no data to process
                 numeric_names = [str(i) for i in range(len(first_row))]
                 headers = tuple(numeric_names)
@@ -702,9 +717,9 @@ class AzureBlobSource(BaseSource):
         row_count = 0
         while True:
             try:
-                values = next(row_source)
-            except StopIteration:
-                break
+                # next(..., sentinel) makes end-of-file ordinary control flow;
+                # the csv.Error boundary handler below still fires on bad CSV.
+                values = next(row_source, _ROW_EXHAUSTED)
             except csv.Error as e:
                 # csv.Error can leave parser in corrupted state — stop processing
                 row_count += 1
@@ -731,6 +746,9 @@ class AzureBlobSource(BaseSource):
                         error=error_msg,
                         destination=self._on_validation_failure,
                     )
+                break
+
+            if values is _ROW_EXHAUSTED:
                 break
 
             # Skip blank lines

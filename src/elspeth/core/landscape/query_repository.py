@@ -183,6 +183,36 @@ class QueryRepository:
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}): expected JSON object, got {actual_type}"
                 )
 
+    def _load_payload_if_present(
+        self, row_id: str, source_data_ref: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Load a payload, recording absence when it was purged by retention.
+
+        Returns ``(data, True)`` when the payload is present, or ``(None, False)``
+        when the payload store reports it was purged (``PayloadNotFoundError`` —
+        a documented retention outcome, not an error). The absence is recorded
+        explicitly in the returned tuple rather than swallowed; corruption and
+        infrastructure failures continue to propagate as ``AuditIntegrityError``
+        from ``_retrieve_and_parse_payload``.
+
+        Args:
+            row_id: Row ID (for error context)
+            source_data_ref: Payload store reference key
+
+        Returns:
+            ``(parsed_payload, payload_available)`` — ``payload_available`` is
+            ``False`` exactly when the payload was purged.
+
+        Raises:
+            AuditIntegrityError: Payload is corrupt, fails integrity check,
+                or cannot be retrieved due to infrastructure failure
+        """
+        try:
+            return self._retrieve_and_parse_payload(row_id, source_data_ref), True
+        except PayloadNotFoundError as exc:
+            logger.debug("Payload purged, continuing without source data", content_hash=exc.content_hash)
+            return None, False
+
     def get_row_data(self, row_id: str) -> RowDataResult:
         """Get the payload data for a row with explicit state.
 
@@ -616,16 +646,13 @@ class QueryRepository:
         if row.run_id != run_id:
             raise AuditIntegrityError(f"Row {row_id} belongs to run {row.run_id}, not {run_id}")
 
-        # Try to load payload
+        # Try to load payload — purged payloads (retention) are recorded as
+        # absence (source_data=None, payload_available=False), not an error.
         source_data: dict[str, Any] | None = None
         payload_available = False
 
         if row.source_data_ref is not None and self._payload_store is not None:
-            try:
-                source_data = self._retrieve_and_parse_payload(row_id, row.source_data_ref)
-                payload_available = True
-            except PayloadNotFoundError as exc:
-                logger.debug("Payload purged, continuing without source data", content_hash=exc.content_hash)
+            source_data, payload_available = self._load_payload_if_present(row_id, row.source_data_ref)
 
         return RowLineage(
             row_id=row.row_id,

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import ColumnElement, CompoundSelect, FromClause, and_, or_, select, union
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import RunStatus
@@ -407,15 +408,23 @@ class PurgeManager:
         # This degrades REPLAY_REPRODUCIBLE -> ATTRIBUTABLE_ONLY since
         # nondeterministic runs can no longer be replayed without payloads.
         # Each update is wrapped individually because payloads are already
-        # irreversibly deleted — a failure for one run must not prevent
-        # grade updates for the remaining runs.
+        # irreversibly deleted — a transient DB failure for one run must not
+        # prevent grade updates for the remaining runs.
+        #
+        # We catch ONLY SQLAlchemyError: update_grade_after_purge operates on
+        # our own Tier-1 audit DB, so the only recoverable failure mode is
+        # database I/O (lock contention, connection loss). Every *semantic*
+        # anomaly it can detect is already raised as AuditIntegrityError (a
+        # Tier-1 error that is NOT a SQLAlchemyError), which therefore
+        # propagates uncaught and crashes the purge — corruption of our audit
+        # trail must never be recorded as a recoverable "grade update failure".
+        # Any other exception (TypeError, AttributeError, RuntimeError) is a bug
+        # in our own code and likewise crashes rather than being swallowed.
         grade_update_failures: list[str] = []
         for run_id in sorted(affected_run_ids):
             try:
                 update_grade_after_purge(self._db, run_id, deleted_refs=deleted_refs)
-            except contract_errors.TIER_1_ERRORS:
-                raise  # Tier 1 errors must crash — never swallow
-            except Exception as exc:
+            except SQLAlchemyError as exc:
                 logger.warning(
                     "grade_update_failed",
                     run_id=run_id,

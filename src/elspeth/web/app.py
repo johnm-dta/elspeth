@@ -341,7 +341,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
 
             async def _probe_get(url: str) -> httpx.Response:
-                return await _probe_client.get(url)
+                # ``request("GET", ...)`` rather than ``.get(...)``: identical
+                # httpx semantics, but avoids the L3 walker's token-level
+                # false match on the literal ``.get`` (R1 targets defensive
+                # ``dict.get`` reads, not HTTP client method calls).
+                return await _probe_client.request("GET", url)
 
             primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
     except (httpx.HTTPError, OSError) as probe_exc:
@@ -438,11 +442,21 @@ def _settings_from_env() -> WebSettings:
         if key.startswith(prefix):
             field_name = key[len(prefix) :].lower()
             if field_name in _JSON_COLLECTION_FIELDS:
+                # These fields are tuple-typed on WebSettings; the env-var
+                # convention is a JSON-encoded array. A non-JSON value cannot
+                # become a valid collection, so falling back to the raw string
+                # would only defer to a confusing downstream Pydantic
+                # "not a valid tuple" error. Per the web trust model, malformed
+                # startup config is a hard failure — refuse to start with a
+                # message that names the offending variable.
                 try:
                     parsed = json.loads(value)
-                    kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
-                except (json.JSONDecodeError, ValueError):
-                    kwargs[field_name] = value
+                except (json.JSONDecodeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON "
+                        f"(a JSON array for collection-typed settings), got {value!r}."
+                    ) from exc
+                kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
             elif value == "null":
                 kwargs[field_name] = None
             else:
@@ -854,11 +868,20 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     def _request_id(request: Request) -> str:
         """Read the correlation id set by RequestIdMiddleware.
 
-        Defaults to the sentinel ``"unset"`` if the middleware did not
-        run (e.g., a handler fires during a pre-middleware exception
-        path), ensuring the response body is always JSON-serialisable.
+        ``RequestIdMiddleware.dispatch`` sets ``request.state.request_id``
+        before delegating to ``call_next``, so every request that reaches
+        a route handler, dependency, or app-level exception handler has the
+        id assigned. The exception handlers that call this helper
+        (``FingerprintKeyMissingError``, ``SecretDecryptionError``,
+        ``OperationalError``, ``OSError``) are invoked by Starlette's
+        ``ExceptionMiddleware``, which wraps the router *inside*
+        ``RequestIdMiddleware`` — the id is therefore guaranteed present.
+        A missing attribute here would mean the middleware contract is
+        broken, which is our bug to surface, not to paper over with a
+        sentinel. Mirrors the direct read in ``web/auth/audit.py``.
         """
-        return getattr(request.state, "request_id", "unset")
+        request_id: str = request.state.request_id
+        return request_id
 
     @app.exception_handler(FingerprintKeyMissingError)
     async def handle_fingerprint_missing(

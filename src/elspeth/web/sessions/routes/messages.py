@@ -802,10 +802,20 @@ def register_message_routes(router: APIRouter) -> None:
                 # provider/timeout failures are recorded inside the task;
                 # programmer bugs and DB write failures propagate here
                 # instead of being silently swallowed.
+                #
+                # ``asyncio.wait`` reports the scheduling timeout as an
+                # explicit ``(done, pending)`` partition rather than as a
+                # raised ``TimeoutError`` — the timeout is a control-flow
+                # signal, not an error to catch. On the done path we call
+                # ``.result()`` to re-raise any task exception (programmer
+                # bug / DB write failure) so it propagates exactly as the
+                # comment above promises; on the not-done (timed-out) path
+                # we cancel the runaway task and let the route return.
                 if auto_title_task is not None:
-                    try:
-                        await asyncio.wait_for(auto_title_task, timeout=2.0)
-                    except TimeoutError:
+                    done, _ = await asyncio.wait({auto_title_task}, timeout=2.0)
+                    if auto_title_task in done:
+                        auto_title_task.result()
+                    else:
                         auto_title_task.cancel()
 
     @router.get(

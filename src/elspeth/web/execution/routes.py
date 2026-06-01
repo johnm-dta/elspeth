@@ -846,7 +846,19 @@ def create_execution_router() -> APIRouter:
             except _RunStatusNotFoundError:
                 await websocket.close(code=4004, reason="Run not found")
                 return
-            except (ValidationError, _RunStatusIntegrityError):
+            except (ValidationError, _RunStatusIntegrityError) as integrity_exc:
+                # Tier-1 accounting projection failed integrity validation on
+                # the seed snapshot. The close frame is the routed outcome for
+                # the external client, but the operator needs the detail to
+                # diagnose the divergence — Landscape carries the run audit,
+                # not this projection failure, so slog is the only channel
+                # (CLAUDE.md logging policy: audit-system failure).
+                slog.error(
+                    "websocket_run_status_integrity_error",
+                    run_id=run_id,
+                    phase="seed",
+                    error=str(integrity_exc),
+                )
                 await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                 return
             current = current_snapshot.response
@@ -867,7 +879,17 @@ def create_execution_router() -> APIRouter:
                     except _RunStatusNotFoundError:
                         await websocket.close(code=4004, reason="Run not found")
                         break
-                    except (ValidationError, _RunStatusIntegrityError):
+                    except (ValidationError, _RunStatusIntegrityError) as integrity_exc:
+                        # Same Tier-1 accounting integrity failure as the seed
+                        # path, on the idle-timeout recheck. Record the detail
+                        # before signalling internal-error close (see seed
+                        # handler above for the logging-channel rationale).
+                        slog.error(
+                            "websocket_run_status_integrity_error",
+                            run_id=run_id,
+                            phase="idle_recheck",
+                            error=str(integrity_exc),
+                        )
                         await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                         break
                     current = current_snapshot.response
@@ -1021,7 +1043,16 @@ def create_execution_router() -> APIRouter:
                 },
             )
 
-        resolved = fs_path.resolve()
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_type": "output_path_outside_allowlist",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            ) from None
         data_dir = request.app.state.settings.data_dir
         allowed = allowed_sink_directories(data_dir)
         if not any(resolved.is_relative_to(base) for base in allowed):
@@ -1117,7 +1148,16 @@ def create_execution_router() -> APIRouter:
                 },
             )
 
-        resolved = fs_path.resolve()
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_type": "output_path_outside_allowlist",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            ) from None
         data_dir = request.app.state.settings.data_dir
         allowed = allowed_sink_directories(data_dir)
         if not any(resolved.is_relative_to(base) for base in allowed):

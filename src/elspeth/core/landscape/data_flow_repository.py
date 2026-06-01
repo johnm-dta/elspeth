@@ -115,6 +115,77 @@ class DataFlowRepository:
             allow_raw = os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
         return _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
 
+    # ── Tier-3 external-data audit serialization (coerce-and-record) ──────
+
+    def _canonical_or_recorded_hash(self, data: Any) -> str:
+        """Hash external row data, recording a non-canonical fallback on failure.
+
+        Tier-3 boundary. ``data`` is external-origin (a source/quarantined row or
+        transform-result payload) that may legitimately contain NaN/Infinity or
+        otherwise non-canonical values which ``stable_hash`` rejects. This is the
+        sanctioned coerce-and-record boundary: we return the canonical hash when
+        possible, and otherwise return an explicit ``repr_hash`` fallback. The
+        absence of a canonical hash is recorded as a distinct (repr-based) value,
+        never fabricated and never silently swallowed.
+        """
+        try:
+            return stable_hash(data)
+        except (ValueError, TypeError):
+            # Non-canonical external data: return the explicit repr-based fallback
+            # so the audit row still records what we received.
+            return repr_hash(data)
+
+    def _canonical_or_recorded_json(self, data: Any) -> str:
+        """Serialize external row data, recording a non-canonical fallback on failure.
+
+        Tier-3 boundary companion to :meth:`_canonical_or_recorded_hash`. Returns
+        canonical JSON when ``data`` is canonicalizable, otherwise returns an
+        explicit :class:`NonCanonicalMetadata` envelope (repr + type + error)
+        serialized as JSON. The failure is recorded as structured metadata in the
+        audit trail, not discarded.
+        """
+        try:
+            return canonical_json(data)
+        except (ValueError, TypeError) as exc:
+            # Non-canonical external data: return an explicit structured envelope
+            # capturing what we saw (repr, type, serialization error).
+            return json.dumps(NonCanonicalMetadata.from_error(data, exc).to_dict(), allow_nan=False)
+
+    def _canonical_or_recorded_error_details_json(self, error_details: Any) -> str:
+        """Serialize transform error_details, recording a non-canonical fallback.
+
+        Tier-3 boundary. ``error_details`` originates from transform results and
+        may carry arbitrary row-derived data (NaN/Infinity, non-serializable
+        objects from exception context). Returns canonical JSON when possible,
+        otherwise an explicit ``__non_canonical__`` envelope (repr + error) — the
+        failure is recorded as structured audit data, not discarded.
+        """
+        try:
+            return canonical_json(error_details)
+        except (ValueError, TypeError) as exc:
+            return json.dumps(
+                {
+                    "__non_canonical__": True,
+                    "repr": repr(error_details)[:500],
+                    "serialization_error": str(exc),
+                },
+                allow_nan=False,
+            )
+
+    def _canonical_or_recorded_repr_payload(self, data: Any) -> str:
+        """Serialize a quarantined payload, recording a repr sentinel on failure.
+
+        Tier-3 boundary for the payload store. ``data`` is quarantined external
+        data that may contain non-canonical values. Returns canonical JSON when
+        possible, otherwise an explicit ``{"_repr": repr(data)}`` sentinel that
+        the query repository recognizes on read-back — the absence of a canonical
+        payload is recorded, never fabricated or swallowed.
+        """
+        try:
+            return canonical_json(data)
+        except (ValueError, TypeError):
+            return json.dumps({"_repr": repr(data)}, allow_nan=False)
+
     def _resolve_run_id_for_row(self, row_id: str) -> str:
         """Resolve the run_id that owns a given row_id.
 
@@ -415,12 +486,11 @@ class DataFlowRepository:
         row_id = row_id or generate_id()
 
         # Quarantined rows are Tier-3 external data that may contain non-canonical
-        # values (NaN, Infinity). Use repr_hash as a fallback per canonical.py docs.
+        # values (NaN, Infinity). The coerce-and-record helper returns the canonical
+        # hash or an explicit repr-based fallback per canonical.py docs. Non-quarantined
+        # rows are trusted to be canonical — let stable_hash crash on any anomaly.
         if quarantined:
-            try:
-                data_hash = stable_hash(data)
-            except (ValueError, TypeError):
-                data_hash = repr_hash(data)
+            data_hash = self._canonical_or_recorded_hash(data)
         else:
             data_hash = stable_hash(data)
 
@@ -433,10 +503,7 @@ class DataFlowRepository:
             # For quarantined data, fall back to json.dumps(repr()) if
             # canonical serialization fails on non-canonical values.
             if quarantined:
-                try:
-                    payload_bytes = canonical_json(data).encode("utf-8")
-                except (ValueError, TypeError):
-                    payload_bytes = json.dumps({"_repr": repr(data)}, allow_nan=False).encode("utf-8")
+                payload_bytes = self._canonical_or_recorded_repr_payload(data).encode("utf-8")
             else:
                 payload_bytes = canonical_json(data).encode("utf-8")
             final_payload_ref = self._payload_store.store(payload_bytes)
@@ -1562,16 +1629,11 @@ class DataFlowRepository:
         """
         error_id = f"verr_{generate_id()[:12]}"
 
-        # Tier-3 (external data) trust boundary: row_data may be non-canonical
-        # Try canonical hash/JSON first, fall back to safe representations
-        try:
-            row_hash = stable_hash(row_data)
-            row_data_json = canonical_json(row_data)
-        except (ValueError, TypeError) as e:
-            row_hash = repr_hash(row_data)
-            # Store non-canonical representation with type metadata
-            metadata = NonCanonicalMetadata.from_error(row_data, e)
-            row_data_json = json.dumps(metadata.to_dict(), allow_nan=False)
+        # Tier-3 (external data) trust boundary: row_data may be non-canonical.
+        # The coerce-and-record helpers return the canonical representation or an
+        # explicit non-canonical fallback recorded in the audit trail.
+        row_hash = self._canonical_or_recorded_hash(row_data)
+        row_data_json = self._canonical_or_recorded_json(row_data)
 
         # Extract contract violation details if provided
         violation_type: str | None = None
@@ -1706,32 +1768,18 @@ class DataFlowRepository:
         error_id = f"terr_{generate_id()[:12]}"
 
         # error_details may contain NaN/Infinity or non-serializable values
-        # (e.g. from exception context in row operations). Wrap in try/except
-        # per Tier 3 boundary: error_details originates from transform results
-        # which may contain arbitrary row-derived data.
-        try:
-            error_details_json = canonical_json(error_details)
-        except (ValueError, TypeError) as e:
-            error_details_json = json.dumps(
-                {
-                    "__non_canonical__": True,
-                    "repr": repr(error_details)[:500],
-                    "serialization_error": str(e),
-                },
-                allow_nan=False,
-            )
+        # (e.g. from exception context in row operations). Tier-3 boundary:
+        # error_details originates from transform results which may carry
+        # arbitrary row-derived data. The helper returns canonical JSON or an
+        # explicit __non_canonical__ envelope recorded in the audit trail.
+        error_details_json = self._canonical_or_recorded_error_details_json(error_details)
 
         # row_data may contain NaN/Infinity (valid floats that passed source
-        # validation). Wrap serialization with the same fallback pattern used
-        # in record_validation_error — losing the error record is worse than
-        # using a repr-based hash.
-        try:
-            row_hash = stable_hash(row_data)
-            row_data_json = canonical_json(row_data)
-        except (ValueError, TypeError) as e:
-            row_hash = repr_hash(row_data)
-            metadata = NonCanonicalMetadata.from_error(row_data, e)
-            row_data_json = json.dumps(metadata.to_dict(), allow_nan=False)
+        # validation). The coerce-and-record helpers return the canonical
+        # representation or an explicit non-canonical fallback — losing the
+        # error record is worse than recording a repr-based hash.
+        row_hash = self._canonical_or_recorded_hash(row_data)
+        row_data_json = self._canonical_or_recorded_json(row_data)
 
         self._ops.execute_insert(
             transform_errors_table.insert().values(

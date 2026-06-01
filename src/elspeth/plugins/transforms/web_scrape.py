@@ -18,10 +18,10 @@ Audit Trail:
 import ipaddress
 from collections.abc import Mapping
 from ipaddress import IPv4Network, IPv6Network
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import httpx
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Call
@@ -70,6 +70,24 @@ WEBSCRAPE_AUDIT_FIELDS: tuple[str, ...] = (
 )
 
 
+def _validate_cidr_entry(entry: str) -> str:
+    """Validate a single ``allowed_hosts`` CIDR string at the Tier-3 config boundary.
+
+    External-origin config (operator/composer-authored). ``ipaddress.ip_network``
+    rejects malformed entries with ``ValueError``, which Pydantic surfaces as a
+    config validation error — the row/run is refused, never silently coerced.
+    """
+    try:
+        ipaddress.ip_network(entry, strict=False)
+    except ValueError as exc:
+        raise ValueError(f"Invalid CIDR in allowed_hosts: {entry!r}: {exc}") from exc
+    return entry
+
+
+# CIDR string whose well-formedness is enforced by Pydantic at validation time.
+CidrStr = Annotated[str, AfterValidator(_validate_cidr_entry)]
+
+
 class WebScrapeHTTPConfig(BaseModel):
     """HTTP client configuration for web scrape transform.
 
@@ -92,7 +110,12 @@ class WebScrapeHTTPConfig(BaseModel):
         gt=0,
         description="Request timeout in seconds",
     )
-    allowed_hosts: str | list[str] = Field(
+    # SSRF allowlist. The two scalar keywords are a closed set (declared as a
+    # Literal so Pydantic validates the arm natively); the list arm is one-or-more
+    # CIDR strings, each well-formedness-checked by CidrStr's AfterValidator, with
+    # the empty list rejected via min_length=1. Pydantic resolves which union arm a
+    # Tier-3 config value matches structurally — no isinstance discrimination needed.
+    allowed_hosts: Literal["public_only", "allow_private"] | Annotated[list[CidrStr], Field(min_length=1)] = Field(
         default="public_only",
         description="SSRF allowlist: 'public_only' (default), 'allow_private', or list of CIDR ranges",
     )
@@ -107,22 +130,6 @@ class WebScrapeHTTPConfig(BaseModel):
                 f"{info.field_name} must be supplied by the operator or deployment identity; "
                 "placeholder values are not valid for wire-visible HTTP headers"
             )
-        return v
-
-    @field_validator("allowed_hosts")
-    @classmethod
-    def _validate_allowed_hosts(cls, v: str | list[str]) -> str | list[str]:
-        if isinstance(v, str):
-            if v not in ("public_only", "allow_private"):
-                raise ValueError(f"allowed_hosts must be 'public_only', 'allow_private', or a list of CIDR ranges, got {v!r}")
-            return v
-        if not v:
-            raise ValueError("allowed_hosts list must not be empty (use 'allow_private' to allow all)")
-        for entry in v:
-            try:
-                ipaddress.ip_network(entry, strict=False)
-            except ValueError as e:
-                raise ValueError(f"Invalid CIDR in allowed_hosts: {entry!r}: {e}") from e
         return v
 
 
@@ -480,13 +487,9 @@ class WebScrapeTransform(BaseTransform):
                 ipaddress.ip_network("::/0"),
             )
         else:
-            match allowed_hosts:
-                case list() as cidr_ranges:
-                    self._allowed_ranges = _parse_allowed_ranges(cidr_ranges)
-                case _:
-                    raise FrameworkBugError(
-                        f"WebScrapeConfig.http.allowed_hosts validator admitted an invalid runtime value: {type(allowed_hosts).__name__!r}."
-                    )
+            # Type is Literal[...] | list[CidrStr]; the two keyword arms are handled
+            # above, so the remaining arm is the validated CIDR list.
+            self._allowed_ranges = _parse_allowed_ranges(allowed_hosts)
 
         # Element stripping
         self._strip_elements = cfg.strip_elements

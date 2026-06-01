@@ -303,9 +303,16 @@ def _type_name(t: Any) -> str:
 
 
 def _is_union_type(t: Any) -> bool:
-    """Check if type is a Union (typing.Union or types.UnionType)."""
+    """Check if type is a Union (typing.Union or types.UnionType).
+
+    ``get_origin`` normalises both spellings to a comparable origin:
+    ``typing.Union[int, None]`` yields ``typing.Union`` and the PEP 604
+    ``int | None`` yields ``types.UnionType``. Comparing against both origins
+    is exhaustive type dispatch over the two union forms — no ``isinstance``
+    fallback is needed.
+    """
     origin = get_origin(t)
-    return origin is Union or isinstance(t, UnionType)
+    return origin is Union or origin is UnionType
 
 
 def _unwrap_annotated(annotation: Any) -> Any:

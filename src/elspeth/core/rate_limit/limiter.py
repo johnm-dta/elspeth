@@ -10,7 +10,6 @@ import time
 from typing import TYPE_CHECKING
 
 from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has incomplete type stubs
-    BucketFullException,
     Duration,
     InMemoryBucket,
     Limiter,
@@ -251,16 +250,22 @@ class RateLimiter:
             raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
         self._validate_weight(weight)
         with self._lock:
-            # Temporarily disable max_delay to get immediate response
+            # Temporarily disable blocking + raising so the library reports the
+            # rate-limit outcome as its documented bool return instead of via a
+            # BucketFullException. With max_delay=None the limiter never waits,
+            # and with raise_when_fail=False it returns False on a full bucket
+            # rather than raising — letting us return that bool directly. The
+            # limiter is otherwise constructed with raise_when_fail=True for the
+            # blocking acquire() path, so both flags are restored in finally.
             original_max_delay = self._limiter.max_delay
+            original_raise_when_fail = self._limiter.raise_when_fail
             self._limiter.max_delay = None
+            self._limiter.raise_when_fail = False
             try:
-                self._limiter.try_acquire(self.name, weight=weight)
-                return True
-            except BucketFullException:
-                return False
+                return bool(self._limiter.try_acquire(self.name, weight=weight))
             finally:
                 self._limiter.max_delay = original_max_delay
+                self._limiter.raise_when_fail = original_raise_when_fail
 
     def close(self) -> None:
         """Close the rate limiter and release resources."""
@@ -269,14 +274,14 @@ class RateLimiter:
         self._closed = True
         # Get reference to the leaker thread before disposing.
         # pyrate-limiter's BucketFactory._leaker is the background thread that
-        # drains bucket tokens. This is a third-party library internal (Tier 3
-        # framework boundary) — the attribute may change across versions.
-        # If the internal API changes, we skip graceful cleanup and let the
-        # thread die naturally (the custom excepthook is still a safety net).
-        try:
-            leaker = self._limiter.bucket_factory._leaker
-        except AttributeError:
-            leaker = None
+        # drains bucket tokens. It is declared as a class-level attribute on
+        # BucketFactory (`_leaker: Optional[Leaker] = None`), so it is always
+        # present on the pinned library version — None when no leaker has been
+        # scheduled, a Leaker thread otherwise. We access it directly: if a
+        # future pyrate-limiter version removes the attribute, that is an
+        # interface violation we want to surface loudly at upgrade time, not
+        # silence into a permanently-skipped cleanup path.
+        leaker = self._limiter.bucket_factory._leaker
         leaker_ident: int | None = None
         if leaker is not None and leaker.is_alive() and leaker.ident is not None:
             leaker_ident = leaker.ident  # Capture before it can become None

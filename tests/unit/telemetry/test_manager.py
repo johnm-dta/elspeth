@@ -604,10 +604,10 @@ class TestDropBackpressure:
         dummy = DummyManager(q)
         q.put_nowait(None)
 
-        def _raise_requeue_failure(_manager: object) -> None:
-            raise RuntimeError("sentinel requeue failure")
+        def _signal_requeue_failure(_manager: object) -> bool:
+            return False
 
-        monkeypatch.setattr(TelemetryManager, "_requeue_shutdown_sentinel_or_raise", _raise_requeue_failure)
+        monkeypatch.setattr(TelemetryManager, "_requeue_shutdown_sentinel", _signal_requeue_failure)
 
         # Must NOT raise — telemetry failures never propagate to callers
         TelemetryManager._drop_oldest_and_enqueue_newest(dummy, incoming_event)  # type: ignore[arg-type]  # DummyManager duck-types TelemetryManager for isolated unit test

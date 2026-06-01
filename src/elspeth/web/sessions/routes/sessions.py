@@ -85,6 +85,36 @@ def _copied_blob_for_inline_marker(
     return copied_blob
 
 
+async def _archive_session_capturing_failure(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    *,
+    context: str,
+) -> str | None:
+    """Best-effort rollback archive of a partially-forked session.
+
+    Returns an explicit ``RecoveryFailed[...]`` note (a recorded boundary
+    outcome, not a swallow) when ``archive_session`` fails with a recoverable
+    IO/DB error; the caller attaches it to the propagating primary error so the
+    orphan session row is visible to operators. Returns ``None`` on success.
+
+    The catch is narrowed to ``(SQLAlchemyError, OSError)`` so programmer bugs
+    (AttributeError, TypeError) in ``archive_session`` still propagate. The
+    cleanup failure is converted to a return value *inside* this helper, so it
+    never enters the headline exception's ``__context__`` chain — the caller's
+    ``raise ... from None`` / bare ``raise`` traceback semantics are preserved.
+    """
+    try:
+        await service.archive_session(session_id)
+        return None
+    except (SQLAlchemyError, OSError) as cleanup_exc:
+        return (
+            f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
+            f"could not archive forked session {session_id} {context} "
+            f"({cleanup_exc}). Manual cleanup of sessions.id={session_id} required."
+        )
+
+
 def _rewrite_inline_content_blob_refs(
     value: Any,
     blob_map: dict[UUID, BlobRecord],
@@ -499,41 +529,29 @@ def register_session_routes(router: APIRouter) -> None:
             # attached as a note on the object that actually propagates —
             # the inner BlobQuotaExceededError is suppressed by `from None`
             # and any note attached to it would never reach operator logs.
-            # Cleanup catch is narrowed to recoverable IO/DB failures so
-            # programmer bugs (AttributeError, TypeError) still crash.
             quota_exc = HTTPException(
                 status_code=413,
                 detail="Blob quota exceeded during fork — unable to copy files",
             )
-            try:
-                await service.archive_session(new_session.id)
-            except (SQLAlchemyError, OSError) as cleanup_exc:
-                quota_exc.add_note(
-                    f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
-                    f"could not archive forked session {new_session.id} "
-                    f"after blob quota rollback ({cleanup_exc}). "
-                    f"Manual cleanup of sessions.id={new_session.id} required."
-                )
+            cleanup_note = await _archive_session_capturing_failure(
+                service, new_session.id, context="after blob quota rollback"
+            )
+            if cleanup_note is not None:
+                quota_exc.add_note(cleanup_note)
             raise quota_exc from None
         except Exception as primary_exc:
             # Mirror the RecoveryFailed[...] convention from
             # ``BlobServiceImpl.copy_blobs_for_fork`` and
             # ``BlobServiceImpl.finalize_run_output_blobs`` (web/blobs/service.py):
-            # cleanup failures must NOT mask the original error.  Narrow the
-            # catch to (SQLAlchemyError, OSError) — programmer bugs in
-            # archive_session must propagate — and attach the cleanup
-            # failure as a note so the orphan session row is visible to
-            # operators reading the traceback.  Bare `raise` preserves
+            # cleanup failures must NOT mask the original error.  The
+            # best-effort archive captures any recoverable cleanup failure as a
+            # note attached to primary_exc; the bare `raise` preserves
             # primary_exc and its original traceback as the headline.
-            try:
-                await service.archive_session(new_session.id)
-            except (SQLAlchemyError, OSError) as cleanup_exc:
-                primary_exc.add_note(
-                    f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
-                    f"could not archive forked session {new_session.id} "
-                    f"during fork rollback ({cleanup_exc}). "
-                    f"Manual cleanup of sessions.id={new_session.id} required."
-                )
+            cleanup_note = await _archive_session_capturing_failure(
+                service, new_session.id, context="during fork rollback"
+            )
+            if cleanup_note is not None:
+                primary_exc.add_note(cleanup_note)
             raise
 
         return ForkSessionResponse(

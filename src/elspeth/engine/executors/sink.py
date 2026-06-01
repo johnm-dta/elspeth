@@ -794,7 +794,7 @@ class SinkExecutor:
                             if not isinstance(failsink_write_result, SinkWriteResult):
                                 raise PluginContractViolation(
                                     f"Failsink '{failsink_name}' returned {type(failsink_write_result).__name__}, "
-                                    f"expected SinkWriteResult. This is a sink plugin bug."
+                                    f"expected SinkWriteResult. This is a failsink plugin bug."
                                 )
                             failsink_artifact_info = failsink_write_result.artifact
                             # First-party plugin-contract guard:
@@ -809,7 +809,7 @@ class SinkExecutor:
                                 raise PluginContractViolation(
                                     f"Failsink '{failsink_name}' returned SinkWriteResult with artifact of type "
                                     f"{type(failsink_artifact_info).__name__}, expected ArtifactDescriptor. "
-                                    f"This is a sink plugin bug."
+                                    f"This is a failsink plugin bug."
                                 )
                             if failsink_write_result.diversions:
                                 raise FrameworkBugError(

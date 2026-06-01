@@ -413,9 +413,16 @@ def register_composer_routes(router: APIRouter) -> None:
             # frontend without revealing the validation errors that were
             # the actual blocker).
             if not result.success:
-                error_summary = (
-                    result.data.get(_DATA_ERROR_KEY) if isinstance(result.data, Mapping) else None
-                ) or "Composer proposal failed validation."
+                # ``result`` is our own ``execute_tool`` output. Every
+                # ``success=False`` ToolResult is built by one of the two
+                # failure factories in ``web/composer/tools/_common.py``
+                # (``_failure_result`` and the credential-repair factory),
+                # both of which set ``data`` to a Mapping carrying
+                # ``_DATA_ERROR_KEY``. That is a first-party contract — read
+                # it directly and let a contract violation (a future tool
+                # building ``success=False`` without the error key) crash
+                # loudly rather than degrade to a generic message.
+                error_summary = result.data[_DATA_ERROR_KEY] or "Composer proposal failed validation."
                 validation_errors_payload: list[dict[str, Any]] = []
                 if result.validation is not None:
                     for entry in result.validation.errors:
@@ -440,17 +447,31 @@ def register_composer_routes(router: APIRouter) -> None:
                 # records the system as the rejecting actor so the trail
                 # distinguishes operator-driven rejection from this
                 # automatic-on-validation-failure path.
-                try:
+                # Control-flow sentinel, not a swallowed error. TOCTOU: this
+                # handler does not hold a session write lock spanning the
+                # proposal load (above) and this auto-reject write, so a
+                # concurrent Accept/reject for the same proposal can transition
+                # it out of "pending" in between.
+                # ``reject_composition_proposal`` raises ``ValueError`` for
+                # exactly that case (status != "pending"). When that fires, the
+                # desired end state — the proposal is no longer pending — is
+                # already satisfied, AND the concurrent request that won the
+                # race already recorded its own ``proposal.rejected`` event in
+                # ``proposal_events``, so no audit fact is lost here (do not
+                # "fix" this by adding logging — there is nothing to record).
+                # Fall through to the 422 below, which surfaces the real
+                # validation failure to the operator. We suppress ONLY
+                # ``ValueError`` (the benign status-race signal); we deliberately
+                # do NOT suppress ``KeyError`` (proposal row missing): the row
+                # was loaded successfully above and proposals are never
+                # hard-deleted, so a missing row is corruption of our own data
+                # and must crash rather than be swallowed.
+                with contextlib.suppress(ValueError):
                     await service.reject_composition_proposal(
                         session_id=session.id,
                         proposal_id=proposal.id,
                         actor=f"system:auto_reject_validation_failed:user:{user.user_id}",
                     )
-                except (KeyError, ValueError) as rejection_exc:
-                    # The proposal might have been concurrently rejected or
-                    # otherwise transitioned; ignore — the validation-failure
-                    # response is still the correct surface for the operator.
-                    rejection_exc.add_note("proposal already terminal during validation-failure auto-reject")
                 raise HTTPException(
                     status_code=422,
                     detail={

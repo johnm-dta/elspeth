@@ -440,15 +440,18 @@ class TestCleanupPluginsReRaisesSystemExceptions:
     AuditIntegrityError indicate system-level corruption (Tier 1 violations)
     and must crash immediately, not be silently downgraded.
 
-    Fix: record_cleanup_error() checks isinstance before logging and re-raises
-    system-level exceptions.
+    Fix: run_hook() catches TIER_1_ERRORS in a dedicated except clause that
+    re-raises before the broad-catch clause can downgrade them — the canonical
+    ``except TIER_1_ERRORS: raise`` form documented in contracts/errors.py.
     """
 
     def test_source_code_has_reraise_guard(self) -> None:
-        """Verify record_cleanup_error re-raises Tier 1 errors via TIER_1_ERRORS.
+        """Verify cleanup re-raises Tier 1 errors via a TIER_1_ERRORS except clause.
 
-        Structural test: inspect the source to confirm the isinstance check
-        with TIER_1_ERRORS exists inside record_cleanup_error.
+        Structural test: inspect the source to confirm a dedicated
+        ``except ...TIER_1_ERRORS:`` handler whose body is a bare ``raise``
+        precedes the broad-catch clause, so system-level corruption crashes
+        immediately instead of being collected as a cleanup warning.
         """
         import ast
         import inspect
@@ -460,21 +463,20 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         tree = ast.parse(source)
 
         # Look for TIER_1_ERRORS usage in the function
-        assert "TIER_1_ERRORS" in source, "cleanup_plugins must use TIER_1_ERRORS guard in record_cleanup_error"
+        assert "TIER_1_ERRORS" in source, "cleanup_plugins must guard on TIER_1_ERRORS"
 
-        # Find a Raise inside an If that checks isinstance with TIER_1_ERRORS
+        # Find an `except ...TIER_1_ERRORS:` handler whose body re-raises.
         found_reraise = False
         for node in ast.walk(tree):
-            if isinstance(node, ast.If):
-                if_source = ast.dump(node)
-                if "isinstance" in if_source and "TIER_1_ERRORS" in if_source:
-                    # Check that the if body contains a raise
-                    for child in ast.walk(node):
-                        if isinstance(child, ast.Raise):
-                            found_reraise = True
-                            break
+            if isinstance(node, ast.ExceptHandler):
+                handler_type_src = ast.dump(node.type) if node.type is not None else ""
+                if "TIER_1_ERRORS" not in handler_type_src:
+                    continue
+                if any(isinstance(stmt, ast.Raise) for stmt in node.body):
+                    found_reraise = True
+                    break
 
-        assert found_reraise, "Expected isinstance(error, TIER_1_ERRORS) guard with raise inside record_cleanup_error"
+        assert found_reraise, "Expected `except TIER_1_ERRORS: raise` handler in cleanup_plugins"
 
     def test_framework_bug_error_propagates_through_cleanup(self) -> None:
         """FrameworkBugError from plugin.on_complete() must propagate, not be swallowed."""

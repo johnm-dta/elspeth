@@ -19,7 +19,7 @@ import io
 import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
@@ -197,8 +197,12 @@ class AzureBlobSinkConfig(DataPluginConfig):
 
     @property
     def headers_mapping(self) -> dict[str, str] | None:
-        if isinstance(self.headers, dict):
-            return self.headers
+        # Dispatch on the canonical header mode (single source of truth) rather
+        # than re-inspecting the runtime type of the validated union field.
+        # parse_header_mode() returns CUSTOM iff headers is a non-empty dict, so
+        # the narrowing is exact.
+        if self.headers_mode is HeaderMode.CUSTOM:
+            return cast("dict[str, str]", self.headers)
         return None
 
     @model_validator(mode="after")
@@ -305,7 +309,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e8998299fb06cce9"
+    source_file_hash: str | None = "sha256:8a61dd0396069293"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

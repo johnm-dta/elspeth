@@ -867,82 +867,111 @@ class BlobServiceImpl:
             finalized: list[BlobRecord] = []
             errors: list[BlobFinalizationError] = []
             for row in rows:
-                blob_id = UUID(row.id)
-                try:
-                    if success:
-                        storage = Path(row.storage_path)
-                        if storage.exists():
-                            file_bytes = storage.read_bytes()
-                            try:
-                                record = self._finalize_blob_sync(
-                                    blob_id,
-                                    "ready",
-                                    size_bytes=len(file_bytes),
-                                    content_hash_val=content_hash(file_bytes),
-                                )
-                            except BlobQuotaExceededError:
-                                # Run succeeded but this blob would breach the
-                                # session quota — mark as error so the run
-                                # finalization isn't aborted entirely.
-                                # Delete the backing file to prevent untracked
-                                # disk growth from repeated over-quota outputs.
-                                if storage.exists():
-                                    storage.unlink()
-                                record = self._finalize_blob_sync(blob_id, "error")
-                        else:
-                            record = self._finalize_blob_sync(blob_id, "error")
-                    else:
-                        # Run failed — delete the backing file so the
-                        # filesystem matches the DB metadata (size_bytes=0,
-                        # content_hash=None).  Without this, repeated
-                        # failed runs can grow disk usage without bound
-                        # while quota accounting sees only zero-byte
-                        # error rows.
-                        failed_storage = Path(row.storage_path)
-                        if failed_storage.exists():
-                            failed_storage.unlink()
-                        record = self._finalize_blob_sync(blob_id, "error")
-                    finalized.append(record)
-                except self._PER_BLOB_SUPPRESSED as exc:
-                    # Best-effort: transition the failed blob to "error"
-                    # so it doesn't remain permanently pending.  The WHERE
-                    # on status='pending' makes this a no-op if already
-                    # finalized or deleted.
-                    recovery_exc: BaseException | None = None
-                    try:
-                        with self._engine.begin() as err_conn:
-                            err_conn.execute(
-                                blobs_table.update()
-                                .where(blobs_table.c.id == str(blob_id))
-                                .where(blobs_table.c.status == "pending")
-                                .values(status="error")
-                            )
-                    except (SQLAlchemyError, OSError) as rec_exc:
-                        # Narrow to DB/IO faults — programmer bugs
-                        # (TypeError, AttributeError, AssertionError) must
-                        # propagate per offensive-programming policy.
-                        # The blob stays pending; we record the recovery
-                        # failure alongside the primary exception so the
-                        # audit trail carries both causes.
-                        recovery_exc = rec_exc
-                    errors.append(
-                        BlobFinalizationError(
-                            blob_id=blob_id,
-                            exc_type=type(exc).__name__,
-                            detail=str(exc),
-                        )
-                    )
-                    if recovery_exc is not None:
-                        errors.append(
-                            BlobFinalizationError(
-                                blob_id=blob_id,
-                                exc_type=f"RecoveryFailed[{type(recovery_exc).__name__}]",
-                                detail=str(recovery_exc),
-                            )
-                        )
+                outcome = self._finalize_one_output_blob(UUID(row.id), Path(row.storage_path), success=success)
+                if isinstance(outcome, BlobRecord):
+                    finalized.append(outcome)
+                else:
+                    errors.extend(outcome)
             return BlobFinalizationResult(finalized=finalized, errors=errors)
 
         return await self._run_sync(_sync)
+
+    def _finalize_one_output_blob(
+        self,
+        blob_id: UUID,
+        storage: Path,
+        *,
+        success: bool,
+    ) -> BlobRecord | list[BlobFinalizationError]:
+        """Finalize a single output blob, returning an explicit per-blob outcome.
+
+        This is the per-item boundary for ``finalize_run_output_blobs``.
+        Filesystem and database faults are genuine I/O boundaries (Tier 3 in
+        the web-component sense — the disk and DB are external to our authored
+        values).  Rather than swallow such a fault, this method **returns** an
+        explicit list of :class:`BlobFinalizationError` records so the batch
+        caller can record them in ``BlobFinalizationResult.errors`` and proceed
+        to the next blob.  Programmer bugs (TypeError, AttributeError,
+        AssertionError) and the Tier 1 "blob vanished mid-transaction"
+        RuntimeError are NOT in ``_PER_BLOB_SUPPRESSED`` and so propagate.
+        """
+        try:
+            if success:
+                if storage.exists():
+                    file_bytes = storage.read_bytes()
+                    try:
+                        record = self._finalize_blob_sync(
+                            blob_id,
+                            "ready",
+                            size_bytes=len(file_bytes),
+                            content_hash_val=content_hash(file_bytes),
+                        )
+                    except BlobQuotaExceededError:
+                        # Run succeeded but this blob would breach the
+                        # session quota — mark as error so the run
+                        # finalization isn't aborted entirely.
+                        # Delete the backing file to prevent untracked
+                        # disk growth from repeated over-quota outputs.
+                        if storage.exists():
+                            storage.unlink()
+                        record = self._finalize_blob_sync(blob_id, "error")
+                else:
+                    record = self._finalize_blob_sync(blob_id, "error")
+            else:
+                # Run failed — delete the backing file so the
+                # filesystem matches the DB metadata (size_bytes=0,
+                # content_hash=None).  Without this, repeated
+                # failed runs can grow disk usage without bound
+                # while quota accounting sees only zero-byte
+                # error rows.
+                if storage.exists():
+                    storage.unlink()
+                record = self._finalize_blob_sync(blob_id, "error")
+            return record
+        except self._PER_BLOB_SUPPRESSED as exc:
+            # Best-effort: transition the failed blob to "error" so it does
+            # not remain permanently pending.  Return explicit error records
+            # (never a silent swallow) describing the primary fault and any
+            # recovery fault, so the batch caller surfaces both to auditors.
+            blob_errors = [
+                BlobFinalizationError(
+                    blob_id=blob_id,
+                    exc_type=type(exc).__name__,
+                    detail=str(exc),
+                )
+            ]
+            recovery_exc = self._best_effort_mark_blob_error(blob_id)
+            if recovery_exc is not None:
+                blob_errors.append(
+                    BlobFinalizationError(
+                        blob_id=blob_id,
+                        exc_type=f"RecoveryFailed[{type(recovery_exc).__name__}]",
+                        detail=str(recovery_exc),
+                    )
+                )
+            return blob_errors
+
+    def _best_effort_mark_blob_error(self, blob_id: UUID) -> SQLAlchemyError | OSError | None:
+        """Transition a still-pending blob to ``error`` status, best effort.
+
+        The ``WHERE status='pending'`` makes this a no-op if the blob was
+        already finalized or deleted.  Returns the DB/IO fault if the update
+        itself failed (so the caller records a ``RecoveryFailed[...]`` audit
+        entry) or ``None`` on success.  Narrow to DB/IO faults — programmer
+        bugs (TypeError, AttributeError, AssertionError) must propagate per
+        offensive-programming policy.
+        """
+        try:
+            with self._engine.begin() as err_conn:
+                err_conn.execute(
+                    blobs_table.update()
+                    .where(blobs_table.c.id == str(blob_id))
+                    .where(blobs_table.c.status == "pending")
+                    .values(status="error")
+                )
+        except (SQLAlchemyError, OSError) as rec_exc:
+            return rec_exc
+        return None
 
     async def copy_blobs_for_fork(
         self,
@@ -1026,13 +1055,9 @@ class BlobServiceImpl:
             # preserving the original copy failure as the headline.
             cleanup_failures: list[tuple[UUID, BaseException]] = []
             for written_blob in copied:
-                try:
-                    await self.delete_blob(written_blob.id)
-                except (SQLAlchemyError, OSError) as cleanup_exc:
+                cleanup_exc = await self._cleanup_forked_blob(written_blob)
+                if cleanup_exc is not None:
                     cleanup_failures.append((written_blob.id, cleanup_exc))
-                    storage = Path(written_blob.storage_path)
-                    if storage.exists():
-                        storage.unlink(missing_ok=True)
             for orphan_id, recorded_exc in cleanup_failures:
                 primary_exc.add_note(
                     f"RecoveryFailed[{type(recorded_exc).__name__}]: "
@@ -1054,6 +1079,26 @@ class BlobServiceImpl:
             raise
 
         return blob_map
+
+    async def _cleanup_forked_blob(self, written_blob: BlobRecord) -> SQLAlchemyError | OSError | None:
+        """Delete a partially-copied fork blob, returning any cleanup fault.
+
+        ``delete_blob`` performs filesystem + database I/O — a genuine
+        external boundary.  On a narrow DB/IO fault this **returns** the
+        exception (the caller records a ``RecoveryFailed[...]`` note + counter
+        so the orphaned DB row is visible to auditors) after a fallback file
+        unlink for disk-quota recovery; on success it returns ``None``.
+        Programmer bugs (TypeError, AttributeError, AssertionError) are not
+        caught and propagate per offensive-programming policy.
+        """
+        try:
+            await self.delete_blob(written_blob.id)
+        except (SQLAlchemyError, OSError) as cleanup_exc:
+            storage = Path(written_blob.storage_path)
+            if storage.exists():
+                storage.unlink(missing_ok=True)
+            return cleanup_exc
+        return None
 
     def _finalize_blob_sync(
         self,

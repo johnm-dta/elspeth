@@ -19,7 +19,7 @@ from elspeth.contracts.type_normalization import ALLOWED_CONTRACT_TYPES
 def _is_union_type(t: Any) -> bool:
     """Check if type is a Union (typing.Union or types.UnionType)."""
     origin = get_origin(t)
-    return origin is Union or isinstance(t, UnionType)
+    return origin is Union or origin is UnionType
 
 
 def _unwrap_annotated(annotation: Any) -> Any:
@@ -62,7 +62,7 @@ def _get_python_type(annotation: Any) -> tuple[type, bool]:
 
         if len(non_none_args) > 1:
             # Multi-type union like int | float - not supported
-            type_names = [getattr(a, "__name__", str(a)) for a in non_none_args]
+            type_names = [str(a) for a in non_none_args]
             raise TypeError(
                 f"Multi-type union '{' | '.join(type_names)}' not supported in schema contracts. "
                 f"Use 'Any' for fields that accept multiple types."
@@ -81,7 +81,7 @@ def _get_python_type(annotation: Any) -> tuple[type, bool]:
         return (cast(type, unwrapped), False)
 
     # Unsupported concrete type (e.g., list[str], dict[str, Any])
-    type_name = getattr(unwrapped, "__name__", str(unwrapped))
+    type_name = str(unwrapped)
     raise TypeError(
         f"Unsupported type annotation '{type_name}' in schema contract. "
         f"Allowed types: {', '.join(sorted(t.__name__ for t in ALLOWED_CONTRACT_TYPES))}. "

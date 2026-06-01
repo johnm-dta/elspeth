@@ -20,7 +20,6 @@ the TOCTOU (Time-of-Check to Time-of-Use) vulnerability in traditional SSRF defe
 from __future__ import annotations
 
 import ipaddress
-import queue
 import socket
 import urllib.parse
 from collections.abc import Sequence
@@ -125,7 +124,8 @@ def _resolve_hostname(hostname: str) -> list[str]:
         List of unique IP addresses (IPv4 and/or IPv6)
 
     Raises:
-        NetworkError: If DNS resolution fails
+        NetworkError: If DNS resolution fails or the hostname is not
+            IDNA-encodable (Tier 3: hostname is user-supplied)
     """
     try:
         # AF_UNSPEC = return both IPv4 and IPv6
@@ -142,7 +142,11 @@ def _resolve_hostname(hostname: str) -> list[str]:
                 seen.add(ip)
                 ips.append(ip)
         return ips
-    except socket.gaierror as e:
+    except (socket.gaierror, UnicodeError) as e:
+        # socket.gaierror: resolver-level failure (NXDOMAIN, no resolver, etc.).
+        # UnicodeError: getaddrinfo raises this when the user-supplied hostname is
+        # not IDNA-encodable (Tier 3 external input). Both are recoverable external
+        # boundary failures, surfaced as the documented NetworkError — never crashed.
         raise NetworkError(f"DNS resolution failed: {hostname}: {e}") from e
 
 
@@ -313,29 +317,17 @@ def validate_url_for_ssrf(
     # blackholed DNS resolver), at most _DNS_POOL_SIZE threads are blocked in
     # getaddrinfo; additional requests queue and time out without creating new
     # threads.
-    result_queue: queue.Queue[tuple[str, list[str] | BaseException]] = queue.Queue()
-
-    def _resolve_worker() -> None:
-        try:
-            result_queue.put(("ok", _resolve_hostname(hostname)))
-        except BaseException as exc:
-            result_queue.put(("error", exc))
-
-    _dns_pool.submit(_resolve_worker)
-
+    #
+    # Future.result(timeout=) re-raises the worker's exception with its original
+    # type, so SSRFBlockedError / NetworkError propagate unchanged and any other
+    # exception (a bug in our own resolver code) crashes rather than being
+    # laundered into NetworkError. On timeout the worker keeps running in the
+    # pool (bounded), and control returns to the caller immediately.
+    future = _dns_pool.submit(_resolve_hostname, hostname)
     try:
-        status, value = result_queue.get(timeout=timeout)
-    except queue.Empty as exc:
+        ip_list = future.result(timeout=timeout)
+    except TimeoutError as exc:
         raise NetworkError(f"DNS resolution timeout ({timeout}s): {hostname}") from exc
-
-    if status == "error":
-        err = value
-        assert isinstance(err, BaseException)
-        if isinstance(err, (SSRFBlockedError, NetworkError)):
-            raise err
-        raise NetworkError(f"DNS resolution failed: {hostname}: {err}") from err
-
-    ip_list: list[str] = value  # type: ignore[assignment]
 
     if not ip_list:
         raise NetworkError(f"DNS resolution returned no addresses: {hostname}")

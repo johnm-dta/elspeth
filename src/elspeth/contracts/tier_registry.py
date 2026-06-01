@@ -124,9 +124,9 @@ def tier_1_error(_cls: type | None = None, *, reason: str, caller_module: str): 
         raise TypeError(
             "@tier_1_error requires reason and caller_module kwargs — use @tier_1_error(reason=..., caller_module=__name__) not @tier_1_error"
         )
-    if not isinstance(reason, str) or not reason.strip():
+    if not reason.strip():
         raise ValueError("@tier_1_error(reason=...) requires non-empty reason string")
-    if not isinstance(caller_module, str) or not caller_module.strip():
+    if not caller_module.strip():
         raise ValueError("@tier_1_error(caller_module=...) requires non-empty string; pass caller_module=__name__ literally")
 
     def _decorator(cls: type[_ExcT]) -> type[_ExcT]:
@@ -152,7 +152,7 @@ def _register_with_module_prefix[ExcT: BaseException](*, cls: type[ExcT], reason
                 f"own exceptions to Tier-1 — request ADR review instead."
             )
         class_module = cls.__module__
-        if not isinstance(class_module, str) or not class_module.strip():
+        if not class_module.strip():
             raise TypeError(
                 f"@tier_1_error applied to {cls!r} with invalid __module__={class_module!r}; "
                 "Tier-1 registration requires a non-empty module name."

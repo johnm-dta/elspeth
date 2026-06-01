@@ -700,7 +700,15 @@ class TestFailsinkCleanupEnvelope:
         )
 
     def test_invalid_failsink_result_type_cleans_primary_divert_states(self) -> None:
-        """Malformed failsink return values must fail loudly after cleanup."""
+        """Malformed failsink return values must fail loudly after cleanup.
+
+        failsink.write() is a first-party system-owned method annotated
+        -> SinkWriteResult; a wrong return type is a plugin bug. The executor
+        guards the return type and raises PluginContractViolation (an offensive
+        crash with a named error), not an AttributeError. Primary-divert
+        cleanup still runs because PluginContractViolation is not in
+        TIER_1_ERRORS and falls through to the ``except Exception`` cleanup arm.
+        """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
@@ -708,7 +716,7 @@ class TestFailsinkCleanupEnvelope:
         failsink.write.return_value = object()
         tokens = [_make_token("t0")]
 
-        with pytest.raises(PluginContractViolation, match=r"returned object, expected SinkWriteResult"):
+        with pytest.raises(PluginContractViolation, match=r"expected SinkWriteResult"):
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]

@@ -833,25 +833,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[15]/body[3]/body[0]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:844ac2e0f90eecca1c62f02b935441e5ccbc773c46f4674e9da1fa44e7b266cd'
-- key: plugins/transforms/rag/query.py:R5:QueryBuilder:_build_regex:fp=6fa9771f101ecc99
-  owner: feature
-  reason: |-
-    Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately with TypeError if upstream plugin sends non-string value to query_field
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:31:39.123084+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    The isinstance check is offensive programming: it detects an invalid Tier-2 state (upstream plugin produced non-str for query_field) and raises TypeError with a clear diagnostic message explicitly citing the Tier-2 invariant. This is exactly the 'detect invalid state and throw meaningful error' pattern the policy encourages, not a defensive shape guard suppressing an error. R5 normally flags isinstance as a defensive guard, but here it is paired with an immediate raise — no silent fallback, no coercion. The code excerpt confirms the guard crashes rather than recovers, matching the rationale.
-  judge_signature_version: 2
-  scope_fingerprint: 4ce93be3e40a825b3c399a51def9119ba391466e26c0f9919d3852cdb03d6d53
-  judge_transport: openrouter
-  ast_path: 'body[15]/body[5]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:1d3790ca835ec3d41d3455d1d17d0fdf393c4aa3afe1369c32bbabce915a5e89'
 - key: plugins/transforms/rag/config.py:R6:_get_providers:fp=3371a100de2c9052
   owner: feature
   reason: |-

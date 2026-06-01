@@ -318,10 +318,13 @@ def _set_nested_option(container: dict[str, Any], keys: list[str], value: Any) -
         container[keys[0]] = value
         return container
     head = keys[0]
-    child = container.get(head)
-    if child is not None and not isinstance(child, Mapping):
-        raise ValueError(f"field_path segment {head!r} already exists and is not an object")
-    nested = dict(deep_thaw(child)) if child is not None else {}
+    if head in container:
+        child = container[head]
+        if not isinstance(child, Mapping):
+            raise ValueError(f"field_path segment {head!r} already exists and is not an object")
+        nested = dict(deep_thaw(child))
+    else:
+        nested = {}
     container[head] = _set_nested_option(nested, keys[1:], value)
     return container
 
@@ -399,7 +402,15 @@ def _execute_wire_blob_inline_ref(
     except ValueError:
         return _failure_result(state, f"blob_id {arguments['blob_id']!r} is not a valid UUID")
 
-    encoding_value = arguments.get("encoding", "utf-8")
+    # Tier-3 LLM tool argument. Absent ``encoding`` means utf-8 by the
+    # published tool-schema contract (json_schema declares default "utf-8").
+    # The ``isinstance(..., str)`` guard is load-bearing and must precede the
+    # membership test: the LLM may emit a JSON array/object (Python
+    # list/dict), and ``unhashable_value not in ALLOWED_CONTENT_ENCODINGS``
+    # would raise TypeError out of the dispatcher rather than returning the
+    # explicit failure result. The str narrowing also satisfies the
+    # ContentEncoding cast below.
+    encoding_value = arguments["encoding"] if "encoding" in arguments else "utf-8"
     if not isinstance(encoding_value, str) or encoding_value not in ALLOWED_CONTENT_ENCODINGS:
         return _failure_result(state, f"encoding must be one of {sorted(ALLOWED_CONTENT_ENCODINGS)}, got {encoding_value!r}")
     encoding = cast(ContentEncoding, encoding_value)
@@ -413,7 +424,10 @@ def _execute_wire_blob_inline_ref(
     if pinned_hash is None:
         raise AuditIntegrityError(f"Ready blob '{blob_id}' has null content_hash; cannot author inline_content ref")
 
-    sha256_override = arguments.get("sha256_override")
+    # Optional Tier-3 LLM tool argument; its absence honestly means "no
+    # override supplied" (None), so the missing key is recorded as None
+    # rather than fabricated into a value.
+    sha256_override = arguments["sha256_override"] if "sha256_override" in arguments else None
     if sha256_override is not None and sha256_override != pinned_hash:
         return _failure_result(state, "sha256 override disagrees with authoritative blob content_hash; composer pins from blob metadata")
 
@@ -584,7 +598,16 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
 def _state_source_blob_ref(state: CompositionState) -> str | None:
     if state.source is None:
         return None
-    blob_ref = state.source.options.get("blob_ref")
+    # Tier-3: state.source.options is composer/user-authored pipeline config
+    # read back from our store. ``blob_ref`` may be absent (no source blob
+    # binding) or — since the composer-LLM authors arbitrary JSON here —
+    # present with a non-string value. Both cases honestly mean "no usable
+    # string blob_ref", recorded as None; the str type-narrowing enforces
+    # this function's ``str | None`` contract against malformed external
+    # config rather than propagating a wrong-typed value downstream.
+    if "blob_ref" not in state.source.options:
+        return None
+    blob_ref = state.source.options["blob_ref"]
     return blob_ref if isinstance(blob_ref, str) else None
 
 
@@ -999,15 +1022,12 @@ def _session_blob_lock(session_id: str) -> threading.Lock:
     get-or-create race on first access so two concurrent callers on the
     same session_id cannot each install a different lock instance.
     """
-    lock = _SESSION_BLOB_LOCKS.get(session_id)
-    if lock is not None:
-        return lock
+    if session_id in _SESSION_BLOB_LOCKS:
+        return _SESSION_BLOB_LOCKS[session_id]
     with _SESSION_BLOB_LOCKS_REGISTRY_MUTEX:
-        lock = _SESSION_BLOB_LOCKS.get(session_id)
-        if lock is None:
-            lock = threading.Lock()
-            _SESSION_BLOB_LOCKS[session_id] = lock
-        return lock
+        if session_id not in _SESSION_BLOB_LOCKS:
+            _SESSION_BLOB_LOCKS[session_id] = threading.Lock()
+        return _SESSION_BLOB_LOCKS[session_id]
 
 
 class _BlobQuotaExceededInTxn(Exception):

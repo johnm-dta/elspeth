@@ -57,7 +57,16 @@ def get_fingerprint_key() -> bytes:
     Raises:
         ValueError: If ELSPETH_FINGERPRINT_KEY is not set
     """
-    env_key = os.environ.get(_ENV_VAR)
+    try:
+        env_key = os.environ[_ENV_VAR]
+    except KeyError as exc:
+        raise ValueError(
+            f"Fingerprint key not configured. Set {_ENV_VAR} environment variable "
+            f"or configure it in your pipeline's secrets section to load from Azure Key Vault."
+        ) from exc
+    # An env var present but set to the empty string is a non-crashing anomaly:
+    # os.environ[...] returns "" without raising, but an empty keyed-derivation
+    # salt produces meaningless fingerprints. Reject it explicitly at the boundary.
     if not env_key:
         raise ValueError(
             f"Fingerprint key not configured. Set {_ENV_VAR} environment variable "

@@ -112,7 +112,8 @@ class TestEnvSecretLoader:
 class TestKeyVaultSecretLoader:
     """Key Vault loader behavior."""
 
-    def test_get_secret_caches_successful_lookup(self) -> None:
+    def test_get_secret_caches_successful_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://cache-test.vault.azure.net")
         client = MagicMock()
         client.get_secret.return_value = MagicMock(value="from-vault")
@@ -127,7 +128,8 @@ class TestKeyVaultSecretLoader:
         assert second_ref.source == "keyvault"
         assert client.get_secret.call_count == 1
 
-    def test_get_secret_none_value_raises_secret_not_found(self) -> None:
+    def test_get_secret_none_value_raises_secret_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://empty-secret.vault.azure.net")
         client = MagicMock()
         client.get_secret.return_value = MagicMock(value=None)
@@ -153,34 +155,27 @@ class TestKeyVaultSecretLoader:
         with pytest.raises(SecretNotFoundError, match="not found in Key Vault"):
             loader.get_secret("DOES_NOT_EXIST")
 
-    def test_get_secret_works_when_azure_core_exceptions_import_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """If azure.core.exceptions import fails, sentinel path should still allow success."""
-        original_import = builtins.__import__
+    def test_get_secret_succeeds_with_azure_sdk_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With the Azure SDK installed, the lookup succeeds.
 
-        def _patched_import(
-            name: str,
-            globals: Mapping[str, object] | None = None,
-            locals: Mapping[str, object] | None = None,
-            fromlist: tuple[str, ...] = (),
-            level: int = 0,
-        ) -> object:
-            if name == "azure.core.exceptions":
-                raise ImportError("azure.core missing")
-            return original_import(name, globals, locals, fromlist, level)
+        The Azure exception type is imported only after _get_client() returns, so
+        a successful client means azure-core (which provides
+        azure.core.exceptions) is installed and the import cannot fail.
+        """
+        _install_fake_azure_modules(monkeypatch)
 
-        monkeypatch.setattr(builtins, "__import__", _patched_import)
-
-        loader = KeyVaultSecretLoader("https://sentinel-path.vault.azure.net")
+        loader = KeyVaultSecretLoader("https://sdk-present.vault.azure.net")
         client = MagicMock()
-        client.get_secret.return_value = MagicMock(value="fallback-success")
+        client.get_secret.return_value = MagicMock(value="vault-success")
         loader._get_client = MagicMock(return_value=client)  # type: ignore[method-assign]
 
         value, ref = loader.get_secret("ANY_SECRET")
 
-        assert value == "fallback-success"
+        assert value == "vault-success"
         assert ref.source == "keyvault"
 
-    def test_clear_cache_forces_refetch(self) -> None:
+    def test_clear_cache_forces_refetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
         loader = KeyVaultSecretLoader("https://clear-cache.vault.azure.net")
         client = MagicMock()
         client.get_secret.return_value = MagicMock(value="refetch-me")

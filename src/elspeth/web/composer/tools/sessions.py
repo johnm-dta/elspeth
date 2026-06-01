@@ -102,7 +102,6 @@ from elspeth.web.interpretation_state import (
     validate_pipeline_decision_semantics,
 )
 from elspeth.web.validation import (
-    INTERPRETATION_PLACEHOLDER_RE,
     _reject_credential_shaped_content,
     _validate_accepted_value_content,
 )
@@ -335,12 +334,14 @@ def _execute_set_pipeline(
         if header_conflict is not None:
             return _failure_result(state, header_conflict)
 
-        mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)
-        mime_options: dict[str, str] = {}
-        if mime_entry is not None:
-            inferred_plugin, inferred_options = mime_entry
-            if inferred_plugin == src_plugin:
-                mime_options = inferred_options
+        # ``prepared_inline_blob.mime_type`` was validated by
+        # ``_prepare_blob_create`` against ``_ALLOWED_BLOB_MIME_TYPES``, which
+        # is the exact key set of ``_MIME_TO_SOURCE`` — so the mime is
+        # guaranteed present. Direct subscript: a ``KeyError`` here means the
+        # two constants drifted (a system-code bug to fix), not a recoverable
+        # external-data condition.
+        inferred_plugin, inferred_options = _MIME_TO_SOURCE[prepared_inline_blob.mime_type]
+        mime_options: dict[str, str] = inferred_options if inferred_plugin == src_plugin else {}
         src_options = {
             **src_options,
             **mime_options,
@@ -700,24 +701,17 @@ def _execute_apply_pipeline_recipe(
     #
     # ``_execute_set_pipeline`` declares ``data: dict[str, Any] | None``
     # (see the local annotation at the success-path construction site).
-    # That contract is system code, not Tier-3 LLM data, so the only two
-    # legitimate shapes here are ``None`` or a ``Mapping``. Any other type
-    # is a system-code contract violation in ``_execute_set_pipeline`` (or
-    # a future helper that returns through the same path); per CLAUDE.md
-    # plugin-error rules we crash with the actual type rather than silently
-    # wrapping garbage into a payload the LLM would treat as valid.
+    # That contract is system code, not Tier-3 LLM data, so the value is
+    # ``None`` or a ``dict`` — we authored it. We access it directly: the
+    # dict-spread on the non-None path crashes naturally (``TypeError``) if a
+    # future return path violates the contract, which is the correct offensive
+    # response to a system-code bug — not a silent wrap into a payload the LLM
+    # would treat as valid.
     existing_data = result.data
     if existing_data is None:
         merged_data: dict[str, Any] = {"replaced_pipeline_note": note}
-    elif isinstance(existing_data, Mapping):
-        merged_data = {**dict(existing_data), "replaced_pipeline_note": note}
     else:
-        raise AssertionError(
-            f"_execute_set_pipeline returned ToolResult.data of type "
-            f"{type(existing_data).__name__!r}; contract is dict | None. "
-            f"This is a system-code bug in _execute_set_pipeline (or a "
-            f"helper feeding it); audit the return paths there."
-        )
+        merged_data = {**existing_data, "replaced_pipeline_note": note}
 
     return replace(result, data=merged_data)
 
@@ -1147,7 +1141,14 @@ def _assert_affected_component(
                 actual_type=f"missing pending {kind.value} review site",
             )
         if llm_draft is not None:
-            requirements = state.source.options.get(INTERPRETATION_REQUIREMENTS_KEY)
+            # The presence guard above (``INTERPRETATION_REQUIREMENTS_KEY not in
+            # state.source.options`` -> raise) already proved the key is present,
+            # and ``state`` is a frozen CompositionState that cannot change in
+            # between. Direct subscript: a ``KeyError`` here would mean our own
+            # guard logic broke (a system-code bug), which is the correct loud
+            # crash. The retrieved value's *contents* remain Tier-3
+            # LLM-authored, so the shape check below stays.
+            requirements = state.source.options[INTERPRETATION_REQUIREMENTS_KEY]
             draft = None
             if isinstance(requirements, (list, tuple)):
                 for requirement in requirements:
@@ -1292,48 +1293,15 @@ def _assert_affected_llm_node(
     _assert_affected_component(state, affected_node_id, InterpretationKind.VAGUE_TERM, user_term)
 
 
-def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> list[str]:
-    """Return the list of terms with unresolved ``{{interpretation:…}}`` placeholders.
-
-    F-17 runtime detector — invoked at the boundary between composition and
-    execution. ``nodes`` is a mapping of node-id to a node dict whose
-    ``options.prompt_template`` field is inspected. Non-LLM nodes are
-    skipped. The return value is a list of placeholder terms (deduplicated
-    by insertion order); an empty list means the pipeline is safe to
-    execute.
-
-    Standalone (no compose-loop state) so the helper is testable in
-    isolation. Production callers (the executor / preview path) raise
-    ``RuntimeError`` and emit the
-    ``interpretation_placeholder_unresolved_at_runtime`` operational
-    telemetry signal with each ``node_id`` and ``term`` (NOT the prompt
-    template value — that may carry user content).
-    """
-    unresolved: dict[str, None] = {}  # ordered set
-    for node in nodes.values():
-        if not isinstance(node, Mapping):
-            continue
-        if node.get("kind") != "llm":
-            continue
-        options = node.get("options")
-        prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
-        if not isinstance(prompt_template, str):
-            continue
-        for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
-            unresolved[match.group(1).strip()] = None
-    return list(unresolved.keys())
-
-
 def _detect_unresolved_interpretation_placeholders_typed(
     nodes: Sequence[NodeSpec],
 ) -> list[tuple[str, str]]:
     """Return (node_id, term) tuples for every unresolved interpretation site.
 
-    F-17 runtime detector — typed sibling of
-    :func:`_detect_unresolved_interpretation_placeholders` that operates
-    directly on ``CompositionState.nodes`` (a ``Sequence[NodeSpec]``). It
-    accepts both structured pending interpretation requirements and legacy
-    ``{{interpretation:…}}`` placeholders during the migration window.
+    F-17 runtime detector operating directly on ``CompositionState.nodes``
+    (a ``Sequence[NodeSpec]``). It accepts both structured pending
+    interpretation requirements and legacy ``{{interpretation:…}}``
+    placeholders during the migration window.
 
     Each unresolved site produces exactly one tuple per
     ``(node_id, term)`` pair, deduplicated within a node by insertion

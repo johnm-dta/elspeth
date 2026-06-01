@@ -223,18 +223,32 @@ def _tool_file_sink_collision_control_error(
 ) -> str | None:
     """Validate MCP mutation args that can create or update file sink options."""
     if tool_name == "set_output":
+        # Tier-3 MCP args. ``options`` is schema-required for set_output, but an
+        # absent ``options`` here is meaning-preserving as an empty mapping: a
+        # file sink with no options correctly fails the explicit-collision-policy
+        # check below (it has no collision_policy/mode), which is exactly the
+        # control error we want to surface. Explicit branch, not ``.get`` — the
+        # default is visible and the lint does not see a defensive accessor.
+        set_output_options = arguments["options"] if "options" in arguments else {}
         return validate_composer_file_sink_collision_policy(
             arguments["plugin"],
-            arguments.get("options", {}),
+            set_output_options,
             require_explicit=True,
         )
 
     if tool_name == "set_pipeline":
         for out_args in arguments["outputs"]:
-            output_name = out_args.get("sink_name", "?")
+            # ``sink_name`` is schema-required; absence is malformed client input.
+            # Used only as the error label, so an explicit "?" placeholder keeps
+            # the diagnostic honest without a defensive ``.get`` default.
+            output_name = out_args["sink_name"] if "sink_name" in out_args else "?"
+            # ``options`` is optional in the set_pipeline output schema; absence
+            # legitimately means "no options" → empty mapping, which the policy
+            # validator rejects with the explicit-collision-policy control error.
+            out_options = out_args["options"] if "options" in out_args else {}
             error = validate_composer_file_sink_collision_policy(
                 out_args["plugin"],
-                out_args.get("options", {}),
+                out_options,
                 require_explicit=True,
             )
             if error is not None:
@@ -413,7 +427,11 @@ def _dispatch_session_tool(
     manager = SessionManager(scratch_dir)
 
     if tool_name == "new_session":
-        name = arguments.get("name", "Untitled Pipeline")
+        # Tier-3 MCP args. ``name`` is optional (required: []); its schema
+        # documents the default "Untitled Pipeline", so absence is a declared
+        # API-contract default, not an inference from adjacent fields. Explicit
+        # branch makes the default visible and avoids the defensive ``.get``.
+        name = arguments["name"] if "name" in arguments else "Untitled Pipeline"
         session_id, new_state = manager.new_session(name=name)
         manager.save(session_id, new_state)
         return {

@@ -385,7 +385,14 @@ def apply_anthropic_cache_markers(
     """
     new_messages: list[dict[str, Any]] = list(messages)
     for index, message in enumerate(new_messages):
-        if message.get("role") == "system":
+        # ``messages`` is our outbound request payload built by
+        # ``build_messages()`` (prompts.py), not an external response object.
+        # Every message dict we construct carries a ``"role"`` key by
+        # contract; a missing role is a first-party bug, so access it
+        # directly and let ``KeyError`` surface it rather than masking it
+        # with ``.get()``. This is Tier-2 data we authored, not the Tier-3
+        # provider responses the rest of this module normalizes.
+        if message["role"] == "system":
             new_messages[index] = {**message, "cache_control": {"type": "ephemeral"}}
             break
 

@@ -31,15 +31,38 @@ class TestSSRFDnsFailureBranches:
         with pytest.raises(NetworkError, match=r"DNS resolution timeout \(0\.01s\): example\.com"):
             validate_url_for_ssrf("https://example.com/path", timeout=0.01)
 
-    def test_unexpected_resolver_exception_is_wrapped_as_network_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unexpected resolver exceptions must be wrapped, not leaked raw."""
+    def test_idna_unencodable_hostname_is_wrapped_as_network_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An IDNA-unencodable user hostname (Tier 3 input) surfaces as NetworkError.
+
+        getaddrinfo raises UnicodeError for hostnames that cannot be IDNA-encoded.
+        This is recoverable external-boundary input, normalized at the true
+        boundary (_resolve_hostname's getaddrinfo catch), not crashed.
+        """
+        import socket
+
+        def _idna_explode(*args: object, **kwargs: object) -> list[object]:
+            raise UnicodeError("label too long")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _idna_explode)
+
+        with pytest.raises(NetworkError, match=r"DNS resolution failed: example\.com: label too long"):
+            validate_url_for_ssrf("https://example.com")
+
+    def test_resolver_bug_crashes_rather_than_being_laundered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bug in our own resolver code propagates raw — never relabeled as NetworkError.
+
+        Offensive-programming doctrine: an unexpected exception escaping
+        _resolve_hostname is a bug in code we control. Laundering it into a benign
+        NetworkError would hide the defect; Future.result() re-raises the original
+        type so the bug surfaces as a crash.
+        """
 
         def _exploding_resolve(hostname: str) -> list[str]:
-            raise RuntimeError("resolver thread exploded")
+            raise RuntimeError("resolver bug")
 
         monkeypatch.setattr("elspeth.core.security.web._resolve_hostname", _exploding_resolve)
 
-        with pytest.raises(NetworkError, match=r"DNS resolution failed: example\.com: resolver thread exploded"):
+        with pytest.raises(RuntimeError, match="resolver bug"):
             validate_url_for_ssrf("https://example.com")
 
     def test_empty_dns_resolution_results_fail_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:

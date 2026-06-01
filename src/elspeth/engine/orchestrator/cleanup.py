@@ -68,12 +68,6 @@ def cleanup_plugins(
     cleanup_errors: list[str] = []
 
     def record_cleanup_error(hook: str, plugin_name: str, error: Exception) -> None:
-        # FrameworkBugError and AuditIntegrityError indicate system-level
-        # corruption or bugs — Tier 1 violations that must crash immediately.
-        # These must NOT be downgraded to cleanup warnings.
-        if isinstance(error, contract_errors.TIER_1_ERRORS):
-            raise
-
         logger.warning(
             "Plugin cleanup hook failed",
             hook=hook,
@@ -85,13 +79,17 @@ def cleanup_plugins(
         cleanup_errors.append(f"{hook}({plugin_name}): {type(error).__name__}: {error}")
 
     def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
-        # Single broad-catch surface for plugin cleanup. Per the policy
-        # documented above, plugin cleanup MUST attempt every hook even when
-        # one fails — broad catch is required by contract. Tier-1 errors are
-        # re-raised inside record_cleanup_error; everything else is collected
-        # and folded into the RuntimeError raised after all hooks finish.
+        # Plugin cleanup MUST attempt every hook even when one fails — broad
+        # catch is required by the best-effort lifecycle contract documented
+        # above. FrameworkBugError / AuditIntegrityError (TIER_1_ERRORS) signal
+        # system-level corruption that must crash immediately, so they are
+        # re-raised by the dedicated Tier-1 clause BEFORE the broad catch can
+        # downgrade them to a cleanup warning. Everything else is recorded and
+        # folded into the RuntimeError raised after all hooks finish.
         try:
             fn()
+        except contract_errors.TIER_1_ERRORS:
+            raise
         except Exception as exc:
             record_cleanup_error(hook_label, plugin_name, exc)
 

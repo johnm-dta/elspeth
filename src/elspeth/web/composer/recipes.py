@@ -632,7 +632,12 @@ def list_recipes() -> list[dict[str, Any]]:
 
 def get_recipe(name: str) -> RecipeSpec | None:
     """Return a recipe spec by name, or None if not registered."""
-    return _RECIPES.get(name)
+    # ``name`` is external (composer-LLM-authored); "no such recipe" is a real
+    # answer, so ``None`` is honest absence, not a fabricated default. Explicit
+    # membership keeps that absence signal structural rather than a swallow.
+    if name in _RECIPES:
+        return _RECIPES[name]
+    return None
 
 
 def apply_recipe(name: str, raw_slots: Mapping[str, Any]) -> dict[str, Any]:
@@ -642,9 +647,13 @@ def apply_recipe(name: str, raw_slots: Mapping[str, Any]) -> dict[str, Any]:
     slots fail validation. The returned dict is consumable directly by
     ``set_pipeline``.
     """
-    recipe = _RECIPES.get(name)
-    if recipe is None:
-        raise RecipeValidationError(f"recipe '{name}' is not registered. Available recipes: {sorted(_RECIPES)}.")
+    # ``name`` is external (composer-LLM-authored). Convert an unknown-recipe
+    # KeyError directly into the typed RecipeValidationError the caller routes,
+    # preserving the exception chain.
+    try:
+        recipe = _RECIPES[name]
+    except KeyError as exc:
+        raise RecipeValidationError(f"recipe '{name}' is not registered. Available recipes: {sorted(_RECIPES)}.") from exc
     coerced = validate_slots(recipe, raw_slots)
     # Concrete recipe builders return dict; the Mapping return type on the
     # RecipeSpec contract is the looser superset (Mapping ⊇ dict). Convert

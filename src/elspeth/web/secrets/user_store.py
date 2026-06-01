@@ -53,20 +53,26 @@ def _compute_fingerprint(name: str, value: str) -> str:
     """Compute HMAC fingerprint of a secret value.
 
     Returns a 64-char hex digest.  Raises ``FingerprintKeyMissingError``
-    when ``ELSPETH_FINGERPRINT_KEY`` is unset — the fingerprint is required
-    for audit-trail integrity, and an empty value would crash downstream
-    at ``SecretResolutionInput`` validation with a confusing generic error.
+    when ``ELSPETH_FINGERPRINT_KEY`` is unset (or set to an empty value) —
+    the fingerprint is required for audit-trail integrity, and an absent or
+    empty key would otherwise surface as a confusing generic ``ValueError``.
     The typed exception lets HTTP handlers map the condition to 503 with
     actionable deployment guidance, and lets pipeline resolution fail fast
     rather than silently bucketing the miss into ``SecretResolutionError``.
+
+    Delegates the deployment-env read to :func:`secret_fingerprint` /
+    :func:`get_fingerprint_key`, which read ``ELSPETH_FINGERPRINT_KEY`` at
+    call time (preserving per-call deployment-state semantics) and raise
+    ``ValueError`` on both absence and an empty key.  We re-raise that as the
+    typed ``FingerprintKeyMissingError`` so the boundary outcome is explicit.
     """
-    fp_key = os.environ.get("ELSPETH_FINGERPRINT_KEY")
-    if not fp_key:
+    try:
+        return secret_fingerprint(value)
+    except ValueError as exc:
         raise FingerprintKeyMissingError(
             f"ELSPETH_FINGERPRINT_KEY is not set — cannot compute fingerprint for secret {name!r}. "
             "Set the environment variable before starting the web server."
-        )
-    return secret_fingerprint(value, key=fp_key.encode("utf-8"))
+        ) from exc
 
 
 def _derive_fernet_key(master_key: str, salt: bytes) -> bytes:

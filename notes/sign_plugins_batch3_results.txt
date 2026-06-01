@@ -1,0 +1,66 @@
+
+================================================================================
+plugins/sinks/chroma_sink.py:R6:ChromaSink.write:fp=c52a6a2457cc3cdc
+VERDICT: ACCEPTED
+RATIONALE: Optional metadata fields are absent from some rows; except KeyError continue is the correct expression of per-field optionality. Not error swallowing — metadata absence is valid and the row proceeds normally with whatever metadata was present.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:53:16.120148+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10089 cached=7975 (79% hit)
+
+Judge rationale:
+  The except KeyError: continue here expresses per-field optionality of metadata fields, not error swallowing. The surrounding code distinguishes correctly: required fields (id, document) divert the row on KeyError, while optional metadata fields are individually skipped on absence — which is the documented semantic ('metadata is optional per-field'). The row still proceeds with whatever metadata was present, and type violations on present values still trigger _divert_row. This is a legitimate expression of optional-field semantics on Tier-2 row data, not a silent-except defect.
+
+Proposed entry:
+
+
+================================================================================
+plugins/sinks/chroma_sink.py:R5:ChromaSink.write:fp=459fb5a3b1e6a043
+VERDICT: ACCEPTED
+RATIONALE: Tier-2 operation-unsafe guard at the ChromaDB external boundary: isinstance(value, (str, int, float, bool)) detects metadata values whose types ChromaDB does not accept. A wrong-typed metadata value (e.g. dict or datetime) is value-unsafe at this Tier-2→external boundary — the type is valid Python but causes an operation failure at the ChromaDB API. Per-row divert prevents an unattributable batch rejection. This is the Tier-2 value-unsafe wrap pattern prescribed by the data manifesto.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:53:22.776623+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10205 cached=7975 (78% hit)
+
+Judge rationale:
+  This is a sink writing to an external system (ChromaDB) whose API only accepts str|int|float|bool|None as metadata values. The isinstance check is at the Tier-2→external boundary, screening per-row values for downstream-operation compatibility and diverting bad rows rather than crashing the batch. This matches the data manifesto's value-unsafe wrap pattern at an external API boundary, and the response is per-row quarantine (not silent coercion/fabrication). The rule R5 concern (masking contract violations) doesn't apply: row field types are not contractually constrained to ChromaDB's accepted set, so the check enforces an external-API constraint rather than hiding a first-party contract bug.
+
+Proposed entry:
+
+
+================================================================================
+plugins/sinks/chroma_sink.py:R5:ChromaSink.write:fp=801f187823d20f74
+VERDICT: ACCEPTED
+RATIONALE: Tier-2 operation-unsafe guard at the ChromaDB external boundary: isinstance(value, float) narrows to float before math.isfinite() to detect non-finite floats (NaN/Infinity). The type is correct (float) but the value causes a ChromaDB operation failure. This is the Tier-2 value-unsafe wrap pattern — type-valid but operation-unsafe values must be wrapped before crossing into the external system.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:53:30.282512+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10146 cached=7975 (79% hit)
+
+Judge rationale:
+  The data here is a row value from upstream pipeline data heading into ChromaDB, an external sink. The isinstance(value, float) check is narrowing a Tier-2 type-valid value before applying math.isfinite() to catch NaN/Infinity, which ChromaDB rejects — this is exactly the value-unsafe operation wrap pattern. The isinstance narrowing is needed because math.isfinite only accepts numeric types and the preceding branch admits str/int/bool as well; it's not masking a contract violation but selecting the float subset for an operation-safety check before crossing into the external system. The bad-value path diverts the row rather than fabricating, consistent with the boundary discipline.
+
+Proposed entry:
+

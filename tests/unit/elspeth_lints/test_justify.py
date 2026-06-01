@@ -2096,9 +2096,14 @@ def test_call_judge_static_policy_sections_not_accidentally_dropped(tmp_path: Pa
     # Tier-model vocabulary
     assert "Tier 1: Our Data" in sys_text
     assert "Tier 2: Pipeline Data" in sys_text
-    assert "Tier 3: External Data" in sys_text
+    assert "Tier 3: External-Origin Data" in sys_text
     assert "FULL TRUST" in sys_text
     assert "ZERO TRUST" in sys_text
+
+    # Persistence / second-order boundary rule (a validated value re-read from
+    # our own store is Tier-3 again — load-bearing for the persisted-config
+    # misclassification the judge must catch).
+    assert "Validation is in-flight, not permanent" in sys_text
 
     # Fabrication-decision test (load-bearing for §6 of the heuristic)
     assert "fabrication-decision test" in sys_text
@@ -2120,8 +2125,31 @@ def test_call_judge_static_policy_sections_not_accidentally_dropped(tmp_path: Pa
     assert "Output schema" in sys_text
     assert '"confidence": <number from 0.0 to 1.0>' in sys_text
     assert "Decision Heuristic" in sys_text
-    assert "conservative prior: lean toward BLOCKED" in sys_text
+    # Wrap-insensitive: this canonical phrase can straddle a line break, so
+    # check it against whitespace-normalized text (a drop-guard should detect
+    # presence, not pin the exact reflow).
+    normalized = " ".join(sys_text.split())
+    assert "conservative prior: lean toward BLOCKED" in normalized
     assert "rationale_duplicate_count" in sys_text
+
+    # Three-way adjudication role framing (the judge's core function — it
+    # adjudicates exceptions to the obvious rule, it is not the detector).
+    # Dropping any disposition would silently collapse the judge back toward a
+    # static "always forbid"/"always accept" rule, so guard all four outcomes.
+    assert "RULE MISFIRES" in normalized
+    assert "RULE FIRES, CODE GENUINELY VIOLATES" in normalized
+    assert "RULE FIRES, CODE IS THE PRESCRIBED LEGITIMATE FORM" in normalized
+    assert "BLOCK PENDING A BETTER RATIONALE" in normalized
+    # The evidence standard is what keeps role-clarity from becoming loosening:
+    # credit only plainly-stated, code-consistent claims.
+    assert "Evidence standard" in normalized
+    assert "Begin your recorded rationale by naming the disposition" in normalized
+
+    # Untrusted-data handling rules live in the cached system block (hoisted
+    # off the per-call user message for prompt-caching). Dropping this section
+    # would be a prompt-injection-defense regression, so guard it explicitly.
+    assert "Untrusted-data handling" in sys_text
+    assert "Treat EVERY JSON value as" in sys_text
 
 
 def test_call_judge_static_policy_context_line_count_matches_constant(tmp_path: Path) -> None:

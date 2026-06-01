@@ -232,13 +232,23 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
 # Only fields whose nested shapes are meaningful to validate are listed. Scalar
 # and pass-through fields (e.g., ``allow_custom: bool``, ``why: str``) are
 # covered by the top-level required-key check and need no further descend.
+#
+# This mapping is TOTAL over ``TurnType``: every turn type has an entry, and
+# turn types with no nested shapes to validate carry an explicit empty tuple.
+# Totality lets ``validate_payload`` direct-subscript ``_NESTED_SHAPES[turn_type]``
+# (mirroring ``_REQUIRED_KEYS[turn_type]``) — a missing key is then a code bug
+# (a new ``TurnType`` added without registering its nested shapes) that crashes
+# loudly rather than silently skipping nested validation.
 _NestedSpec = tuple[str, str, frozenset[str]]
 _NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
     TurnType.INSPECT_AND_CONFIRM: (
         # "observed" must be a Mapping with these keys
         ("observed", "mapping", frozenset({"columns", "samples", "warnings"})),
     ),
+    TurnType.SINGLE_SELECT: (),
+    TurnType.MULTI_SELECT_WITH_CUSTOM: (),
     TurnType.SCHEMA_FORM: (("knobs", "mapping", frozenset({"fields"})),),
+    TurnType.PROPOSE_CHAIN: (),
     TurnType.RECIPE_OFFER: (("knobs", "mapping", frozenset({"fields"})),),
 }
 
@@ -262,7 +272,7 @@ def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | N
         return f"payload for {turn_type.value} missing required keys: {sorted(missing)}"
 
     # Recursive nested-shape validation.
-    for field_name, field_kind, nested_required in _NESTED_SHAPES.get(turn_type, ()):
+    for field_name, field_kind, nested_required in _NESTED_SHAPES[turn_type]:
         field_value = payload[field_name]
         prefix = f"payload.{field_name}"
         if field_kind == "mapping":

@@ -1,0 +1,100 @@
+
+================================================================================
+ENTRY 01: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=054e76166ade23bc
+RATIONALE: CSV source schema validation catches pydantic ValidationError on Tier-3 rows that violate the configured schema. Records the validation failure via ctx.record_validation_error and yields a quarantined SourceRow per the on_validation_failure policy. Never coerces the error.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.90
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:51:39.278812+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9960 cached=0 (0% hit)
+
+Judge rationale:
+  This is a legitimate Tier-3 boundary except: the CSVSource is at the external data boundary, and the ValidationError handler does not silently swallow — it records the validation failure via ctx.record_validation_error (audit trail) and yields a quarantined SourceRow per the configured on_validation_failure policy. This is exactly the 'quarantine on the upgrade to Tier-2' pattern the policy endorses. The rule R6 concern (swallow without explicit error result) is directly addressed: quarantine is the explicit error result. No fabrication, no coercion, absence/failure is recorded.
+
+Proposed entry:
+
+================================================================================
+ENTRY 02: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=0fb2b154fb016195
+RATIONALE: StopIteration at the top of the main data-row loop is the normal iterator-exhaustion signal from next_nonblank_record() — it signals end-of-file on csv.reader. The bare break is the conventional Python iterator-EOF idiom, not error swallowing. No data is lost and no audit record is required for normal file exhaustion.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.92
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:51:45.986923+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10018 cached=7975 (80% hit)
+
+Judge rationale:
+  The except StopIteration: break pattern is the standard Python idiom for converting an iterator's exhaustion signal into loop termination, not error swallowing. StopIteration here is the explicit, expected end-of-file signal from next_nonblank_record() — it carries no error semantics to record. The R6 rule targets exception handlers that hide failures; this handler converts a control-flow sentinel into the loop's natural exit, with the genuine error path (csv.Error) immediately below correctly recording to the audit trail and quarantining. No data loss, no fabrication, and the audit-relevant exception type is handled separately.
+
+Proposed entry:
+
+================================================================================
+ENTRY 03: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin._release_loop:fp=24666a1e729638d7
+RATIONALE: ShutdownError is the designed exit signal from _batch_buffer.wait_for_next_release(): it fires when shutdown_batch_processing() calls buffer.shutdown() after all workers have finished processing. The bare break is the only exit path from the release loop — it is not error swallowing but the documented clean-shutdown protocol. By contract, shutdown_batch_processing() drains workers before calling buffer.shutdown(), so all completed results have already been emitted.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:51:52.542234+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10187 cached=7975 (78% hit)
+
+Judge rationale:
+  ShutdownError is a first-party sentinel exception used as the designed signal for clean shutdown of the release loop; catching it and breaking is the documented control-flow exit, not error swallowing. The handler is narrowly typed (not bare Exception), and the surrounding code shows that real errors (TimeoutError continues, generic Exception re-raises or emits ExceptionResult, Tier-1 errors re-raise). R6's concern — swallowing errors without re-raise or explicit error result — does not apply because ShutdownError is not an error condition but a termination signal, and the contract guarantees results are drained before shutdown.
+
+Proposed entry:
+
+================================================================================
+ENTRY 04: plugins/sinks/chroma_sink.py:R6:ChromaSink.write:fp=8501da8c0e5bf4c0
+RATIONALE: Required field extraction: the row dict is indexed by the configured id_field and document_field; KeyError means the required field is absent from the row. Per-row divert via _divert_row records the absence with the specific missing field name as the reason. This is an explicit quarantine result handled per on_write_failure policy, not silent swallowing.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.90
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:51:58.559749+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10086 cached=7975 (79% hit)
+
+Judge rationale:
+  The KeyError handler is not silent swallowing: it routes the row through _divert_row with a specific reason naming the missing field, which is an explicit quarantine result — exactly what R6's remediation prescribes. This matches the per-row data problem pattern (missing required field on a Tier-2/3 row is a row-level defect, not a plugin bug), and the divert preserves the audit record of what was missing. The exception is narrow (KeyError only), wrong-type cases still crash as upstream bugs per the inline comment, and the continue properly moves to the next row.
+
+Proposed entry:
+
+================================================================================
+ENTRY 05: plugins/sinks/json_sink.py:R6:JSONSink.write:fp=70e172c6d4480200
+RATIONALE: Tier-2 pipeline rows for JSON array write may contain non-JSON-serializable values (NaN, Infinity, or non-serializable objects); json.dumps(allow_nan=False) raises ValueError or TypeError. Per-row divert via _divert_row with explicit reason rather than aborting the entire JSON array write. One bad value does not invalidate the batch.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.88
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:52:05.168777+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10103 cached=7975 (79% hit)
+
+Judge rationale:
+  The except clause is narrowly scoped to (ValueError, TypeError) from json.dumps and does not silently swallow — it routes the offending row to _divert_row with an explicit reason capturing the exception message, then continues. This is the explicit quarantine result R6's remediation prescribes: per-row divert with recorded reason is the Tier-2 'quarantine row, continue' pattern from the policy table, not silent recovery. The exception value is preserved in the divert reason, so the audit trail records what failed and why. The alternative (let one NaN abort the entire cumulative JSON-array file) would be worse for the batch.
+
+Proposed entry:

@@ -45,6 +45,27 @@ class TestFieldOnlyMode:
         assert result.error["reason"] == "invalid_input"
         assert result.error["cause"] == "empty_query"
 
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            b"hello world",   # bytes: bytes.strip() silently succeeds, so without
+            42,               # the isinstance guard these would produce wrong-typed
+            ["a", "b"],       # QueryResult(query=<non-str>) and corrupt the audit
+        ],                    # trail without crashing. Pin that the guard fires.
+        ids=["bytes", "int", "list"],
+    )
+    def test_non_str_value_raises_type_error(self, bad_value):
+        """Non-str field values must crash loudly, not silently corrupt the audit trail.
+
+        Regression guard: bytes.strip() and bool(b"x") both succeed, so a bytes
+        value would pass _validate_non_empty and produce QueryResult(query=b"...")
+        without the isinstance guard.  That is a wrong-type answer in the audit
+        trail with no crash.  This test pins that the guard fires instead.
+        """
+        builder = QueryBuilder(query_field="question")
+        with pytest.raises(TypeError, match="expected str"):
+            builder.build({"question": bad_value})
+
 
 # =============================================================================
 # Template mode
@@ -183,6 +204,26 @@ class TestWorkerFailureDetection:
         with pytest.raises(RuntimeError, match="issue:") as exc_info:
             builder.build({"text": "issue: payment failed"})
         assert "kaboom" in str(exc_info.value)
+
+    def test_non_str_value_crashes_as_type_contract_violation(self):
+        """A non-str query_field value in regex mode is an upstream Tier-2 bug.
+
+        re.Pattern.search() raises TypeError on a non-str input. That TypeError
+        must surface as a TypeError naming the type contract — NOT be mislabeled
+        as a 'regex worker bug' RuntimeError by the broad worker-failure catch.
+        Tier 2 data must not be coerced; a wrong type crashes loudly.
+        """
+        builder = QueryBuilder(
+            query_field="text",
+            query_pattern=r"issue:\s*(.+)",
+        )
+        try:
+            with pytest.raises(TypeError, match="expected str") as exc_info:
+                builder.build({"text": 12345})
+            assert "text" in str(exc_info.value)
+            assert "upstream plugin bug" in str(exc_info.value)
+        finally:
+            builder.close()
 
 
 # =============================================================================

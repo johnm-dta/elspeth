@@ -829,6 +829,28 @@ def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[
     return tuple(errors)
 
 
+def _validate_aggregation_trigger(node_id: str, trigger: Mapping[str, Any]) -> ValidationEntry | None:
+    """Validate a composer-authored aggregation trigger at the Tier-3 boundary.
+
+    ``node.trigger`` is composer/LLM/user-authored config read back from session
+    state, so a malformed ``trigger`` is recoverable external input, not an
+    invariant break. We run it through the same ``TriggerConfig`` parser the
+    runtime settings load uses and convert a parse failure into an explicit
+    blocking ``ValidationEntry`` — rejecting the bad trigger before runtime
+    settings load rather than crashing the composer.
+    """
+    try:
+        TriggerConfig.model_validate(deep_thaw(trigger))
+    except PydanticValidationError as exc:
+        detail = "; ".join(str(error["msg"]) for error in exc.errors())
+        return ValidationEntry(
+            component=f"node:{node_id}",
+            message=f"Aggregation '{node_id}' trigger is invalid: {detail}",
+            severity="high",
+        )
+    return None
+
+
 def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
     """Return the consumer's accepted-input field set when its input is locked.
 
@@ -1372,8 +1394,13 @@ def _check_schema_contracts(
         if producer.producer_id == "source":
             return _effective_producer_guarantees(producer)
 
-        producer_node = node_by_id.get(producer.producer_id)
-        if producer_node is None or producer_node.plugin is None:
+        if producer.producer_id not in node_by_id:
+            # Sources have producer_id == "source" and are not members of the
+            # locally-built node_by_id map; this is expected internal control
+            # flow, not a missing-key anomaly, so fall back to the declared set.
+            return _effective_producer_guarantees(producer)
+        producer_node = node_by_id[producer.producer_id]
+        if producer_node.plugin is None:
             return _effective_producer_guarantees(producer)
         if producer_node.node_type not in {"transform", "aggregation"}:
             return _effective_producer_guarantees(producer)
@@ -1396,21 +1423,72 @@ def _check_schema_contracts(
             return _effective_producer_guarantees(producer)
         return frozenset(output_config.guaranteed_fields)
 
-    for node in nodes:
+    # Tier-3 contract-config parse boundary. node.options / output.options are
+    # composer/LLM/user-authored config read back from session state, so a
+    # malformed schema declaration is recoverable external input, not an
+    # invariant break. These helpers convert the parser's ValueError into an
+    # explicit (value, ValidationEntry) result the caller aggregates into the
+    # validation report — the boundary surfaces the defect as a blocking entry
+    # rather than crashing /validate on the first bad node.
+    def _parse_node_required_fields(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
         try:
-            consumer_required = get_raw_node_required_fields(
-                node.options,
-                owner=f"node:{node.id}",
-                node_type=node.node_type,
+            return (
+                get_raw_node_required_fields(
+                    node.options,
+                    owner=f"node:{node.id}",
+                    node_type=node.node_type,
+                ),
+                None,
             )
         except ValueError as exc:
-            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_consumer_locked_input(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _consumer_locked_input_set(node), None
+        except ValueError as exc:
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_sink_required_fields(
+        output: OutputSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return (
+                get_raw_sink_required_fields(output.options, owner=f"output:{output.name}"),
+                None,
+            )
+        except ValueError as exc:
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_sink_locked_input(
+        output: OutputSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _sink_locked_input_set(output), None
+        except ValueError as exc:
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_producer_guarantees(
+        producer: ProducerEntry,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _effective_producer_guarantees(producer), None
+        except ValueError as exc:
+            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
+
+    for node in nodes:
+        consumer_required, consumer_required_error = _parse_node_required_fields(node)
+        if consumer_required_error is not None:
+            errors.append(consumer_required_error)
             continue
 
-        try:
-            consumer_locked_input = _consumer_locked_input_set(node)
-        except ValueError as exc:
-            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+        consumer_locked_input, consumer_locked_error = _parse_consumer_locked_input(node)
+        if consumer_locked_error is not None:
+            errors.append(consumer_locked_error)
             continue
 
         if not consumer_required and consumer_locked_input is None:
@@ -1423,12 +1501,12 @@ def _check_schema_contracts(
         if actual_producer is None or actual_producer.producer_id in parse_failed_producers:
             continue
 
-        try:
-            producer_guaranteed = _effective_producer_guarantees(actual_producer)
-        except ValueError as exc:
-            errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+        producer_guaranteed, producer_error = _parse_producer_guarantees(actual_producer)
+        if producer_error is not None:
+            errors.append(producer_error)
             parse_failed_producers.add(actual_producer.producer_id)
             continue
+        assert producer_guaranteed is not None  # No error => guarantees resolved.
 
         if consumer_required:
             missing_fields = consumer_required - producer_guaranteed
@@ -1460,11 +1538,14 @@ def _check_schema_contracts(
         # composer-time we mirror the same predicate against the producer's
         # *predicted emit set* (not its declared set — see _producer_emit_set).
         if consumer_locked_input is not None:
-            try:
-                producer_emit = _producer_emit_set(actual_producer)
-            except ValueError:
-                # Already surfaced above via _effective_producer_guarantees.
-                continue
+            # _effective_producer_guarantees(actual_producer) already succeeded
+            # above (else we continued via parse_failed_producers), so this
+            # producer's contract config parsed cleanly. _producer_emit_set walks
+            # the same parse paths (create_transform / _effective_producer_guarantees)
+            # on the same options, deterministically — any ValueError here would be
+            # a non-determinism bug in our own code, not a fresh Tier-3 parse fault,
+            # so it is left to crash rather than silently swallowed.
+            producer_emit = _producer_emit_set(actual_producer)
             extras = producer_emit - consumer_locked_input
             if extras:
                 # When consumer is itself a field_mapper, suggesting "insert a
@@ -1498,19 +1579,14 @@ def _check_schema_contracts(
                 )
 
     for output in outputs:
-        try:
-            sink_required = get_raw_sink_required_fields(
-                output.options,
-                owner=f"output:{output.name}",
-            )
-        except ValueError as exc:
-            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+        sink_required, sink_required_error = _parse_sink_required_fields(output)
+        if sink_required_error is not None:
+            errors.append(sink_required_error)
             continue
 
-        try:
-            sink_locked_input = _sink_locked_input_set(output)
-        except ValueError as exc:
-            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+        sink_locked_input, sink_locked_error = _parse_sink_locked_input(output)
+        if sink_locked_error is not None:
+            errors.append(sink_locked_error)
             continue
 
         if not sink_required and sink_locked_input is None:
@@ -1543,12 +1619,12 @@ def _check_schema_contracts(
             if actual_producer.producer_id in parse_failed_producers:
                 continue
 
-            try:
-                producer_guaranteed = _effective_producer_guarantees(actual_producer)
-            except ValueError as exc:
-                errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+            producer_guaranteed, producer_error = _parse_producer_guarantees(actual_producer)
+            if producer_error is not None:
+                errors.append(producer_error)
                 parse_failed_producers.add(actual_producer.producer_id)
                 continue
+            assert producer_guaranteed is not None  # No error => guarantees resolved.
 
             if sink_required:
                 missing_fields = sink_required - producer_guaranteed
@@ -1579,10 +1655,13 @@ def _check_schema_contracts(
             # surface is the auto-generated sink Pydantic model with
             # ``extra="forbid"`` triggered by ``mode: fixed`` on the sink schema.
             if sink_locked_input is not None:
-                try:
-                    producer_emit = _producer_emit_set(actual_producer)
-                except ValueError:
-                    continue
+                # See Rule A above: _effective_producer_guarantees(actual_producer)
+                # already succeeded for this producer in this iteration, so its
+                # contract config parsed cleanly. _producer_emit_set walks the same
+                # deterministic parse paths on the same options — a ValueError here
+                # would be a non-determinism bug in our own code, not a fresh Tier-3
+                # fault, so it is left to crash rather than silently swallowed.
+                producer_emit = _producer_emit_set(actual_producer)
                 extras = producer_emit - sink_locked_input
                 if extras:
                     errors.append(
@@ -2012,11 +2091,9 @@ class CompositionState:
                 # If early triggers are present, validate them through the same
                 # TriggerConfig parser used by settings load.
                 if node.trigger is not None:
-                    try:
-                        TriggerConfig.model_validate(deep_thaw(node.trigger))
-                    except PydanticValidationError as exc:
-                        detail = "; ".join(str(error["msg"]) for error in exc.errors())
-                        errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' trigger is invalid: {detail}", "high"))
+                    trigger_error = _validate_aggregation_trigger(node.id, node.trigger)
+                    if trigger_error is not None:
+                        errors.append(trigger_error)
                 # output_mode must be a valid OutputMode value when present
                 if node.output_mode is not None and node.output_mode not in ("passthrough", "transform"):
                     errors.append(

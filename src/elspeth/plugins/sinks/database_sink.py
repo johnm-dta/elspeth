@@ -127,8 +127,14 @@ class DatabaseSink(BaseSink):
         super().__init__(config)
         cfg = DatabaseSinkConfig.from_dict(config, plugin_name=self.name)
 
-        # Honor ELSPETH_ALLOW_RAW_SECRETS for dev environments (consistent with config.py)
-        allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+        # Honor ELSPETH_ALLOW_RAW_SECRETS for dev environments. Process environment
+        # is a Tier-3 boundary; absence of the flag is meaning-preserving (feature
+        # off → do not allow raw secrets), so we read it as an explicit membership
+        # test rather than a defaulting .get() (mirrors data_flow_repository.py).
+        allow_raw = (
+            "ELSPETH_ALLOW_RAW_SECRETS" in os.environ
+            and os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
+        )
         fail_if_no_key = not allow_raw
 
         self._url = cfg.url  # Raw URL for database connection

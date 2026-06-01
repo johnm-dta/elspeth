@@ -199,7 +199,9 @@ def test_agent_transport_produces_validated_response(monkeypatch: pytest.MonkeyP
     assert resp.judge_transport == TRANSPORT_AGENT
     assert resp.verdict is JudgeVerdict.ACCEPTED
     assert resp.model_id == "claude-opus-4-7"  # served model from model_usage
-    assert resp.prompt_tokens_total == 200
+    # total = input_tokens (200) + cache_read (50) [+ cache_creation (0)] = 250;
+    # a true prompt total >= the cached subset, matching the OpenRouter path.
+    assert resp.prompt_tokens_total == 250
     assert resp.prompt_tokens_cached == 50
 
 
@@ -240,18 +242,22 @@ def test_agent_transport_empty_model_usage_falls_back_to_requested(monkeypatch: 
     assert resp.model_id == "claude-sonnet-4-7"
 
 
-def test_agent_transport_multi_model_usage_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A single-shot judge call must resolve to exactly one served model;
-    # more than one key is an unexpected shape — crash, don't fabricate.
+def test_agent_transport_multi_model_usage_resolves_to_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The claude_code preset may invoke an auxiliary fast model (e.g. Haiku)
+    # alongside the primary model that produces the verdict, so model_usage can
+    # legitimately carry >1 key. That is NOT a contract violation: record the
+    # model that did the bulk of the work (most tokens) — the one that served
+    # the verdict — rather than crashing on the auxiliary.
     _install_fake_sdk(
         monkeypatch,
         assistant_text=_GOOD_JSON,
-        model_usage={"a": {"input_tokens": 1}, "b": {"input_tokens": 1}},
+        model_usage={
+            "claude-haiku-4-5-20251001": {"input_tokens": 120, "output_tokens": 30},
+            "claude-opus-4-8": {"input_tokens": 8400, "output_tokens": 510},
+        },
     )
-    # A response-shape violation: JudgeContractError (not transport). It must
-    # propagate unchanged through _call_agent_sdk's except arms, not be remapped.
-    with pytest.raises(JudgeContractError):
-        call_judge(_request(), transport=TRANSPORT_AGENT)
+    resp = call_judge(_request(), transport=TRANSPORT_AGENT)
+    assert resp.model_id == "claude-opus-4-8"
 
 
 def test_agent_transport_missing_result_message_crashes(monkeypatch: pytest.MonkeyPatch) -> None:

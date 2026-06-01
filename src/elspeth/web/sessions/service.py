@@ -540,7 +540,7 @@ def _interpretation_hash_domain_v2(
     affected_node_id: str,
     tool_call_id: str,
     user_term: str,
-    kind: InterpretationKind | str,
+    kind: str,
     llm_draft: str,
     accepted_value: str,
     actor: str,
@@ -556,7 +556,7 @@ def _interpretation_hash_domain_v2(
         "affected_node_id": affected_node_id,
         "tool_call_id": tool_call_id,
         "user_term": user_term,
-        "kind": kind.value if isinstance(kind, InterpretationKind) else kind,
+        "kind": kind,
         "llm_draft": llm_draft,
         "accepted_value": accepted_value,
         "actor": actor,
@@ -590,7 +590,8 @@ def _find_llm_transform_node(
     for node in state.nodes:
         if node["id"] != affected_node_id:
             continue
-        if node.get("node_type") != "transform" or "plugin" not in node:
+        node_type = node["node_type"] if "node_type" in node else None
+        if node_type != "transform" or "plugin" not in node:
             raise InterpretationNodePluginMutatedError(
                 f"{context}: node {affected_node_id!r} has no LLM discriminator; expected node_type='transform' with plugin='llm'"
             )
@@ -672,7 +673,8 @@ def _matching_pending_requirement_index(
         requirement_term = requirement["user_term"]
         if not isinstance(requirement_term, str):
             raise InterpretationPlaceholderConsumedError(f"{context}: interpretation requirement user_term is invalid")
-        if requirement_term.strip() == normalized_user_term and requirement.get("status") == "pending" and requirement_kind == kind.value:
+        requirement_status = requirement["status"] if "status" in requirement else None
+        if requirement_term.strip() == normalized_user_term and requirement_status == "pending" and requirement_kind == kind.value:
             matching_indexes.append(index)
         requirements.append(requirement)
     if len(matching_indexes) != 1:
@@ -744,10 +746,11 @@ def _patch_structured_interpretation_prompt(
                 f"_patch_llm_transform_prompt: duplicate interpretation requirement id {requirement_id!r}"
             )
         requirements_by_id[requirement_id] = requirement
-        requirement_kind = requirement.get("kind", InterpretationKind.VAGUE_TERM.value)
+        requirement_kind = requirement["kind"] if "kind" in requirement else InterpretationKind.VAGUE_TERM.value
+        requirement_status = requirement["status"] if "status" in requirement else None
         if (
             requirement_term.strip() == normalized_user_term
-            and requirement.get("status") == "pending"
+            and requirement_status == "pending"
             and requirement_kind == InterpretationKind.VAGUE_TERM.value
         ):
             matching_indexes.append(index)
@@ -818,8 +821,9 @@ def _patch_structured_interpretation_prompt(
             matched_ref_count += 1
             rendered.append(accepted_value)
             continue
-        if stored_requirement.get("status") == "resolved":
-            accepted = stored_requirement.get("accepted_value")
+        stored_status = stored_requirement["status"] if "status" in stored_requirement else None
+        if stored_status == "resolved":
+            accepted = stored_requirement["accepted_value"] if "accepted_value" in stored_requirement else None
             if not isinstance(accepted, str):
                 raise InterpretationPlaceholderConsumedError(
                     f"_patch_llm_transform_prompt: resolved interpretation requirement {requirement_id!r} has no accepted value"
@@ -910,7 +914,8 @@ def _patch_llm_transform_prompt(
 
         found = True
 
-        if node.get("node_type") != "transform" or "plugin" not in node:
+        node_type = node["node_type"] if "node_type" in node else None
+        if node_type != "transform" or "plugin" not in node:
             raise InterpretationNodePluginMutatedError(
                 f"_patch_llm_transform_prompt: node {affected_node_id!r} has no LLM discriminator; "
                 "expected node_type='transform' with plugin='llm'"
@@ -2824,7 +2829,7 @@ class SessionServiceImpl:
                         affected_node_id=affected_node_id,
                         tool_call_id=tool_call_id,
                         user_term=user_term,
-                        kind=kind,
+                        kind=kind_value,
                         llm_draft=llm_draft,
                         accepted_value=llm_draft,
                         actor="composer-llm",
@@ -4709,12 +4714,13 @@ class SessionServiceImpl:
                 # error rather than letting the FK fire generically.
                 if msg.parent_assistant_id is None:
                     raise RuntimeError(f"fork_session: tool message id={msg.id} has no parent assistant")
-                copied_parent_assistant_id = source_to_copied_assistant_id.get(str(msg.parent_assistant_id))
-                if copied_parent_assistant_id is None:
+                parent_key = str(msg.parent_assistant_id)
+                if parent_key not in source_to_copied_assistant_id:
                     # Slice ``[:fork_idx]`` excluded the assistant message
                     # this tool row depends on. Detect it pre-batch with a
                     # named error per the offensive-programming policy.
                     raise RuntimeError(f"fork slice excludes parent assistant of tool message id={msg.id}")
+                copied_parent_assistant_id = source_to_copied_assistant_id[parent_key]
 
             msg_records_data.append(
                 {

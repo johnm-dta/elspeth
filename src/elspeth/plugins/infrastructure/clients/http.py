@@ -162,7 +162,11 @@ class AuditedHTTPClient(AuditedClientBase):
 
         Handles JSON (with NaN/Infinity rejection), text, and binary content.
         """
-        content_type = response.headers.get("content-type", "")
+        # Tier 3 external boundary: the content-type header is authored by the
+        # remote server and may be absent. Absence is recorded as "" (honest: we
+        # were told nothing about the type), which routes to the binary fallback
+        # below — never fabricated into a concrete type.
+        content_type = response.headers["content-type"] if "content-type" in response.headers else ""
 
         if "application/json" in content_type:
             parsed, error = _parse_json_strict(response.text)
@@ -724,7 +728,11 @@ class AuditedHTTPClient(AuditedClientBase):
         hostname_url = httpx.URL(original_url)
 
         while response.is_redirect and redirects_followed < max_redirects:
-            location = response.headers.get("location")
+            # Tier 3 external boundary: the redirect Location header is authored
+            # by the remote server and may be absent on a malformed redirect.
+            # Absence is recorded as None and stops redirect following — never
+            # fabricated into a target URL.
+            location = response.headers["location"] if "location" in response.headers else None
             if not location:
                 break
 

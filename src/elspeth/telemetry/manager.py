@@ -134,10 +134,11 @@ class TelemetryManager:
         # Track whether we've already disabled telemetry
         self._disabled = False
 
-        # Store exception for fail_on_total=True to re-raise on flush()
-        # Widened from TelemetryExporterError to Exception to also capture
-        # FrameworkBugError/AuditIntegrityError from background thread.
-        self._stored_exception: object | None = None
+        # Store exception for fail_on_total=True to re-raise on flush().
+        # Typed BaseException (not just TelemetryExporterError) to also capture
+        # FrameworkBugError/AuditIntegrityError raised in the background thread,
+        # which cannot propagate to the main thread directly.
+        self._stored_exception: BaseException | None = None
 
         # Thread coordination
         self._shutdown_event = threading.Event()
@@ -181,15 +182,14 @@ class TelemetryManager:
                 # Store for re-raise on flush() when fail_on_total=True
                 logger.error("Export loop failed unexpectedly", error=str(e))
                 self._stored_exception = e
-            except Exception as e:
-                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
-                    # Programming error — store for re-raise on flush()/close().
-                    # Background thread can't raise to main thread directly.
-                    self._stored_exception = e
-                    break  # Stop processing — system integrity compromised
-
+            except TELEMETRY_TRANSPORT_ERRORS as e:
                 # Transport failure — log but don't crash
                 logger.error("Export loop failed unexpectedly", error=str(e))
+            except Exception as e:
+                # Programming error — store for re-raise on flush()/close().
+                # Background thread can't raise to main thread directly.
+                self._stored_exception = e
+                break  # Stop processing — system integrity compromised
             finally:
                 # ALWAYS call task_done() to prevent join() hangs
                 # This runs for ALL cases including sentinel (break still executes finally)
@@ -242,10 +242,9 @@ class TelemetryManager:
 
                 breaker.record_success()
                 successes += 1
-            except Exception as e:
-                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
-                    raise  # Programming error — must crash
-
+            except TELEMETRY_TRANSPORT_ERRORS as e:
+                # Transport/IO failure — isolate this exporter, don't crash.
+                # Any other exception is a programming error and propagates.
                 breaker.record_failure()
                 failures += 1
                 self._exporter_failures[exporter.name] += 1
@@ -388,9 +387,7 @@ class TelemetryManager:
             try:
                 if had_evicted and evicted is None:
                     # Preserve shutdown sentinel if we raced with close().
-                    try:
-                        TelemetryManager._requeue_shutdown_sentinel_or_raise(self)
-                    except RuntimeError:
+                    if not TelemetryManager._requeue_shutdown_sentinel(self):
                         # Sentinel could not be restored after bounded retries.
                         # This is recoverable: close() will retry sentinel insertion
                         # independently, and the export thread join has a timeout.
@@ -418,13 +415,15 @@ class TelemetryManager:
                     # while the replacement event is being queued.
                     self._queue.task_done()
 
-    def _requeue_shutdown_sentinel_or_raise(self) -> None:
+    def _requeue_shutdown_sentinel(self) -> bool:
         """Reinsert shutdown sentinel evicted during DROP-mode overflow.
 
         Must be called while holding _dropped_lock.
-        Raises RuntimeError if sentinel cannot be restored after bounded retries.
-        Callers must catch RuntimeError and degrade gracefully — telemetry
-        must never propagate exceptions to pipeline code.
+
+        Returns:
+            True if the sentinel was re-enqueued; False if it could not be
+            restored after bounded retries. Callers must degrade gracefully on
+            False — telemetry must never propagate failures to pipeline code.
         """
         pending_task_done = 0
         max_attempts = self._queue.maxsize + 10  # Safety margin for close races
@@ -433,7 +432,7 @@ class TelemetryManager:
             for _ in range(max_attempts):
                 try:
                     self._queue.put_nowait(None)
-                    return
+                    return True
                 except queue.Full:
                     # Queue refilled by in-flight producer. Evict one item and retry.
                     try:
@@ -450,7 +449,7 @@ class TelemetryManager:
             for _ in range(pending_task_done):
                 self._queue.task_done()
 
-        raise RuntimeError("Failed to re-enqueue shutdown sentinel during DROP overflow")
+        return False
 
     def _log_drops_if_needed(self) -> None:
         """Log aggregate drop message if threshold reached.
@@ -521,9 +520,6 @@ class TelemetryManager:
         # Re-raise stored exception from background thread (fail_on_total=True)
         if self._stored_exception is not None:
             exc = self._stored_exception
-            if not isinstance(exc, BaseException):
-                self._stored_exception = None
-                raise TypeError(f"Stored telemetry exception is not raiseable: {type(exc).__name__}")
             try:
                 raise exc
             finally:
@@ -541,9 +537,9 @@ class TelemetryManager:
                         exporter=exporter.name,
                         circuit_state=breaker.state.name,
                     )
-            except Exception as e:
-                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
-                    raise  # Programming error — must crash
+            except TELEMETRY_TRANSPORT_ERRORS as e:
+                # Transport/IO failure — log, don't crash. Other exceptions
+                # are programming errors and propagate.
                 logger.warning(
                     "Exporter flush failed",
                     exporter=exporter.name,
@@ -611,9 +607,9 @@ class TelemetryManager:
         for exporter in self._exporters:
             try:
                 exporter.close()
-            except Exception as e:
-                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
-                    raise  # Programming error — must crash
+            except TELEMETRY_TRANSPORT_ERRORS as e:
+                # Transport/IO failure — log, don't crash. Other exceptions
+                # are programming errors and propagate.
                 logger.warning(
                     "Exporter close failed",
                     exporter=exporter.name,

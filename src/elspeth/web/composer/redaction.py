@@ -301,7 +301,18 @@ def _build_substitute_provider(
                 name = step[1]
                 next_frontier: list[Any] = []
                 for current in frontier:
-                    value = current.get(name) if isinstance(current, Mapping) else None
+                    # Optional-intermediate disposition (sibling parity with
+                    # _build_value_provider lines 211-216): a None intermediate
+                    # or a runtime union arm that lacks this named field has no
+                    # leaf to substitute INTO — skip it. Direct subscript on the
+                    # present-key case; the value may itself be None (declared
+                    # Optional sub-model unset at runtime), which is equally
+                    # unsubstitutable, so skip that too.
+                    if current is None:
+                        continue
+                    if isinstance(current, Mapping) and name not in current:
+                        continue
+                    value = current[name]
                     if value is None:
                         continue
                     next_frontier.append(value)
@@ -3086,12 +3097,30 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
 
     Returns a shallow copy with source options redacted. Does not mutate
     the input dict.
+
+    ``state_dict`` is one of our own serializer outputs, but its shape is
+    POLYMORPHIC across callers: full-state / ``{"source": ...}`` views always
+    carry a ``"source"`` key, whereas the component-scoped
+    ``_execute_get_pipeline_state`` view emits ``{"node": ...}`` or
+    ``{"output": ...}`` with NO ``"source"`` key at all. The absent key is a
+    legitimate first-party shape ("this view has no source to redact"), not a
+    contract violation — so we gate on explicit membership rather than crash.
+    Likewise a source dict carries ``"options"`` on the to_dict path but the
+    component-scoped ``_serialize_source`` may omit it; gate on membership.
+    The composer/LLM-authored VALUES inside ``options`` are Tier 3, but the
+    only redaction trigger is the structural ``blob_ref`` marker; a ``None``
+    source or blob_ref-less options is the "nothing to redact" outcome,
+    recorded explicitly by returning the input unchanged.
     """
-    source = state_dict.get("source")
+    if "source" not in state_dict:
+        return state_dict
+    source = state_dict["source"]
     if source is None:
         return state_dict
 
-    options = source.get("options")
+    if "options" not in source:
+        return state_dict
+    options = source["options"]
     if options is None or "blob_ref" not in options:
         return state_dict
 

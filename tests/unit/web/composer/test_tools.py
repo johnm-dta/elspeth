@@ -10750,6 +10750,91 @@ class TestPreviewProofStep:
 
         assert isinstance(result.data["authoring_validation"], _Mapping)
 
+    # -- Tier-3 persisted-option boundaries: malformed source.options ---------
+    # ``source.options`` is composer/operator-authored config re-read from
+    # persisted session state — Tier-3 origin. A drifted / hand-edited / stale
+    # store can carry a malformed value that the helpers re-validate on read,
+    # raising ``ValueError``. ``compute_proof_diagnostics`` is called UNWRAPPED
+    # from the preview tool and the dispatcher only catches ``ToolArgumentError``,
+    # so an unhandled ``ValueError`` would crash the tool. These pin the boundary
+    # at the ``compute_proof_diagnostics`` level: each malformed option must yield
+    # a blocking diagnostic and NO exception may escape. The tampered options are
+    # injected via ``dataclasses.replace`` to model persisted state that drifted
+    # after the set_source_from_blob write-time validation that originally
+    # produced it (the "validated once is not validated forever" T3 read-back).
+
+    def _state_with_tampered_source_options(self, options: dict[str, object]):
+        """Build a valid CSV blob state, then overwrite source.options.
+
+        Models persisted external-origin options that drifted between the
+        write-time validation and this read.
+        """
+        import dataclasses
+
+        state = self._state_with_csv_source(schema_mode="observed")
+        assert state.source is not None
+        tampered = dataclasses.replace(state.source, options=options)
+        return state.with_source(tampered)
+
+    def test_proof_malformed_schema_block_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``schema`` block (get_raw_schema_config raises) blocks,
+
+        does not crash the tool.
+        """
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # schema.mode is not a recognised mode → get_raw_schema_config raises
+        # ValueError. blob_ref must survive so the proof step inspects the blob.
+        state = self._state_with_tampered_source_options(
+            {"blob_ref": self.csv_blob_id, "schema": {"mode": "not_a_real_mode"}}
+        )
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
+        # The schema-block builder's repair text must point at the schema knob,
+        # not at header/field_mapping resolution.
+        schema_diag = next(d for d in blocking if d["code"] == "csv_source_field_resolution_error")
+        assert "schema" in schema_diag["suggested_repair"]
+        assert "schema.mode" in schema_diag["suggested_repair"]
+
+    def test_proof_malformed_columns_option_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``columns`` option (inspect wrap raises) blocks, no crash."""
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # columns must be a sequence of str; an int member raises ValueError
+        # inside _csv_source_columns, surfaced by the inspect-call wrap.
+        state = self._state_with_tampered_source_options(
+            {"blob_ref": self.csv_blob_id, "columns": ["order_id", 123]}
+        )
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
+
+    def test_proof_malformed_delimiter_option_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``delimiter`` option (inspect wrap raises) blocks, no crash."""
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # delimiter must be a single character; a multi-char string raises
+        # ValueError inside _csv_source_delimiter, surfaced by the inspect wrap.
+        state = self._state_with_tampered_source_options(
+            {"blob_ref": self.csv_blob_id, "delimiter": "||"}
+        )
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
+
     # -- proof step integrity verification -----------------------------------
     # The proof step reads blob bytes through the same Tier-1 invariants as
     # _execute_get_blob_content and _execute_inspect_source: NULL stored

@@ -266,9 +266,10 @@ def test_redaction_preserves_non_path_slot_keys_inside_summary() -> None:
 
 def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Offensive-programming pin: if ``_execute_set_pipeline`` ever returns
-    ``ToolResult.data`` that is neither ``None`` nor a ``Mapping``, the
-    apply-recipe merge path crashes with an ``AssertionError`` that names
-    the offending type and points at the system-code bug.
+    ``ToolResult.data`` that is neither ``None`` nor a ``dict``, the
+    apply-recipe merge path crashes naturally with a ``TypeError`` from the
+    dict-spread, surfacing the system-code bug rather than silently wrapping
+    garbage.
 
     Replaces the pre-existing silent-wrap fallback flagged by the 2026-05-23
     multi-agent review: the prior code wrapped contract-violating data into
@@ -277,6 +278,12 @@ def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: py
     to the LLM. Per CLAUDE.md "Plugin returns wrong type → CRASH"; the
     ``data`` shape is a system-code contract (``dict | None`` per the
     annotation at the success-path construction site), not Tier-3 LLM input.
+
+    The merge previously routed the contract violation through a hand-rolled
+    ``isinstance``/``AssertionError`` guard; the tier-model burndown removed
+    that defensive guard (a flagged ``isinstance`` on our own authored value)
+    so the contract violation now crashes the way direct access always does —
+    a ``TypeError`` when the non-mapping ``data`` is spread into a dict.
 
     The non-empty pre-state forces the success+annotation branch — see the
     suppress-note guard at the head of the merge block. Both ``apply_recipe``
@@ -323,7 +330,7 @@ def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: py
 
     monkeypatch.setattr(tools_sessions, "_execute_set_pipeline", fake_set_pipeline)
 
-    with pytest.raises(AssertionError) as exc_info:
+    with pytest.raises(TypeError) as exc_info:
         _execute_apply_pipeline_recipe(
             {"recipe_name": "anything", "slots": {}},
             pre_state,
@@ -331,6 +338,4 @@ def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: py
         )
 
     msg = str(exc_info.value)
-    assert "_execute_set_pipeline" in msg
-    assert "'int'" in msg
-    assert "dict | None" in msg
+    assert "mapping" in msg.lower()

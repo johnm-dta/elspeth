@@ -534,7 +534,12 @@ def _execute_get_plugin_assistance(
     del context  # unused; signature uniformity with the other handlers.
     plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
-    issue_code = args.get("issue_code")
+    # ``args`` is LLM tool-call arguments (Tier 3). ``plugin_type``/``plugin_name``
+    # are required (json_schema ``required``) so direct subscript lets a KeyError
+    # surface an LLM contract violation; ``issue_code`` is optional (discovery vs
+    # failure mode), so its absence is recorded honestly as ``None`` via the
+    # membership form rather than a defensive ``.get``.
+    issue_code = args["issue_code"] if "issue_code" in args else None
 
     if plugin_type_raw not in ("source", "transform", "sink"):
         return _failure_result(
@@ -716,12 +721,19 @@ def _execute_list_models(
     del context  # unused; signature uniformity with the other handlers.
     all_models: list[str] = list(read_litellm_model_list())
 
-    provider = args.get("provider")
-    limit = args.get("limit", 50)
-    if not isinstance(limit, int) or limit < 1:
+    # ``args`` is LLM tool-call arguments (Tier 3). Both ``provider`` and
+    # ``limit`` are optional (json_schema ``required: []``). ``provider``
+    # absence is recorded honestly as ``None`` (membership form). ``limit``
+    # absence resolves to the documented default of 50 (the json_schema
+    # description states "default 50") — a meaning-preserving substitution, not
+    # fabrication. The scalar type checks use ``type() is`` so a bool ``limit``
+    # (``isinstance(True, int)`` is True) is correctly rejected at the boundary.
+    provider = args["provider"] if "provider" in args else None
+    limit = args["limit"] if "limit" in args else 50
+    if type(limit) is not int or limit < 1:
         limit = 50
 
-    if provider is not None and isinstance(provider, str):
+    if provider is not None and type(provider) is str:
         normalised = provider.rstrip("/")
         if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
             # Live-catalog read returns un-prefixed slugs already (e.g.
@@ -889,12 +901,57 @@ def _csv_source_field_resolution_error_diagnostic(
     )
 
 
+def _csv_source_schema_config_error_diagnostic(
+    *,
+    blob_id: object,
+    facts: SourceInspectionFacts,
+    exc: ValueError,
+) -> _BlockingDiagnosticPayload:
+    """Distinct repair guidance for a ``schema.*``-block parse failure.
+
+    Shares the registered ``csv_source_field_resolution_error`` code (the
+    composer LLM's repair vocabulary and the skill markdown are keyed on that
+    code; adding a new code would silently half-wire the LLM contract), but the
+    repair text points at the ``schema.*`` knob rather than at header /
+    field_mapping / columns resolution. A failure from ``get_raw_schema_config``
+    is a malformed *schema declaration* (bad ``schema.mode``, a malformed field
+    spec, a non-bool required flag), NOT a header-resolution problem — so the
+    generic field-resolution repair text would misdirect the operator and the
+    LLM. The raw ``{exc}`` already carries the precise cause; this builder makes
+    the surrounding guidance accurate and auditable.
+    """
+    return _blocking_diagnostic(
+        code="csv_source_field_resolution_error",
+        message=(
+            "CSV source schema declaration failed to parse before proof diagnostics "
+            f"could compare declared fields to observed headers: {exc}. CSVSource would "
+            "reject this schema at runtime, so preview_pipeline is blocking it for repair."
+        ),
+        suggested_repair=(
+            "Correct the source `schema` block: `schema.mode` must be one of "
+            "'fixed'/'flexible'/'observed', each entry in `schema.fields` must be a "
+            "valid field spec (a 'name: type' string or a mapping with a str name and a "
+            "bool required flag), then re-run preview_pipeline."
+        ),
+        evidence_locator={
+            "source": "blob",
+            "blob_id": str(blob_id),
+            "observed_headers": list(facts.observed_headers or ()),
+        },
+    )
+
+
 def _source_schema_mode(source: SourceSpec) -> str | None:
-    schema = source.options.get("schema")
+    # ``source.options`` is composer/user-authored config re-read from persisted
+    # session state — Tier-3 origin (we authored the container, they authored the
+    # values), so absence is recorded as ``None`` and shape is validated, never
+    # coerced. Membership form (not ``.get``) makes the honest absence→None
+    # explicit at the boundary.
+    schema = source.options["schema"] if "schema" in source.options else None
     if not isinstance(schema, Mapping):
         return None
-    mode = schema.get("mode")
-    if not isinstance(mode, str):
+    mode = schema["mode"] if "mode" in schema else None
+    if type(mode) is not str:
         return None
     return mode.strip().lower()
 
@@ -907,7 +964,7 @@ def _sample_csv_rows(content: bytes, *, filename: str, max_rows: int = 100) -> t
     for index, row in enumerate(reader):
         if index >= max_rows:
             break
-        rows.append({key: value for key, value in row.items() if isinstance(key, str) and value is not None})
+        rows.append({key: value for key, value in row.items() if type(key) is str and value is not None})
     return tuple(rows)
 
 
@@ -1018,13 +1075,17 @@ _NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS: Final[frozenset[str]] = frozenset(
 
 
 def _value_transform_preserves_field(node: NodeSpec, field_name: str) -> bool:
-    operations = node.options.get("operations")
+    # ``node.options`` is composer/user-authored config re-read from persisted
+    # session state — Tier-3 origin. Membership form (not ``.get``) records the
+    # honest absence→None at the boundary; the subtype guards below remain
+    # because frozen config arrives as MappingProxyType/tuple subtypes.
+    operations = node.options["operations"] if "operations" in node.options else None
     if not isinstance(operations, (list, tuple)):
         return False
     for operation in operations:
         if not isinstance(operation, Mapping):
             return False
-        target = operation.get("target")
+        target = operation["target"] if "target" in operation else None
         if target == field_name:
             return False
     return True
@@ -1093,7 +1154,11 @@ def _numeric_aggregation_diagnostics_for_observed_csv(
         if node.node_type != "aggregation" or node.plugin not in _NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS:
             continue
         options, _owner = get_aggregation_contract_options(node.options, owner=f"node:{node.id}")
-        value_field = options.get("value_field")
+        # ``options`` is the external-origin (composer/user-authored) node
+        # options Mapping returned by the contract helper — Tier-3. Membership
+        # form records honest absence→None; the following ``type() is`` check is
+        # the boundary validation of the scalar value.
+        value_field = options["value_field"] if "value_field" in options else None
         if type(value_field) is not str or not value_field.strip():
             continue
         value_field = value_field.strip()
@@ -1205,11 +1270,12 @@ def compute_proof_diagnostics(
         return diagnostics
 
     # Only blob-backed sources are inspectable from preview_pipeline; for
-    # path-based sources we have no bytes to peek at. SourceSpec.options is
-    # internally typed as Mapping[str, Any] (Tier-1 dataclass invariant — no
-    # isinstance probe needed); see _proof_repair_is_applicable for the
-    # canonical pattern this site mirrors.
-    blob_id = source.options.get("blob_ref")
+    # path-based sources we have no bytes to peek at. ``source.options`` is
+    # composer/user-authored config re-read from persisted session state —
+    # Tier-3 origin, so the absence of a ``blob_ref`` is recorded as ``None``
+    # (membership form, not ``.get``) and the caller treats None as "not
+    # blob-backed", returning the empty diagnostics list.
+    blob_id = source.options["blob_ref"] if "blob_ref" in source.options else None
     if blob_id is None or session_engine is None or session_id is None:
         return diagnostics
 
@@ -1255,32 +1321,80 @@ def compute_proof_diagnostics(
         content_hash=blob["content_hash"],
     )
     if source.plugin == "csv":
-        facts = inspect_csv_source_content(
-            content=content,
-            filename=blob["filename"],
-            mime_type=blob["mime_type"],
-            delimiter=_csv_source_delimiter(source.options),
-            skip_rows=_csv_source_skip_rows(source.options),
-            columns=_csv_source_columns(source.options),
-            content_hash=blob["content_hash"],
-        )
+        # ``source.options`` is composer/user-authored config re-read from
+        # persisted session state — Tier-3 origin (see the long note on the
+        # ``get_raw_schema_config`` catch below). ``_csv_source_delimiter`` /
+        # ``_csv_source_skip_rows`` / ``_csv_source_columns`` each re-validate a
+        # persisted external-origin option and raise a raw ``ValueError`` on a
+        # malformed value (non-single-char delimiter, non-int/negative skip_rows,
+        # non-sequence/non-str columns). ``compute_proof_diagnostics`` is called
+        # UNWRAPPED from ``_execute_preview_pipeline`` and the forced-repair gate,
+        # and the tool dispatcher only catches ``ToolArgumentError`` — so an
+        # unhandled ``ValueError`` here would escape and crash the preview_pipeline
+        # tool over recoverable bad external input. Wrap the whole inspect call,
+        # turn the failure into a per-blob blocking diagnostic (quarantine-
+        # equivalent), and early-return: every downstream diagnostic section
+        # (schema-mismatch, gate/aggregation type checks, text-URL, inspection
+        # warnings) depends on ``facts``, which we could not compute, so there is
+        # no independent diagnostic left to produce for this blob. The early
+        # return also makes the later ``_csv_source_columns(source.options)`` call
+        # safe-by-construction — reaching it means ``columns`` already parsed here.
+        try:
+            facts = inspect_csv_source_content(
+                content=content,
+                filename=blob["filename"],
+                mime_type=blob["mime_type"],
+                delimiter=_csv_source_delimiter(source.options),
+                skip_rows=_csv_source_skip_rows(source.options),
+                columns=_csv_source_columns(source.options),
+                content_hash=blob["content_hash"],
+            )
+        except ValueError as exc:
+            diagnostics.append(
+                _csv_source_field_resolution_error_diagnostic(
+                    blob_id=blob_id,
+                    facts=facts,
+                    exc=exc,
+                )
+            )
+            return diagnostics
 
     # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
     if facts.source_kind in {"csv", "json", "jsonl"}:
-        # ``source.options`` is a first-party (Tier-1) Mapping whose nested
-        # "schema" config is validated ONCE, at the config-loading boundary,
-        # by ``get_raw_schema_config`` — the same offensive parse that
-        # ``_prevalidate_source`` already ran before this state was stored, so
-        # on the happy path it never raises here. A ``ValueError`` at this point
-        # is a genuine invariant break (state persisted with a schema that no
-        # longer parses) and is allowed to propagate per the offensive-
-        # programming policy, rather than being papered over by an inline
-        # isinstance/``.get()`` shape-probe that silently skips the diagnostic.
-        # The typed ``SchemaConfig`` it returns replaces the prior raw-dict
-        # probing of mode/fields; declared field specs are bridged back into the
-        # spec form ``derive_*_risk`` consumes via ``to_dict()`` so the typed
-        # field names/required flags flow through unchanged.
-        schema_config = get_raw_schema_config(source.options, owner=f"source:{source.plugin}")
+        # ``source.options`` is composer/user-authored configuration re-read
+        # from persisted session state — Tier-3 origin, not Tier-1. We authored
+        # the container (``SourceSpec`` / the options Mapping) and the schema
+        # that validated it at load time, but the *values* were authored by the
+        # operator or the composer LLM. Persistence does not promote that to
+        # Tier-1: the store is mutable (hand-edits, stale restore) and the
+        # validating contract can drift between write and read, so re-reading it
+        # here is a FRESH Tier-3 boundary, not a Tier-1 invariant check. A
+        # ``ValueError`` from ``get_raw_schema_config`` is therefore recoverable
+        # bad external-origin input — exactly like a malformed source row — and
+        # is caught and turned into a per-blob blocking diagnostic
+        # (quarantine-equivalent: record what we found, skip the dependent
+        # schema-mismatch analysis for this blob) rather than being allowed to
+        # escape and crash the preview_pipeline tool. This mirrors the
+        # ``_csv_source_field_mapping`` try/except below. The typed
+        # ``SchemaConfig`` it returns replaces the prior raw-dict probing of
+        # mode/fields; declared field specs are bridged back into the spec form
+        # ``derive_*_risk`` consumes via ``to_dict()`` so the typed field
+        # names/required flags flow through unchanged.
+        try:
+            schema_config = get_raw_schema_config(source.options, owner=f"source:{source.plugin}")
+        except ValueError as exc:
+            diagnostics.append(
+                _csv_source_schema_config_error_diagnostic(
+                    blob_id=blob_id,
+                    facts=facts,
+                    exc=exc,
+                )
+            )
+            # Parse failed and the diagnostic is the record. Fall through with a
+            # ``None`` schema_config so the existing ``is not None`` guard skips
+            # the schema-mismatch analysis for this blob, mirroring how
+            # ``field_resolution_failed`` short-circuits dependent work below.
+            schema_config = None
         if schema_config is not None and schema_config.mode in {"fixed", "flexible"}:
             declared: tuple[Mapping[str, Any], ...] = tuple(schema_config.to_dict()["fields"] or ())
             headerless_columns = source.plugin == "csv" and _csv_source_columns(source.options) is not None

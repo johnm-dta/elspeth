@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
@@ -39,6 +39,54 @@ _DEFS_REF_PREFIX = "#/$defs/"
 # transforms. Batch-aware transform schemas must not advertise this option
 # until a batch pre-emission dispatch site exists.
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
+
+
+# Typed views over the JSON-Schema documents that Pydantic's
+# ``model_json_schema()`` emits for plugin config models. The *values* in
+# these documents are first-party (our own plugin config models produced
+# them — system code), but the *presence* of individual keys is governed by
+# the JSON Schema specification, which we do not author: ``required`` is
+# omitted when no field is mandatory, ``default`` is omitted when a field has
+# none, top-level ``type`` is absent for ``anyOf`` properties, ``$ref`` is
+# absent for inline ``oneOf`` entries. Parsing each fragment into one of
+# these permissive models makes the spec-optional keys explicit typed fields
+# with honest defaults (absent ``required`` -> empty list, absent ``default``
+# -> ``None``) so the traversal accesses typed attributes directly instead of
+# guessing with ``.get(key, default)``. A ``ValidationError`` here would mean
+# our own schema generation produced a structurally impossible document — a
+# first-party bug — so it is intentionally left to propagate (crash), never
+# swallowed.
+class _SchemaProperty(BaseModel):
+    """One entry under a JSON-Schema ``properties`` map."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    type: str | None = None
+    description: str | None = None
+    default: Any = None
+    any_of: list[_SchemaProperty] = Field(default_factory=list, alias="anyOf")
+
+
+class _SchemaObject(BaseModel):
+    """A JSON-Schema object document (top-level model or ``$defs`` variant)."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    properties: dict[str, _SchemaProperty] = Field(default_factory=dict)
+    required: list[str] = Field(default_factory=list)
+
+
+class _OneOfEntry(BaseModel):
+    """One entry of a discriminated-union ``oneOf`` list.
+
+    JSON Schema permits each entry to be either a ``$ref`` into ``$defs`` or
+    an inline object schema; an inline entry simply omits ``$ref``, so the
+    field defaults to the empty string and the caller skips it.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    ref: str = Field(default="", alias="$ref")
 
 # Map Determinism enum values to the AuditCharacteristic flag they
 # imply. The catalog surfaces these as visual cues on the plugin card so
@@ -428,14 +476,16 @@ class CatalogServiceImpl:
         if "oneOf" in schema and "$defs" in schema:
             return self._fields_from_discriminated(schema)
 
-        # Pydantic's model_json_schema() produces a JSON Schema dict.
-        # Keys like "type", "anyOf", "description", "default" are conditionally
-        # present per JSON Schema spec — .get() is correct here (not defensive
-        # programming, but standard JSON Schema traversal).
-        properties: dict[str, Any] = schema.get("properties", {})
-        required_fields: set[str] = set(schema.get("required", []))
+        # Pydantic's model_json_schema() produces a JSON Schema document whose
+        # spec-optional keys ("properties", "required", "type", ...) are made
+        # explicit typed fields by _SchemaObject (absent "required" -> empty
+        # list). Parsing here surfaces a structurally impossible document as a
+        # first-party ValidationError (crash) rather than guessing with .get().
+        parsed = _SchemaObject.model_validate(schema)
+        required_fields = set(parsed.required)
         return [
-            self._field_summary(field_name, field_schema, field_name in required_fields) for field_name, field_schema in properties.items()
+            self._field_summary(field_name, field_schema, field_name in required_fields)
+            for field_name, field_schema in parsed.properties.items()
         ]
 
     def _fields_from_discriminated(self, schema: dict[str, Any]) -> list[ConfigFieldSummary]:
@@ -456,23 +506,22 @@ class CatalogServiceImpl:
         ``PluginSchemaInfo.json_schema`` directly.
         """
         defs: dict[str, dict[str, Any]] = schema["$defs"]
-        variant_props: list[dict[str, Any]] = []
+        variant_props: list[dict[str, _SchemaProperty]] = []
         variant_required: list[set[str]] = []
-        for entry in schema["oneOf"]:
+        for raw_entry in schema["oneOf"]:
             # A ``oneOf`` entry may legitimately be an inline schema rather
-            # than a ``$ref`` — JSON Schema permits both shapes. ``.get()``
-            # with a default lets us skip the inline case (contributing no
-            # variant fields) rather than crashing on a valid-but-unusual
-            # Pydantic output.
-            ref = entry.get("$ref", "")
-            if not ref.startswith(_DEFS_REF_PREFIX):
+            # than a ``$ref`` — JSON Schema permits both shapes. _OneOfEntry
+            # makes the optional ``$ref`` an explicit field (default ""), so
+            # the inline case is skipped explicitly, not crashed on.
+            entry = _OneOfEntry.model_validate(raw_entry)
+            if not entry.ref.startswith(_DEFS_REF_PREFIX):
                 continue
             # Dangling ``$ref`` (target missing from ``$defs``) is treated
             # as a Pydantic-schema bug — direct subscript lets the KeyError
             # propagate instead of silently producing a truncated summary.
-            variant = defs[ref[len(_DEFS_REF_PREFIX) :]]
-            variant_props.append(variant.get("properties", {}))
-            variant_required.append(set(variant.get("required", [])))
+            variant = _SchemaObject.model_validate(defs[entry.ref[len(_DEFS_REF_PREFIX) :]])
+            variant_props.append(variant.properties)
+            variant_required.append(set(variant.required))
 
         # Preserve insertion order: walk variants in oneOf order, append new names.
         ordered_fields: list[str] = []
@@ -486,30 +535,38 @@ class CatalogServiceImpl:
         fields: list[ConfigFieldSummary] = []
         for field_name in ordered_fields:
             # First variant that carries this field defines its surface metadata.
-            field_schema: dict[str, Any] = next(
+            field_schema: _SchemaProperty = next(
                 (props[field_name] for props in variant_props if field_name in props),
-                {},
+                _SchemaProperty(),
             )
             required = all(field_name in props and field_name in req for props, req in zip(variant_props, variant_required, strict=True))
             fields.append(self._field_summary(field_name, field_schema, required))
         return fields
 
     @staticmethod
-    def _field_summary(name: str, field_schema: dict[str, Any], required: bool) -> ConfigFieldSummary:
-        """Build a ConfigFieldSummary from one JSON-Schema property entry."""
-        json_type = field_schema.get("type", "object")
-        # anyOf produces no top-level type — pick first non-null branch type
-        if "anyOf" in field_schema and not field_schema.get("type"):
-            for branch in field_schema["anyOf"]:
-                if branch.get("type") != "null":
-                    json_type = branch.get("type", "object")
+    def _field_summary(name: str, field_schema: _SchemaProperty, required: bool) -> ConfigFieldSummary:
+        """Build a ConfigFieldSummary from one JSON-Schema property entry.
+
+        ``field_schema`` is a typed view of a Pydantic-emitted property whose
+        spec-optional keys ("type", "anyOf", "default", "description") are
+        explicit fields with honest absence defaults (``None`` / empty list),
+        so requiredness/default absence is preserved without ``.get()``.
+        """
+        # Type precedence: (1) explicit top-level ``type``; else (2) the first
+        # non-null ``anyOf`` branch type (Pydantic emits no top-level ``type``
+        # for ``X | None`` fields); else (3) ``"object"`` as the catch-all.
+        json_type = field_schema.type or "object"
+        if field_schema.any_of and not field_schema.type:
+            for branch in field_schema.any_of:
+                if branch.type != "null":
+                    json_type = branch.type or "object"
                     break
         return ConfigFieldSummary(
             name=name,
             type=json_type,
             required=required,
-            description=field_schema.get("description"),
-            default=field_schema.get("default"),
+            description=field_schema.description,
+            default=field_schema.default,
         )
 
     def _available_names(self, plugin_type: PluginKind) -> list[str]:

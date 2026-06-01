@@ -288,7 +288,12 @@ class DataPluginConfig(PluginConfig):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if cls.__dict__.get("_component_type_exempt") is True:
+        # Own-namespace check only (NOT inherited): the exemption must be
+        # re-declared per intermediate base and does not propagate to children.
+        # Membership-then-subscript on cls.__dict__ keeps that own-class scoping
+        # without a defensive default — the key is legitimately absent on most
+        # subclasses, so absence is the normal path, not an anomaly.
+        if "_component_type_exempt" in cls.__dict__ and cls.__dict__["_component_type_exempt"] is True:
             return
         if cls._plugin_component_type is None:
             raise TypeError(
@@ -545,10 +550,12 @@ class TransformDataConfig(DataPluginConfig):
         if len(v) == 0:
             return []
 
+        # Element type (str) is already guaranteed by the field annotation
+        # (list[str]); Pydantic rejects non-str elements before this after-mode
+        # validator runs, so we only enforce the semantic rules (non-empty,
+        # valid identifier, no duplicates) here.
         result: list[str] = []
         for i, name in enumerate(v):
-            if not isinstance(name, str):
-                raise ValueError(f"required_input_fields[{i}] must be a string, got {type(name).__name__}")
             name = name.strip()
             if not name:
                 raise ValueError(f"required_input_fields[{i}] cannot be empty")

@@ -170,13 +170,22 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
         module = importlib.util.module_from_spec(spec)
         # Register module in sys.modules BEFORE exec_module
         # Required for Python 3.13+ where dataclass decorator looks up
-        # cls.__module__ in sys.modules during field resolution
-        sys.modules[module.__name__] = module
+        # cls.__module__ in sys.modules during field resolution.
+        # Capture the registration key now: exec_module runs the plugin's
+        # module-level code, which could reassign module.__name__, and we must
+        # roll back the *exact* key we registered, not whatever __name__ became.
+        registered_name = module.__name__
+        sys.modules[registered_name] = module
         try:
             spec.loader.exec_module(module)
         except Exception:
-            # Clean up on failure
-            sys.modules.pop(module.__name__, None)
+            # Roll back only our own registration. Guard on identity (not mere
+            # membership) so we never delete an entry another importer placed
+            # under the same name during exec_module reentrancy, and use del
+            # (not .pop(..., None)) so the rollback can never mask the original
+            # import failure with a spurious KeyError on the re-raise.
+            if registered_name in sys.modules and sys.modules[registered_name] is module:
+                del sys.modules[registered_name]
             raise
 
         # Also register under the canonical name so that future standard

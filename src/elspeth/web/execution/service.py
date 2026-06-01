@@ -329,7 +329,7 @@ class ExecutionServiceImpl:
         not supported (staging is restarted on deploys, and a restart
         re-runs the lifespan).
         """
-        if not isinstance(sha256, str) or not is_valid_sha256_hex(sha256):
+        if not is_valid_sha256_hex(sha256):
             raise RuntimeError(f"openrouter_catalog_sha256 must be 64 lowercase hex chars, got {sha256!r}")
         if source not in ("live", "bundled"):
             raise RuntimeError(f"openrouter_catalog_source must be 'live' or 'bundled', got {source!r}")
@@ -991,12 +991,19 @@ class ExecutionServiceImpl:
                         "server": "env",
                     }
                     for rs in resolutions:
-                        audit_source = _SCOPE_TO_AUDIT_SOURCE.get(rs.scope)
-                        if audit_source is None:
+                        # Offensive lookup against our own code-controlled
+                        # mapping: rs.scope is a typed SecretScope Literal, so
+                        # an unmapped scope (e.g. a valid "org" with no audit
+                        # mapping added yet) is a programmer coverage gap, not
+                        # external absence. Direct subscript surfaces it as a
+                        # KeyError, re-raised as a meaningful ValueError.
+                        try:
+                            audit_source = _SCOPE_TO_AUDIT_SOURCE[rs.scope]
+                        except KeyError as exc:
                             raise ValueError(
                                 f"No audit source mapping for secret scope {rs.scope!r} "
                                 f"(secret: {rs.name!r}) — add mapping to _SCOPE_TO_AUDIT_SOURCE"
-                            )
+                            ) from exc
                         secret_resolution_inputs.append(
                             SecretResolutionInput(
                                 env_var_name=rs.name,
@@ -1223,19 +1230,24 @@ class ExecutionServiceImpl:
             if result.status in (RunStatus.FAILED, RunStatus.COMPLETED_WITH_FAILURES):
                 # Enrich the structural message with the top distinct per-row
                 # failures so the runs view shows the dominant cause inline.
-                # Tier-1 read: the helper raises on malformed audit JSON. We
-                # deliberately catch and degrade here because run-status
-                # persistence is more important than enrichment — a missing
-                # sample list still satisfies the failed-requires-error
-                # invariant via the bare message. Audit-DB shape violations
-                # are still observable via the slog warning (audit-system
-                # failure exemption per CLAUDE.md logging-telemetry-policy).
+                # Tier-1 read. Narrowed to the transient infrastructure
+                # failure modes (DB-layer errors, disk/filesystem errors)
+                # only: run-status persistence is more important than the
+                # optional sample enrichment, so a transient audit-system
+                # degradation degrades to the bare structural message (still
+                # satisfying the failed-requires-error invariant) and is
+                # recorded via the slog warning (audit-system failure
+                # exemption per CLAUDE.md logging-telemetry-policy).
+                # Malformed audit JSON (json.JSONDecodeError, a ValueError
+                # subclass raised by load_top_failure_samples) is Tier-1
+                # audit-data corruption and is DELIBERATELY not caught — it
+                # must crash per the tier model, not be silently degraded.
                 samples_text = ""
                 if landscape_db is not None:
                     try:
                         samples = load_top_failure_samples(landscape_db, result.run_id)
                         samples_text = format_failure_samples(samples)
-                    except Exception:
+                    except (SQLAlchemyError, OSError):
                         slog.warning(
                             "failure_sample_enrichment_failed",
                             run_id=run_id,

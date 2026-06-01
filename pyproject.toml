@@ -292,6 +292,7 @@ extend-immutable-calls = ["typer.Option", "typer.Argument"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T20"]  # Allow print in tests
 "scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
+"notes/**/*.py" = ["T20"]  # Ad-hoc diagnostic scripts — print is the output channel
 "docs-archive/**/*.py" = ["T20"]  # Archived sources are frozen-as-of-relocation; not maintained against current lint rules
 "elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py" = [
     "T20", # Ported CLI-compatible analyzer preserves the legacy text/error output boundary

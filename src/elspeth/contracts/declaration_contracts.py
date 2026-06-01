@@ -1192,8 +1192,12 @@ def register_declaration_contract(contract: DeclarationContract) -> None:
             violation_class = contract.violation_class
         except AttributeError as exc:
             raise TypeError(f"Contract {contract.name!r} missing required violation_class attribute") from exc
-        if not isinstance(violation_class, type):
-            raise TypeError(f"Contract {contract.name!r} violation_class must be a DeclarationContractViolation subclass type")
+        # No explicit ``isinstance(violation_class, type)`` gate: the identity
+        # check below is non-type-safe (returns False on a non-type) and the
+        # ``issubclass(violation_class, ...)`` check two lines down raises
+        # ``TypeError`` natively on any non-type. A non-type ``violation_class``
+        # is a framework bug; letting ``issubclass`` crash it offensively is the
+        # correct Tier-1 response (no redundant pre-guard required).
         if violation_class is DeclarationContractViolation:
             raise TypeError(
                 f"Contract {contract.name!r} violation_class must be a purpose-built "

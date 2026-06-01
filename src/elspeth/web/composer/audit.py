@@ -471,13 +471,18 @@ def finish_success(
     runtime-preflight) without correlating with operational logs.
     """
     normalized = _normalize_audit_payload(result_payload)
-    try:
-        canon = canonical_json(normalized)
-        result_hash = stable_hash(normalized)
-    except (ValueError, TypeError) as canon_exc:
-        sentinel = build_canonicalization_sentinel(canon_exc, result_payload)
-        canon = canonical_json(sentinel)
-        result_hash = stable_hash(sentinel)
+    # ``result_payload`` is the SUCCESS-path output of a composer tool handler —
+    # ``ToolResult.to_dict()`` (our own code building structured catalog/state
+    # data). It is a first-party authored value, not an external-origin one: the
+    # composer-LLM authors tool *arguments* (handled on the ARG_ERROR path), never
+    # the handler's *result*. A non-finite float or non-serializable object here
+    # therefore means one of our handlers produced un-canonicalizable output —
+    # a bug in our code, not malformed external data. Per the trust model,
+    # ``canonical_json`` on our own dispatch output is a Tier-1-equivalent act:
+    # crash on anomaly rather than substituting a degraded sentinel and reporting
+    # SUCCESS, which would launder our bug into a clean-looking audit row.
+    canon = canonical_json(normalized)
+    result_hash = stable_hash(normalized)
     return ComposerToolInvocation(
         tool_call_id=audit.tool_call_id,
         tool_name=audit.tool_name,

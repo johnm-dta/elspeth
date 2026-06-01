@@ -284,14 +284,13 @@ def _resolve_source_blob(
     mime_extra: dict[str, str] = {}
     if explicit_plugin:
         plugin = explicit_plugin
+    elif blob["mime_type"] not in _MIME_TO_SOURCE:
+        return _failure_result(
+            state,
+            f"Cannot infer source plugin for MIME type '{blob['mime_type']}'. Please specify the 'plugin' parameter explicitly.",
+        )
     else:
-        mime_entry = _MIME_TO_SOURCE.get(blob["mime_type"])
-        if mime_entry is None:
-            return _failure_result(
-                state,
-                f"Cannot infer source plugin for MIME type '{blob['mime_type']}'. Please specify the 'plugin' parameter explicitly.",
-            )
-        plugin, mime_extra = mime_entry
+        plugin, mime_extra = _MIME_TO_SOURCE[blob["mime_type"]]
 
     try:
         catalog.get_schema("source", plugin)

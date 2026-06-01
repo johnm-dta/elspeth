@@ -26,6 +26,22 @@ def _is_reserved(name: str) -> bool:
     return name.startswith(_RESERVED_PREFIX)
 
 
+def _env_secret_value(name: str) -> str | None:
+    """Read a server-secret env var, treating set-but-empty as absent.
+
+    ``os.environ`` is a Tier-3 boundary (the process environment is authored by
+    the deployment operator, not by us).  An unset env var is an expected
+    external state, and a set-but-empty (``""``) env var is a non-crashing
+    anomaly that must NOT be exposed as a resolvable secret.  Both collapse to
+    ``None`` (honest absence) here so callers never have to re-derive the
+    "set AND non-empty" predicate — there is exactly one place to get it right.
+    """
+    if name not in os.environ:
+        return None
+    value = os.environ[name]
+    return value if value else None
+
+
 class ServerSecretStore:
     """Env-var secret store restricted to an explicit allowlist.
 
@@ -60,7 +76,7 @@ class ServerSecretStore:
         """
         if _is_reserved(name):
             return False
-        return name in self._allowlist and bool(os.environ.get(name)) and _fingerprint_key_available()
+        return name in self._allowlist and _env_secret_value(name) is not None and _fingerprint_key_available()
 
     def get_secret(self, name: str) -> tuple[str, SecretRef]:
         """Resolve an allowlisted env var.
@@ -88,8 +104,8 @@ class ServerSecretStore:
             raise SecretNotFoundError(name)
         if name not in self._allowlist:
             raise SecretNotFoundError(name)
-        value = os.environ.get(name)  # Tier 3: env vars are external input
-        if not value:
+        value = _env_secret_value(name)  # Tier 3: env vars are external input
+        if value is None:
             raise SecretNotFoundError(name)
         fp = _compute_fingerprint(name, value)
         return value, SecretRef(name=name, fingerprint=fp, source="env")
@@ -127,7 +143,7 @@ class ServerSecretStore:
                     )
                 )
                 continue
-            if not os.environ.get(name):
+            if _env_secret_value(name) is None:
                 items.append(
                     SecretInventoryItem(
                         name=name,

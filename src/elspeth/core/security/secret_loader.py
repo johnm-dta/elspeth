@@ -189,44 +189,32 @@ class KeyVaultSecretLoader:
                 ref = SecretRef(name=name, fingerprint="", source="keyvault")
                 return self._cache[name], ref
 
-            # Import Azure exceptions for proper error handling
-            # These are only used when azure-keyvault-secrets is available
-            try:
-                from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
-            except ImportError:
-                # When azure.core is unavailable, _get_client() raises ImportError before any
-                # Azure API call. This sentinel class ensures the except clause below can never
-                # accidentally catch unrelated exceptions.
-                class AzureResourceNotFoundError(Exception):  # type: ignore[no-redef]
-                    pass
+            # _get_client() raises the helpful ImportError when the Azure SDK is
+            # absent, before any API call. Once it returns, azure-keyvault-secrets
+            # (and its azure-core dependency) are installed, so importing the Azure
+            # exception type here cannot fail in any real environment.
+            client = self._get_client()
+            from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
 
-            # Fetch from Key Vault
             try:
-                client = self._get_client()
                 secret = client.get_secret(name)
-                value: str | None = secret.value
-
-                if value is None:
-                    raise SecretNotFoundError(f"Key Vault secret '{name}' has no value")
-
-                # Cache the result
-                self._cache[name] = value
-
-                ref = SecretRef(name=name, fingerprint="", source="keyvault")
-                return value, ref
-
-            except SecretNotFoundError:
-                # Re-raise our own SecretNotFoundError (from value is None check)
-                raise
-            except ImportError:
-                # Re-raise ImportError as-is - missing package is different from missing secret
-                raise
             except AzureResourceNotFoundError as e:
-                # HTTP 404 - secret genuinely doesn't exist in Key Vault
-                # This is the ONLY Azure exception that should trigger fallback
+                # HTTP 404 - secret genuinely doesn't exist in Key Vault.
+                # This is the ONLY Azure exception that triggers fallback; all
+                # other Azure exceptions (auth errors, rate limits, network issues)
+                # propagate. Do NOT catch Exception - operational failures must
+                # fail fast, not silently fall back.
                 raise SecretNotFoundError(f"Secret '{name}' not found in Key Vault ({self._vault_url})") from e
-            # All other Azure exceptions (auth errors, rate limits, network issues) propagate
-            # Do NOT catch Exception - operational failures must fail fast, not silently fall back
+
+            value: str | None = secret.value
+            if value is None:
+                raise SecretNotFoundError(f"Key Vault secret '{name}' has no value")
+
+            # Cache the result
+            self._cache[name] = value
+
+            ref = SecretRef(name=name, fingerprint="", source="keyvault")
+            return value, ref
 
     def clear_cache(self) -> None:
         """Clear the secret cache, forcing refetch on next access."""

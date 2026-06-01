@@ -325,15 +325,25 @@ class CSVSource(BaseSource):
                     )
                 return  # Don't continue with corrupted parser state
 
-        def next_nonblank_record() -> list[str]:
-            """Return the next nonblank CSV record.
+        def next_nonblank_record() -> list[str] | None:
+            """Return the next nonblank CSV record, or None at end of file.
 
             csv.reader yields [] for blank physical lines. We apply the same
             skip rule before header discovery and during data iteration so a
             leading blank line cannot become a zero-column header.
+
+            Returns None when the reader is exhausted (end-of-file). We use the
+            ``next(reader, None)`` sentinel form rather than catching
+            StopIteration: the StopIteration here is an iteration-protocol
+            signal (normal EOF), not a Tier-3 data error to record. csv.Error
+            (malformed external CSV) still propagates — the ``None`` default
+            only suppresses StopIteration — so the boundary catches below still
+            see and quarantine genuine parse failures.
             """
             while True:
-                values = next(reader)
+                values = next(reader, None)
+                if values is None:
+                    return None  # End of file
                 if values:
                     return values
 
@@ -345,23 +355,6 @@ class CSVSource(BaseSource):
             # Read header row from file
             try:
                 raw_headers = next_nonblank_record()
-            except StopIteration:
-                # File exhausted after skip_rows — no header row remains.
-                # Record so the audit trail shows skip_rows consumed all content.
-                if self._skip_rows > 0:
-                    error_msg = (
-                        f"CSV file has no header row after skipping {self._skip_rows} row(s); skip_rows may exceed available content"
-                    )
-                    ctx.record_validation_error(
-                        row={
-                            "file_path": str(self._path),
-                            "skip_rows": self._skip_rows,
-                        },
-                        error=error_msg,
-                        schema_mode="parse",
-                        destination=self._on_validation_failure,
-                    )
-                return
             except csv.Error as e:
                 # Header parse failure at source boundary (Tier 3): record and quarantine/discard
                 physical_line = reader.line_num if reader.line_num > 0 else self._skip_rows + 1
@@ -383,6 +376,28 @@ class CSVSource(BaseSource):
                     yield SourceRow.quarantined(
                         row=raw_row,
                         error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
+
+            if raw_headers is None:
+                # File exhausted after skip_rows — no header row remains.
+                # (next_nonblank_record() returns None at EOF.) This is distinct
+                # from headerless mode, which set raw_headers=None above without
+                # reading the file; here we are in the headered branch, so None
+                # means the file ran out of content before a header appeared.
+                # Record so the audit trail shows skip_rows consumed all content.
+                if self._skip_rows > 0:
+                    error_msg = (
+                        f"CSV file has no header row after skipping {self._skip_rows} row(s); skip_rows may exceed available content"
+                    )
+                    ctx.record_validation_error(
+                        row={
+                            "file_path": str(self._path),
+                            "skip_rows": self._skip_rows,
+                        },
+                        error=error_msg,
+                        schema_mode="parse",
                         destination=self._on_validation_failure,
                     )
                 return
@@ -436,10 +451,10 @@ class CSVSource(BaseSource):
         row_num = 0  # Logical row number (data rows only)
         while True:
             try:
-                # Try to read next row - csv.Error raised here for malformed rows
+                # Try to read next row - csv.Error raised here for malformed rows.
+                # next_nonblank_record() returns None at EOF (iteration-protocol
+                # signal, not a Tier-3 data error); csv.Error still propagates.
                 values = next_nonblank_record()
-            except StopIteration:
-                break  # End of file
             except csv.Error as e:
                 # CSV parsing error (bad quoting, unmatched quotes, etc.)
                 # CRITICAL: csv.Error can leave the parser in a corrupted state where
@@ -473,6 +488,9 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return  # Don't continue with corrupted parser state
+
+            if values is None:
+                break  # End of file
 
             row_num += 1
             # reader.line_num tracks physical file line position (including multiline fields)

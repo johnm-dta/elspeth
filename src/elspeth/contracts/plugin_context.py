@@ -305,18 +305,16 @@ class PluginContext:
             response_snapshot = response_data
 
             # Extract token usage for LLM calls if available.
-            # response_snapshot may contain frozen containers (MappingProxyType) —
-            # use Mapping ABC for isinstance checks, not dict.
+            # raw_usage is external (Tier 3) optional metadata; TokenUsage.from_dict
+            # is the boundary validator — it accepts Any, returns unknown() (has_data
+            # False) for non-Mapping / missing input, so no pre-guard is needed here.
             token_usage = None
             if call_type == CallTypeEnum.LLM and response_snapshot is not None:
-                from collections.abc import Mapping
-
                 from elspeth.contracts.token_usage import TokenUsage
 
                 raw_usage = response_snapshot.get("usage")
-                if isinstance(raw_usage, Mapping):
-                    tu = TokenUsage.from_dict(raw_usage)
-                    token_usage = tu if tu.has_data else None
+                tu = TokenUsage.from_dict(raw_usage)
+                token_usage = tu if tu.has_data else None
 
             # Wrap data in RawCallPayload for typed telemetry payload.
             # RawCallPayload.__init__ calls deep_freeze(), creating an independent

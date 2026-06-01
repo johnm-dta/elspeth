@@ -169,13 +169,25 @@ _KNOWN_PREFLIGHT_EXCEPTION_CLASSES: frozenset[str] = frozenset(
 
 
 def _request_interpretation_review_kind_from_arguments(arguments: Mapping[str, Any]) -> InterpretationKind:
+    # `arguments` is the LLM tool-call payload (Tier 3); `kind` becomes the
+    # interpretation-kind discriminator on an audit row, so a non-member or
+    # non-string value must NOT be written. The InterpretationKind constructor
+    # is itself the boundary check: a missing/non-string/unhashable value raises
+    # ValueError (and TypeError on exotic inputs) from the enum lookup, which we
+    # convert to a typed AuditIntegrityError rather than coercing or writing a
+    # bad row. The uncaught AuditIntegrityError is the intended crash (we refuse
+    # to record an audit row under a fabricated kind).
     raw_kind = arguments["kind"] if "kind" in arguments else None
     if not isinstance(raw_kind, str):
-        raise AuditIntegrityError("request_interpretation_review rate-cap row requires string kind")
+        raise AuditIntegrityError(
+            f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}"
+        )
     try:
         return InterpretationKind(raw_kind)
     except ValueError as exc:
-        raise AuditIntegrityError(f"request_interpretation_review rate-cap row has unknown kind {raw_kind!r}") from exc
+        raise AuditIntegrityError(
+            f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}"
+        ) from exc
 
 
 # Module-level OTel counter for runtime preflight outcomes.
@@ -261,10 +273,16 @@ def _apply_openrouter_app_identity(kwargs: dict[str, Any]) -> None:
     )
 
     existing = kwargs["extra_headers"] if "extra_headers" in kwargs else None
-    headers: dict[str, str] = dict(existing) if existing else {}
-    headers.setdefault("HTTP-Referer", OPENROUTER_APP_REFERER)
-    headers.setdefault("X-OpenRouter-Title", OPENROUTER_APP_TITLE)
-    headers.setdefault("X-Title", OPENROUTER_APP_TITLE)
+    # Caller-supplied headers win: our three attribution identity keys are laid
+    # down first, then any caller headers overlay them (a key the caller already
+    # set survives the merge). This expresses the precedence explicitly instead
+    # of relying on setdefault's "fill-if-absent" side effect.
+    headers: dict[str, str] = {
+        "HTTP-Referer": OPENROUTER_APP_REFERER,
+        "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
+        "X-Title": OPENROUTER_APP_TITLE,
+        **(dict(existing) if existing else {}),
+    }
     kwargs["extra_headers"] = headers
 
 
@@ -604,8 +622,14 @@ def _last_mutation_was_pending_proposal(tool_invocations: tuple[ComposerToolInvo
         payload = json.loads(invocation.result_canonical)
         if type(payload) is not dict:
             return False
-        data = payload.get("data")
-        return type(data) is dict and data.get("status") == "APPROVAL_REQUIRED"
+        # Tool results are heterogeneous: only proposal-shaped results carry a
+        # "data" mapping with a "status" key, so absence is an expected state
+        # (this result is simply not a pending proposal), not a missing-key bug.
+        # Membership-test before subscript makes that expectation explicit.
+        data = payload["data"] if "data" in payload else None
+        if type(data) is not dict:
+            return False
+        return ("status" in data) and data["status"] == "APPROVAL_REQUIRED"
     return False
 
 
@@ -1251,7 +1275,10 @@ class ComposerServiceImpl:
             state_version=state.version,
             settings_hash=runtime_preflight_settings_hash(self._settings),
         )
-        cached = cache.get(key)
+        # A cache miss is the normal, expected state on the first preflight for
+        # this key — absence is not a missing-key bug, so membership-test then
+        # subscript instead of relying on .get's implicit-None default.
+        cached = cache[key] if key in cache else None
         if isinstance(cached, ValidationResult):
             return cached
         if isinstance(cached, RuntimePreflightFailure):
@@ -2694,7 +2721,7 @@ class ComposerServiceImpl:
             raise _BadRequestLLMError(
                 f"LLM request rejected ({type(exc).__name__})",
                 provider_detail=str(exc) or None,
-                provider_status_code=getattr(exc, "status_code", None),
+                provider_status_code=exc.status_code,
             ) from exc
         # Tier 3 boundary: LiteLLM can return empty choices on content-filter,
         # rate-limit, or malformed upstream responses.  Validate before callers
@@ -2726,7 +2753,7 @@ class ComposerServiceImpl:
             raise _BadRequestLLMError(
                 f"LLM request rejected ({type(exc).__name__})",
                 provider_detail=str(exc) or None,
-                provider_status_code=getattr(exc, "status_code", None),
+                provider_status_code=exc.status_code,
             ) from exc
         if not response.choices:
             raise _MalformedLLMResponseError("LLM returned empty choices array — cannot explain run diagnostics", response=response)

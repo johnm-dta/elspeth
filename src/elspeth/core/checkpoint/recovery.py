@@ -238,10 +238,12 @@ class RecoveryManager:
         if not check.can_resume:
             return None
 
-        try:
-            checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
-        except IncompatibleCheckpointError:
-            return None
+        # can_resume already loaded this checkpoint and gated IncompatibleCheckpointError
+        # (returning can_resume=False, handled above). get_latest_checkpoint raises that
+        # error deterministically from the stored format_version, so it cannot fire here
+        # after can_resume passed — no defensive re-catch. A checkpoint can still appear or
+        # change between the two reads, which is why we re-load and re-validate topology below.
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
         if checkpoint is None:
             return None
 

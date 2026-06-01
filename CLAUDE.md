@@ -52,8 +52,9 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 - No coercion, no defaults, no silent recovery
 - If we read garbage from our own database, something catastrophic happened (bug in our code, database corruption, tampering)
 - Every field must be exactly what we expect - wrong type = crash, NULL where unexpected = crash, invalid enum value = crash
+- **Tier 1 is about authored *values*, not the container or the store.** A value is Tier 1 only when *we* wrote it (audit rows, checkpoints, secret fingerprints). It is **not** Tier 1 just because it lives in one of our typed dataclasses (`SourceSpec`, a Pydantic model) or because we read it back out of our own database. If a user, operator, or the composer-LLM authored the value, our dataclass is only the box it sits in — origin sets the tier; the container and the storage location do not.
 
-**Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud.
+**Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud. The container/values distinction is the difference between a defensible crash and a latent bug: crashing on a corrupt *audit row* (value we authored) is correct; crashing on hand-edited *user config* that happens to sit in a `SourceSpec` (value the user authored) takes down the tool over data we never owned.
 
 ### Tier 2: Pipeline Data (Post-Source) - ELEVATED TRUST ("Probably OK")
 
@@ -66,9 +67,11 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 
 **Why:** Plugins have contractual obligations. If a transform's `output_schema` says `int` and it outputs `str`, that's a bug we fix by fixing the plugin, not by coercing downstream. Note: type-safe doesn't mean operation-safe — `row["divisor"] = 0` is type-valid but will fail on division. Wrap operations on row values.
 
-### Tier 3: External Data (Source Input) - ZERO TRUST
+### Tier 3: External-Origin Data - ZERO TRUST
 
 **Can be literal trash.** We don't control what external systems feed us.
+
+**"External" means non-authored, not networked.** Tier 3 is any value whose *contract we did not write*: source rows, HTTP/LLM responses, OIDC tokens — but equally the output of a local `date` subprocess we parse positionally, or user/operator/composer-LLM-authored configuration. The test is not "did this arrive over the network?" but **"did we author the contract that guarantees this value's shape?"** If not, it is Tier 3 until we validate it at the boundary. The plugin or dataclass that carries the value is a courier; trust attaches to the value's *author*, not its courier.
 
 - Malformed CSV rows, NULLs everywhere, wrong types, unexpected JSON structures
 - **Validate at the boundary, coerce where possible, record what we got**
@@ -77,6 +80,8 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 - **Coercion is meaning-preserving; fabrication is not.** `"42"` → `42` preserves the value (coercion). `None` → `0` changes the meaning from "unknown" to "zero" (fabrication). The test: can the downstream consumer distinguish real data from synthetic? If not, it's fabrication.
 - **Inference from adjacent fields is still fabrication.** If field A is absent, deriving its value from field B produces a synthetic datum that the external system never asserted. The audit trail now contains a confident answer to a question the source never answered. An auditor asking "did Dataverse say there were more records?" gets `True` — but Dataverse said nothing. The correct representation is `None` (absence), not a value inferred from other fields. Let consumers decide what absence means in their context; don't decide for them at the boundary.
 - **The fabrication decision test:** Before filling in a missing field, ask: (1) If an auditor queries this field, will they get a value the external system actually provided? If no, it's fabrication. (2) If the external system's behaviour changes and the field starts appearing with a different value than what we inferred, will the audit trail silently contain two contradictory sources of truth? If yes, it's fabrication. (3) Would recording `None` and letting the consumer handle absence be less convenient but more honest? If yes, record `None`.
+- **Origin is sticky; persistence is not a sanitizer.** External-origin data that we validate, persist to our own DB, and read back later is *still Tier 3 on read-back*. Validation promotes a value to Tier 2 **in flight** — it does not stamp the origin permanently. Re-reading persisted external-origin config (e.g. `source.options`, composer-authored pipeline YAML) is a **fresh Tier 3 boundary**: the store is hand-editable and the validating model can drift between write and read, so "it passed validation once" is not a reason to trust it on the next read. This is the classic *second-order / stored-input* trust boundary. Wrap the read, quarantine or return a diagnostic on failure — never crash the tool or pipeline because persisted config no longer parses.
+  - **The deciding factor is chain of custody, not storage.** A checkpoint *we* authored stays Tier 1 through the same DB round-trip (our own statement, unbroken custody → crash on anomaly); config *they* authored stays Tier 3 (someone else's statement, custody interrupted by storage → re-check the seal, quarantine). Persistence doesn't change *whose statement* a value is — it interrupts custody, so the read is re-checked either way; only the response (crash for our evidence vs quarantine for their material) differs by authorship. Think evidence handling: writing to disk and reading back left the envelope unattended, so the next reader checks the tamper seal — but a broken seal on *our* record is tampering (crash), while a broken seal on *their* delivery is a damaged parcel (quarantine).
 - Quarantine rows that can't be coerced/validated
 - The audit trail records "row 42 was quarantined because field X was NULL" - that's a valid audit outcome
 
@@ -88,7 +93,8 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 - **Transform (on row data)**: no coercion, wrap operations on values
 - **Transform (on external calls)**: coerce OK — external response is Tier 3, record absence as `None`
 - **Sink**: no coercion, expect types
-- **Our data (Landscape, checkpoints)**: crash on any anomaly — serialization doesn't change trust tier
+- **Our data (Landscape, checkpoints)**: crash on any anomaly — serialization doesn't change trust tier (we authored the *values*, so they stay Tier 1 through `json.loads`)
+- **Persisted external-origin config (composer/user/operator-authored, read back from our DB)**: still Tier 3 — re-validate on read, quarantine/diagnostic on failure; living in a `SourceSpec` and "validated once" do **not** promote it to Tier 1. Origin sets the tier, not the container or the store.
 
 For detailed code examples (external call boundaries, pipeline templates, coercion/wrapping tables), see the `tier-model-deep-dive` skill.
 

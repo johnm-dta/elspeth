@@ -185,11 +185,16 @@ def merge_contract_with_output(
     merged_fields: list[FieldContract] = []
 
     for output_field in output_schema_contract.fields:
-        # Preserve original name from input if available
-        original = input_originals.get(
-            output_field.normalized_name,
-            output_field.original_name,
-        )
+        # Preserve the input's original name when this normalized field
+        # existed upstream; otherwise the field is new to this transform's
+        # output, so keep the output field's own original name. Both branches
+        # are first-party FieldContract values built above — an explicit
+        # membership test makes the two-way choice auditable rather than
+        # hiding it behind a defensive lookup default.
+        if output_field.normalized_name in input_originals:
+            original = input_originals[output_field.normalized_name]
+        else:
+            original = output_field.original_name
 
         merged_fields.append(
             FieldContract(

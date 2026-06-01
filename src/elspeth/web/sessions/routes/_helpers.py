@@ -212,9 +212,14 @@ _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
 
 
 def _patched_routes_attr(name: str, current: Any) -> Any | None:
-    routes_package = sys.modules.get("elspeth.web.sessions.routes")
-    if routes_package is None:
-        return None
+    # The parent package is necessarily imported before this submodule's code
+    # can run, so a direct subscript is correct — a missing key here would be a
+    # genuine interpreter-state bug, not a recoverable absence.
+    routes_package = sys.modules["elspeth.web.sessions.routes"]
+    # ``name`` is a dynamic attribute that a test may have monkeypatched onto
+    # the package; absence is the normal (unpatched) case, so the default is a
+    # real probe of optional override state, not a swallowed AttributeError on
+    # a contract we own.
     patched = getattr(routes_package, name, None)
     if patched is not None and patched is not current:
         return patched
@@ -271,12 +276,18 @@ class _SessionComposeLockRegistry:
 
 
 def _get_session_compose_lock_registry(request: Request) -> _SessionComposeLockRegistry:
-    """Return the app-scoped compose lock registry, creating it on first use."""
-    registry = getattr(request.app.state, "session_compose_lock_registry", None)
-    if registry is None:
-        registry = _SessionComposeLockRegistry()
-        request.app.state.session_compose_lock_registry = registry
-    return registry
+    """Return the app-scoped compose lock registry, creating it on first use.
+
+    The registry is lazily attached to ``app.state`` on first use (see the
+    class docstring for why it is not created in ``create_app()``). We probe
+    presence with an explicit membership test on our own state container
+    rather than a ``getattr`` default: absence is a designed first-use
+    condition, and once the key is present a direct attribute read crashes if
+    it is somehow the wrong type — no default papers over a contract bug.
+    """
+    if "session_compose_lock_registry" not in request.app.state:
+        request.app.state.session_compose_lock_registry = _SessionComposeLockRegistry()
+    return cast(_SessionComposeLockRegistry, request.app.state.session_compose_lock_registry)
 
 
 def _get_composer_progress_registry(request: Request) -> ComposerProgressRegistry:
@@ -485,7 +496,11 @@ def _litellm_error_detail(
     if not expose_provider_error:
         return detail
 
-    if isinstance(exc, _BadRequestLLMError):
+    # Exact-type dispatch on our own ``_BadRequestLLMError`` carrier (raised
+    # directly, never subclassed): it exposes scrubbed ``provider_detail`` /
+    # ``provider_status_code`` attributes, whereas a LiteLLM-native exception
+    # in the ``else`` branch is a Tier-3 SDK object we probe defensively.
+    if type(exc) is _BadRequestLLMError:
         raw_provider_detail: str | None = exc.provider_detail
         raw_status_code: int | None = exc.provider_status_code
     else:
@@ -1148,7 +1163,13 @@ def _composer_persisted_validation(
     to lock in the contract that authoring-valid + opaque-runtime-fail
     persists as ``is_valid=False``.
     """
-    if isinstance(runtime_preflight, _RuntimePreflightFailed):
+    # Exact-type dispatch on our own ``_RuntimePreflightOutcome`` union
+    # (``ValidationResult | _RuntimePreflightFailed | None``). ``type() is``
+    # rather than ``isinstance`` because these are first-party, non-subclassed
+    # types and exact dispatch is the intended contract. Each member is matched
+    # by a positive ``type() is`` test (which narrows for the type checker)
+    # rather than relying on negative narrowing of a single branch.
+    if type(runtime_preflight) is _RuntimePreflightFailed:
         if runtime_preflight.exception_class is None:
             return False, ["runtime_preflight_failed"]
         return False, _runtime_preflight_failure_errors(
@@ -1156,7 +1177,7 @@ def _composer_persisted_validation(
             runtime_preflight.exception_message_first_line,
             runtime_preflight.frames,
         )
-    if runtime_preflight is not None:
+    if type(runtime_preflight) is ValidationResult:
         messages = [error.message for error in runtime_preflight.errors]
         return runtime_preflight.is_valid, messages or None
     if authoring.is_valid:
@@ -1256,14 +1277,46 @@ def _hash_canonical_payload(canonical_payload: str) -> str:
 
 
 def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, object] | None:
+    """Decode an audit canonical-JSON payload back into its mapping.
+
+    ``canonical_payload`` is ``ComposerToolInvocation.arguments_canonical``
+    / ``.result_canonical`` — RFC 8785 canonical JSON *we* authored at the
+    dispatch boundary (see :mod:`elspeth.web.composer.audit`, which always
+    emits ``canonical_json`` of a mapping, wrapping even unparseable LLM
+    arguments in a sentinel object). It is therefore Tier-1 audit data on
+    read-back: ``None`` input is the only honest absence (``result_canonical``
+    is nullable for ARG_ERROR / PLUGIN_CRASH), but a *non-None* payload that
+    fails to decode, or decodes to a non-mapping, is corruption of our own
+    audit serialization — we crash rather than return ``None``.
+
+    Returning ``None`` on a decode failure would be doubly wrong: it hides a
+    Tier-1 anomaly, and it makes the redaction callers
+    (``_redacted_{argument,result}_canonical_for_chat_message``) fall back to
+    emitting the *raw, unredacted* canonical payload, defeating the
+    redaction manifest for any row whose canonical text was corrupted.
+    """
     if canonical_payload is None:
         return None
     try:
         decoded = json.loads(canonical_payload)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(decoded, dict):
-        return None
+    except json.JSONDecodeError as exc:
+        raise AuditIntegrityError(
+            "Tier 1 audit anomaly: composer tool-invocation canonical payload "
+            "is not valid JSON. arguments_canonical / result_canonical are "
+            "RFC 8785 canonical JSON written by our own dispatch boundary; a "
+            "decode failure is corruption of our audit serialization, not a "
+            "recoverable data-quality issue."
+        ) from exc
+    # ``json.loads`` returns a plain ``dict`` (never a subclass) for a JSON
+    # object, so the exact-type check is correct and lets the tier-model gate
+    # see this is an offensive Tier-1 invariant assertion, not duck-typing.
+    if type(decoded) is not dict:
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: composer tool-invocation canonical payload "
+            f"decoded to {type(decoded).__name__!r}, expected a JSON object. "
+            f"The dispatch boundary always emits canonical_json of a mapping; "
+            f"a non-object payload is corruption of our audit serialization."
+        )
     return cast(dict[str, object], decoded)
 
 
@@ -1684,7 +1737,12 @@ async def _state_data_from_composer_state_impl(
             # local-variable repr — so secrets in plugin config dicts
             # / DB URLs / bound SQL params do not enter the audit row.
             runtime = _capture_runtime_preflight_failure(exc)
-    if isinstance(runtime, ValidationResult):
+    # Exact-type dispatch on our own ``_RuntimePreflightOutcome`` union:
+    # ``runtime`` is a passing/failing ``ValidationResult`` only when the
+    # preflight actually ran (not a captured ``_RuntimePreflightFailed`` and
+    # not ``None``). ``type() is`` because ``ValidationResult`` is a
+    # first-party, non-subclassed Pydantic model.
+    if type(runtime) is ValidationResult:
         _record_composer_runtime_preflight_telemetry(
             "passed" if runtime.is_valid else "failed",
             source=telemetry_source,
@@ -2880,13 +2938,13 @@ async def _dispatch_guided_respond_impl(
                     ),
                 )
             plugin_name = edited["plugin"]
-            if not isinstance(plugin_name, str) or not plugin_name:
+            if type(plugin_name) is not str or not plugin_name:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"schema_form response at step 1 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
                 )
             options_raw = edited["options"]
-            if not isinstance(options_raw, Mapping):
+            if type(options_raw) is not dict:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"schema_form response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
@@ -2904,7 +2962,7 @@ async def _dispatch_guided_respond_impl(
                 plugin_name=plugin_name,
             )
             observed_columns_raw = edited["observed_columns"]
-            if not isinstance(observed_columns_raw, list):
+            if type(observed_columns_raw) is not list:
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -2912,7 +2970,7 @@ async def _dispatch_guided_respond_impl(
                     ),
                 )
             sample_rows_raw = edited["sample_rows"]
-            if not isinstance(sample_rows_raw, list):
+            if type(sample_rows_raw) is not list:
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -2925,7 +2983,7 @@ async def _dispatch_guided_respond_impl(
             # The HTTP boundary is a trust boundary: external data may contain
             # arbitrary JSON values at any list position.
             for _sr_idx, _sr_elem in enumerate(sample_rows_raw):
-                if not isinstance(_sr_elem, Mapping):
+                if type(_sr_elem) is not dict:
                     raise HTTPException(
                         status_code=400,
                         detail=(
@@ -3039,7 +3097,7 @@ async def _dispatch_guided_respond_impl(
                 ),
             )
         columns_raw = edited["columns"]
-        if not isinstance(columns_raw, list):
+        if type(columns_raw) is not list:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -3164,13 +3222,13 @@ async def _dispatch_guided_respond_impl(
                     ),
                 )
             plugin_name = edited["plugin"]
-            if not isinstance(plugin_name, str) or not plugin_name:
+            if type(plugin_name) is not str or not plugin_name:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"schema_form response at step 2 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
                 )
             options_raw = edited["options"]
-            if not isinstance(options_raw, Mapping):
+            if type(options_raw) is not dict:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"schema_form response at step 2 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
@@ -3365,13 +3423,13 @@ async def _dispatch_guided_respond_impl(
                     ),
                 )
             recipe_name = edited["recipe_name"]
-            if not isinstance(recipe_name, str) or not recipe_name:
+            if type(recipe_name) is not str or not recipe_name:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty string; got {recipe_name!r}"),
                 )
             slots_raw = edited["slots"]
-            if not isinstance(slots_raw, Mapping):
+            if type(slots_raw) is not dict:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
@@ -3557,8 +3615,17 @@ async def _dispatch_guided_respond_impl(
                         detail="propose_chain edit_step_index sent but no chain proposal is staged.",
                     )
                 step = dict(guided.step_3_proposal.steps[edit_step_index])
+                # Type-narrowing on our own staged ``ChainProposal`` steps. A
+                # non-str plugin / non-mapping options here is a server-side
+                # staging defect, not a client request fault, so this raises
+                # InvariantError (HTTP 500) — mirroring the sibling check in
+                # routes/composer.py. ``plugin`` uses exact-type (never a str
+                # subclass). ``options`` MUST stay an ``isinstance(_, Mapping)``
+                # check: the staged step value is frozen at construction
+                # (``MappingProxyType``), so an exact ``type() is dict`` would
+                # wrongly reject our own valid frozen mapping.
                 plugin = step["plugin"]
-                if not isinstance(plugin, str) or not plugin:
+                if type(plugin) is not str or not plugin:
                     raise InvariantError("step_3_proposal step plugin must be a non-empty string")
                 options = step["options"]
                 if not isinstance(options, Mapping):

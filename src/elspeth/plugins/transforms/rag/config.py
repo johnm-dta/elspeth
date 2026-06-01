@@ -137,10 +137,9 @@ class RAGRetrievalConfig(TransformDataConfig):
 
     @model_validator(mode="after")
     def validate_provider_config(self) -> Self:
-        provider_entry = PROVIDERS.get(self.provider)
-        if provider_entry is None:
+        if self.provider not in PROVIDERS:
             raise ValueError(f"Unknown provider: {self.provider!r}. Available: {sorted(PROVIDERS)}")
-        config_cls, _ = provider_entry
+        config_cls, _ = PROVIDERS[self.provider]
         config_cls(**self.provider_config)
         return self
 

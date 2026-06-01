@@ -434,8 +434,9 @@ class DataverseSource(BaseSource):
         result: dict[str, Any] = {}
         has_unmapped_fields = False
         for k, v in row.items():
-            normalized_name = mapping.get(k)
-            if normalized_name is None:
+            if k in mapping:
+                normalized_name = mapping[k]
+            else:
                 # Field not in initial mapping — normalize individually
                 normalized_name = normalize_field_name(k)
                 has_unmapped_fields = True
@@ -570,9 +571,12 @@ class DataverseSource(BaseSource):
                 entity_elem = root.find("entity")
                 if entity_elem is None:
                     raise RuntimeError("FetchXML is missing <entity> element — cannot determine entity name for URL")
-                entity_name = entity_elem.get("name")
-                if entity_name is None:
+                # entity_elem.attrib is the XML element's attribute dict; FetchXML
+                # is external/user-authored config (Tier 3). A missing 'name'
+                # attribute is a config error, surfaced explicitly here.
+                if "name" not in entity_elem.attrib:
                     raise RuntimeError("FetchXML <entity> element missing 'name' attribute")
+                entity_name = entity_elem.attrib["name"]
                 page_iterator = self._client.paginate_fetchxml(entity_name, self._fetch_xml)
 
             for page in page_iterator:

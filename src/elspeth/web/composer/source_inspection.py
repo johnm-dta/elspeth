@@ -604,7 +604,13 @@ def _facts_from_objects(
         # Warn if the underlying value was a list/dict (vs a string scalar).
         for obj in objects:
             for h in headers:
-                v = obj.get(h)
+                # ``headers`` is the union of keys across all sampled objects, so a
+                # given object may legitimately not carry every header. Skip the
+                # honest absence rather than masking it with ``obj.get(h)`` — a
+                # present key is accessed directly so a structural anomaly surfaces.
+                if h not in obj:
+                    continue
+                v = obj[h]
                 if isinstance(v, (list, dict)):
                     warnings.append(f"field {h!r} contains nested structures; consider json_explode")
                     break
@@ -788,7 +794,13 @@ def _declared_field_name(field: DeclaredFieldSpec) -> str | None:
     if isinstance(field, str):
         name = field.split(":", 1)[0].strip()
         return name or None
-    name_raw = field.get("name")
+    # The YAML single-key form ``{"id": "int"}`` carries no "name" key at all
+    # (the name is the key, recovered elsewhere) — honest absence, the caller
+    # drops the entry. Test membership directly rather than masking the absence
+    # behind ``field.get("name")``.
+    if "name" not in field:
+        return None
+    name_raw = field["name"]
     if name_raw is None:
         return None
     if type(name_raw) is not str:

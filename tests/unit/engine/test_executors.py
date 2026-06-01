@@ -5364,10 +5364,14 @@ class TestReRaiseGuardPattern:
                 if isinstance(node, ast.ExceptHandler) and _is_framework_audit_handler(node):
                     count += 1
 
-        # Current count: ~41 TIER_1_ERRORS guards across the codebase.
-        # If this drops, a guard was removed.  Update if legitimately adding more.
-        assert count >= 35, (
-            f"Expected at least 35 TIER_1_ERRORS re-raise guards, found {count}. A TIER_1_ERRORS guard may have been removed."
+        # Current count: 33 explicit except-TIER_1_ERRORS handlers across the codebase.
+        # This is lower than historical counts because some explicit "except TIER_1_ERRORS:
+        # raise" guards were replaced by narrowed exception clauses (e.g. "except
+        # SQLAlchemyError") that provide the same protection implicitly — T1 errors
+        # are not SQLAlchemyErrors, so they propagate naturally. This ratchet counts
+        # the explicit pattern only; update the floor when a legitimate refactor changes it.
+        assert count >= 33, (
+            f"Expected at least 33 TIER_1_ERRORS re-raise guards, found {count}. A TIER_1_ERRORS guard may have been removed."
         )
 
 

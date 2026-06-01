@@ -60,7 +60,6 @@ from elspeth.web.composer.tools import (
     _SECRET_MUTATION_TOOLS,
     _SESSION_AWARE_TOOL_HANDLERS,
     _check_interpretation_rate_limits,
-    _detect_unresolved_interpretation_placeholders,
     _detect_unresolved_interpretation_placeholders_typed,
     _handle_request_interpretation_review,
     _utc_day_start,
@@ -1710,42 +1709,6 @@ async def test_14_jwt_benign_period_negative(service: SessionServiceImpl) -> Non
         **_provenance_kwargs(),
     )
     assert result.success is True
-
-
-# --------------------------------------------------------------------------- #
-# F-17 runtime placeholder detector
-# --------------------------------------------------------------------------- #
-
-
-def test_detect_unresolved_placeholder_returns_terms() -> None:
-    """F-17: the standalone detector returns the list of unresolved terms."""
-    nodes = {
-        "rate_node": {
-            "kind": "llm",
-            "options": {"prompt_template": "Rate how {{interpretation:cool}} this row is."},
-        },
-        "summarise_node": {
-            "kind": "llm",
-            "options": {"prompt_template": "Summarise: {{ interpretation : important }} signals."},
-        },
-        "filter_node": {
-            "kind": "row_filter",
-            "options": {"prompt_template": "Ignored — not an LLM node."},
-        },
-    }
-    found = _detect_unresolved_interpretation_placeholders(nodes)
-    assert set(found) == {"cool", "important"}
-
-
-def test_detect_unresolved_placeholder_empty_when_resolved() -> None:
-    """F-17: an LLM node without ``{{interpretation:…}}`` returns []."""
-    nodes = {
-        "rate_node": {
-            "kind": "llm",
-            "options": {"prompt_template": "Rate how cool this row is (cool = visually appealing)."},
-        },
-    }
-    assert _detect_unresolved_interpretation_placeholders(nodes) == []
 
 
 # --------------------------------------------------------------------------- #

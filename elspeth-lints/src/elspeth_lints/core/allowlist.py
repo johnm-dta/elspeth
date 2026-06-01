@@ -542,6 +542,79 @@ def _file_path_from_canonical_key(key: str) -> str:
     return key[: py_idx + len(".py")]
 
 
+def _key_without_fp(key: str) -> str:
+    """Return the ``file_path:rule_id:symbol`` prefix of a canonical key.
+
+    The canonical shape is ``<file>:<rule>:<symbol>:fp=<hash>``. The fingerprint
+    is hex and the symbol is a ``:``-joined tuple of Python identifiers, neither
+    of which can contain ``:fp=``, so a single split is unambiguous.
+    """
+    if ":fp=" not in key:
+        raise ValueError(f"allowlist key is not in canonical form (missing ':fp=' suffix): {key!r}")
+    return key.split(":fp=", 1)[0]
+
+
+def find_scope_fallback_entry(
+    entries: list[AllowlistEntry],
+    *,
+    canonical_key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+    scope_depth: int,
+) -> AllowlistEntry | None:
+    """Match a finding whose exact key missed against a scope-stable v2 entry.
+
+    Rescues a judge-gated **v2** entry whose module-rooted ``ast_path`` drifted
+    (a module-level statement shifted the leading index) but whose enclosing
+    scope and within-scope position are unchanged — the same suppression,
+    relocated by an unrelated module-body edit.
+
+    An entry is a candidate iff ALL hold:
+
+    1. same ``file_path:rule_id:symbol`` as the finding;
+    2. it is judge-gated and v2 (carries ``scope_fingerprint``); v1 entries bind
+       ``file_fingerprint`` and are skipped;
+    3. its persisted ``scope_fingerprint`` equals the finding's (the enclosing
+       scope body is byte-identical — a real body edit fails here);
+    4. its ``ast_path`` has the same component count (a depth-changing relocation
+       fails here);
+    5. its within-scope suffix ``ast_path.split("/")[scope_depth:]`` equals the
+       finding's (the within-scope position is identical — the fallback-path
+       replacement for the exact ``ast_path`` transplant defence).
+
+    Returns the unique candidate, or ``None`` when there are zero or **two or
+    more** (ambiguity must never silently bind — fail closed). An empty
+    ``scope_fingerprint`` on the finding (un-stamped / non-tier_model finding)
+    yields ``None``: there is nothing to bind against.
+
+    Match-only: this never rewrites the entry's key, ast_path, or signature. The
+    matched entry keeps its pre-shift key (still self-consistent at load); only
+    a *new* finding is allowed to match an *old* key.
+    """
+    if not scope_fingerprint:
+        return None
+    finding_prefix = _key_without_fp(canonical_key)
+    live_components = ast_path.split("/")
+    live_suffix = live_components[scope_depth:]
+    candidates: list[AllowlistEntry] = []
+    for entry in entries:
+        if entry.judge_verdict is None or entry.scope_fingerprint is None or entry.ast_path is None:
+            continue
+        if _key_without_fp(entry.key) != finding_prefix:
+            continue
+        if entry.scope_fingerprint != scope_fingerprint:
+            continue
+        stored_components = entry.ast_path.split("/")
+        if len(stored_components) != len(live_components):
+            continue
+        if stored_components[scope_depth:] != live_suffix:
+            continue
+        candidates.append(entry)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _compute_file_fingerprint(source_path: Path) -> str:
     """Return the SHA-256 hex digest of ``source_path``'s bytes.
 

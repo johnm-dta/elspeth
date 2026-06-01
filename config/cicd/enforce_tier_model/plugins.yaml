@@ -951,17 +951,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[14]/body[16]/body[1]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:64cea49d980cb6ecaad82ac6ab9613f19d65d9cb4fcaf45d31f458df76e85cec'
-- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=06bc6e6d57f87e71
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
-  expires: null
 - key: plugins/infrastructure/config_base.py:R1:DataPluginConfig:__init_subclass__:fp=e9064dddb97b1895
   owner: plugin-infrastructure
   reason: |-
@@ -1489,14 +1478,3 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
-  expires: null

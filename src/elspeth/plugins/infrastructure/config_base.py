@@ -112,7 +112,7 @@ def _format_validation_error_cause(exc: ValidationError) -> str:
         loc = tuple(error["loc"])
         location = _format_validation_error_location(loc)
         message = error["msg"]
-        if loc == ("schema",) and error.get("type") == "missing":
+        if loc == ("schema",) and error["type"] == "missing":
             message = _SCHEMA_REQUIRED_GUIDANCE
         lines.append(f"{location}: {message}")
     return "\n".join(lines)

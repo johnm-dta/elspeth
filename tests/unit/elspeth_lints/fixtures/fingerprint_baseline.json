@@ -2309,10 +2309,6 @@
     },
     {
       "file_path": "plugins/infrastructure/config_base.py",
-      "fingerprint": "06bc6e6d57f87e71"
-    },
-    {
-      "file_path": "plugins/infrastructure/config_base.py",
       "fingerprint": "2bb17951492b01c1"
     },
     {
@@ -2390,10 +2386,6 @@
     {
       "file_path": "plugins/infrastructure/utils.py",
       "fingerprint": "c10d679ccb3cd196"
-    },
-    {
-      "file_path": "plugins/infrastructure/validation.py",
-      "fingerprint": "9240c6f6517a323b"
     },
     {
       "file_path": "plugins/sinks/azure_blob_sink.py",

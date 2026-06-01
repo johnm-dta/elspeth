@@ -88,6 +88,7 @@ class _OneOfEntry(BaseModel):
 
     ref: str = Field(default="", alias="$ref")
 
+
 # Map Determinism enum values to the AuditCharacteristic flag they
 # imply. The catalog surfaces these as visual cues on the plugin card so
 # a compliance-focused user (Linda persona) can see at a glance which

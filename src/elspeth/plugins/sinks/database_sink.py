@@ -131,10 +131,7 @@ class DatabaseSink(BaseSink):
         # is a Tier-3 boundary; absence of the flag is meaning-preserving (feature
         # off → do not allow raw secrets), so we read it as an explicit membership
         # test rather than a defaulting .get() (mirrors data_flow_repository.py).
-        allow_raw = (
-            "ELSPETH_ALLOW_RAW_SECRETS" in os.environ
-            and os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
-        )
+        allow_raw = "ELSPETH_ALLOW_RAW_SECRETS" in os.environ and os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
         fail_if_no_key = not allow_raw
 
         self._url = cfg.url  # Raw URL for database connection

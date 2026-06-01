@@ -179,15 +179,11 @@ def _request_interpretation_review_kind_from_arguments(arguments: Mapping[str, A
     # to record an audit row under a fabricated kind).
     raw_kind = arguments["kind"] if "kind" in arguments else None
     if not isinstance(raw_kind, str):
-        raise AuditIntegrityError(
-            f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}"
-        )
+        raise AuditIntegrityError(f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}")
     try:
         return InterpretationKind(raw_kind)
     except ValueError as exc:
-        raise AuditIntegrityError(
-            f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}"
-        ) from exc
+        raise AuditIntegrityError(f"request_interpretation_review rate-cap row has invalid kind {raw_kind!r}") from exc
 
 
 # Module-level OTel counter for runtime preflight outcomes.

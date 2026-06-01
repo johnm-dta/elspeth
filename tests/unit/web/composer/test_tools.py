@@ -10785,9 +10785,7 @@ class TestPreviewProofStep:
 
         # schema.mode is not a recognised mode → get_raw_schema_config raises
         # ValueError. blob_ref must survive so the proof step inspects the blob.
-        state = self._state_with_tampered_source_options(
-            {"blob_ref": self.csv_blob_id, "schema": {"mode": "not_a_real_mode"}}
-        )
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "schema": {"mode": "not_a_real_mode"}})
         diagnostics = compute_proof_diagnostics(
             state,
             session_engine=self.engine,
@@ -10807,9 +10805,7 @@ class TestPreviewProofStep:
 
         # columns must be a sequence of str; an int member raises ValueError
         # inside _csv_source_columns, surfaced by the inspect-call wrap.
-        state = self._state_with_tampered_source_options(
-            {"blob_ref": self.csv_blob_id, "columns": ["order_id", 123]}
-        )
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "columns": ["order_id", 123]})
         diagnostics = compute_proof_diagnostics(
             state,
             session_engine=self.engine,
@@ -10824,9 +10820,7 @@ class TestPreviewProofStep:
 
         # delimiter must be a single character; a multi-char string raises
         # ValueError inside _csv_source_delimiter, surfaced by the inspect wrap.
-        state = self._state_with_tampered_source_options(
-            {"blob_ref": self.csv_blob_id, "delimiter": "||"}
-        )
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "delimiter": "||"})
         diagnostics = compute_proof_diagnostics(
             state,
             session_engine=self.engine,

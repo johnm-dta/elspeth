@@ -183,9 +183,7 @@ class QueryRepository:
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}): expected JSON object, got {actual_type}"
                 )
 
-    def _load_payload_if_present(
-        self, row_id: str, source_data_ref: str
-    ) -> tuple[dict[str, Any] | None, bool]:
+    def _load_payload_if_present(self, row_id: str, source_data_ref: str) -> tuple[dict[str, Any] | None, bool]:
         """Load a payload, recording absence when it was purged by retention.
 
         Returns ``(data, True)`` when the payload is present, or ``(None, False)``

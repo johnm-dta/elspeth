@@ -70,15 +70,14 @@ def main(argv: list[str]) -> int:
 
     div_counts = collections.Counter(o.get("divergence") for o in outcomes)
     print(f"# reaudit {run_id}: {len(outcomes)} outcomes scored")
-    for k, v in sorted(div_counts.items(), key=lambda kv: (kv[0] or "")):
+    for k, v in sorted(div_counts.items(), key=lambda kv: kv[0] or ""):
         print(f"#   {k}: {v}")
 
-    selected = [
-        o for o in outcomes
-        if all_div or o.get("divergence") not in (None, "STILL_AGREES")
-    ]
-    print(f"\n# {len(selected)} entr{'y' if len(selected)==1 else 'ies'} to triage "
-          f"(bucket each: 1=always-wrong  2=standard-raised  3=judge-wrong)\n")
+    selected = [o for o in outcomes if all_div or o.get("divergence") not in (None, "STILL_AGREES")]
+    print(
+        f"\n# {len(selected)} entr{'y' if len(selected) == 1 else 'ies'} to triage "
+        f"(bucket each: 1=always-wrong  2=standard-raised  3=judge-wrong)\n"
+    )
 
     for o in selected:
         entry = o.get("entry") or {}

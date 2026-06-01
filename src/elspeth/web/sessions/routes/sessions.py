@@ -533,9 +533,7 @@ def register_session_routes(router: APIRouter) -> None:
                 status_code=413,
                 detail="Blob quota exceeded during fork — unable to copy files",
             )
-            cleanup_note = await _archive_session_capturing_failure(
-                service, new_session.id, context="after blob quota rollback"
-            )
+            cleanup_note = await _archive_session_capturing_failure(service, new_session.id, context="after blob quota rollback")
             if cleanup_note is not None:
                 quota_exc.add_note(cleanup_note)
             raise quota_exc from None
@@ -547,9 +545,7 @@ def register_session_routes(router: APIRouter) -> None:
             # best-effort archive captures any recoverable cleanup failure as a
             # note attached to primary_exc; the bare `raise` preserves
             # primary_exc and its original traceback as the headline.
-            cleanup_note = await _archive_session_capturing_failure(
-                service, new_session.id, context="during fork rollback"
-            )
+            cleanup_note = await _archive_session_capturing_failure(service, new_session.id, context="during fork rollback")
             if cleanup_note is not None:
                 primary_exc.add_note(cleanup_note)
             raise

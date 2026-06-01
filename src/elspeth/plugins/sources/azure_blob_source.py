@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+
 # Sentinel distinguishing "iterator exhausted" from a real CSV row when peeking
 # with next(it, _ROW_EXHAUSTED). Lets us treat end-of-file as ordinary control
 # flow instead of catching StopIteration, while csv.Error still propagates. An

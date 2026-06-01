@@ -54,7 +54,7 @@ from elspeth_lints.core.judge import (
 # A faithful excerpt of the fixed site: a Tier-3 re-read of persisted, operator/
 # composer-authored source config, caught into a per-blob diagnostic (R6: caught
 # without re-raise).
-EXCERPT = '''\
+EXCERPT = """\
     if facts.source_kind in {"csv", "json", "jsonl"}:
         # source.options is re-read here from persisted composer session state.
         try:
@@ -64,7 +64,7 @@ EXCERPT = '''\
                 _csv_source_schema_config_error_diagnostic(blob_id=blob_id, facts=facts, exc=exc)
             )
             schema_config = None  # diagnostic recorded; skip dependent analysis for this blob
-'''
+"""
 
 R6_DEFINITION = (
     "R6 (silent-except): an exception is caught and handled without re-raising. "
@@ -108,7 +108,7 @@ BUG_RATIONALE = (
 #            launder a redundant guard.
 # If the judge ACCEPTs BOTH, it is pattern-matching "isinstance+raise = accept"
 # and the role text loosened it — that is a PROMPT failure, not a test flaw.
-SINK_EXCERPT = '''\
+SINK_EXCERPT = """\
     write_result = sink.write(rows, ctx)
     # First-party plugin-contract guard: SinkWriteResult is this system-owned
     # sink's typed return contract (Plugin Ownership), so a wrong type is a
@@ -118,12 +118,12 @@ SINK_EXCERPT = '''\
             f"Sink '{sink.name}' returned {type(write_result).__name__}, "
             f"expected SinkWriteResult. This is a sink plugin bug."
         )
-'''
+"""
 
 # Case 4: the guarded value comes from OUR OWN internal helper with a concrete,
 # controlled return annotation — no Protocol, no plugin boundary, no external
 # origin. The type is already guaranteed by code we control.
-CONTROLLED_RETURN_EXCERPT = '''\
+CONTROLLED_RETURN_EXCERPT = """\
     # _collect_counts is our own module-internal helper, declared
     # -> dict[str, int]; its return type is guaranteed by code we control.
     result = self._collect_counts(rows)
@@ -132,7 +132,7 @@ CONTROLLED_RETURN_EXCERPT = '''\
             f"_collect_counts must return dict, got {type(result).__name__}"
         )
     return result
-'''
+"""
 
 R5_DEFINITION = (
     "R5 (isinstance shape-guard): an isinstance() check on first-party/typed "
@@ -210,7 +210,8 @@ def main() -> int:
         # offensive rationale language; differ ONLY in guaranteed-vs-not.
         run_case(
             "Case 3 — isinstance->raise on a STRUCTURAL-Protocol return (unguaranteed)",
-            SINK_STATED_RATIONALE, "ACCEPTED",
+            SINK_STATED_RATIONALE,
+            "ACCEPTED",
             file_path="engine/executors/sink.py",
             rule_id="R5",
             symbol="SinkExecutor.write",
@@ -219,7 +220,8 @@ def main() -> int:
         ),
         run_case(
             "Case 4 — isinstance->raise on OUR controlled -> dict return (redundant) → BLOCK",
-            CONTROLLED_RETURN_RATIONALE, "BLOCKED",
+            CONTROLLED_RETURN_RATIONALE,
+            "BLOCKED",
             file_path="web/composer/tools/sessions.py",
             rule_id="R5",
             symbol="_summarize_recipe_counts",
@@ -228,14 +230,15 @@ def main() -> int:
         ),
     ]
     passed = all(results)
-    print(f"\n{'ALL PASS' if passed else 'FAILED'}: "
-          f"{sum(results)}/{len(results)} verdicts matched expectation.")
+    print(f"\n{'ALL PASS' if passed else 'FAILED'}: {sum(results)}/{len(results)} verdicts matched expectation.")
     if not passed:
-        print("The prompt does NOT correctly adjudicate — do not re-sign the "
-              "corpus until this passes. Cases 1/2 = persisted-config tier; "
-              "Cases 3/4 = minimal pair: ACCEPT an isinstance->raise on an "
-              "UNGUARANTEED (structural-Protocol) return, BLOCK the same form on "
-              "a return our own code GUARANTEES. Accepting BOTH = prompt loosened.")
+        print(
+            "The prompt does NOT correctly adjudicate — do not re-sign the "
+            "corpus until this passes. Cases 1/2 = persisted-config tier; "
+            "Cases 3/4 = minimal pair: ACCEPT an isinstance->raise on an "
+            "UNGUARANTEED (structural-Protocol) return, BLOCK the same form on "
+            "a return our own code GUARANTEES. Accepting BOTH = prompt loosened."
+        )
     return 0 if passed else 1
 
 

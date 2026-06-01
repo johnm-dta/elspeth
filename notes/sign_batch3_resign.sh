@@ -227,4 +227,3 @@ echo
 echo "Then verify keyed (expect exit 0 when all 25 ACCEPTED):"
 echo "  env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli \\"
 echo "    check --rules trust_tier.tier_model --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model"
-

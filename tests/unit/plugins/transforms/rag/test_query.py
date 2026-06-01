@@ -48,10 +48,10 @@ class TestFieldOnlyMode:
     @pytest.mark.parametrize(
         "bad_value",
         [
-            b"hello world",   # bytes: bytes.strip() silently succeeds, so without
-            42,               # the isinstance guard these would produce wrong-typed
-            ["a", "b"],       # QueryResult(query=<non-str>) and corrupt the audit
-        ],                    # trail without crashing. Pin that the guard fires.
+            b"hello world",  # bytes: bytes.strip() silently succeeds, so without
+            42,  # the isinstance guard these would produce wrong-typed
+            ["a", "b"],  # QueryResult(query=<non-str>) and corrupt the audit
+        ],  # trail without crashing. Pin that the guard fires.
         ids=["bytes", "int", "list"],
     )
     def test_non_str_value_raises_type_error(self, bad_value):

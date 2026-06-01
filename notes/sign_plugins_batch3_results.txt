@@ -63,4 +63,3 @@ Judge rationale:
   The data here is a row value from upstream pipeline data heading into ChromaDB, an external sink. The isinstance(value, float) check is narrowing a Tier-2 type-valid value before applying math.isfinite() to catch NaN/Infinity, which ChromaDB rejects — this is exactly the value-unsafe operation wrap pattern. The isinstance narrowing is needed because math.isfinite only accepts numeric types and the preceding branch admits str/int/bool as well; it's not masking a contract violation but selecting the float subset for an operation-safety check before crossing into the external system. The bad-value path diverts the row rather than fabricating, consistent with the boundary discipline.
 
 Proposed entry:
-

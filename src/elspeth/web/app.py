@@ -453,8 +453,7 @@ def _settings_from_env() -> WebSettings:
                     parsed = json.loads(value)
                 except (json.JSONDecodeError, ValueError) as exc:
                     raise RuntimeError(
-                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON "
-                        f"(a JSON array for collection-typed settings), got {value!r}."
+                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON (a JSON array for collection-typed settings), got {value!r}."
                     ) from exc
                 kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
             elif value == "null":

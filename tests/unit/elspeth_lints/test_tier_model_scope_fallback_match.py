@@ -12,6 +12,7 @@ from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry, JudgeVerdict
 from elspeth_lints.rules.trust_tier.tier_model.rule import (
+    Finding,
     _match_finding,
     scan_directory,
 )
@@ -20,13 +21,13 @@ BEFORE = "def handler(payload):\n    return payload.get('missing')\n"
 AFTER = "from x import trust_boundary\n\ndef handler(payload):\n    return payload.get('missing')\n"
 
 
-def _r1(findings):
+def _r1(findings: list[Finding]) -> Finding:
     r1 = [f for f in findings if f.rule_id == "R1"]
     assert r1
     return r1[0]
 
 
-def _entry_from(finding) -> AllowlistEntry:
+def _entry_from(finding: Finding) -> AllowlistEntry:
     return AllowlistEntry(
         key=finding.canonical_key,
         owner="t",
@@ -49,10 +50,15 @@ def test_import_insertion_does_not_stale_a_v2_entry(tmp_path: Path) -> None:
     # Sanity: exact match before any drift.
     assert _match_finding(allowlist, before) is allowlist.entries[0]
 
+    # Reset so the post-fallback `matched is True` assertion below actually
+    # tests that the FALLBACK path sets it (the sanity match above set it True).
+    allowlist.entries[0].matched = False
+
     # Insert a module-level import -> every downstream ast_path shifts.
     src.write_text(AFTER)
     after = _r1(scan_directory(tmp_path))
     assert after.canonical_key != before.canonical_key  # exact key drifted
+    assert after.scope_fingerprint == before.scope_fingerprint  # the scope is unchanged — this is why the fallback fires
 
     matched = _match_finding(allowlist, after)
     assert matched is allowlist.entries[0]  # rescued by the fallback

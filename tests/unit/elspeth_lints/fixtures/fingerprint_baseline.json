@@ -481,7 +481,7 @@
     },
     {
       "file_path": "contracts/identity.py",
-      "fingerprint": "1fe109115f3ce0f7"
+      "fingerprint": "0a89455502472925"
     },
     {
       "file_path": "contracts/plugin_context.py",
@@ -1061,63 +1061,127 @@
     },
     {
       "file_path": "core/checkpoint/recovery.py",
-      "fingerprint": "7a2f9a2b860707a7"
+      "fingerprint": "0b8d412d4c743e6e"
     },
     {
       "file_path": "core/checkpoint/recovery.py",
-      "fingerprint": "c48ba8486b6c2e03"
+      "fingerprint": "1707b0fbd6672873"
+    },
+    {
+      "file_path": "core/checkpoint/recovery.py",
+      "fingerprint": "427a1fed4efd849c"
+    },
+    {
+      "file_path": "core/checkpoint/recovery.py",
+      "fingerprint": "54948171154c08e1"
+    },
+    {
+      "file_path": "core/checkpoint/recovery.py",
+      "fingerprint": "b8840fd73f01302a"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "273f707dcd7d2715"
+      "fingerprint": "050b19733e173e83"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "3b281eeeed6ea725"
+      "fingerprint": "075371afeb244b99"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "4caef713e72da410"
+      "fingerprint": "14d9e07fc4fbc3d0"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "536a707d2c187622"
+      "fingerprint": "18f88813d249c80b"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "5489fa474057e670"
+      "fingerprint": "19c079e3a232811b"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "755597011f4f00b0"
+      "fingerprint": "25a40ddb21cd4313"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "8fe487c1aed56a45"
+      "fingerprint": "27e3fc77f05b1478"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "a715fdc0c601c28f"
+      "fingerprint": "2c2cafb76f28c6c3"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "b1dbbdedb998f0f7"
+      "fingerprint": "3773b48dc9794bb6"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "be3984d8f5bd0518"
+      "fingerprint": "484bc02ee046ebd8"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "cb45c50da6366324"
+      "fingerprint": "4c503ab58dfe313f"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "dca291232de403e4"
+      "fingerprint": "5533a3017dc59e6b"
     },
     {
       "file_path": "core/checkpoint/serialization.py",
-      "fingerprint": "ef96cb9ea70edb86"
+      "fingerprint": "554e6902e877bcbd"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "6a63baa73fc4b8f4"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "6ddcd651ef0e45ee"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "6e526bdc175ad422"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "77eae01f1fbcd56b"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "7f63a7b5da520b6b"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "84d5fc7f28a0202e"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "8f384610036e7b0e"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "9d3cff6d9077974b"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "bde5d98ad6f04f50"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "d2afbb898883d3d6"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "d99bd508a258c874"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "df0a89de8cf26eea"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "e1db1a375831b087"
     },
     {
       "file_path": "core/config.py",
@@ -1445,23 +1509,23 @@
     },
     {
       "file_path": "core/landscape/data_flow_repository.py",
-      "fingerprint": "79239e021b66fa02"
+      "fingerprint": "3688461f6ab01933"
     },
     {
       "file_path": "core/landscape/data_flow_repository.py",
-      "fingerprint": "8ca3a7ee3cc84783"
+      "fingerprint": "392656e9caba2bde"
     },
     {
       "file_path": "core/landscape/data_flow_repository.py",
-      "fingerprint": "90984799b1de3e99"
+      "fingerprint": "4248e0e1ad50b6df"
     },
     {
       "file_path": "core/landscape/data_flow_repository.py",
-      "fingerprint": "b4edfad55e521778"
+      "fingerprint": "826cabfefbde5e8a"
     },
     {
       "file_path": "core/landscape/data_flow_repository.py",
-      "fingerprint": "cf71d23d49a057eb"
+      "fingerprint": "97624a174e31d397"
     },
     {
       "file_path": "core/landscape/database.py",
@@ -1553,7 +1617,7 @@
     },
     {
       "file_path": "core/landscape/query_repository.py",
-      "fingerprint": "5b5158345e746330"
+      "fingerprint": "b81f5371dd48636a"
     },
     {
       "file_path": "core/landscape/run_lifecycle_repository.py",
@@ -1784,10 +1848,6 @@
       "fingerprint": "bcf52a77562fcc5d"
     },
     {
-      "file_path": "engine/coalesce_executor.py",
-      "fingerprint": "4a8461c859544771"
-    },
-    {
       "file_path": "engine/commencement.py",
       "fingerprint": "18ca009ccd49b5e0"
     },
@@ -1834,10 +1894,6 @@
     {
       "file_path": "engine/executors/sink.py",
       "fingerprint": "6bf4f058589b3c6f"
-    },
-    {
-      "file_path": "engine/executors/sink.py",
-      "fingerprint": "7484e4d5a8bb7618"
     },
     {
       "file_path": "engine/executors/sink.py",
@@ -1889,47 +1945,47 @@
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "234840683c030073"
+      "fingerprint": "0cc6604068a4a1ab"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "2eb0994608f3c7bb"
+      "fingerprint": "1ea0c4e0a581854e"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "3e3ac5f66f8d5e7e"
+      "fingerprint": "4b886949863af1cb"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "4c75d5612b325236"
+      "fingerprint": "5ab5c3ba2b04f76e"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "6ca1e695c92ecd95"
+      "fingerprint": "761fac98cc099606"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "853347c66d90dd22"
+      "fingerprint": "7e29221876688f00"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "8d66944eadbf933a"
+      "fingerprint": "8f8c24a4a6ef7253"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "a96b7a8d581e144b"
+      "fingerprint": "ae6fb5c748bd1b41"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "b29f9569a61ec28b"
+      "fingerprint": "afa061df278cd266"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "c7ca039c1e4e899c"
+      "fingerprint": "e977f3ba37b6a316"
     },
     {
       "file_path": "engine/processor.py",
-      "fingerprint": "e14b85cf8455c4e0"
+      "fingerprint": "efab8c7077980eae"
     },
     {
       "file_path": "engine/tokens.py",
@@ -2217,39 +2273,39 @@
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "1a56c5169fca221b"
+      "fingerprint": "1f302628b74016c1"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "3c62e2c3ff824fd7"
+      "fingerprint": "243918e12128f142"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "423ca2aea34a9f56"
+      "fingerprint": "5551552311d288c2"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "46bde1db12749de8"
+      "fingerprint": "76c5f24e4e40a7c5"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "866a8f498d10e0fe"
+      "fingerprint": "a65c899e73722949"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "8c1f201c7b5ddd49"
+      "fingerprint": "bb2dd0f674f6a511"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "ac3495bbb7ec9639"
+      "fingerprint": "d0cd78d20173f5ea"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "d3ae8b449f567803"
+      "fingerprint": "e46590f3467b48c7"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "f9be71eef8e59cb3"
+      "fingerprint": "fd801529b9af8435"
     },
     {
       "file_path": "plugins/infrastructure/config_base.py",
@@ -3509,43 +3565,43 @@
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "08a628af082bd78b"
+      "fingerprint": "134755c5b096d126"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "4c7ec97e16ccebc9"
+      "fingerprint": "14c606709324b9c3"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "57b015b09222f296"
+      "fingerprint": "24172e6f3021016f"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "5b6d0378675eb2f2"
+      "fingerprint": "4df8c39f8dbaf59b"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "6494c39fcc6d20fc"
+      "fingerprint": "54a0a436e8a89380"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "7ad8f0d01efdbd81"
+      "fingerprint": "98c3e6a2eb0fb6bd"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "b8b1270a71192d97"
+      "fingerprint": "aa783cf35b18cc27"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "c10514f46a44024c"
+      "fingerprint": "afea2e03288ba5da"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "cd4ba5b028a35026"
+      "fingerprint": "c1b4c0a9254bce2f"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "e21f32481fc9784c"
+      "fingerprint": "d508bf2c1e144939"
     },
     {
       "file_path": "web/blobs/service.py",
@@ -3893,19 +3949,7 @@
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "03c72d42852801e5"
-    },
-    {
-      "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "314ea348e863a6f4"
-    },
-    {
-      "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "327fe9a5a3e59ac5"
-    },
-    {
-      "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "431bc71e5d5e137e"
+      "fingerprint": "4e2ec0402671ae1e"
     },
     {
       "file_path": "web/composer/source_inspection.py",
@@ -3913,19 +3957,23 @@
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "684a0b8827dc898e"
+      "fingerprint": "7ac9c954381a870b"
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "839f884f581b26d0"
+      "fingerprint": "91c24d0316e4f7f1"
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "c2d07dc1c5c6d068"
+      "fingerprint": "a42b2527d38b93e2"
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "ec99754b8b1fc32a"
+      "fingerprint": "a85e490edf063a75"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "e6252b5381ad3e07"
     },
     {
       "file_path": "web/composer/state.py",
@@ -4125,227 +4173,195 @@
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "1572f749e0721c8d"
+      "fingerprint": "1ff926b2bf15f5b6"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "1b80b2f85d944ac6"
+      "fingerprint": "2ef2bf69d0781cc3"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "3658d54a8721ac96"
+      "fingerprint": "407d362dc9724726"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "79391f3b16bd3db6"
+      "fingerprint": "6f346528de4eff44"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "9606870cec567eb9"
+      "fingerprint": "7ebc32f4e7eeeb5c"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "96d73b682ad0a226"
+      "fingerprint": "854b2f8bbe34c853"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "984ed68ceb1df11f"
+      "fingerprint": "96640a4192412d72"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "9f3a080fbddec2a0"
+      "fingerprint": "9e58784935875dc0"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "b158f3692e8bbf5d"
+      "fingerprint": "a822d6da673fa225"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "bf8563c850ca9a87"
+      "fingerprint": "c5b8692b1242fdb4"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "df3f9d3f9790ca88"
+      "fingerprint": "dff29aac4923cd0a"
     },
     {
       "file_path": "web/composer/tools/blobs.py",
-      "fingerprint": "e8ea24c6f35c3e3c"
+      "fingerprint": "f7acd19deaf734c2"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "0939dce5f06ef7cb"
+      "fingerprint": "1ee8b77a6b6e4453"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "0945f207a98cbbff"
+      "fingerprint": "28159f3e018e3ba8"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "157afff4c5b89efd"
+      "fingerprint": "29bd2e75e6cdf05f"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "170da3b1e8b91a7c"
+      "fingerprint": "326106a6c4ebfdfa"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "176985867214e183"
+      "fingerprint": "3616d956adb630a6"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "1988212271415914"
+      "fingerprint": "46721045f0f20130"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "1a4634d0d4e540a1"
+      "fingerprint": "47a80285f7d544db"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "1f07af64510ad515"
+      "fingerprint": "4b7e0010c666b3c0"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "20dc866451ce18cc"
+      "fingerprint": "5d23abcd140a1f2a"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "23513e8813c297f6"
+      "fingerprint": "5ea6b1a5885d0de3"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "2780ab37f5f2d489"
+      "fingerprint": "5f5da5c287f672de"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "2d23380aa7ea7a24"
+      "fingerprint": "74851ba44d3bd95d"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "2d3a8b87d9ca51f3"
+      "fingerprint": "758de98ebb620cc5"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "2dadfe65b888003f"
+      "fingerprint": "8009b82001221272"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "2e46bb891c34ebf7"
+      "fingerprint": "809e9ae6c8ca9e34"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "30e852fafe54278d"
+      "fingerprint": "839a894b5bb72ca8"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "3cf8de969f916272"
+      "fingerprint": "91175c90886d7936"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "42a2049f51f41ad5"
+      "fingerprint": "9163e128ad236a3d"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "42dc2828b0e57306"
+      "fingerprint": "97d34ac37373771c"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "556a65c1e6ad5068"
+      "fingerprint": "9e3396be69940de5"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "5e95739f36d9eda1"
+      "fingerprint": "a2f8138dc73b1a05"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "65bfa9c0c7279e67"
+      "fingerprint": "a853c4d37e0ab0f4"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "69025a61f1c28d9f"
+      "fingerprint": "ac899cd6915d83d1"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "7236ffc455b6c7be"
+      "fingerprint": "c1a966ded6f69ee5"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "78003676a01b62e7"
+      "fingerprint": "c41637dcf592e391"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "788462ae239e2501"
+      "fingerprint": "c8522bb1defb2382"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "8218c1e27d444b5d"
+      "fingerprint": "cef327d35dd213b7"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "9481bb581f0a388f"
+      "fingerprint": "d2ce1314623cf084"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "9c1695c48f0efa04"
+      "fingerprint": "d7042c58e9f9964c"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "9e1243b28dd8b86f"
+      "fingerprint": "dbe640b4339f7059"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "a198571c1b9ad526"
+      "fingerprint": "dd1a0312d8e19a4b"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "a46f1ac16266c1ba"
+      "fingerprint": "e192af8426155eed"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "aa5808f615d3af9a"
+      "fingerprint": "ece67886c5cd8acb"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "abc6ef78029ec544"
+      "fingerprint": "ed800f33df858d6b"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "be409e72085e2f59"
+      "fingerprint": "f04db137fa0f3f6f"
     },
     {
       "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "c1946cc969215bd2"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "d8ccc95d7f3fafec"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "e0bc2bf3936637b4"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "e2665599a03a84d5"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "f0e165ac927832cd"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "f179b12ee165ade2"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "f89d44e37975a3cc"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "fb7e9f0ac5e38ba3"
-    },
-    {
-      "file_path": "web/composer/tools/generation.py",
-      "fingerprint": "fd05b8a30100c68c"
+      "fingerprint": "f818c54fa5f0bca8"
     },
     {
       "file_path": "web/composer/tools/sessions.py",

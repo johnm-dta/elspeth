@@ -1681,10 +1681,12 @@ def register_composer_routes(router: APIRouter) -> None:
                         session_id,
                         recorder.invocations,
                         state_record_out.id if state_record_out is not None else None,
-                        # Guided endpoints don't dispatch tools that can plugin-crash;
-                        # auto-drop on solver exhaustion is a separate channel that
-                        # doesn't surface through this audit path. Rev-4 made
-                        # this keyword-only with no default, exposing the gap.
+                        # Success path: no primary exception is in flight, so the
+                        # success disposition applies. ``plugin_crash_pending``
+                        # means "are we unwinding from a primary failure?", NOT
+                        # "did a plugin crash" — here no, so a persist failure is
+                        # a Tier-1 audit corruption that must raise (False). The
+                        # unwind (else) branch below passes True.
                         plugin_crash_pending=False,
                     )
                     await _persist_llm_calls(
@@ -1695,17 +1697,20 @@ def register_composer_routes(router: APIRouter) -> None:
                         plugin_crash_pending=False,
                     )
                 else:
+                    # Unwind path: a primary exception is in flight (this is the
+                    # ``finally`` block). ``plugin_crash_pending`` asks "are we
+                    # unwinding from a primary failure?", NOT "did a plugin
+                    # crash" — here the answer is yes. True selects the helper's
+                    # record-and-continue disposition (unwind counter + slog) so
+                    # an audit-persist failure does NOT raise AuditIntegrityError
+                    # and mask the primary failure the operator needs to see.
                     try:
                         await _persist_tool_invocations(
                             service,
                             session_id,
                             recorder.invocations,
                             state_record_out.id if state_record_out is not None else None,
-                            # Guided endpoints don't dispatch tools that can plugin-crash;
-                            # auto-drop on solver exhaustion is a separate channel that
-                            # doesn't surface through this audit path. Rev-4 made
-                            # this keyword-only with no default, exposing the gap.
-                            plugin_crash_pending=False,
+                            plugin_crash_pending=True,
                         )
                     except Exception as persist_exc:
                         # Terminal logger-of-last-resort: no safer channel exists if structlog itself raises here.
@@ -1725,7 +1730,7 @@ def register_composer_routes(router: APIRouter) -> None:
                             session_id,
                             recorder.llm_calls,
                             state_record_out.id if state_record_out is not None else None,
-                            plugin_crash_pending=False,
+                            plugin_crash_pending=True,
                         )
                     except Exception as persist_exc:
                         with contextlib.suppress(Exception):
@@ -2428,10 +2433,12 @@ def register_composer_routes(router: APIRouter) -> None:
                         session_id,
                         recorder.invocations,
                         state_record_out.id if state_record_out is not None else None,
-                        # Guided endpoints don't dispatch tools that can plugin-crash;
-                        # auto-drop on solver exhaustion is a separate channel that
-                        # doesn't surface through this audit path. Rev-4 made
-                        # this keyword-only with no default, exposing the gap.
+                        # Success path: no primary exception is in flight, so the
+                        # success disposition applies. ``plugin_crash_pending``
+                        # means "are we unwinding from a primary failure?", NOT
+                        # "did a plugin crash" — here no, so a persist failure is
+                        # a Tier-1 audit corruption that must raise (False). The
+                        # unwind (else) branch below passes True.
                         plugin_crash_pending=False,
                     )
                     await _persist_llm_calls(
@@ -2442,13 +2449,20 @@ def register_composer_routes(router: APIRouter) -> None:
                         plugin_crash_pending=False,
                     )
                 else:
+                    # Unwind path: a primary exception is in flight (this is the
+                    # ``finally`` block). ``plugin_crash_pending`` asks "are we
+                    # unwinding from a primary failure?", NOT "did a plugin
+                    # crash" — here the answer is yes. True selects the helper's
+                    # record-and-continue disposition (unwind counter + slog) so
+                    # an audit-persist failure does NOT raise AuditIntegrityError
+                    # and mask the primary failure the operator needs to see.
                     try:
                         await _persist_tool_invocations(
                             service,
                             session_id,
                             recorder.invocations,
                             state_record_out.id if state_record_out is not None else None,
-                            plugin_crash_pending=False,
+                            plugin_crash_pending=True,
                         )
                     except Exception as persist_exc:
                         with contextlib.suppress(Exception):
@@ -2467,7 +2481,7 @@ def register_composer_routes(router: APIRouter) -> None:
                             session_id,
                             recorder.llm_calls,
                             state_record_out.id if state_record_out is not None else None,
-                            plugin_crash_pending=False,
+                            plugin_crash_pending=True,
                         )
                     except Exception as persist_exc:
                         with contextlib.suppress(Exception):
@@ -3029,13 +3043,22 @@ def register_composer_routes(router: APIRouter) -> None:
                         request_unwinding=False,
                     )
                 else:
+                    # Unwind path: a primary exception is in flight (this is the
+                    # ``finally`` block). ``plugin_crash_pending`` asks "are we
+                    # unwinding from a primary failure?", NOT "did a plugin
+                    # crash" — here the answer is yes. True selects the helper's
+                    # record-and-continue disposition (unwind counter + slog) so
+                    # an audit-persist failure does NOT raise AuditIntegrityError
+                    # and mask the primary failure. Mirrors the
+                    # ``request_unwinding=True`` passed to _persist_chat_turns
+                    # below in this same branch.
                     try:
                         await _persist_tool_invocations(
                             service,
                             session_id,
                             recorder.invocations,
                             state_record_out.id if state_record_out is not None else None,
-                            plugin_crash_pending=False,
+                            plugin_crash_pending=True,
                         )
                     except Exception as persist_exc:
                         with contextlib.suppress(Exception):

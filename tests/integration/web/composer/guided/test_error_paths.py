@@ -832,3 +832,80 @@ class TestI1InvariantErrorStructuredLogging:
         # message embeds {d!r} (cf. ``from_dict`` callers).
         forbidden_keys = {"exc_message", "exception", "exc_info"}
         assert not (forbidden_keys & entry.keys()), f"slog entry must not carry the raw exception message under the B1 convention: {entry}"
+
+
+# ---------------------------------------------------------------------------
+# Unwind-path audit disposition flag (regression)
+#
+# The guided ``finally`` blocks drain the recorder on BOTH the success path
+# (``primary_exc is None``) and the exception-unwind path (``else``). The
+# ``plugin_crash_pending`` flag selects the audit-persist disposition:
+#   - False  -> success disposition: a persist failure is a Tier-1 audit
+#               corruption that MUST raise ``AuditIntegrityError``.
+#   - True   -> unwind disposition: record via the "persist failed during
+#               unwind" counter + slog and CONTINUE, so the persist failure
+#               does not mask the primary exception the operator needs to see.
+#
+# The bug: the unwind (``else``) branch passed ``plugin_crash_pending=False``
+# at three handlers (get_guided, post_guided_respond, post_guided_chat). On
+# unwind that wrongly selects the success disposition — incrementing the
+# Tier-1 violation counter and raising a (then-swallowed) AuditIntegrityError,
+# i.e. falsely recording an audit-corruption event during a routine
+# best-effort unwind persist. post_guided_chat's sibling _persist_chat_turns
+# call in the SAME branch already used ``request_unwinding=True``, proving the
+# disposition was set inconsistently within one branch. All three sites are
+# fixed to pass ``True`` on unwind; this pins post_guided_respond, the
+# canonical site flagged in review.
+# ---------------------------------------------------------------------------
+
+
+class TestUnwindAuditDispositionFlag:
+    def test_unwind_persist_helpers_receive_plugin_crash_pending_true(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch,
+    ) -> None:
+        """On the exception-unwind path, both audit-persist helpers must be
+        invoked with ``plugin_crash_pending=True`` (record-and-continue), never
+        ``False`` (the success disposition that raises AuditIntegrityError and
+        masks the primary failure).
+
+        Forces the unwind branch by patching ``_dispatch_guided_respond`` to
+        raise, and captures the disposition flag by patching the two persist
+        helpers in the composer module namespace (where the finally block
+        resolves them at call time). The flag is the caller-side contract this
+        fix corrects.
+        """
+        from elspeth.web.composer.guided.errors import InvariantError
+        from elspeth.web.sessions.routes import composer as composer_module
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        captured: list[tuple[str, bool]] = []
+
+        async def _raise_in_dispatcher(*args, **kwargs):
+            raise InvariantError("synthetic primary failure to force the unwind branch")
+
+        async def _spy_tool(*args, plugin_crash_pending, **kwargs):
+            captured.append(("tool_invocations", plugin_crash_pending))
+
+        async def _spy_llm(*args, plugin_crash_pending, **kwargs):
+            captured.append(("llm_calls", plugin_crash_pending))
+
+        monkeypatch.setattr(composer_module, "_dispatch_guided_respond", _raise_in_dispatcher)
+        monkeypatch.setattr(composer_module, "_persist_tool_invocations", _spy_tool)
+        monkeypatch.setattr(composer_module, "_persist_llm_calls", _spy_llm)
+
+        resp = _respond_raw(composer_test_client, session_id, chosen=["csv"])
+
+        # The primary failure surfaces as a sanitized 500 — it is NOT masked.
+        assert resp.status_code == 500, resp.text
+
+        # Both finally-block persist helpers ran on the unwind path with the
+        # record-and-continue disposition...
+        assert ("tool_invocations", True) in captured, captured
+        assert ("llm_calls", True) in captured, captured
+        # ...and NEITHER was called with the success disposition (the bug).
+        assert ("tool_invocations", False) not in captured, captured
+        assert ("llm_calls", False) not in captured, captured

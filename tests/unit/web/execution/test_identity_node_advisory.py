@@ -347,7 +347,7 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
     """End-to-end: helper output appears in validate_pipeline()'s ValidationResult.checks
     when validation otherwise succeeds, with the expected detail-string content."""
     mock_yaml_gen = MagicMock()
-    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
     mock_settings = MagicMock()
     mock_load.return_value = mock_settings
 
@@ -396,7 +396,7 @@ def test_validate_pipeline_emits_no_advisory_when_clean(
 ) -> None:
     """A pipeline with no identity passthrough gets no advisory entries."""
     mock_yaml_gen = MagicMock()
-    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
     mock_load.return_value = MagicMock()
 
     mock_bundle = MagicMock()

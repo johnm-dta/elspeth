@@ -62,7 +62,7 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
-_TEST_PIPELINE_YAML = "source:\n  plugin: csv\n"
+_TEST_PIPELINE_YAML = "source:\n  plugin: csv\n  options: {}\n"
 
 
 @pytest.fixture
@@ -4854,12 +4854,23 @@ class TestResolveYamlPaths:
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "name: test" in result
 
-    def test_source_without_options_is_noop(self) -> None:
+    def test_source_without_options_raises_type_error(self) -> None:
+        """A present ``source`` missing its ``options`` key is a generator-contract
+        violation, not optional data.
+
+        ``yaml_generator`` emits ``source.options`` unconditionally
+        (yaml_generator.py:92) and both production callers feed
+        ``generate_yaml()`` output here — never hand-authored YAML. So a
+        ``source`` without ``options`` can only mean a generator bug, and
+        ``resolve_runtime_yaml_paths`` asserts it loudly rather than masking
+        the absence with ``.get()`` (sinks differ — the generator emits sink
+        options conditionally, so the sink path tolerates absence by design).
+        """
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
 
         yaml_str = "source:\n  plugin: csv\n"
-        result = _resolve_yaml_paths(yaml_str, "/srv/data")
-        assert "plugin: csv" in result
+        with pytest.raises(TypeError, match="without required 'options'"):
+            _resolve_yaml_paths(yaml_str, "/srv/data")
 
 
 # ── Phase 2.2 propagation: _partial_completion_message ───────────────

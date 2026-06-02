@@ -966,7 +966,15 @@ class AzureBlobSource(BaseSource):
         try:
             row_items = list(row.items())
         except AttributeError:
-            raise ValueError(f"Expected JSON object, got {type(row).__name__}") from None
+            # A JSON/JSONL element that is not an object (e.g. a bare primitive
+            # in an array) is Tier-3 bad source data, not an our-code fault.
+            # Raise the external-field-boundary marker (ExternalHeaderError, a
+            # ValueError subclass) so _validate_and_yield can discriminate this
+            # quarantine-worthy data fault from the plain ValueErrors that
+            # resolve_field_names raises for config/our-code faults, which must
+            # crash. Mirrors the CSV header path's ExternalHeaderError vs plain
+            # ValueError split (see _load_csv and field_normalization.py).
+            raise ExternalHeaderError(f"Expected JSON object, got {type(row).__name__}") from None
 
         raw_keys = [key for key, _ in row_items]
 
@@ -1019,7 +1027,15 @@ class AzureBlobSource(BaseSource):
         """
         try:
             row_to_validate = self._normalize_row_keys(row) if self._format in ("json", "jsonl") else row
-        except ValueError as e:
+        except ExternalHeaderError as e:
+            # Tier-3 data faults only: a non-object row (ExternalHeaderError from
+            # _normalize_row_keys) or a collision in the external row's own keys
+            # (ExternalHeaderError from resolve_field_names). Config/our-code faults
+            # — a bad field_mapping (plain ValueError: keys-not-found / creates-
+            # collision) or a normalization-algorithm bug (plain ValueError) — are
+            # ours and must crash, so they are NOT caught here. This mirrors the CSV
+            # header path (_load_csv catches ExternalHeaderError, lets plain
+            # ValueError propagate; see the comment there and field_normalization.py).
             error_msg = f"Field normalization failed: {e}"
             ctx.record_validation_error(
                 row=row,

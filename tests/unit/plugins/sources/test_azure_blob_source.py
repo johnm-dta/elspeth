@@ -562,6 +562,46 @@ class TestAzureBlobSourceJSON:
         assert rows[0].row == {"display_name": "Alice", "order_id": 101}
         assert source.get_field_resolution() is not None
 
+    def test_non_object_row_in_json_array_quarantines(self, ctx: PluginContext) -> None:
+        """A non-object element in a JSON array is Tier-3 bad source data: the row
+        is quarantined (recorded + routed), the rest of the array keeps processing.
+
+        Pins the preserved data-fault behaviour after _normalize_row_keys was changed
+        to raise ExternalHeaderError (not plain ValueError) for a non-object row, so
+        _validate_and_yield still quarantines it rather than crashing the run.
+        """
+        data = [{"id": 1}, "not_an_object", {"id": 2}]
+        source = _make_source(_base_config(format="json"))
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+            rows = list(source.load(ctx))
+
+        valid = [r for r in rows if not r.is_quarantined]
+        quarantined = [r for r in rows if r.is_quarantined]
+        assert len(valid) == 2
+        assert len(quarantined) == 1
+        assert "Expected JSON object" in quarantined[0].quarantine_error
+
+    def test_json_field_mapping_collision_crashes_not_quarantines(self, ctx: PluginContext) -> None:
+        """A field_mapping that collapses two distinct fields into one final name is a
+        CONFIG fault (ours), not bad source data: it must crash, not be quarantined.
+
+        Here field_mapping maps 'a' -> 'x' while the row also carries a passthrough
+        'x', so resolve_field_names raises a plain ValueError ('field_mapping creates
+        collision'). After narrowing _validate_and_yield to catch only the Tier-3
+        ExternalHeaderError marker, this config ValueError propagates and crashes —
+        mirroring the CSV header path (which lets the same plain ValueError escape).
+        Previously the broad `except ValueError` masked it as a per-row quarantine.
+        """
+        data = [{"a": 1, "x": 2}]
+        source = _make_source(_base_config(format="json", field_mapping={"a": "x"}))
+
+        with (
+            patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())),
+            pytest.raises(ValueError, match="collision"),
+        ):
+            list(source.load(ctx))
+
 
 # ---------------------------------------------------------------------------
 # Task 3: JSONL Loading

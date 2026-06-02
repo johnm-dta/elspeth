@@ -1,20 +1,20 @@
 allow_hits:
 - key: __init__.py:R6:_module_:fp=1669d46742317730
-  owner: core
+  owner: john
   reason: |-
-    Standard importlib.metadata version fallback — PackageNotFoundError means package not installed in editable mode
+    At src/elspeth/__init__.py line 12, the module-level `except PackageNotFoundError` wraps `version("elspeth")`, a query against the Python package-installation metadata database — an external, non-authored system (Tier 3). PackageNotFoundError is a single, narrow exception type (not a bare/broad except) raised specifically when the package is not installed in editable/installed mode. The fallback `__version__ = "UNKNOWN-dev-uninstalled"` records absence honestly rather than fabricating a plausible-looking version string, which aligns with the 'record what we didn't get' principle; production installs via wheel/sdist always populate this metadata. This is meaning-preserving boundary handling at a real external surface, not silent suppression of a bug in our own code, and no audit-trail data is involved.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
+  expires: '2026-08-31'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:15:44.166780+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.85
+  judge_recorded_at: '2026-06-02T04:37:12.574229+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
   judge_rationale: |-
-    This is a legitimate trust boundary at module import: importlib.metadata is querying an external system (the Python package installation database), and PackageNotFoundError is a specific, narrow exception indicating the package is not installed in editable/installed mode. The fallback value 'UNKNOWN-dev-uninstalled' is honest — it records absence rather than fabricating a plausible-looking version string, which aligns with the 'record what we didn't get' principle. The except clause catches one specific exception type (not a bare except), and the dev-only context is genuine: production installs via wheel/sdist always populate metadata. This is offensive programming around a real external boundary, not defensive suppression of a code bug.
+    RULE FIRES, CODE IS THE PRESCRIBED LEGITIMATE FORM. The except wraps `importlib.metadata.version("elspeth")` — a query against Python's package-installation metadata, an external system whose state (installed vs not) ELSPETH does not control. `PackageNotFoundError` is a single narrow exception type, not a bare/broad swallow. The fallback string `"UNKNOWN-dev-uninstalled"` records absence honestly rather than fabricating a plausible version (e.g. `"0.0.0"`), satisfying the Tier-3 'record what we got / record absence' principle. This is module-level package-metadata bootstrap with no audit-trail data in scope, and the rationale plainly states the why (dev editable-install vs production wheel/sdist).
   judge_signature_version: 2
   scope_fingerprint: bc09890d7296366cf6fe1b07eafdd1e667c9ae88f86354b9de86372cfa09fa3e
-  judge_transport: openrouter
+  judge_transport: claude_agent_sdk
   ast_path: 'body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:b3439d8ae19e74a2a586784e12a553c90b2395330b940881c5242ce4c67009ef'
+  judge_metadata_signature: 'hmac-sha256:v2:645f9f373ddfcb10810611efe7add4c6bb86baae3d64cf96dd6cf7d15b3e626a'

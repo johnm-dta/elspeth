@@ -90,8 +90,12 @@ class ComposerRateLimiter:
             cutoff = now - self._WINDOW_SECONDS
             stale_users = [uid for uid, bucket in self._buckets.items() if not bucket or bucket[-1] <= cutoff]
             for uid in stale_users:
+                # Both deletes are bare: every uid here comes from _buckets, and
+                # check() creates the _user_locks entry (_get_user_lock) before the
+                # _buckets entry, so a _buckets uid is guaranteed to have a lock.
+                # A KeyError would surface a real desync rather than be masked.
                 del self._buckets[uid]
-                self._user_locks.pop(uid, None)
+                del self._user_locks[uid]
 
     async def check(self, user_id: str) -> None:
         """Check rate limit for the given user.

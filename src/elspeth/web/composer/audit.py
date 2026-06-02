@@ -435,17 +435,24 @@ def finish_success(
     ``result_canonical``. Only path-level failures (ARG_ERROR,
     PLUGIN_CRASH) get a non-success status.
 
-    Sentinel-canonical fallback (B1 fix)
-    ------------------------------------
-    Wrap ``canonical_json(result_payload)`` and ``stable_hash(result_payload)``
-    in try/except so a non-finite float or non-serializable type in the
-    result does not raise out of the success path and either crash the
-    request or silently skip the audit record. Mirrors the standalone-MCP
-    sentinel at ``composer_mcp/server.py:715-721`` exactly so both
-    surfaces have the same canonicalization-failure discipline. The audit
-    row still lands; the verifier can detect the sentinel by parsing
-    ``result_canonical`` and noticing the ``_canonicalization_error``
-    key.
+    Crash-on-anomaly (no sentinel fallback)
+    ---------------------------------------
+    ``result_payload`` is the SUCCESS-path output of a composer tool
+    handler (``ToolResult.to_dict()`` — our own code). It is a
+    first-party authored value, so a non-finite float or non-serializable
+    type here means one of our handlers produced un-canonicalizable
+    output: a bug in our code, not malformed external data. Per the trust
+    model, ``canonical_json`` / ``stable_hash`` on our own dispatch output
+    is a Tier-1-equivalent act — it crashes on anomaly rather than
+    substituting a degraded sentinel and reporting SUCCESS (which would
+    launder our bug into a clean-looking audit row). The audit record is
+    still guaranteed: :func:`dispatch_with_audit`'s ``finally`` clause
+    catches the raise, records PLUGIN_CRASH, and re-raises — so the
+    failure surfaces loudly *with* an audit row, not silently. (Contrast
+    the ARG_ERROR path, where the composer-LLM authors the tool
+    *arguments* — genuinely Tier-3 — and
+    :func:`build_canonicalization_sentinel` does produce a bounded
+    sentinel rather than crash.)
 
     Pydantic normalization (elspeth-281f259235 fix)
     -----------------------------------------------
@@ -454,21 +461,10 @@ def finish_success(
     ``BaseModel`` instances to plain dicts. Discovery tool results
     (``list_sources``, ``list_transforms``, ``list_sinks``,
     ``get_plugin_schema``) carry ``PluginSummary`` / ``PluginSchemaInfo``
-    instances on ``ToolResult.data``; without this step the
-    canonicalization-failure sentinel would obliterate the actual result
-    body that the LLM saw, breaking the attributability test (auditors
-    cannot reconstruct what data the LLM made its decision against).
-
-    Sentinel shape (elspeth-281f259235 fix)
-    ---------------------------------------
-    On the fallback path, :func:`build_canonicalization_sentinel`
-    enriches the sentinel with diagnostic metadata —
-    ``_canonicalization_detail`` (allowlisted to
-    :class:`rfc8785.CanonicalizationError` whose messages are
-    value-free by spec) and ``_payload_keys`` (top-level keys only;
-    no values, no leak risk). An auditor reading the sentinel can
-    fingerprint the failure shape (discovery-tool vs mutation vs
-    runtime-preflight) without correlating with operational logs.
+    instances on ``ToolResult.data``; without this step canonicalization
+    would reject the ``BaseModel`` and crash the success path on output
+    that is in fact legitimate — normalization keeps well-formed handler
+    results canonicalizable so only genuine anomalies trip the crash.
     """
     normalized = _normalize_audit_payload(result_payload)
     # ``result_payload`` is the SUCCESS-path output of a composer tool handler —
@@ -642,10 +638,11 @@ async def dispatch_with_audit(
     SUCCESS
         ``do_dispatch`` returned a value. The success branch records
         the post-dispatch state version, and the ``finally`` clause
-        builds the SUCCESS invocation via :func:`finish_success` (which
-        itself wraps ``canonical_json`` in a sentinel-fallback
-        try/except so a non-finite float in the result cannot bypass
-        audit). Returns :class:`DispatchOutcome`.
+        builds the SUCCESS invocation via :func:`finish_success`. If
+        :func:`finish_success` raises while canonicalizing first-party
+        handler output (a bug producing un-canonicalizable data), the
+        ``finally`` clause records PLUGIN_CRASH and re-raises — the
+        failure cannot bypass audit. Returns :class:`DispatchOutcome`.
 
     ARG_ERROR
         ``do_dispatch`` raised :class:`ToolArgumentError`. The except
@@ -766,10 +763,11 @@ async def dispatch_with_audit(
 
         # SUCCESS path. The final recorder.record(...) lives in
         # ``finally`` for structural symmetry; here we only capture the
-        # handler result and post-dispatch version. ``finish_success``
-        # itself wraps canonical_json / stable_hash in a
-        # sentinel-fallback try/except (B1 fix), so a non-finite float
-        # in result cannot skip the audit record.
+        # handler result and post-dispatch version. If ``finish_success``
+        # raises while canonicalizing first-party handler output, the
+        # ``finally`` clause records PLUGIN_CRASH and re-raises (see the
+        # try/except around finish_success below), so a canonicalization
+        # failure cannot skip the audit record.
         success_result = result
         success_version_after = version_after_provider(result)
         status = ComposerToolStatus.SUCCESS

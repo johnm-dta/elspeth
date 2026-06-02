@@ -771,6 +771,15 @@ def facts_from_dict(d: Mapping[str, Any]) -> SourceInspectionFacts:
         raise InvariantError(f"facts_from_dict: malformed record {d!r}") from exc
 
 
+@trust_boundary(
+    tier=3,
+    source="declared field spec from external / LLM-authored composer source options (str form or Mapping form)",
+    source_param="field",
+    suppresses=("R5",),
+    invariant="raises ValueError when a Mapping field spec carries a non-str 'name'; never coerces",
+    test_ref="tests/unit/web/composer/test_source_inspection.py::TestDeclaredFieldName::test_non_str_name_raises",
+    test_fingerprint="31ed5061e5b5a8994074e3c87f706605707d195c23d00d2456049933aa4fd745",
+)
 def _declared_field_name(field: DeclaredFieldSpec) -> str | None:
     # ``DeclaredFieldSpec = str | Mapping[str, Any]`` is a first-party union
     # over the two composer field-spec authoring shapes. ``isinstance(field,

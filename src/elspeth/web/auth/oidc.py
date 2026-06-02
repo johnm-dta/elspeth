@@ -25,7 +25,10 @@ slog = structlog.get_logger()
 
 def optional_profile_claim(payload: dict[str, Any], claim_name: str) -> str | None:
     """Return optional cosmetic IdP claims as visible strings or None."""
-    value = payload.get(claim_name)
+    # Tier-3 token claims: an optional claim may simply be absent. Read it
+    # explicitly (membership-then-subscript) so the "absent -> None" step is
+    # visible decision-making rather than a `.get()` that hides it.
+    value = payload[claim_name] if claim_name in payload else None
     if value is None or not isinstance(value, str):
         return None
     claim_value = cast(str, value)
@@ -442,11 +445,15 @@ class OIDCAuthProvider:
         except KeyError as exc:
             raise AuthenticationError("Missing required 'sub' claim in token") from exc
 
+        # preferred_username is an optional cosmetic claim. Decide the username
+        # explicitly: use the IdP-supplied visible value when present, otherwise
+        # fall back to the canonical `sub` identifier (always a valid principal).
+        preferred_username = self._optional_profile_claim(payload, "preferred_username")
+        username = preferred_username if preferred_username is not None else sub
+
         return UserIdentity(
             user_id=sub,
-            # preferred_username is optional — fall back to sub if absent,
-            # null, or empty.
-            username=payload.get("preferred_username") or sub,
+            username=username,
         )
 
     @staticmethod
@@ -480,11 +487,15 @@ class OIDCAuthProvider:
         if display_name is None:
             display_name = self._optional_profile_claim(payload, "preferred_username")
 
+        # preferred_username is an optional cosmetic claim. Decide the username
+        # explicitly: use the IdP-supplied visible value when present, otherwise
+        # fall back to the canonical `sub` identifier (always a valid principal).
+        preferred_username = self._optional_profile_claim(payload, "preferred_username")
+        username = preferred_username if preferred_username is not None else sub
+
         return UserProfile(
             user_id=sub,
-            # preferred_username is optional — fall back to sub if absent,
-            # null, or empty. IdPs may send null for this optional claim.
-            username=payload.get("preferred_username") or sub,
+            username=username,
             display_name=display_name,
             email=self._optional_profile_claim(payload, "email"),
             groups=tuple(groups),

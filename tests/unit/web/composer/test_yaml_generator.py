@@ -432,6 +432,61 @@ class TestGenerateYaml:
         assert parsed["source"]["options"]["path"] == "/data/input.txt"
         assert parsed["source"]["options"]["column"] == "line"
 
+    def test_bind_source_mode_stripped_with_blob_ref(self) -> None:
+        """A blob-bound source carries a ``mode: bind_source`` marker alongside
+        ``blob_ref``; both are web-only and must be stripped from engine YAML.
+
+        ``blob_ref`` is dropped by the _WEB_ONLY_OPTION_KEYS filter; ``mode`` is
+        not in that set, so the generator pops it explicitly only when the
+        blob-bind marker is present.
+        """
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="out",
+                options={
+                    "path": "/data/input.txt",
+                    "blob_ref": "20b944e3-fd46-434f-b9a2-4fb508db30f0",
+                    "mode": "bind_source",
+                    "column": "line",
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "blob_ref" not in parsed["source"]["options"]
+        assert "mode" not in parsed["source"]["options"]
+        assert parsed["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["source"]["options"]["column"] == "line"
+
+    def test_mode_retained_when_not_bind_source_marker(self) -> None:
+        """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
+        config and must survive into the YAML — the strip only fires for the
+        blob_ref + ``mode == 'bind_source'`` pair.
+        """
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="out",
+                options={"path": "/data/input.txt", "mode": "observed"},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["source"]["options"]["mode"] == "observed"
+
     def test_on_error_emitted_when_set(self) -> None:
         state = CompositionState(
             source=SourceSpec(

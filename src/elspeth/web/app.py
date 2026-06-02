@@ -1031,12 +1031,22 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         # collector would raise here and Starlette's default 500 handler
         # leaks the traceback into the response body. /metrics is a
         # scrape endpoint — return a safe 503 with no internal detail so
-        # scrapers retry gracefully and the traceback stays in the
-        # process log.  Audit-primacy: this endpoint reads in-memory
-        # counter state only; failure is operational, not legal.
+        # scrapers retry gracefully.  Audit-primacy (CLAUDE.md): this
+        # endpoint reads in-memory counter state only, so failure is a
+        # telemetry-system failure (operational, not legal) — logged, not
+        # audited. A bounded message is safe to log here (unlike the
+        # secret-bearing DB exceptions elsewhere): generate_latest() only
+        # formats global-REGISTRY state, every value of which /metrics
+        # already serves publicly, so the message identifies *which*
+        # collector broke without exposing anything not already public.
         try:
             body = generate_latest()
-        except Exception:
+        except Exception as scrape_exc:
+            _handler_slog.error(
+                "prometheus_scrape_failed",
+                exc_class=type(scrape_exc).__name__,
+                detail=str(scrape_exc)[:200],
+            )
             return Response(
                 content=b"# scrape failed\n",
                 status_code=503,

@@ -12,6 +12,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import tokens_table
 from elspeth.web.execution.failure_samples import (
     FailureSample,
+    _classify,
     format_failure_samples,
     load_top_failure_samples,
 )
@@ -83,6 +84,48 @@ def _record_error(
     )
 
 
+def _record_messageless_error(
+    db: LandscapeDB,
+    run_id: str,
+    transform_id: str,
+    *,
+    reason: str,
+    token_id: str,
+    row_index: int,
+) -> None:
+    """Record an error whose details carry only the required ``reason`` category.
+
+    Exercises the canonical-shape branch where no human-message field
+    (``error``/``message``) is present — the honest fallback must keep distinct
+    categories in distinct aggregation buckets, not collapse them to ``""``.
+    """
+    factory = RecorderFactory(db)
+    row = factory.data_flow.create_row(
+        run_id=run_id,
+        source_node_id="source_test",
+        row_index=row_index,
+        data={"url": f"row-{row_index}"},
+    )
+    with db.connection() as conn:
+        conn.execute(
+            tokens_table.insert().values(
+                token_id=token_id,
+                row_id=row.row_id,
+                run_id=run_id,
+                step_in_pipeline=0,
+                created_at=datetime.now(UTC),
+            )
+        )
+        conn.commit()
+    factory.data_flow.record_transform_error(
+        ref=TokenRef(token_id=token_id, run_id=run_id),
+        transform_id=transform_id,
+        row_data={"url": f"row-{row_index}"},
+        error_details={"reason": reason},
+        destination="discard",
+    )
+
+
 class TestLoadTopFailureSamples:
     def test_aggregates_identical_errors_by_count(self) -> None:
         db, run_id, transform_id = _make_run_with_transform()
@@ -140,6 +183,94 @@ class TestLoadTopFailureSamples:
         except ValueError:
             return
         raise AssertionError("expected ValueError for limit=0")
+
+    def test_messageless_errors_with_distinct_reasons_do_not_merge(self) -> None:
+        # Two errors that carry only the required ``reason`` category and no
+        # human-message field. Before the Tier-1 honest-read fix the terminal
+        # ``""`` default collapsed both into a single ``message=""`` bucket; the
+        # distinct categories must now stay distinct so the operator sees that
+        # two unrelated failure modes occurred, not one.
+        db, run_id, transform_id = _make_run_with_transform()
+        _record_messageless_error(
+            db, run_id, transform_id, reason="missing_field", token_id="tm0", row_index=0
+        )
+        _record_messageless_error(
+            db, run_id, transform_id, reason="api_error", token_id="ta0", row_index=1
+        )
+
+        samples = load_top_failure_samples(db, run_id, limit=3)
+
+        assert len(samples) == 2
+        messages = {s.message for s in samples}
+        assert messages == {
+            "(no message; category=missing_field)",
+            "(no message; category=api_error)",
+        }
+        # error_type falls back to the required reason category, not "UnknownError".
+        assert {s.error_type for s in samples} == {"missing_field", "api_error"}
+
+
+class TestClassify:
+    """Direct coverage of the two-shape discriminator.
+
+    The non-canonical envelope is produced by
+    ``DataFlowRepository._canonical_or_recorded_error_details_json`` only when
+    canonical serialization of ``error_details`` fails, which cannot be driven
+    through the typed recorder API — so it is asserted here against the exact
+    envelope shape that writer emits.
+    """
+
+    def test_canonical_prefers_error_field(self) -> None:
+        details = {"reason": "api_error", "error": "boom", "error_type": "http_error"}
+        assert _classify(details) == ("http_error", "boom")
+
+    def test_canonical_falls_back_to_message_field(self) -> None:
+        details = {"reason": "api_error", "message": "rate limited"}
+        # error_type absent -> falls back to the required reason category.
+        assert _classify(details) == ("api_error", "rate limited")
+
+    def test_canonical_messageless_carries_category_distinctly(self) -> None:
+        assert _classify({"reason": "missing_field"}) == (
+            "missing_field",
+            "(no message; category=missing_field)",
+        )
+
+    def test_missing_required_reason_raises(self) -> None:
+        # Canonical shape with no reason is Tier-1 corruption: KeyError surfaces.
+        try:
+            _classify({"error_type": "http_error", "error": "boom"})
+        except KeyError:
+            return
+        raise AssertionError("expected KeyError on missing required 'reason'")
+
+    def test_non_canonical_envelope_surfaces_serialization_error(self) -> None:
+        # Exact shape emitted by _canonical_or_recorded_error_details_json.
+        details = {
+            "__non_canonical__": True,
+            "repr": "{'reason': 'x', 'val': nan}",
+            "serialization_error": "Out of range float values are not JSON compliant",
+        }
+        error_type, message = _classify(details)
+        assert error_type == "NonCanonicalErrorDetails"
+        assert "Out of range float values" in message
+        assert "repr=" in message
+
+    def test_distinct_non_canonical_envelopes_do_not_merge(self) -> None:
+        first = _classify(
+            {
+                "__non_canonical__": True,
+                "repr": "{'a': nan}",
+                "serialization_error": "nan error",
+            }
+        )
+        second = _classify(
+            {
+                "__non_canonical__": True,
+                "repr": "{'b': inf}",
+                "serialization_error": "inf error",
+            }
+        )
+        assert first != second
 
 
 class TestFormatFailureSamples:

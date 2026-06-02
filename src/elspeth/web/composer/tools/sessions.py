@@ -18,6 +18,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -185,6 +186,15 @@ def _options_with_inline_blob_source_review(
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer tool-call arguments",
+    source_param="args",
+    suppresses=("R1", "R5"),
+    invariant="raises ToolArgumentError on SetPipelineArgumentsModel shape mismatch; never coerces",
+    test_ref="tests/unit/web/composer/test_promote_set_pipeline.py::TestPromoteSetPipelineArgErrorRouting::test_empty_arguments_raise_tool_argument_error",
+    test_fingerprint="02c5bd7c9f9aa90bd1af5d67ac7d60764bfc0306de78c6216ee84a5d905d362b",
+)
 def _execute_set_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -1091,6 +1101,15 @@ def _matching_interpretation_sites(
     ]
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer tool-call state (composer/LLM-authored composition state re-read from session storage)",
+    source_param="state",
+    suppresses=("R1", "R5"),
+    invariant="raises ToolArgumentError on review-component shape/semantic mismatch; never coerces",
+    test_ref="tests/unit/web/composer/test_request_interpretation_review_tool.py::test_04_wrong_kind_node_raises",
+    test_fingerprint="bb71cdbf2a60eb1348ab865028d80f2c1303d84495f82b5eb2572e170a96ef1d",
+)
 def _assert_affected_component(
     state: CompositionState,
     affected_node_id: str,

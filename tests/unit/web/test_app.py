@@ -15,6 +15,7 @@ from pydantic import SecretBytes, ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
+from structlog.testing import capture_logs
 
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
@@ -169,6 +170,39 @@ class TestHealthEndpoint:
         client = TestClient(app)
         response = client.get("/api/health")
         assert response.json() == {"status": "ok"}
+
+
+class TestMetricsEndpoint:
+    """Tests for GET /metrics (Prometheus scrape endpoint)."""
+
+    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_metrics_scrape_failure_returns_503_and_records_cause(self, tmp_path) -> None:
+        """A third-party collector raising inside generate_latest() must not
+        leak a traceback into the response and must not drop the error
+        silently. The handler returns a fixed 503 and records *why* via slog
+        (sanctioned telemetry-system-failure logging per CLAUDE.md), carrying
+        a bounded detail that identifies which collector broke.
+        """
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        boom = RuntimeError("collector 'broken_metric' raised during collect()")
+        with (
+            patch("elspeth.web.app.generate_latest", side_effect=boom),
+            capture_logs() as logs,
+        ):
+            response = client.get("/metrics")
+        assert response.status_code == 503
+        assert response.content == b"# scrape failed\n"
+        events = [e for e in logs if e.get("event") == "prometheus_scrape_failed"]
+        assert len(events) == 1, f"expected one scrape-failure log, got {logs!r}"
+        assert events[0]["exc_class"] == "RuntimeError"
+        assert "broken_metric" in events[0]["detail"]
 
 
 class TestCORSMiddleware:

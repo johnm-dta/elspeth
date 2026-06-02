@@ -1131,11 +1131,15 @@ def _call_openrouter(
 # excerpt — identical input to the OpenRouter path. The tool-augmented mode
 # (``tool_scope`` set) lets the judge READ the surrounding source to resolve a
 # question the excerpt can't answer (e.g. "where does this parameter come
-# from?", "is the audit event recorded before this ceremony?"). It is
-# reaudit-only and NEVER signs anything, so it carries zero CI-correctness
-# hazard; the only thing it trades away is verdict reproducibility (so the
-# deterministic temperature=0 OpenRouter path stays canonical for decay
-# sweeps). See elspeth-ab5e093fa3.
+# from?", "is the audit event recorded before this ceremony?"). Since the
+# --judge-tools parity change it is available on BOTH reaudit (read-only) and
+# justify (signing), so it CAN feed a signed verdict. What it trades away is
+# verdict reproducibility (so the deterministic temperature=0 OpenRouter path
+# stays canonical for decay sweeps); and the signed payload does not separately
+# mark a verdict as tool-augmented (``judge_transport`` is "claude_agent_sdk"
+# for blinded and tool modes alike). That provenance gap is benign: reaudit
+# does not gate entry selection on ``policy_hash``, so these entries are
+# re-judged blinded on the next sweep regardless. See elspeth-ab5e093fa3.
 #
 # SECURITY — the load-bearing guard. ``permission_mode="default"``
 # auto-approves read-only tools, so a ``can_use_tool`` callback is NEVER
@@ -1166,8 +1170,14 @@ _TOOL_SCOPE_FORBIDDEN_BASENAMES: frozenset[str] = frozenset({".env"})
 
 # Appended to the system prompt ONLY in tool mode, OUTSIDE ``_STATIC_POLICY_BLOCK``
 # so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged and no
-# corpus re-sign is triggered. Tool mode is reaudit-only / non-signing, so the
-# signed policy hash never needs to capture this addendum.
+# corpus re-sign is triggered. Tool mode can now feed a signing justify (the
+# --judge-tools parity change), so the signed ``policy_hash`` CAN accompany a
+# verdict produced under this addendum without capturing it. That is
+# acceptable: the addendum is investigation MECHANICS (read tools, cite what
+# you read), not tier-model verdict CRITERIA — those live in the hashed static
+# block. And reaudit does not gate selection on ``policy_hash``, so a future
+# edit to this addendum cannot silently strand tool-mode-signed entries; they
+# are re-judged (blinded, under openrouter) on the next sweep.
 _TOOL_MODE_ADDENDUM: str = """
 TOOL-AUGMENTED INVESTIGATION MODE (read-only)
 

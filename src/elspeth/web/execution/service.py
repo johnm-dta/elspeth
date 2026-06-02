@@ -1643,7 +1643,14 @@ class ExecutionServiceImpl:
         finally:
             # Always clean up, regardless of success or failure
             with self._shutdown_events_lock:
-                self._shutdown_events.pop(run_id, None)
+                # Idempotent cleanup of an internal bookkeeping key. Access it
+                # directly (R9 remediation); the membership guard preserves the
+                # silent no-op when cleanup races or runs twice, and matches the
+                # sibling submit-failure cleanup above. run_id is contractually
+                # registered (str key, synchronous, before submit) so a bare
+                # pop-with-default would mask a broken invariant.
+                if run_id in self._shutdown_events:
+                    del self._shutdown_events[run_id]
             if landscape_db is not None:
                 landscape_db.close()
             if rate_limit_registry is not None:

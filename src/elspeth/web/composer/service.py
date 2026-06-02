@@ -44,6 +44,7 @@ from elspeth.contracts.composer_llm_audit import (
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
@@ -168,6 +169,15 @@ _KNOWN_PREFLIGHT_EXCEPTION_CLASSES: frozenset[str] = frozenset(
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="LLM composer tool-call payload (request_interpretation_review arguments)",
+    source_param="arguments",
+    suppresses=("R5",),
+    invariant="raises AuditIntegrityError on a non-string or non-member kind; never coerces or writes a fabricated audit-row discriminator",
+    test_ref="tests/unit/web/composer/test_request_interpretation_review_kind_boundary.py::test_non_str_kind_raises_audit_integrity_error",
+    test_fingerprint="69e4bec4d82790adb9f3dfd104b1a504755721cd7aff2f56982e7cc7b86f0621",
+)
 def _request_interpretation_review_kind_from_arguments(arguments: Mapping[str, Any]) -> InterpretationKind:
     # `arguments` is the LLM tool-call payload (Tier 3); `kind` becomes the
     # interpretation-kind discriminator on an audit row, so a non-member or

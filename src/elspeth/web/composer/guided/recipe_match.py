@@ -254,7 +254,14 @@ def _classify_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mappi
             f"{sorted(source.options.keys())}"
         )
     blob_ref = source.options["blob_ref"]
-    output_path = sink.outputs[0].options.get("path", "outputs/classified.jsonl")
+    # Tier-3 sink options. An operator-configured ``path`` is used verbatim;
+    # its absence is an explicit decision to offer the recipe's default JSONL
+    # destination as a rubber-stampable pre-fill (not a silent fallback).
+    sink_options = sink.outputs[0].options
+    if "path" in sink_options:
+        output_path = sink_options["path"]
+    else:
+        output_path = "outputs/classified.jsonl"
     # Pick the first keyword-matching required_field; predicate guarantees one exists.
     label_field = next(n for n in sink.outputs[0].required_fields if n in _CLASSIFY_KEYWORDS)
     return {
@@ -319,8 +326,19 @@ def _split_threshold_slot_resolver(source: SourceResolved, sink: SinkResolved) -
             f"{sorted(source.options.keys())}"
         )
     blob_ref = source.options["blob_ref"]
-    above_path = sink.outputs[0].options.get("path", "outputs/above.jsonl")
-    below_path = sink.outputs[1].options.get("path", "outputs/below.jsonl")
+    # Tier-3 sink options. As in ``_classify_slot_resolver``, an operator-set
+    # ``path`` is used verbatim; its absence is an explicit decision to offer
+    # the recipe's default destination as a rubber-stampable pre-fill.
+    above_options = sink.outputs[0].options
+    if "path" in above_options:
+        above_path = above_options["path"]
+    else:
+        above_path = "outputs/above.jsonl"
+    below_options = sink.outputs[1].options
+    if "path" in below_options:
+        below_path = below_options["path"]
+    else:
+        below_path = "outputs/below.jsonl"
     return {
         "source_blob_id": blob_ref,
         "above_output_path": above_path,

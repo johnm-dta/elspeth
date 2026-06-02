@@ -85,8 +85,13 @@ class TestRateLimiterWindowReset:
     @pytest.mark.asyncio
     async def test_window_resets_after_60_seconds(self) -> None:
         limiter = ComposerRateLimiter(limit=1)
-        # Manually inject an old timestamp to simulate window expiry
+        # Manually inject an old timestamp to simulate window expiry. Inject the
+        # paired lock too: production always creates the _user_locks entry
+        # (via _get_user_lock) before the _buckets entry, so the sweep's bare
+        # ``del self._user_locks[uid]`` relies on that invariant — a bucket
+        # without a lock is a state production never produces.
         limiter._buckets["user_1"] = [time.monotonic() - 61.0]
+        limiter._user_locks["user_1"] = asyncio.Lock()
         # Should pass -- the old request is outside the window
         await limiter.check("user_1")
         # The expired timestamp must be evicted; only the fresh call remains.

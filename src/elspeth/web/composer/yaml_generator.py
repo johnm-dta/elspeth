@@ -38,8 +38,16 @@ def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
     Returns a shallow copy with web-only keys removed.
     """
     stripped = {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
-    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
-        stripped.pop("mode", None)
+    if (
+        "blob_ref" in options
+        and options["blob_ref"] is not None
+        and "mode" in options
+        and options["mode"] == "bind_source"
+    ):
+        # The guard above proves ``mode`` is present in ``options``; ``mode`` is
+        # not in _WEB_ONLY_OPTION_KEYS, so it survives into ``stripped`` — pop
+        # it directly without a default (a missing key here would be a bug).
+        stripped.pop("mode")
     return stripped
 
 

@@ -263,12 +263,12 @@ def _install_tool_fake_sdk(
     served: str = "claude-opus-4-7",
     capture: dict | None = None,
 ) -> types.ModuleType:
-    """Fake SDK whose ``query`` yields a sequence of assistant messages.
+    """Fake SDK whose managed ``ClaudeSDKClient`` emits a sequence of messages.
 
-    ``messages`` is a list of (text, has_tool_use) pairs emitted in order,
-    followed by a ResultMessage carrying ``num_turns``. ``capture`` (if given)
-    records the ClaudeAgentOptions kwargs and the prompt object so wiring can
-    be asserted.
+    ``messages`` is a list of (text, has_tool_use) pairs emitted in order by
+    ``receive_response()``, followed by a ResultMessage carrying ``num_turns``.
+    ``capture`` (if given) records the ClaudeAgentOptions kwargs, the prompt, and
+    that the client connected/disconnected, so wiring + teardown can be asserted.
     """
     mod = types.ModuleType("claude_agent_sdk")
 
@@ -309,9 +309,7 @@ def _install_tool_fake_sdk(
     class ClaudeSDKError(Exception):
         pass
 
-    async def query(*, prompt: object, options: object) -> AsyncIterator[object]:
-        if capture is not None:
-            capture["prompt"] = prompt
+    async def _emit_messages() -> AsyncIterator[object]:
         for text, has_tool in messages:
             content: list[object] = []
             if has_tool:
@@ -321,6 +319,33 @@ def _install_tool_fake_sdk(
             yield AssistantMessage(content=content)
         yield ResultMessage()
 
+    class ClaudeSDKClient:
+        """Managed-client fake (the tool path uses this, not bare query()).
+
+        Records that the client path was taken + that disconnect ran, so the
+        test can assert the subprocess is torn down in-loop (the -9 fix).
+        """
+
+        def __init__(self, options: object = None, transport: object = None) -> None:
+            if capture is not None:
+                capture["used_client"] = True
+
+        async def __aenter__(self) -> ClaudeSDKClient:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            if capture is not None:
+                capture["disconnected"] = True
+            return False
+
+        async def query(self, prompt: object, session_id: str = "default") -> None:
+            if capture is not None:
+                capture["prompt"] = prompt
+
+        async def receive_response(self) -> AsyncIterator[object]:
+            async for m in _emit_messages():
+                yield m
+
     mod.ClaudeAgentOptions = ClaudeAgentOptions  # type: ignore[attr-defined]
     mod.TextBlock = TextBlock  # type: ignore[attr-defined]
     mod.ToolUseBlock = ToolUseBlock  # type: ignore[attr-defined]
@@ -328,7 +353,7 @@ def _install_tool_fake_sdk(
     mod.AssistantMessage = AssistantMessage  # type: ignore[attr-defined]
     mod.ResultMessage = ResultMessage  # type: ignore[attr-defined]
     mod.ClaudeSDKError = ClaudeSDKError  # type: ignore[attr-defined]
-    mod.query = query  # type: ignore[attr-defined]
+    mod.ClaudeSDKClient = ClaudeSDKClient  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
     return mod
 
@@ -365,8 +390,11 @@ def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.Mon
     assert opts["permission_mode"] == "default"
     assert opts["max_turns"] == scope.max_turns
     assert opts["cwd"] == str(scope.cwd)
-    # streaming-input prompt (async iterable), required for the hook to fire.
-    assert hasattr(capture["prompt"], "__aiter__")
+    # Tool path goes through the managed ClaudeSDKClient (not bare query()), and
+    # disconnects in-loop — the fix for the -9 SIGKILL on a lingering subprocess.
+    assert capture["used_client"] is True
+    assert capture["disconnected"] is True
+    assert isinstance(capture["prompt"], str)  # client.query(prompt_text)
     # tool-mode addendum rides OUTSIDE the hashed policy block.
     assert "TOOL-AUGMENTED INVESTIGATION MODE" in opts["system_prompt"]["append"]
 

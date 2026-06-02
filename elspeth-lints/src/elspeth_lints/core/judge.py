@@ -1329,16 +1329,6 @@ def _build_pretooluse_scope_hook(scope: AgentToolScope) -> Callable[..., Any]:
     return _hook
 
 
-async def _one_user_message_stream(text: str) -> Any:
-    """A one-item async stream carrying the user prompt (enables streaming mode).
-
-    The Claude Agent SDK only consults the PreToolUse hook in *streaming* input
-    mode, which requires the ``prompt`` to be an async-iterable of message dicts
-    rather than a plain string. This wraps the single judge prompt accordingly.
-    """
-    yield {"type": "user", "message": {"role": "user", "content": text}}
-
-
 def _call_agent_sdk(
     request: JudgeRequest,
     model_id: str,
@@ -1433,9 +1423,10 @@ def _call_agent_sdk(
             setting_sources=[],
             permission_mode="bypassPermissions",
         )
-        prompt: Any = prompt_text
-        final_message_only = False
-        max_turns: int | None = None
+        # Blinded single-shot: the bare ``query()`` helper. The subprocess exits
+        # immediately after the one-turn verdict, before ``asyncio.run`` closes
+        # the loop, so there is nothing for asyncio to reap.
+        drain = _drain_agent_query(sdk, prompt_text, options, model_id)
     else:
         # Tool-augmented path. Read/Grep/Glob are NOT in allowed_tools (that
         # list auto-approves and bypasses the hook); they are left available
@@ -1456,21 +1447,17 @@ def _call_agent_sdk(
             max_turns=tool_scope.max_turns,
             cwd=str(tool_scope.cwd),
         )
-        prompt = _one_user_message_stream(prompt_text)
-        final_message_only = True
-        max_turns = tool_scope.max_turns
+        # Tool path: the managed ``ClaudeSDKClient``. Investigation keeps the
+        # subprocess alive across tool turns; the bare ``query()`` generator
+        # leaves it lingering, so when ``asyncio.run`` closes the loop the child
+        # is SIGKILLed (-9, "Fatal error in message reader") — the failure the
+        # operator hit on the second investigation entry. The client's
+        # ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating the
+        # subprocess gracefully before the loop closes.
+        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, tool_scope.max_turns)
 
     try:
-        return asyncio.run(
-            _drain_agent_query(
-                sdk,
-                prompt,
-                options,
-                model_id,
-                final_message_only=final_message_only,
-                max_turns=max_turns,
-            )
-        )
+        return asyncio.run(drain)
     except (JudgeConfigurationError, JudgeContractError, JudgeTransportError):
         # Already-classified failures from the drain (in-band error mapping,
         # errored ResultMessage, usage-contract guards) pass through unchanged
@@ -1549,19 +1536,18 @@ def _extract_trailing_verdict_json(text: str) -> str | None:
     return None
 
 
-async def _drain_agent_query(
+async def _consume_agent_messages(
     sdk: Any,
-    prompt: Any,
-    options: Any,
+    message_iter: Any,
     requested_model: str,
     *,
-    final_message_only: bool = False,
-    max_turns: int | None = None,
+    final_message_only: bool,
+    max_turns: int | None,
 ) -> _TransportResult:
-    """Drain the async query stream into a ``_TransportResult``.
+    """Reduce an async iterator of SDK messages to a ``_TransportResult``.
 
-    ``prompt`` is a plain string (blinded single-shot) or an async-iterable of
-    message dicts (tool-augmented streaming mode). When ``final_message_only``
+    Shared by both agent paths (blinded bare-``query()`` and tool-augmented
+    ``ClaudeSDKClient.receive_response()``). When ``final_message_only``
     is set (tool mode), only the LAST assistant message's text is kept, and the
     trailing verdict JSON object is extracted from it (the agent narrates its
     investigation before the verdict in that same message) via
@@ -1585,7 +1571,7 @@ async def _drain_agent_query(
     """
     text_parts: list[str] = []
     result_message: Any = None
-    async for message in sdk.query(prompt=prompt, options=options):
+    async for message in message_iter:
         if isinstance(message, sdk.AssistantMessage):
             inband_error = message.error
             if inband_error is not None:
@@ -1652,6 +1638,41 @@ async def _drain_agent_query(
         prompt_tokens_total=prompt_tokens_total,
         prompt_tokens_cached=prompt_tokens_cached,
     )
+
+
+async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested_model: str) -> _TransportResult:
+    """Blinded single-shot drain: the bare ``query()`` async generator.
+
+    The one-turn subprocess exits immediately after the verdict, so it is gone
+    before ``asyncio.run`` closes the loop — no managed teardown needed.
+    """
+    return await _consume_agent_messages(
+        sdk,
+        sdk.query(prompt=prompt_text, options=options),
+        requested_model,
+        final_message_only=False,
+        max_turns=None,
+    )
+
+
+async def _drain_agent_query_client(sdk: Any, prompt_text: str, options: Any, requested_model: str, max_turns: int) -> _TransportResult:
+    """Tool-augmented drain via the managed ``ClaudeSDKClient``.
+
+    Investigation keeps the subprocess alive across tool turns. The async-context
+    client connects on enter and ``disconnect()``s on exit — IN the event loop —
+    terminating the subprocess gracefully before ``asyncio.run`` closes the loop.
+    The bare ``query()`` generator left the streaming child alive, so loop close
+    SIGKILLed it (-9, "Fatal error in message reader") on the second sweep entry.
+    """
+    async with sdk.ClaudeSDKClient(options=options) as client:
+        await client.query(prompt_text)
+        return await _consume_agent_messages(
+            sdk,
+            client.receive_response(),
+            requested_model,
+            final_message_only=True,
+            max_turns=max_turns,
+        )
 
 
 def _raise_for_agent_inband_error(inband_error: str) -> None:

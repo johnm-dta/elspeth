@@ -34,15 +34,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@f94ec08e8a939077b949bc5c38acff26de0092c1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -71,10 +71,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -97,10 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -121,10 +121,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -145,15 +145,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@f94ec08e8a939077b949bc5c38acff26de0092c1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -187,15 +187,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@f94ec08e8a939077b949bc5c38acff26de0092c1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -227,7 +227,7 @@ jobs:
 
       - name: Upload coverage report
         if: matrix.coverage && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595
         with:
           name: coverage-report
           path: coverage.xml
@@ -243,15 +243,15 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@f94ec08e8a939077b949bc5c38acff26de0092c1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -287,15 +287,15 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@f94ec08e8a939077b949bc5c38acff26de0092c1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -308,7 +308,7 @@ jobs:
         run: uv sync --frozen --all-extras
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1f8c6b94b26d0feae1e387ca63cebdc29d273327
         with:
           node-version: "22"
           cache: "npm"
@@ -330,7 +330,7 @@ jobs:
 
       - name: Upload Playwright HTML report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595
         with:
           name: playwright-report
           path: src/elspeth/web/frontend/playwright-report/
@@ -338,7 +338,7 @@ jobs:
 
       - name: Upload Playwright traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595
         with:
           name: playwright-traces
           path: src/elspeth/web/frontend/test-results/

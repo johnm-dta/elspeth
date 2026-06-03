@@ -59,6 +59,18 @@ concurrency:
 permissions:
   contents: read
 
+# Every ``run`` step in this workflow is a bash script: the gate steps use
+# ``set -o pipefail`` and the bash-only ``${PIPESTATUS[0]}`` to capture a
+# command's exit status through a ``| tee`` pipe. Inside the
+# ``python:3.13-bookworm`` container jobs, GitHub's shell auto-detection falls
+# back to ``sh -e {0}`` (dash), which rejects ``set -o pipefail`` ("Illegal
+# option") and has no ``PIPESTATUS`` — so the steps crashed before running their
+# real check. Declaring bash explicitly (the image ships it) makes the shell
+# deterministic across the container and host jobs alike.
+defaults:
+  run:
+    shell: bash
+
 # Public-repository guardrail mirrors ci.yaml: fork PRs stay on
 # GitHub-hosted runners; trusted pushes and same-repository PRs use
 # nyx. Both gates are I/O-light (no compilation, no tests); a small

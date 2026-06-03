@@ -180,6 +180,10 @@ vi.mock("../api/client", () => ({
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   fetchMessages: vi.fn(),
+  // refreshAll fans out to refreshInterpretationEventsForSession on session
+  // select; without the mock entry the incidental call throws "no export
+  // defined on the mock" as an unhandled error and fails the run.
+  listInterpretationEvents: vi.fn().mockResolvedValue([]),
   getBlobMetadata: vi.fn(),
   previewBlobContent: vi.fn(),
   // toInlineSourceProvenance is a pure function the projection effect

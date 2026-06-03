@@ -127,6 +127,11 @@ vi.mock("./api/client", () => ({
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   fetchMessages: vi.fn(),
+  // refreshAll fans out to refreshInterpretationEventsForSession on session
+  // select, so this is called incidentally during App render. Without the mock
+  // entry the call throws "no export defined on the mock" as an unhandled error
+  // and fails the run even though every assertion passes.
+  listInterpretationEvents: vi.fn().mockResolvedValue([]),
   // Phase 1B: account-level composer preferences. The real preferencesStore
   // module imports these from @/api/client and would receive `undefined`
   // (throwing at first call) without the mock entries.

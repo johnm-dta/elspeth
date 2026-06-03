@@ -191,12 +191,8 @@ class TestLoadTopFailureSamples:
         # distinct categories must now stay distinct so the operator sees that
         # two unrelated failure modes occurred, not one.
         db, run_id, transform_id = _make_run_with_transform()
-        _record_messageless_error(
-            db, run_id, transform_id, reason="missing_field", token_id="tm0", row_index=0
-        )
-        _record_messageless_error(
-            db, run_id, transform_id, reason="api_error", token_id="ta0", row_index=1
-        )
+        _record_messageless_error(db, run_id, transform_id, reason="missing_field", token_id="tm0", row_index=0)
+        _record_messageless_error(db, run_id, transform_id, reason="api_error", token_id="ta0", row_index=1)
 
         samples = load_top_failure_samples(db, run_id, limit=3)
 

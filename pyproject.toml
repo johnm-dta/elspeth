@@ -344,6 +344,17 @@ module = [
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# claude_agent_sdk is the optional `judge-agent` extra of the elspeth-lints
+# subpackage — deliberately NOT installed in the base CI environment (the main
+# project's `.[all]` does not pull a subpackage's extras). judge.py imports it
+# lazily inside a `try/except ImportError` so the openrouter transport works
+# without it; mypy still resolves the import statement and would fail with
+# import-not-found. Unlike the stubless-but-installed block above, this entry IS
+# justified by absence-from-extras.
+module = ["claude_agent_sdk", "claude_agent_sdk.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # dynaconf lacks type stubs; mypy non-deterministically resolves Dynaconf
 # depending on cache state, causing attr-defined on cold runs and
 # unused-ignore on warm runs. Skip analysis entirely.

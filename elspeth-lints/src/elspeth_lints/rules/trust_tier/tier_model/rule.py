@@ -1437,9 +1437,12 @@ class TierModelVisitor(ast.NodeVisitor):
         if is_broad:
             # Check if the handler re-raises
             has_reraise = False
-            for child in ast.walk(node):
-                if isinstance(child, ast.Raise):
-                    has_reraise = True
+            for statement in node.body:
+                for child in iter_own_scope(statement):
+                    if isinstance(child, ast.Raise):
+                        has_reraise = True
+                        break
+                if has_reraise:
                     break
 
             if not has_reraise:
@@ -1986,27 +1989,70 @@ def scan_dump_edges(
             }
         )
 
-    # SCC detection — Δ5 mandate. Edge endpoints not previously in nodes_out (edges may
-    # cross into other layers if include_layers spans more than one) are added so the
-    # graph is closed. Non-trivial SCCs (size ≥ 2) reported.
-    try:
-        import networkx as nx
-    except ImportError:
-        # NetworkX is in the project dep stack (per CLAUDE.md), so this is a tooling
-        # break, not a normal failure. Surface it loudly and emit no SCCs.
-        print("Warning: networkx unavailable; SCC detection skipped.", file=sys.stderr)
-        return nodes_out, edges_out, []
-
-    graph: nx.DiGraph[str] = nx.DiGraph()
-    for n in nodes_out:
-        graph.add_node(n["id"])
-    for e in edges_out:
-        graph.add_edge(e["from"], e["to"])
-
-    sccs_raw = [sorted(scc) for scc in nx.strongly_connected_components(graph) if len(scc) >= 2]
-    sccs_raw.sort(key=lambda items: (len(items), items[0] if items else ""))
+    # SCC detection — Δ5 mandate. Edge endpoints not previously in nodes_out
+    # (edges may cross into other layers if include_layers spans more than one)
+    # are included by the local Tarjan implementation so the graph is closed.
+    # Non-trivial SCCs (size ≥ 2) are reported.
+    sccs_raw = _nontrivial_strongly_connected_components(
+        node_ids=[n["id"] for n in nodes_out],
+        edge_pairs=[(e["from"], e["to"]) for e in edges_out],
+    )
 
     return nodes_out, edges_out, sccs_raw
+
+
+def _nontrivial_strongly_connected_components(
+    *,
+    node_ids: list[str],
+    edge_pairs: list[tuple[str, str]],
+) -> list[list[str]]:
+    """Return deterministic non-trivial SCCs using Tarjan's algorithm."""
+    adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    for src, tgt in edge_pairs:
+        adjacency.setdefault(src, set()).add(tgt)
+        adjacency.setdefault(tgt, set())
+
+    index_counter = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def strongconnect(node_id: str) -> None:
+        nonlocal index_counter
+        indices[node_id] = index_counter
+        lowlinks[node_id] = index_counter
+        index_counter += 1
+        stack.append(node_id)
+        on_stack.add(node_id)
+
+        for successor in sorted(adjacency[node_id]):
+            if successor not in indices:
+                strongconnect(successor)
+                lowlinks[node_id] = min(lowlinks[node_id], lowlinks[successor])
+            elif successor in on_stack:
+                lowlinks[node_id] = min(lowlinks[node_id], indices[successor])
+
+        if lowlinks[node_id] != indices[node_id]:
+            return
+
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node_id:
+                break
+        if len(component) >= 2:
+            components.append(sorted(component))
+
+    for node_id in sorted(adjacency):
+        if node_id not in indices:
+            strongconnect(node_id)
+
+    components.sort(key=lambda items: (len(items), items[0] if items else ""))
+    return components
 
 
 # =============================================================================

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator,
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -415,8 +415,9 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
+            assert self.oidc_issuer is not None
+            object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
             if self.oidc_authorization_endpoint is not None:
-                assert self.oidc_issuer is not None
                 object.__setattr__(
                     self,
                     "oidc_authorization_endpoint",

@@ -17,12 +17,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.cli_helpers import PluginBundle
 from elspeth.contracts.errors import CommencementGateFailedError
 from elspeth.core.dependency_config import (
     CommencementGateConfig,
     DependencyRunResult,
 )
+from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
 
 
 def _make_bootstrap_config() -> MagicMock:
@@ -61,8 +61,8 @@ class TestBootstrapDependencyDispatch:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -80,7 +80,7 @@ class TestBootstrapDependencyDispatch:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             bootstrap_and_run(Path("/fake/pipeline.yaml"))
 
@@ -99,8 +99,8 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -114,7 +114,7 @@ class TestBootstrapProgrammaticExecution:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             with pytest.raises(RuntimeError, match="close failed"):
                 bootstrap_and_run(Path("/fake/pipeline.yaml"))
@@ -127,8 +127,8 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -142,7 +142,7 @@ class TestBootstrapProgrammaticExecution:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             with pytest.raises(ValueError, match="pipeline failed"):
                 bootstrap_and_run(Path("/fake/pipeline.yaml"))
@@ -154,8 +154,8 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -169,7 +169,7 @@ class TestBootstrapProgrammaticExecution:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             bootstrap_and_run(Path("/fake/pipeline.yaml"))
 
@@ -241,8 +241,8 @@ class TestBootstrapDependencyResultsFlow:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -257,7 +257,7 @@ class TestBootstrapDependencyResultsFlow:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             bootstrap_and_run(Path("/fake/pipeline.yaml"))
 
@@ -283,8 +283,8 @@ class TestBootstrapCommencementGateDispatch:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
             patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
@@ -301,7 +301,7 @@ class TestBootstrapCommencementGateDispatch:
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
             mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             bootstrap_and_run(Path("/fake/pipeline.yaml"))
 
@@ -319,8 +319,8 @@ class TestBootstrapCommencementGateDispatch:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch(
                 "elspeth.engine.commencement.evaluate_commencement_gates",
@@ -336,7 +336,7 @@ class TestBootstrapCommencementGateDispatch:
             mock_graph = MagicMock()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
-            from elspeth.cli_helpers import bootstrap_and_run
+            from elspeth.cli import bootstrap_and_run
 
             with pytest.raises(CommencementGateFailedError, match="test_gate"):
                 bootstrap_and_run(Path("/fake/pipeline.yaml"))

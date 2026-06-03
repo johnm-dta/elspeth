@@ -311,6 +311,35 @@ def test_case07_scc_detection(temp_root: Path) -> None:
     assert any(set(scc) == cycle for scc in sccs), f"expected 3-node SCC {cycle}, got {sccs}"
 
 
+def test_case07_scc_detection_without_networkx(temp_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SCC detection must remain correct when NetworkX is not installed."""
+    _write(temp_root / "alpha" / "__init__.py", "")
+    _write(temp_root / "beta" / "__init__.py", "")
+    _write(temp_root / "gamma" / "__init__.py", "")
+    _write(temp_root / "alpha" / "mod.py", "from elspeth.beta import mod  # noqa: F401\n")
+    _write(temp_root / "beta" / "mod.py", "from elspeth.gamma import mod  # noqa: F401\n")
+    _write(temp_root / "gamma" / "mod.py", "from elspeth.alpha import mod  # noqa: F401\n")
+
+    real_import = __import__
+
+    def import_without_networkx(name: str, *args: object, **kwargs: object) -> object:
+        if name == "networkx":
+            raise ImportError("networkx deliberately unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "networkx", raising=False)
+    monkeypatch.setattr("builtins.__import__", import_without_networkx)
+
+    _, _, sccs = scan_dump_edges(
+        root=temp_root,
+        include_layers=frozenset({3}),
+        collapse_to_subsystem=True,
+    )
+
+    cycle = {"alpha", "beta", "gamma"}
+    assert any(set(scc) == cycle for scc in sccs), f"expected 3-node SCC {cycle}, got {sccs}"
+
+
 # =============================================================================
 # Case 8 — Determinism (--no-timestamp)
 # =============================================================================

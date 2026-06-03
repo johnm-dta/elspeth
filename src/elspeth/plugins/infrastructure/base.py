@@ -317,14 +317,14 @@ class BaseTransform(ABC):
     # Transforms extending TransformDataConfig override this from config.
     # Always non-None at runtime (TransformSettings requires on_error).
     # Base class default is None because injection happens post-construction
-    # via cli_helpers bridge (set from TransformSettings.on_error).
+    # via runtime_factory bridge (set from TransformSettings.on_error).
     on_error: str | None = None
 
     # Success routing configuration
     # Terminal transforms set this to the output sink name.
     # Always non-None at runtime (TransformSettings requires on_success).
     # Base class default is None because injection happens post-construction
-    # via cli_helpers bridge (set from TransformSettings.on_success).
+    # via runtime_factory bridge (set from TransformSettings.on_success).
     on_success: str | None = None
 
     # DAG contract for output field validation (centralized in DAG builder).

@@ -5,8 +5,8 @@ allowed_external_types:
   - "tui/types:TokenDisplayInfo"
   # DAG wiring helper type shared between CLI instantiation and graph construction
   - "core/dag/models:WiredTransform"
-  # Plugin bundle type shared between CLI helpers and CLI entry points
-  - "cli_helpers:PluginBundle"
+  # Plugin bundle type shared between runtime construction, CLI, and web preflight
+  - "plugins/infrastructure/runtime_factory:PluginBundle"
   # SSRF safety type - security infrastructure, tightly coupled to validation logic
   - "core/security/web:SSRFSafeRequest"
   # Engine types used in testing factories - test infrastructure wraps these for convenience
@@ -428,8 +428,6 @@ allowed_dict_patterns:
   # ═══════════════════════════════════════════════════════════════════════════
   # HTTP CLIENTS - External API trust boundary
   # ═══════════════════════════════════════════════════════════════════════════
-  - "src/elspeth/plugins/infrastructure/clients/http.py:AuditedHTTPClient._execute_request:json"
-  - "src/elspeth/plugins/infrastructure/clients/http.py:AuditedHTTPClient.post:json"
   # OpenRouter direct provider — OpenAI-compatible response_format and raw
   # provider JSON are dynamic API payload shapes. LLMCallRequest and
   # LLMCallResponse are the typed audit contracts around these mappings.

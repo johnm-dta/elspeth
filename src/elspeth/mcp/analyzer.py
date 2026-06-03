@@ -61,7 +61,7 @@ class LandscapeAnalyzer:
             database_url: SQLAlchemy connection URL (e.g., sqlite:////home/john/elspeth/data/runs/audit.db)
             passphrase: SQLCipher encryption passphrase (if database is encrypted)
         """
-        self._db = LandscapeDB.from_url(database_url, passphrase=passphrase, create_tables=False)
+        self._db = LandscapeDB.from_url(database_url, passphrase=passphrase, create_tables=False, read_only=True)
         self._factory = RecorderFactory(self._db)
 
     def close(self) -> None:

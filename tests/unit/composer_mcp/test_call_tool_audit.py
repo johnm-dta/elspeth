@@ -113,6 +113,30 @@ async def test_arg_error_path_records_before_return() -> None:
     assert inv.version_after is None
 
 
+@pytest.mark.parametrize("bad_name", [123, {"x": "y"}])
+@pytest.mark.asyncio
+async def test_new_session_rejects_non_string_name_as_arg_error(bad_name: object) -> None:
+    """new_session.name must match the advertised MCP string schema."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        response = await _call_handler(server.request_handlers, "new_session", {"name": bad_name})
+        session_files = list(scratch.glob("*.json"))
+
+    assert response.root.isError is True
+    assert "'name' must be a string" in response.root.content[0].text
+    assert session_files == []
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.ARG_ERROR
+    assert inv.tool_name == "new_session"
+    assert inv.error_class == "ToolArgumentError"
+    assert inv.error_message == "ToolArgumentError"
+    assert inv.version_after is None
+
+
 @pytest.mark.asyncio
 async def test_arg_error_payload_recorded_for_audit_replay() -> None:
     """ARG_ERROR records carry result_canonical with the structured error

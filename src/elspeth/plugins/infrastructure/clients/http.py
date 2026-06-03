@@ -312,7 +312,7 @@ class AuditedHTTPClient(AuditedClientBase):
         url: str,
         headers: dict[str, str] | None,
         timeout: float | None,
-        json: dict[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
         params: dict[str, str | int | float] | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
@@ -437,7 +437,7 @@ class AuditedHTTPClient(AuditedClientBase):
         self,
         url: str,
         *,
-        json: dict[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
@@ -506,24 +506,65 @@ class AuditedHTTPClient(AuditedClientBase):
             token_id=token_id,
         )
 
-    def get_ssrf_safe(
+    @staticmethod
+    def _send_ssrf_safe_request(
+        client: httpx.Client,
+        method: str,
+        connection_url: str,
+        *,
+        headers: dict[str, str],
+        extensions: dict[str, str] | None,
+        json: Mapping[str, Any] | None,
+        params: dict[str, str | int | float] | None,
+    ) -> httpx.Response:
+        """Send one IP-pinned request with method-specific httpx handling."""
+        if method == "GET":
+            return client.get(
+                connection_url,
+                params=params,
+                headers=headers,
+                extensions=extensions,
+            )
+        if method == "POST":
+            return client.post(
+                connection_url,
+                json=json,
+                headers=headers,
+                extensions=extensions,
+            )
+        return client.request(
+            method,
+            connection_url,
+            json=json,
+            params=params,
+            headers=headers,
+            extensions=extensions,
+        )
+
+    def request_ssrf_safe(
         self,
+        method: str,
         request: SSRFSafeRequest,
         *,
         headers: dict[str, str] | None = None,
+        json: Mapping[str, Any] | None = None,
+        params: dict[str, str | int | float] | None = None,
         follow_redirects: bool = False,
         max_redirects: int = 10,
         allowed_ranges: Sequence[IPv4Network | IPv6Network] = (),
     ) -> tuple[httpx.Response, str, Call]:
-        """GET with SSRF-safe IP pinning and redirect validation.
+        """HTTP request with SSRF-safe IP pinning and redirect validation.
 
         Connects to the pre-validated IP in the SSRFSafeRequest, setting the
         Host header and TLS SNI to the original hostname. Each redirect hop
         is independently validated against the SSRF blocklist.
 
         Args:
+            method: HTTP method to send for the initial request.
             request: SSRFSafeRequest from validate_url_for_ssrf()
             headers: Additional headers for this request
+            json: JSON body for POST requests.
+            params: Query parameters for GET requests.
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
             allowed_ranges: IP networks that may bypass the default SSRF
@@ -544,6 +585,7 @@ class AuditedHTTPClient(AuditedClientBase):
             httpx.HTTPError: For network/HTTP errors
             SSRFBlockedError: If redirect target resolves to blocked IP
         """
+        method_upper = method.upper()
         self._acquire_rate_limit()
 
         call_index = self._next_call_index()
@@ -565,9 +607,11 @@ class AuditedHTTPClient(AuditedClientBase):
         # Record original URL and resolved IP in audit trail.
         # DTO stays alive for typed telemetry payload; dict form used for Landscape hashing.
         request_dto = HTTPCallRequest(
-            method="GET",
+            method=method_upper,
             url=request.original_url,
             headers=self._filter_request_headers(merged_headers),
+            json=json,
+            params=params,
             resolved_ip=request.resolved_ip,
         )
         request_data = request_dto.to_dict()
@@ -585,10 +629,14 @@ class AuditedHTTPClient(AuditedClientBase):
                 timeout=effective_timeout,
                 follow_redirects=False,
             ) as ssrf_client:
-                response = ssrf_client.get(
+                response = self._send_ssrf_safe_request(
+                    ssrf_client,
+                    method_upper,
                     connection_url,
                     headers=merged_headers,
                     extensions=extensions if extensions else None,
+                    json=json,
+                    params=params,
                 )
 
             # Handle redirects with SSRF validation at each hop
@@ -680,6 +728,29 @@ class AuditedHTTPClient(AuditedClientBase):
             )
 
             raise
+
+    def get_ssrf_safe(
+        self,
+        request: SSRFSafeRequest,
+        *,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = False,
+        max_redirects: int = 10,
+        allowed_ranges: Sequence[IPv4Network | IPv6Network] = (),
+    ) -> tuple[httpx.Response, str, Call]:
+        """GET with SSRF-safe IP pinning and redirect validation.
+
+        Compatibility wrapper around ``request_ssrf_safe()`` for existing
+        callers that only fetch pages.
+        """
+        return self.request_ssrf_safe(
+            "GET",
+            request,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            max_redirects=max_redirects,
+            allowed_ranges=allowed_ranges,
+        )
 
     def _follow_redirects_safe(
         self,

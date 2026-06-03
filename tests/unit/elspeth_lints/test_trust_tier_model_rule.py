@@ -598,6 +598,21 @@ class TestR4BroadExcept:
         r4_findings = [f for f in findings if f.rule_id == "R4"]
         assert len(r4_findings) == 0
 
+    def test_nested_helper_raise_does_not_satisfy_outer_handler(self) -> None:
+        """A raise inside a nested helper is not a re-raise by the handler."""
+        source = dedent("""
+            try:
+                risky_operation()
+            except Exception:
+                def helper():
+                    raise RuntimeError("not the handler")
+                record_problem()
+        """)
+        findings = parse_and_visit(source)
+
+        r4_findings = [f for f in findings if f.rule_id == "R4"]
+        assert len(r4_findings) == 1
+
     def test_ignores_specific_exceptions(self) -> None:
         """Catching specific exceptions should NOT be flagged."""
         source = dedent("""

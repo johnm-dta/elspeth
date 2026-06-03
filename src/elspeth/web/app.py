@@ -48,7 +48,7 @@ from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.routes import catalog_router
@@ -240,9 +240,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Resolve OIDC authorization_endpoint from discovery or explicit config
     if settings.auth_provider in ("oidc", "entra"):
         if settings.oidc_issuer:
-            issuer = settings.oidc_issuer.rstrip("/")
+            issuer = validate_oidc_issuer(settings.oidc_issuer)
         elif settings.auth_provider == "entra" and settings.entra_tenant_id:
-            issuer = f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0"
+            issuer = validate_oidc_issuer(f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0")
         else:
             raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
 

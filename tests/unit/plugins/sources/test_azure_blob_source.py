@@ -869,6 +869,42 @@ class TestAzureBlobSourceAuditAndErrors:
         ):
             list(source.load(ctx))
 
+    @pytest.mark.parametrize(
+        ("blob_format", "blob_path", "blob_bytes"),
+        [
+            ("csv", "data/input.csv", b"id,name\n1,Ada\n2,Grace\n"),
+            ("json", "data/input.json", b'[{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}]'),
+            ("jsonl", "data/input.jsonl", b'{"id": 1, "name": "Ada"}\n{"id": 2, "name": "Grace"}\n'),
+        ],
+    )
+    def test_success_paths_record_audit_without_normal_info_logs(
+        self,
+        blob_format: str,
+        blob_path: str,
+        blob_bytes: bytes,
+    ) -> None:
+        """Normal success paths keep probative facts in audit, not info logs."""
+        source = _make_source(_base_config(format=blob_format, blob_path=blob_path))
+        ctx = MagicMock()
+
+        with (
+            patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)),
+            patch("elspeth.plugins.sources.azure_blob_source.logger.info") as mock_info,
+        ):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        mock_info.assert_not_called()
+        ctx.record_call.assert_called_once()
+        call_kwargs = ctx.record_call.call_args.kwargs
+        assert call_kwargs["request_data"] == {
+            "operation": "download_blob",
+            "container": "test-container",
+            "blob_path": blob_path,
+        }
+        assert call_kwargs["response_data"] == {"size_bytes": len(blob_bytes)}
+        assert call_kwargs["provider"] == "azure_blob_storage"
+
     def test_field_resolution_returned_for_csv(self, ctx: PluginContext) -> None:
         """get_field_resolution returns mapping for CSV after load."""
         csv_bytes = b"ID,Full Name\n1,Alice\n"

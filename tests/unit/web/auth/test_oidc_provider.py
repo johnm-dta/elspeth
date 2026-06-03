@@ -66,6 +66,26 @@ def mock_httpx_discovery(jwks_response):
 class TestOIDCDiscovery:
     """Tests for JWKS discovery and caching."""
 
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            "http://login.example.com",
+            "https://user:pass@login.example.com",
+            "https://127.0.0.1",
+            "https://169.254.169.254",
+            "https://login.example.com?tenant=default",
+            "https://login.example.com#fragment",
+        ],
+    )
+    def test_rejects_unsafe_issuer_before_discovery_network_call(self, issuer: str) -> None:
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient") as async_client,
+            pytest.raises(ValueError),
+        ):
+            JWKSTokenValidator(issuer=issuer, audience=AUDIENCE)
+
+        async_client.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_fetches_jwks_on_first_authenticate(
         self,

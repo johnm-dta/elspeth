@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode, plugin_preflight_mode_enabled
+from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sources.csv_source import CSVSource
 from elspeth.web.async_workers import run_sync_in_worker

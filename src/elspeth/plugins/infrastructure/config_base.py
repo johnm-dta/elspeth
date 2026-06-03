@@ -363,7 +363,7 @@ class SourceDataConfig(PathConfig):
 
     Note: on_success routing is defined at the settings level
     (SourceSettings in core/config.py), not here. The bridge in
-    cli_helpers.py injects on_success after plugin construction.
+    runtime_factory.py injects on_success after plugin construction.
     """
 
     _plugin_component_type: ClassVar[str | None] = "source"

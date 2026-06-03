@@ -12,6 +12,13 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from elspeth.contracts.probes import CollectionReadinessResult
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.core.security.web import (
+    NetworkError,
+    SSRFBlockedError,
+    SSRFSafeRequest,
+    validate_literal_ip_for_ssrf,
+    validate_url_for_ssrf,
+)
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
@@ -48,6 +55,14 @@ class AzureSearchProviderConfig(BaseModel):
             raise ValueError(f"endpoint must use HTTPS scheme, got {parsed.scheme!r}")
         if not parsed.hostname:
             raise ValueError(f"endpoint must have a hostname, got {v!r}")
+        if parsed.username or parsed.password:
+            raise ValueError("endpoint must not include embedded credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("endpoint must not include query strings or fragments")
+        try:
+            validate_literal_ip_for_ssrf(parsed.hostname)
+        except SSRFBlockedError as exc:
+            raise ValueError(f"endpoint literal IP is blocked by SSRF policy: {exc}") from exc
         return v
 
     @field_validator("index")
@@ -187,7 +202,18 @@ class AzureSearchProvider:
         self._http_client.update_call_context(state_id, token_id)
 
         try:
-            response = self._http_client.post(self._search_url, json=body)
+            try:
+                safe_request = validate_url_for_ssrf(self._search_url)
+            except SSRFBlockedError as exc:
+                raise RetrievalError(f"Azure AI Search endpoint blocked by SSRF validation: {exc}", retryable=False) from exc
+            except NetworkError as exc:
+                raise RetrievalError(f"Azure AI Search endpoint DNS validation failed: {exc}", retryable=True) from exc
+
+            response, _final_hostname_url, _call = self._http_client.request_ssrf_safe(
+                "POST",
+                safe_request,
+                json=body,
+            )
 
             status_code = response.status_code
             if status_code in (401, 403):
@@ -331,6 +357,25 @@ class AzureSearchProvider:
         normalized = (raw_score - min_val) / (max_val - min_val)
         return max(0.0, min(1.0, normalized))
 
+    @staticmethod
+    def _readiness_get(
+        safe_request: SSRFSafeRequest,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.Response:
+        request_headers = {**headers, "Host": safe_request.host_header}
+        extensions: dict[str, str] | None = None
+        if safe_request.scheme == "https":
+            extensions = {"sni_hostname": safe_request.sni_hostname}
+
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            return client.get(
+                safe_request.connection_url,
+                headers=request_headers,
+                extensions=extensions,
+            )
+
     def check_readiness(self) -> CollectionReadinessResult:
         """Check that the Azure Search index exists and has documents.
 
@@ -354,10 +399,11 @@ class AzureSearchProvider:
             count_url = f"{self._config.endpoint.rstrip('/')}/indexes/{index_name}/docs/$count?api-version={self._config.api_version}"
 
             # SSRF validation: resolve DNS and reject internal IPs before
-            # making the request. We validate then use the original URL (not the
-            # IP-pinned URL) to preserve TLS certificate verification.
+            # making the request. The request uses the returned IP-pinned URL
+            # with Host and TLS SNI set to the original hostname to avoid a
+            # validation-to-use DNS gap.
             try:
-                validate_url_for_ssrf(count_url)
+                safe_request = validate_url_for_ssrf(count_url)
             except (SSRFBlockedError, NetworkError) as exc:
                 return CollectionReadinessResult(
                     collection=index_name,
@@ -376,7 +422,7 @@ class AzureSearchProvider:
                 token = credential.get_token("https://search.azure.com/.default")
                 headers["Authorization"] = f"Bearer {token.token}"
 
-            response = httpx.get(count_url, headers=headers, timeout=10.0)
+            response = self._readiness_get(safe_request, headers=headers, timeout=10.0)
 
             if response.status_code == 404:
                 # Index absent — count is unknown, not zero.

@@ -1126,6 +1126,42 @@ class TestValidatePipelineSuccess:
 
 
 class TestValidatePipelineSettingsFailure:
+    def test_file_backed_template_options_fail_during_web_settings_load_before_plugins(self) -> None:
+        pipeline_yaml = """
+source:
+  plugin: csv
+  on_success: transform_in
+  options: {}
+transforms:
+  - name: classify
+    plugin: llm
+    input: transform_in
+    on_success: results
+    on_error: results
+    options:
+      template_file: prompt.txt
+      lookup_file: lookup.yaml
+      system_prompt_file: system.txt
+sinks:
+  primary:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: output.jsonl
+"""
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = pipeline_yaml
+        state = _make_state(nodes=(_make_node(plugin="llm"),), outputs=(_make_output(),))
+        settings = _make_settings()
+
+        with patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate:
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "settings_load").passed is False
+        assert any("template_file" in error.message and "load_settings()" in error.message for error in result.errors)
+        mock_instantiate.assert_not_called()
+
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
     def test_pydantic_validation_error_short_circuits(
         self,

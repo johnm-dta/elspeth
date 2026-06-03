@@ -8,6 +8,7 @@ Settings are frozen (immutable) after construction.
 import ast
 import re
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -73,6 +74,13 @@ _DYNACONF_INTERNAL_KEYS = frozenset(
         # "secrets" is handled by SecretsConfig in the CLI, not by ElspethSettings.
         # It passes through Dynaconf but is consumed before Pydantic validation.
         "secrets",
+    }
+)
+_FILE_BACKED_TEMPLATE_OPTION_KEYS = frozenset(
+    {
+        "template_file",
+        "lookup_file",
+        "system_prompt_file",
     }
 )
 
@@ -1823,6 +1831,30 @@ def _expand_config_templates(
     return config
 
 
+def _reject_file_backed_template_options_for_in_memory_loader(raw_config: Mapping[str, object]) -> None:
+    """Reject file-backed template expansion options without a settings file root."""
+    for collection_name in ("transforms", "aggregations"):
+        collection = raw_config[collection_name] if collection_name in raw_config else None
+        if not isinstance(collection, list):
+            continue
+        for index, plugin_config in enumerate(collection):
+            if not isinstance(plugin_config, dict):
+                continue
+            options = plugin_config["options"] if "options" in plugin_config else None
+            if not isinstance(options, dict):
+                continue
+            present = sorted(key for key in _FILE_BACKED_TEMPLATE_OPTION_KEYS if key in options)
+            if not present:
+                continue
+            raw_name = plugin_config["name"] if "name" in plugin_config else index
+            raise ValueError(
+                "load_settings_from_yaml_string() cannot expand file-backed template options "
+                f"{present} for {collection_name}[{raw_name!r}] because in-memory web execution "
+                "has no trusted settings file base path. Use load_settings() for file-backed "
+                "configs, or inline prompt_template, lookup, and system_prompt before web validation/execution."
+            )
+
+
 def _fingerprint_config_for_audit(
     config_dict: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2160,7 +2192,9 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
     This is used by the web execution service to load pipeline configs
     that may contain resolved secrets. Unlike load_settings(), this
     skips Dynaconf (no env var merging) and file I/O, ensuring secret
-    values never leave process memory.
+    values never leave process memory. File-backed template options
+    (template_file, lookup_file, system_prompt_file) are rejected because
+    there is no trusted settings-file root for resolving them.
 
     Args:
         yaml_content: YAML configuration as a string.
@@ -2179,6 +2213,7 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_file_backed_template_options_for_in_memory_loader(raw_config)
     raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 

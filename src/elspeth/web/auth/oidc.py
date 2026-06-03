@@ -18,6 +18,7 @@ from jwt.exceptions import PyJWTError
 
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
+from elspeth.web.auth.urls import validate_oidc_issuer
 from elspeth.web.validation import has_visible_content
 
 slog = structlog.get_logger()
@@ -47,7 +48,7 @@ class JWKSTokenValidator:
         jwks_cache_ttl_seconds: int = 3600,
         jwks_failure_retry_seconds: int = 300,
     ) -> None:
-        self._issuer = issuer.rstrip("/")
+        self._issuer = validate_oidc_issuer(issuer)
         self._audience = audience
         self._jwks_cache_ttl_seconds = jwks_cache_ttl_seconds
         # 300s default (5 min): JWKS keys rotate on the order of hours

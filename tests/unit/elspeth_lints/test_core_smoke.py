@@ -96,6 +96,60 @@ def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, cap
     assert "demo.scoped" in captured.err
 
 
+def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path, capsys: object) -> None:
+    """Whole-repo rules must not make unparseable files invisible."""
+    import argparse
+    from collections.abc import Iterable
+
+    from elspeth_lints.core.cli import _run_check
+    from elspeth_lints.core.protocols import Category, Finding, RuleContext, RuleMetadata, RuleScope, Severity
+    from elspeth_lints.core.registry import RuleRegistry
+
+    class WholeRepoRule:
+        id = "demo.whole"
+        scope = RuleScope.WHOLE_REPO
+        metadata = RuleMetadata(
+            id=id,
+            name="Whole repo",
+            description="Demo whole-repo rule.",
+            severity=Severity.ERROR,
+            category=Category.MANIFEST,
+            cwe=(),
+            scope=scope,
+            path_filter=None,
+            examples_violation_count=1,
+            examples_clean_count=1,
+        )
+
+        def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> Iterable[Finding]:
+            del tree, file_path, context
+            return ()
+
+    (tmp_path / "good.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    (tmp_path / "invalid_utf8.py").write_bytes(b"\xff")
+    registry = RuleRegistry()
+    registry.register(WholeRepoRule())
+
+    exit_code = _run_check(
+        argparse.Namespace(
+            rules="demo.whole",
+            rule_set="static",
+            format="json",
+            root=tmp_path,
+            allowlist_dir=None,
+            files=None,
+        ),
+        registry=registry,
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    rule_ids = {finding["rule_id"] for finding in payload}
+    assert {"parse-error", "read-error"} <= rule_ids
+
+
 def test_registry_decorator_registers_rule() -> None:
     """The registry exposes a decorator-based API for future rule modules."""
     from elspeth_lints.core.findings import Finding

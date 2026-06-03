@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from urllib.parse import SplitResult, urlsplit
 
+from elspeth.core.security import SSRFBlockedError, validate_literal_ip_for_ssrf
+
 _HTTPS_DEFAULT_PORT = 443
 
 
@@ -51,3 +53,20 @@ def validate_oidc_authorization_endpoint(endpoint: str, *, issuer: str) -> str:
     if _origin(endpoint_url, field_name="authorization_endpoint") != _origin(issuer_url, field_name="issuer"):
         raise ValueError("authorization_endpoint must use the same origin as issuer")
     return endpoint_value
+
+
+def validate_oidc_issuer(issuer: str) -> str:
+    """Return a network-safe OIDC issuer URL for discovery and JWKS fetches."""
+    issuer_value = issuer.strip().rstrip("/")
+    issuer_url = _parse_https_url(issuer_value, field_name="issuer")
+
+    if issuer_url.query or issuer_url.fragment:
+        raise ValueError("issuer must not include a query string or fragment")
+    host = issuer_url.hostname
+    if host is None:
+        raise ValueError("issuer must be an absolute URL")
+    try:
+        validate_literal_ip_for_ssrf(host)
+    except SSRFBlockedError as exc:
+        raise ValueError("issuer host is blocked by SSRF policy") from exc
+    return issuer_value

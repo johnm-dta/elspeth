@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import httpx
 import pytest
 import respx
 
+from elspeth.core.security.web import SSRFBlockedError, SSRFSafeRequest
 from elspeth.plugins.infrastructure.clients.retrieval.azure_search import (
     AzureSearchProvider,
     AzureSearchProviderConfig,
@@ -21,6 +23,21 @@ class TestAzureSearchProviderConfig:
         with pytest.raises(ValueError, match="HTTPS"):
             AzureSearchProviderConfig(
                 endpoint="http://test.search.windows.net",
+                index="test",
+                api_key="key",
+            )
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://10.0.0.1",
+            "https://169.254.169.254",
+        ],
+    )
+    def test_rejects_blocked_literal_ip_endpoints(self, endpoint: str) -> None:
+        with pytest.raises(ValueError, match=r"blocked|metadata|private|loopback|link-local"):
+            AzureSearchProviderConfig(
+                endpoint=endpoint,
                 index="test",
                 api_key="key",
             )
@@ -357,7 +374,16 @@ class TestAzureSearchProviderReadiness:
     @pytest.fixture(autouse=True)
     def _bypass_ssrf_dns(self):
         """Readiness tests mock httpx; bypass live DNS pinning at that boundary."""
-        with patch("elspeth.core.security.web.validate_url_for_ssrf"):
+        safe_request = SSRFSafeRequest(
+            original_url="https://test.search.windows.net/indexes/test-index/docs/$count?api-version=2024-07-01",
+            resolved_ip="93.184.216.34",
+            host_header="test.search.windows.net",
+            port=443,
+            path="/indexes/test-index/docs/$count?api-version=2024-07-01",
+            scheme="https",
+            bare_hostname="test.search.windows.net",
+        )
+        with patch("elspeth.core.security.web.validate_url_for_ssrf", return_value=safe_request):
             yield
 
     def _make_provider(self) -> AzureSearchProvider:
@@ -394,7 +420,7 @@ class TestAzureSearchProviderReadiness:
 
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(text="42")):
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(text="42")):
             result = provider.check_readiness()
 
         assert isinstance(result, CollectionReadinessResult)
@@ -406,7 +432,7 @@ class TestAzureSearchProviderReadiness:
         """Index exists but is empty."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(text="0")):
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(text="0")):
             result = provider.check_readiness()
 
         assert result.reachable is True
@@ -417,7 +443,7 @@ class TestAzureSearchProviderReadiness:
         """Index does not exist — 404 response."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(status_code=404)):
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(status_code=404)):
             result = provider.check_readiness()
 
         assert result.reachable is True
@@ -428,7 +454,7 @@ class TestAzureSearchProviderReadiness:
         """Azure Search is unreachable."""
         provider = self._make_provider()
 
-        with patch("httpx.get", side_effect=ConnectionError("Connection refused")):
+        with patch.object(provider, "_readiness_get", side_effect=ConnectionError("Connection refused")):
             result = provider.check_readiness()
 
         assert result.reachable is False
@@ -439,7 +465,7 @@ class TestAzureSearchProviderReadiness:
         """API key is included in the readiness probe request."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(text="10")) as mock_get:
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(text="10")) as mock_get:
             provider.check_readiness()
 
         mock_get.assert_called_once()
@@ -450,10 +476,10 @@ class TestAzureSearchProviderReadiness:
         """Readiness probe uses the correct $count endpoint."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(text="5")) as mock_get:
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(text="5")) as mock_get:
             provider.check_readiness()
 
-        url = mock_get.call_args.args[0]
+        url = mock_get.call_args.args[0].original_url
         assert "/indexes/test-index/docs/$count" in url
         assert "api-version=2024-07-01" in url
 
@@ -461,7 +487,7 @@ class TestAzureSearchProviderReadiness:
         """Malformed $count response distinguishable from network failure."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(text="not-a-number")):
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(text="not-a-number")):
             result = provider.check_readiness()
 
         # Reachable (HTTP 200) but unparseable — distinct from unreachable
@@ -473,7 +499,7 @@ class TestAzureSearchProviderReadiness:
         """HTTP 500 during readiness probe reports unreachable."""
         provider = self._make_provider()
 
-        with patch("httpx.get", return_value=self._mock_response(status_code=500)):
+        with patch.object(provider, "_readiness_get", return_value=self._mock_response(status_code=500)):
             result = provider.check_readiness()
 
         assert result.reachable is False
@@ -499,7 +525,7 @@ class TestAzureSearchProviderReadiness:
         mock_credential.get_token.return_value = mock_token
 
         with (
-            patch("httpx.get", return_value=self._mock_response(text="10")) as mock_get,
+            patch.object(provider, "_readiness_get", return_value=self._mock_response(text="10")) as mock_get,
             patch(
                 "azure.identity.DefaultAzureCredential",
                 return_value=mock_credential,
@@ -515,12 +541,64 @@ class TestAzureSearchProviderReadiness:
         assert call_headers["Authorization"] == "Bearer managed-identity-token-123"
         assert "api-key" not in call_headers
 
+    def test_readiness_uses_pinned_connection_url_with_host_and_sni(self) -> None:
+        provider = self._make_provider()
+        safe_request = SSRFSafeRequest(
+            original_url="https://test.search.windows.net/indexes/test-index/docs/$count?api-version=2024-07-01",
+            resolved_ip="93.184.216.34",
+            host_header="test.search.windows.net",
+            port=443,
+            path="/indexes/test-index/docs/$count?api-version=2024-07-01",
+            scheme="https",
+            bare_hostname="test.search.windows.net",
+        )
+        mock_response = httpx.Response(
+            200,
+            text="12",
+            request=httpx.Request("GET", safe_request.connection_url),
+        )
+
+        with (
+            patch("elspeth.core.security.web.validate_url_for_ssrf", return_value=safe_request),
+            patch("httpx.get", side_effect=AssertionError("readiness must not request the hostname URL directly")),
+            patch("httpx.Client") as mock_client_class,
+        ):
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            result = provider.check_readiness()
+
+        assert result.reachable is True
+        assert result.count == 12
+        call = mock_client.get.call_args
+        assert call.args[0] == safe_request.connection_url
+        assert call.kwargs["headers"]["Host"] == "test.search.windows.net"
+        assert call.kwargs["headers"]["api-key"] == "test-key"
+        assert call.kwargs["extensions"]["sni_hostname"] == "test.search.windows.net"
+
+    def test_readiness_blocks_dns_to_private_before_request(self) -> None:
+        provider = self._make_provider()
+
+        with (
+            patch("elspeth.core.security.web.validate_url_for_ssrf", side_effect=SSRFBlockedError("Blocked IP range")),
+            patch.object(provider, "_readiness_get") as mock_get,
+        ):
+            result = provider.check_readiness()
+
+        assert result.reachable is False
+        assert result.count is None
+        assert "blocked by SSRF validation" in result.message
+        mock_get.assert_not_called()
+
     def test_uncaught_exception_crashes_through(self) -> None:
         """Programming errors (e.g. TypeError) must NOT be caught by check_readiness."""
         provider = self._make_provider()
 
         with (
-            patch("httpx.get", side_effect=TypeError("unexpected type")),
+            patch.object(provider, "_readiness_get", side_effect=TypeError("unexpected type")),
             pytest.raises(TypeError, match="unexpected type"),
         ):
             provider.check_readiness()
@@ -534,6 +612,12 @@ class TestExecuteSearchHTTP:
     """
 
     SEARCH_URL = "https://test.search.windows.net/indexes/test-index/docs/search?api-version=2024-07-01"
+    PINNED_SEARCH_URL = "https://93.184.216.34:443/indexes/test-index/docs/search?api-version=2024-07-01"
+
+    @pytest.fixture(autouse=True)
+    def _pin_search_dns(self):
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+            yield
 
     def _make_provider(self) -> AzureSearchProvider:
         config = AzureSearchProviderConfig(
@@ -556,7 +640,7 @@ class TestExecuteSearchHTTP:
         provider = self._make_provider()
 
         with respx.mock:
-            respx.post(self.SEARCH_URL).respond(status_code=status_code, json={"error": "Auth failed"})
+            respx.post(self.PINNED_SEARCH_URL).respond(status_code=status_code, json={"error": "Auth failed"})
 
             with pytest.raises(RetrievalError) as exc_info:
                 provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
@@ -570,7 +654,7 @@ class TestExecuteSearchHTTP:
         provider = self._make_provider()
 
         with respx.mock:
-            respx.post(self.SEARCH_URL).respond(status_code=429, json={"error": "Rate limited"})
+            respx.post(self.PINNED_SEARCH_URL).respond(status_code=429, json={"error": "Rate limited"})
 
             with pytest.raises(RetrievalError) as exc_info:
                 provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
@@ -584,7 +668,7 @@ class TestExecuteSearchHTTP:
         provider = self._make_provider()
 
         with respx.mock:
-            respx.post(self.SEARCH_URL).respond(status_code=500, json={"error": "Internal Server Error"})
+            respx.post(self.PINNED_SEARCH_URL).respond(status_code=500, json={"error": "Internal Server Error"})
 
             with pytest.raises(RetrievalError) as exc_info:
                 provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
@@ -603,11 +687,45 @@ class TestExecuteSearchHTTP:
         }
 
         with respx.mock:
-            respx.post(self.SEARCH_URL).respond(status_code=200, json=response_body)
+            respx.post(self.PINNED_SEARCH_URL).respond(status_code=200, json=response_body)
 
             result = provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
 
         assert result == response_body
+
+    def test_execute_search_uses_ssrf_pinned_post_connection(self) -> None:
+        provider = self._make_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+
+        with (
+            patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]),
+            respx.mock,
+        ):
+            ip_route = respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json=response_body))
+            hostname_route = respx.post(self.SEARCH_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+
+            result = provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+        assert result == response_body
+        assert ip_route.called, "Search POST must connect to the validated pinned IP"
+        assert not hostname_route.called, "Search POST must not re-resolve/request the hostname URL"
+
+    def test_execute_search_blocks_dns_to_private_before_request(self) -> None:
+        provider = self._make_provider()
+
+        with (
+            patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("10.0.0.1", 0))]),
+            patch.object(provider._http_client, "request_ssrf_safe") as mock_request,
+            pytest.raises(RetrievalError, match="blocked by SSRF validation") as exc_info,
+        ):
+            provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+        assert not exc_info.value.retryable
+        mock_request.assert_not_called()
 
     def test_200_malformed_json_raises_non_retryable(self) -> None:
         """HTTP 200 with unparseable body maps to RetrievalError(retryable=False)."""
@@ -615,7 +733,7 @@ class TestExecuteSearchHTTP:
         provider = self._make_provider()
 
         with respx.mock:
-            respx.post(self.SEARCH_URL).respond(
+            respx.post(self.PINNED_SEARCH_URL).respond(
                 status_code=200,
                 content=b"this is not json",
                 headers={"Content-Type": "text/plain"},

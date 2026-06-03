@@ -1268,6 +1268,50 @@ sinks:
         mock_orch_cls.assert_not_called()
 
 
+class TestWebRuntimeConfigLoading:
+    """Web execution rejects file-backed config options before runtime graph construction."""
+
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_file_backed_template_options_fail_before_runtime_graph(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_runtime_graph: MagicMock,
+        service: ExecutionServiceImpl,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls
+        pipeline_yaml = """
+source:
+  plugin: csv
+  on_success: transform_in
+  options: {}
+transforms:
+  - name: classify
+    plugin: llm
+    input: transform_in
+    on_success: results
+    on_error: results
+    options:
+      template_file: prompt.txt
+      lookup_file: lookup.yaml
+      system_prompt_file: system.txt
+sinks:
+  primary:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: output.jsonl
+"""
+        mock_runtime_graph.side_effect = AssertionError("runtime graph must not be built")
+
+        with pytest.raises(ValueError, match="template_file"):
+            service._run_pipeline(str(uuid4()), pipeline_yaml, threading.Event())
+
+        mock_runtime_graph.assert_not_called()
+
+
 # ── B7: BaseException + Done Callback ─────────────────────────────────
 
 

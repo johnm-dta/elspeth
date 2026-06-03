@@ -13,6 +13,8 @@ Landscape audit database.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy import (
     DDL,
     Boolean,
@@ -99,10 +101,47 @@ from sqlalchemy.types import JSON
 SESSION_SCHEMA_EPOCH = 17
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
+_POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
 
 
-def _sql_non_blank_text(column_name: str) -> str:
-    return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
+def _sql_non_blank_text(column_name: str, *, dialect: Literal["sqlite", "postgresql"]) -> str:
+    if dialect == "sqlite":
+        return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
+    return f"length(btrim({column_name}, {_POSTGRESQL_ASCII_WHITESPACE})) > 0"
+
+
+def _composition_proposals_composer_provenance_check(*, dialect: Literal["sqlite", "postgresql"]) -> str:
+    return (
+        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
+        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
+        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
+        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('composer_model_identifier', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_model_version', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_provider', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_skill_hash', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('tool_arguments_hash', dialect=dialect)}))"
+    )
+
+
+def _blobs_creating_llm_provenance_check(*, dialect: Literal["sqlite", "postgresql"]) -> str:
+    return (
+        "((creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) AND "
+        "created_from_message_id IS NOT NULL AND "
+        f"{_sql_non_blank_text('created_from_message_id', dialect=dialect)} AND "
+        "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
+        "creating_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('creating_model_identifier', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_model_version', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_provider', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_composer_skill_hash', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_arguments_hash', dialect=dialect)}) OR "
+        "(creation_modality = 'verbatim' AND "
+        "creating_model_identifier IS NULL AND creating_model_version IS NULL AND "
+        "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
+        "creating_arguments_hash IS NULL)"
+    )
 
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
@@ -488,15 +527,13 @@ composition_proposals_table = Table(
         name="ck_composition_proposals_committed_state",
     ),
     CheckConstraint(
-        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
-        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
-        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
-        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL AND "
-        f"{_sql_non_blank_text('composer_model_identifier')} AND {_sql_non_blank_text('composer_model_version')} AND "
-        f"{_sql_non_blank_text('composer_provider')} AND {_sql_non_blank_text('composer_skill_hash')} AND "
-        f"{_sql_non_blank_text('tool_arguments_hash')}))",
+        _composition_proposals_composer_provenance_check(dialect="sqlite"),
         name="ck_composition_proposals_composer_provenance_all_or_none",
-    ),
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        _composition_proposals_composer_provenance_check(dialect="postgresql"),
+        name="ck_composition_proposals_composer_provenance_all_or_none",
+    ).ddl_if(dialect="postgresql"),
 )
 
 # Per-event ``payload`` JSON contract (Tier-1 schema; CLAUDE.md
@@ -1190,21 +1227,13 @@ blobs_table = Table(
     # lets partial/whitespace creating_* values on verbatim rows pass as
     # "not fully populated", which weakens the audit nullability contract.
     CheckConstraint(
-        "((creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) AND "
-        "created_from_message_id IS NOT NULL AND "
-        f"{_sql_non_blank_text('created_from_message_id')} AND "
-        "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
-        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
-        "creating_arguments_hash IS NOT NULL AND "
-        f"{_sql_non_blank_text('creating_model_identifier')} AND {_sql_non_blank_text('creating_model_version')} AND "
-        f"{_sql_non_blank_text('creating_provider')} AND {_sql_non_blank_text('creating_composer_skill_hash')} AND "
-        f"{_sql_non_blank_text('creating_arguments_hash')}) OR "
-        "(creation_modality = 'verbatim' AND "
-        "creating_model_identifier IS NULL AND creating_model_version IS NULL AND "
-        "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
-        "creating_arguments_hash IS NULL)",
+        _blobs_creating_llm_provenance_check(dialect="sqlite"),
         name="ck_blobs_creating_llm_provenance_nullability",
-    ),
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        _blobs_creating_llm_provenance_check(dialect="postgresql"),
+        name="ck_blobs_creating_llm_provenance_nullability",
+    ).ddl_if(dialect="postgresql"),
     CheckConstraint(
         "created_by IN ('user', 'assistant', 'pipeline')",
         name="ck_blobs_created_by",

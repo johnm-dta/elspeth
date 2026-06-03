@@ -21,6 +21,7 @@ Tests for explain_token that hit this path are marked xfail.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -802,6 +803,30 @@ class TestGetRunSummary:
         assert result["errors"]["total"] == 0
         distribution = {(entry["outcome"], entry["path"], entry["completed"]): entry["count"] for entry in result["outcome_distribution"]}
         assert distribution[(TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value, True)] == 1
+
+    def test_summary_token_count_uses_token_run_ownership(self) -> None:
+        """A wrong-run token that references a target row must not be counted."""
+        p = _build_linear_pipeline(run_id="summary-target-run")
+        db = p["db"]
+        factory = p["factory"]
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="summary-other-run")
+
+        from elspeth.core.landscape.schema import tokens_table
+
+        with db.connection() as conn:
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="wrong-run-token",
+                    row_id=p["row"].row_id,
+                    run_id="summary-other-run",
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+        result = get_run_summary(db, factory, "summary-target-run")
+
+        assert "error" not in result
+        assert result["counts"]["tokens"] == 1
 
     def test_summary_for_nonexistent_run(self) -> None:
         """get_run_summary returns error for unknown run_id."""

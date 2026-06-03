@@ -49,6 +49,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
+from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import (
@@ -1169,8 +1170,6 @@ class ExecutionServiceImpl:
             # B2 fix: ALWAYS pass shutdown_event — suppresses signal handler
             # installation from background thread (Python forbids
             # signal.signal() from non-main threads)
-            from elspeth.cli_helpers import _make_sink_factory
-
             # Read the boot-time catalog snapshot. Direct attribute access
             # (offensive programming): if the lifespan never called
             # ``set_openrouter_catalog_snapshot()`` these are ``None`` and
@@ -1192,7 +1191,7 @@ class ExecutionServiceImpl:
                 payload_store=payload_store,
                 secret_resolutions=secret_resolution_inputs or None,
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
-                sink_factory=_make_sink_factory(settings),
+                sink_factory=make_sink_factory(settings),
                 run_id=run_id,
                 initiated_by_user_id=user_id,
                 auth_provider_type=auth_provider_type,

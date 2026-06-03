@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, Mock, patch
@@ -35,8 +36,20 @@ def _create_mock_http_response(response_data: dict[str, Any]) -> Mock:
     response.json.return_value = response_data
     response.raise_for_status = Mock()
     response.headers = {"content-type": "application/json"}
-    response.content = b"{}"
-    response.text = "{}"
+    response.text = json.dumps(response_data)
+    response.content = response.text.encode("utf-8")
+    return response
+
+
+def _create_mock_http_response_body(body: str, *, json_fallback: dict[str, Any]) -> Mock:
+    """Create a response whose raw body must be parsed instead of .json()."""
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = json_fallback
+    response.raise_for_status = Mock()
+    response.headers = {"content-type": "application/json"}
+    response.text = body
+    response.content = body.encode("utf-8")
     return response
 
 
@@ -702,6 +715,83 @@ class TestContentSafetyBatchProcessing:
             assert result.reason["reason"] == "api_error"
             assert result.reason["error_type"] == "malformed_response"
             assert "malformed" in result.reason["message"].lower()
+            assert result.retryable is False
+        finally:
+            transform.close()
+
+    @pytest.mark.parametrize(
+        ("body", "message_fragment"),
+        [
+            (
+                '{"categoriesAnalysis":[{"category":"Hate","severity":NaN},'
+                '{"category":"Violence","severity":0},{"category":"Sexual","severity":0},'
+                '{"category":"SelfHarm","severity":0}],"irrelevant":{"ignored":true}}',
+                "non-finite",
+            ),
+            (
+                '{"categoriesAnalysis":[{"category":"Hate","severity":Infinity},'
+                '{"category":"Violence","severity":0},{"category":"Sexual","severity":0},'
+                '{"category":"SelfHarm","severity":0}],"irrelevant":"ignored"}',
+                "non-finite",
+            ),
+            (
+                '{"categoriesAnalysis":[{"category":"Hate","severity":5,"severity":0},'
+                '{"category":"Violence","severity":0},{"category":"Sexual","severity":0},'
+                '{"category":"SelfHarm","severity":0}],"irrelevant":"ignored"}',
+                "duplicate",
+            ),
+        ],
+    )
+    def test_raw_json_body_parse_failures_return_malformed_error(
+        self,
+        mock_httpx_client: MagicMock,
+        body: str,
+        message_fragment: str,
+    ) -> None:
+        """Strict raw-body parse failures must fail closed even if .json() looks safe."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        mock_response = _create_mock_http_response_body(
+            body,
+            json_fallback={
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            },
+        )
+        mock_httpx_client.post.return_value = mock_response
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        collector = CollectorOutputPort()
+        ctx = make_context()
+        transform.on_start(ctx)
+        transform.connect_output(collector, max_pending=10)
+
+        try:
+            row = make_pipeline_row({"content": "safe according to fallback", "id": 1})
+            transform.accept(row, ctx)
+            transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _ = collector.results[0]
+            assert isinstance(result, TransformResult)
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "api_error"
+            assert result.reason["error_type"] == "malformed_response"
+            assert message_fragment in result.reason["message"].lower()
             assert result.retryable is False
         finally:
             transform.close()

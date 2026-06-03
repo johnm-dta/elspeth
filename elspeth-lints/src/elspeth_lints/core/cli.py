@@ -896,6 +896,14 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
     incremental_rules = [rule for rule in selected_rules if rule.scope == RuleScope.INCREMENTAL]
 
     empty_tree = ast.Module(body=[], type_ignores=[])
+    diagnostic_paths: set[Path] = set()
+    if whole_repo_rules:
+        for item in walk_python_files(args.root, tuple(args.files or ()) or None):
+            diagnostic = _diagnostic_finding_for_walk_item(item)
+            if diagnostic is not None:
+                findings.append(diagnostic)
+                diagnostic_paths.add(item.path)
+
     for rule in whole_repo_rules:
         findings.extend(rule.analyze(empty_tree, args.root, context))
 
@@ -916,16 +924,8 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
             if not applicable_rules:
                 continue
             if isinstance(item, PythonSyntaxError):
-                findings.append(
-                    Finding(
-                        rule_id="parse-error",
-                        file_path=str(item.path),
-                        line=item.line,
-                        column=item.column,
-                        message=item.message,
-                        fingerprint=f"syntax:{item.line}:{item.column}",
-                    )
-                )
+                if item.path not in diagnostic_paths:
+                    findings.append(_syntax_error_finding(item))
                 continue
             if isinstance(item, PythonFileReadError):
                 # Surface I/O / decoding failures as per-file diagnostic
@@ -937,16 +937,8 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
                 # whole-scan abort) needs to remain visible at the
                 # report surface. line/column are 0 because an I/O
                 # failure has no position inside the (unreadable) file.
-                findings.append(
-                    Finding(
-                        rule_id="read-error",
-                        file_path=str(item.path),
-                        line=0,
-                        column=0,
-                        message=f"{item.error_type}: {item.message}",
-                        fingerprint=f"read:{item.error_type}",
-                    )
-                )
+                if item.path not in diagnostic_paths:
+                    findings.append(_read_error_finding(item))
                 continue
             findings.extend(_run_rules(item, applicable_rules, context=context))
 
@@ -981,6 +973,36 @@ def _run_rules(item: ParsedPythonFile, rules: list[Rule], *, context: RuleContex
     for rule in rules:
         findings.extend(rule.analyze(item.tree, item.path, context))
     return findings
+
+
+def _diagnostic_finding_for_walk_item(item: ParsedPythonFile | PythonSyntaxError | PythonFileReadError) -> Finding | None:
+    if isinstance(item, PythonSyntaxError):
+        return _syntax_error_finding(item)
+    if isinstance(item, PythonFileReadError):
+        return _read_error_finding(item)
+    return None
+
+
+def _syntax_error_finding(item: PythonSyntaxError) -> Finding:
+    return Finding(
+        rule_id="parse-error",
+        file_path=str(item.path),
+        line=item.line,
+        column=item.column,
+        message=item.message,
+        fingerprint=f"syntax:{item.line}:{item.column}",
+    )
+
+
+def _read_error_finding(item: PythonFileReadError) -> Finding:
+    return Finding(
+        rule_id="read-error",
+        file_path=str(item.path),
+        line=0,
+        column=0,
+        message=f"{item.error_type}: {item.message}",
+        fingerprint=f"read:{item.error_type}",
+    )
 
 
 def _out_of_scope_explicit_files(files: Sequence[Path], *, root: Path, rules: list[Rule]) -> list[str]:

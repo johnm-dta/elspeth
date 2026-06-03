@@ -18,20 +18,25 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, NodeType, PluginSchema, TokenInfo, TransformResult
+from elspeth.contracts import Determinism, NodeType, PluginSchema, RunStatus, TokenInfo, TransformResult
 from elspeth.contracts.config import RuntimeRetryConfig
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import MaxRetriesExceeded
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
+from elspeth.core.config import ElspethSettings, RetrySettings, SinkSettings, SourceSettings, TransformSettings
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import node_states_table
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.executors import TransformExecutor
+from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.testing import make_pipeline_row
+from tests.fixtures.base_classes import as_sink, as_source, as_transform
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.pipeline import build_linear_pipeline
 
 
 def _make_contract(data: dict[str, Any]) -> SchemaContract:
@@ -63,7 +68,7 @@ class FlakyTransform(BaseTransform):
     plugin_version = "1.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
+        super().__init__({"schema": {"mode": "observed"}, **config})
         self.fail_count = 0
         self.max_fails = config.get("max_fails", 2)
 
@@ -88,7 +93,7 @@ class AlwaysFailTransform(BaseTransform):
     plugin_version = "1.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
+        super().__init__({"schema": {"mode": "observed"}, **config})
         self.fail_count = 0
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
@@ -99,6 +104,93 @@ class AlwaysFailTransform(BaseTransform):
 
 class TestRetryAuditTrail:
     """Verify each retry attempt is recorded in audit trail."""
+
+    def test_orchestrator_run_records_retry_attempts_from_settings(
+        self,
+        tmp_path,
+    ) -> None:
+        """Production orchestration path records each retry attempt.
+
+        This supplements the direct RetryManager/TransformExecutor tests below:
+        settings -> RuntimeRetryConfig.from_settings() -> Orchestrator ->
+        RowProcessor._execute_transform_with_retry() -> TransformExecutor ->
+        node_states.
+        """
+        db = make_landscape_db()
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+
+        transform = FlakyTransform({"max_fails": 2})
+        source, transforms, sinks, graph = build_linear_pipeline(
+            [{"value": 42}],
+            transforms=[transform],
+            source_name="retry_source",
+            sink_name="output",
+        )
+        sink = sinks["output"]
+
+        settings = ElspethSettings(
+            source=SourceSettings(plugin=source.name, on_success=source.on_success, options={}),
+            transforms=[
+                TransformSettings(
+                    name=f"{transform.name}_0",
+                    plugin=transform.name,
+                    input="retry_source_out",
+                    on_success="output",
+                    on_error="discard",
+                    options={},
+                )
+            ],
+            sinks={"output": SinkSettings(plugin=sink.name, options={}, on_write_failure="discard")},
+            retry=RetrySettings(
+                max_attempts=3,
+                initial_delay_seconds=0.01,
+                max_delay_seconds=0.1,
+                exponential_base=3.0,
+            ),
+        )
+        runtime_retry = RuntimeRetryConfig.from_settings(settings.retry)
+        assert runtime_retry.max_attempts == 3
+        assert runtime_retry.base_delay == 0.01
+        assert runtime_retry.max_delay == 0.1
+        assert runtime_retry.exponential_base == 3.0
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(t) for t in transforms],
+            sinks={"output": as_sink(sink)},
+        )
+
+        result = Orchestrator(db).run(
+            config,
+            graph=graph,
+            settings=settings,
+            payload_store=payload_store,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+        assert transform.fail_count == 3
+        assert sink.results == [{"processed": True, "value": 42}]
+        assert transform.node_id is not None
+
+        with db.engine.connect() as conn:
+            stmt = (
+                select(node_states_table)
+                .where(
+                    node_states_table.c.run_id == result.run_id,
+                    node_states_table.c.node_id == transform.node_id,
+                )
+                .order_by(node_states_table.c.attempt)
+            )
+            rows = list(conn.execute(stmt))
+
+        assert [row.attempt for row in rows] == [0, 1, 2]
+        assert [row.status for row in rows] == ["failed", "failed", "completed"]
+        assert all(row.run_id == result.run_id for row in rows)
+        assert all(row.node_id == transform.node_id for row in rows)
 
     @pytest.fixture
     def test_env(self) -> dict[str, Any]:
@@ -265,7 +357,14 @@ class TestRetryAuditTrail:
 
         # Query node_states for this node - should have 3 records
         with db.engine.connect() as conn:
-            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id).order_by(node_states_table.c.attempt)
+            stmt = (
+                select(node_states_table)
+                .where(
+                    node_states_table.c.run_id == run_id,
+                    node_states_table.c.node_id == node_id,
+                )
+                .order_by(node_states_table.c.attempt)
+            )
             rows = list(conn.execute(stmt))
 
         # Verify we have 3 node_state records (attempt 0, 1, 2)
@@ -369,7 +468,14 @@ class TestRetryAuditTrail:
 
         # Query node_states for this node - should have 2 records
         with db.engine.connect() as conn:
-            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id).order_by(node_states_table.c.attempt)
+            stmt = (
+                select(node_states_table)
+                .where(
+                    node_states_table.c.run_id == run_id,
+                    node_states_table.c.node_id == node_id,
+                )
+                .order_by(node_states_table.c.attempt)
+            )
             rows = list(conn.execute(stmt))
 
         # Verify we have 2 node_state records (attempt 0, 1)
@@ -452,7 +558,10 @@ class TestRetryAuditTrail:
 
         # Query node_states - should have exactly 1 record
         with db.engine.connect() as conn:
-            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id)
+            stmt = select(node_states_table).where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id == node_id,
+            )
             rows = list(conn.execute(stmt))
 
         assert len(rows) == 1, f"Expected 1 node_state, got {len(rows)}"

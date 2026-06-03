@@ -47,6 +47,26 @@ def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
     assert not any("SELECT RAISE" in statement for statement in emitted)
 
 
+def test_postgres_schema_uses_postgres_non_blank_check_syntax() -> None:
+    """ASCII-whitespace non-blank CHECKs must compile to PostgreSQL syntax."""
+    emitted: list[str] = []
+    engine = create_mock_engine(
+        "postgresql://",
+        lambda sql, *_, **__: emitted.append(str(sql.compile(dialect=engine.dialect))),
+    )
+
+    metadata.create_all(engine)
+
+    ddl = "\n".join(emitted)
+    assert "ck_composition_proposals_composer_provenance_all_or_none" in ddl
+    assert "ck_blobs_creating_llm_provenance_nullability" in ddl
+    assert "btrim(composer_model_identifier" in ddl
+    assert "btrim(creating_model_identifier" in ddl
+    assert "chr(9)" in ddl
+    assert "char(9)" not in ddl
+    assert " NOT GLOB " not in ddl
+
+
 def test_initialize_session_schema_is_idempotent_for_current_schema() -> None:
     eng = create_session_engine("sqlite:///:memory:")
 

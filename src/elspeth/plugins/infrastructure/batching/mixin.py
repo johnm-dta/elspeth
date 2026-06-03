@@ -104,6 +104,21 @@ class BatchTransformMixin:
     _batch_wait_timeout: float  # Timeout for waiter.wait() in executor
     _pool_size: int = 30  # Max concurrent rows; used by executor to cap adapter max_pending
 
+    @property
+    def batch_runtime_enabled(self) -> bool:
+        """Runtime marker for the engine's row-pipelined batch path."""
+        return True
+
+    @property
+    def batch_pool_size(self) -> int:
+        """Preferred max pending submissions for the engine output adapter."""
+        return self._pool_size
+
+    @property
+    def batch_wait_timeout(self) -> float:
+        """Max seconds the engine should wait for one row result."""
+        return self._batch_wait_timeout
+
     def accept(self, row: PipelineRow, ctx: TransformContext) -> None:
         """Accept a row for concurrent processing.
 

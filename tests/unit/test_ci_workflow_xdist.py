@@ -221,6 +221,19 @@ def test_postgres_testcontainer_ci_stays_sequential() -> None:
     assert "-n auto" not in run
 
 
+def test_postgres_testcontainer_lane_gates_ci_success() -> None:
+    """Postgres testcontainer regressions must fail the aggregate CI result."""
+    workflow = _ci_workflow()
+    ci_success = workflow["jobs"]["ci-success"]
+
+    assert "test-postgres-testcontainer" in ci_success["needs"]
+
+    run = _step_run(ci_success, "Check all jobs passed")
+
+    assert "needs.test-postgres-testcontainer.result" in run
+    assert "Postgres testcontainer job failed" in run
+
+
 def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     """Generated composer skill inventory must be checked in CI, not only pre-commit."""
     workflow = _ci_workflow()

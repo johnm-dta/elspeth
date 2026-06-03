@@ -513,19 +513,6 @@ class AzureBlobSource(BaseSource):
             # are external system errors - propagate with context
             raise RuntimeError(f"Failed to download blob '{self._blob_path}' from container '{self._container}': {e}") from e
 
-        # Log blob download for operator visibility
-        blob_size_kb = len(blob_data) / 1024
-        if blob_size_kb >= 1024:
-            size_str = f"{blob_size_kb / 1024:.1f} MB"
-        else:
-            size_str = f"{blob_size_kb:.1f} KB"
-        logger.info(
-            "blob_downloaded",
-            blob_path=self._blob_path,
-            container=self._container,
-            size=size_str,
-        )
-
         # Parse blob content based on format
         if self._format == "csv":
             yield from self._load_csv(blob_data, ctx)
@@ -785,9 +772,6 @@ class AzureBlobSource(BaseSource):
             row = dict(zip(headers, values, strict=True))
             yield from self._validate_and_yield(row, ctx)
 
-        # Log row count for operator visibility
-        logger.info("csv_blob_parsed", rows_encountered=row_count, blob_path=self._blob_path)
-
     def _load_json_array(self, blob_data: bytes, ctx: SourceContext) -> Iterator[SourceRow]:
         """Load rows from JSON array blob data.
 
@@ -853,9 +837,6 @@ class AzureBlobSource(BaseSource):
             error_msg = f"Expected JSON array, got {type(data).__name__}"
             yield from _record_file_level_error(error_msg, "parse")
             return
-
-        # Log row count for operator visibility
-        logger.info("json_blob_parsed", row_count=len(data), blob_path=self._blob_path)
 
         for row in data:
             yield from self._validate_and_yield(row, ctx)
@@ -958,9 +939,6 @@ class AzureBlobSource(BaseSource):
                     destination=self._on_validation_failure,
                 )
             return
-
-        logger.info("jsonl_blob_parsed", line_count=non_empty_count, blob_path=self._blob_path)
-
     def _normalize_row_keys(self, row: Any) -> Mapping[str, Any]:
         """Normalize JSON/JSONL object keys at the source boundary."""
         try:

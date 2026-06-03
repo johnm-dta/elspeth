@@ -641,6 +641,52 @@ class TestAuthFieldValidationContinued:
         assert settings.entra_tenant_id == "my-tenant-id"
 
 
+class TestOIDCIssuerValidation:
+    """OIDC issuer config must be safe before startup discovery can fetch it."""
+
+    _COMPOSER_DEFAULTS: typing.ClassVar[dict[str, object]] = {
+        "composer_max_composition_turns": 15,
+        "composer_max_discovery_turns": 10,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
+    }
+
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            "http://issuer.example.com",
+            "https://user:pass@issuer.example.com",
+            "https://127.0.0.1",
+            "https://169.254.169.254",
+            "https://issuer.example.com?tenant=default",
+            "https://issuer.example.com#fragment",
+        ],
+    )
+    def test_oidc_provider_rejects_unsafe_issuer(self, issuer: str) -> None:
+        with pytest.raises(ValidationError):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer=issuer,
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_provider_accepts_path_issuer_and_same_origin_authorization_endpoint(self) -> None:
+        settings = WebSettings(
+            auth_provider="oidc",
+            oidc_issuer="https://issuer.example.com/tenant/v2.0/",
+            oidc_audience="my-audience",
+            oidc_client_id="my-client-id",
+            oidc_authorization_endpoint="https://issuer.example.com/oauth2/authorize",
+            **self._COMPOSER_DEFAULTS,
+        )
+
+        assert settings.oidc_issuer == "https://issuer.example.com/tenant/v2.0"
+        assert settings.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
+
+
 class TestOIDCBlankStringRejection:
     """Blank/whitespace-only OIDC/Entra fields must be rejected at config time."""
 

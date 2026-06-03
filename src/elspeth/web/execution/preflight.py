@@ -10,8 +10,8 @@ from typing import Any
 
 import yaml
 
-from elspeth.cli_helpers import PluginBundle, instantiate_plugins_from_config
 from elspeth.core.dag.graph import ExecutionGraph
+from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 from elspeth.web.execution.protocol import ValidationSettings
 from elspeth.web.paths import resolve_data_path
 

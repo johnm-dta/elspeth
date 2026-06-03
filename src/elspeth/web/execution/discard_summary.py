@@ -149,4 +149,8 @@ def _sqlite_database_file_missing(landscape_url: str) -> bool:
     database = parsed.database
     if database is None or database == ":memory:":
         return False
+    if database.startswith("file:"):
+        from urllib.parse import urlparse
+
+        database = urlparse(database).path
     return not Path(database).exists()

@@ -232,7 +232,15 @@ def _lifespan_test_client(app: FastAPI) -> Iterator[TestClient]:
     async def _run_lifespan() -> None:
         nonlocal ready_sent
         try:
-            async with LifespanManager(app) as manager:
+            # asgi_lifespan's default startup_timeout is 5s, which is too tight
+            # for the full ELSPETH app's lifespan startup under concurrent-CI
+            # runner contention (the push + pull_request CI runs execute the
+            # same job in parallel on shared runners). 5s produced intermittent
+            # fixture-setup TimeoutErrors. This inner timeout is the PRIMARY
+            # startup guard; it must stay strictly below the outer ``ready.get``
+            # backstop below so its specific asgi_lifespan TimeoutError is the
+            # one that surfaces, not the generic "thread wedged" backstop.
+            async with LifespanManager(app, startup_timeout=15) as manager:
                 ready.put(manager)
                 ready_sent = True
                 while not stop.is_set():
@@ -251,11 +259,16 @@ def _lifespan_test_client(app: FastAPI) -> Iterator[TestClient]:
     thread = Thread(target=_thread_target, name="audit-readiness-lifespan", daemon=True)
     thread.start()
     try:
-        started = ready.get(timeout=10)
+        # Backstop for a wholly-wedged lifespan thread that never puts a result
+        # (manager or exception) onto the queue. Kept strictly above the inner
+        # ``startup_timeout`` (15s) so the inner asgi_lifespan TimeoutError wins
+        # the race on a slow-but-not-wedged startup; this only fires if the
+        # thread produces nothing at all.
+        started = ready.get(timeout=20)
     except Empty as exc:
         stop.set()
         thread.join(timeout=5)
-        raise TimeoutError("FastAPI lifespan did not start within 10 seconds") from exc
+        raise TimeoutError("FastAPI lifespan did not start within 20 seconds") from exc
 
     if isinstance(started, BaseException):
         thread.join(timeout=5)

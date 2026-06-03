@@ -96,7 +96,10 @@ from sqlalchemy.types import JSON
 #        bypass the verbatim-side nullability invariant.
 #   17 → interpretation_events.kind CHECK gains pipeline_decision for
 #        LLM-authored cleanup/shape decisions that gate execution.
-SESSION_SCHEMA_EPOCH = 17
+#   18 → sessions.forked_from_session_id self-referential foreign key constraint
+#        removed to allow physical deletion of parent sessions (no-durable-history
+#        archive path) when child forks exist.
+SESSION_SCHEMA_EPOCH = 18
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 
@@ -163,10 +166,12 @@ sessions_table = Table(
     Column("density_default", String, nullable=False, server_default="high"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Not a ForeignKey("sessions.id") to allow physical deletion of parent
+    # sessions (no-durable-history archive path) when child forks exist.
+    # Asserted by test_forked_from_session_id_is_historical_without_live_session_fk.
     Column(
         "forked_from_session_id",
         String,
-        ForeignKey("sessions.id"),
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),

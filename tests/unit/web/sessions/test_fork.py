@@ -606,6 +606,75 @@ class TestForkSession:
             )
         assert len(audit_rows) == 1
 
+    @pytest.mark.asyncio
+    async def test_fork_and_archive_parent_session_with_durable_history(self, service) -> None:
+        """Archiving a parent session with runs should soft-archive it and succeed with child forks."""
+        # 1. Create parent session
+        session = await service.create_session("alice", "Original", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={"plugin": "csv", "options": {"path": "data.csv"}},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        await service.add_message(session.id, "user", "Hello", composition_state_id=state.id, writer_principal="route_user_message")
+        msg = await service.add_message(session.id, "user", "World", composition_state_id=state.id, writer_principal="route_user_message")
+
+        # 2. Create run to establish durable history
+        await service.create_run(session.id, state.id)
+
+        # 3. Create fork child session
+        child_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=msg.id,
+            new_message_content="Universe",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        # 4. Archive parent session (this should not fail due to restrictive FK)
+        await service.archive_session(session.id)
+
+        # 5. Verify parent session is archived
+        archived_session = await service.get_session(session.id)
+        assert archived_session.archived_at is not None
+
+        # 6. Verify child session is still active and references the archived parent
+        child = await service.get_session(child_session.id)
+        assert child.forked_from_session_id == session.id
+
+    @pytest.mark.asyncio
+    async def test_fork_and_delete_parent_session_no_durable_history(self, service) -> None:
+        """Archiving a parent session without runs should physically delete it and succeed with child forks."""
+        from elspeth.web.sessions.protocol import SessionNotFoundError
+
+        # 1. Create parent session
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        msg = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
+
+        # 2. Create fork child session
+        child_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=msg.id,
+            new_message_content="Universe",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        # 3. Archive parent session (performs physical delete since no durable history)
+        await service.archive_session(session.id)
+
+        # 4. Verify parent session is physically deleted
+        with pytest.raises(SessionNotFoundError):
+            await service.get_session(session.id)
+
+        # 5. Verify child session is still active and references the deleted parent
+        child = await service.get_session(child_session.id)
+        assert child.forked_from_session_id == session.id
+
 
 # ── Route-level tests ───────────────────────────────────────────────────
 

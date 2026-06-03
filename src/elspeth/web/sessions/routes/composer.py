@@ -2196,6 +2196,15 @@ def register_composer_routes(router: APIRouter) -> None:
                 # same "class + frames, no message" pattern when the exception
                 # carries Tier-bearing strings (see ``_safe_frame_strings`` docs).
                 #
+                # Why 500 (Tier-1 crash class) and not 4xx/quarantine: the
+                # persisted ``guided_session`` is a Tier-1 checkpoint — our
+                # ``to_dict`` envelope, unbroken chain of custody, no external
+                # writer of ``composer_meta["guided_session"]`` — so a
+                # ``from_dict`` failure is a Tier-1 anomaly, and the 500 is the
+                # web expression of "crash on a Tier-1 anomaly", not a Tier-3
+                # quarantine. Full rationale: ``guided/errors.py`` InvariantError
+                # docstring.
+                #
                 # ValueError indicates a client-supplied payload violated the
                 # guided-mode protocol contract (e.g. unexpected chosen value on a
                 # recipe_offer turn, or null edited_values on inspect_and_confirm)
@@ -2292,7 +2301,10 @@ def register_composer_routes(router: APIRouter) -> None:
                         # catch above: ``str(exc)`` from a ``from_dict`` site
                         # embeds ``{d!r}`` of the corrupted Tier-1 record
                         # including Tier-3 ``sample_rows``. Static detail; slog
-                        # carries exc_class + frames only.
+                        # carries exc_class + frames only. Same Tier-1-checkpoint
+                        # classification as the step_advance catch (500 = crash on
+                        # a Tier-1 anomaly, not a Tier-3 quarantine); full
+                        # rationale in ``guided/errors.py`` InvariantError docstring.
                         slog.error(
                             "guided.invariant_violated",
                             session_id=str(session_id),

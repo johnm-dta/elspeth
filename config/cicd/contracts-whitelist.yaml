@@ -283,7 +283,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._without_declared_input_fields:return"
   - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._extract_config_fields:schema"
   - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._fields_from_discriminated:schema"
-  - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._field_summary:field_schema"
 
   # Schema reconstruction - deserializing schemas from landscape database (refactored into orchestrator/export.py)
 

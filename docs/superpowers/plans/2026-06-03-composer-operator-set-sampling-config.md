@@ -54,10 +54,13 @@ Expected: the modified `service.py` / `chain_solver.py` / `chat_solver.py` / `_a
 ```bash
 git checkout -b archive/composer-reactive-temperature-retry
 git add -A
+git reset -- GEMINI.md   # keep this unrelated untracked file out of the archive
 git commit --no-verify -m "archive: abandoned reactive-temperature-retry implementation (superseded by operator-set sampling config)"
 ```
 
 The uncommitted changes follow you onto the new branch and are captured by the commit. (`--no-verify`: this is a throwaway archive of known-incomplete work, not a quality-gated landing.)
+
+> **`git add -A` sweeps every dirty path.** Unrelated untracked files (e.g. `GEMINI.md`) would otherwise be committed to the archive branch and vanish from RC5.2 on checkout. The `git reset -- GEMINI.md` leaves it untracked so it survives in the RC5.2 working tree across the branch switch. Add a `git reset -- <path>` for any other unrelated untracked file present at execution time (re-check with `git status --short` first).
 
 - [ ] **Step 3: Return to RC5.2 (now clean at the spec commit)**
 
@@ -313,13 +316,13 @@ Change `temperature=_COMPOSER_LLM_TEMPERATURE,` to:
                         temperature=self._settings.composer_temperature,
 ```
 
-(Leave its `seed=_composer_llm_seed_for_model(self._model)` line for now — Task 9 swaps it; but if mypy/tests require, change it here to `seed=self._settings.composer_seed`. Prefer changing it here for consistency.)
-
 Change the `_call_llm_with_audit` seed line (service.py ~3401, `seed=_composer_llm_seed_for_model(self._model),`) to:
 
 ```python
                         seed=self._settings.composer_seed,
 ```
+
+This change is mandatory, not conditional — `_composer_llm_seed_for_model` is deleted in Phase 9, so any remaining reference would break the import.
 
 - [ ] **Step 5: Update existing audit tests that pin temperature=0.0**
 
@@ -895,6 +898,20 @@ async def test_probe_raises_boot_config_error_on_temperature_rejection(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_probe_fatal_on_any_bad_request_no_prose_dependency(monkeypatch):
+    # Locks in the CLASS-based discriminator: a 400 with NO recognisable
+    # temperature/seed prose (here a seed rejection) is still fatal. Guards
+    # against anyone re-introducing the deleted phrase-matching heuristic.
+    from litellm.exceptions import BadRequestError
+    async def fake_acompletion(**kwargs):
+        raise BadRequestError(message="Invalid value for 'seed'.",
+                              model="gpt-5", llm_provider="openai")
+    monkeypatch.setattr(bp, "_litellm_acompletion", fake_acompletion)
+    with pytest.raises(bp.ComposerBootConfigError):
+        await bp.probe_composer_config(model="gpt-5", temperature=None, seed=99999999999)
+
+
+@pytest.mark.asyncio
 async def test_probe_passes_through_on_success(monkeypatch):
     async def fake_acompletion(**kwargs):
         class _R: choices = [object()]
@@ -936,29 +953,26 @@ from __future__ import annotations
 
 from elspeth.web.composer.service import _litellm_acompletion
 
-# Phrases (with "temperature" present) that identify a provider rejecting the
-# configured sampling value. Matched case-insensitively against the 400 body.
-_CONFIG_REJECTION_PHRASES = ("only the default", "unsupported value", "unsupportedparams")
-
 
 class ComposerBootConfigError(RuntimeError):
     """The configured composer sampling was rejected by the provider at boot."""
 
 
-def _is_config_rejection(exc: BaseException) -> bool:
-    if type(exc).__name__ == "UnsupportedParamsError":
-        return True
-    message = str(exc).lower()
-    if "temperature" not in message and "seed" not in message:
-        return False
-    return any(p in message for p in _CONFIG_REJECTION_PHRASES)
-
-
 async def probe_composer_config(*, model: str, temperature: float | None, seed: int | None) -> bool:
     """Probe ``model`` with the configured sampling. Return True on success,
     False on a transient failure (caller warns + boots). Raise
-    ``ComposerBootConfigError`` on a provider rejection of the configured
-    sampling (fatal — the operator's config error)."""
+    ``ComposerBootConfigError`` on a provider bad-request (fatal — the
+    operator's config error).
+
+    Discriminator is the exception CLASS, not message prose: the probe sends a
+    fixed trivial ``"ping"`` with ``max_tokens=1``, so the only operator-variable
+    inputs are model/temperature/seed. Any ``BadRequestError`` (400) on that
+    payload is therefore unambiguously an operator config rejection — fatal,
+    seed-symmetric, and immune to provider wording drift. We deliberately do NOT
+    re-introduce the prose-matching heuristic this redesign deletes. Everything
+    else (network/auth/5xx/timeout) is transient → graceful, mirroring the
+    catalog probe's "must still boot for non-LLM features" choice.
+    """
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
     kwargs: dict[str, object] = {
@@ -974,12 +988,10 @@ async def probe_composer_config(*, model: str, temperature: float | None, seed: 
         await _litellm_acompletion(**kwargs)
         return True
     except LiteLLMBadRequestError as exc:
-        if _is_config_rejection(exc):
-            raise ComposerBootConfigError(
-                f"composer sampling rejected by {model}: temperature={temperature}, "
-                f"seed={seed} — {exc}"
-            ) from exc
-        return False
+        raise ComposerBootConfigError(
+            f"composer sampling rejected by {model}: temperature={temperature}, "
+            f"seed={seed} — {exc}"
+        ) from exc
     except Exception:
         # Transient / auth / network: graceful, mirroring the catalog probe.
         return False

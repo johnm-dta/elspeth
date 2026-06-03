@@ -147,11 +147,16 @@ config against the real provider.
 
 **Failure policy — config-rejection only is fatal**, mirroring the existing
 catalog probe's deliberate "whose fault is it" split:
-- A provider **400 rejecting the configured temperature/seed** raises a typed
-  `ComposerBootConfigError` → boot fails, with a message naming the offending
-  parameter, value, and model (e.g. *"composer_temperature=0.0 rejected by
-  gpt-5.5: only the default (1) is supported"*). This is the operator's fixable
-  mistake — fail fast.
+- A provider **400 (`BadRequestError`)** raises a typed `ComposerBootConfigError`
+  → boot fails, with a message naming the configured parameter values and model
+  (e.g. *"composer sampling rejected by gpt-5.5: temperature=0.0, seed=None — only
+  the default (1) is supported"*). The discriminator is the **exception class,
+  not message prose**: the probe sends a fixed trivial `"ping"` with
+  `max_tokens=1`, so the only operator-variable inputs are model/temperature/seed
+  — any 400 on that payload is unambiguously a config rejection (and is
+  seed-symmetric). This deliberately does **not** re-introduce the prose-matching
+  heuristic this redesign deletes. This is the operator's fixable mistake — fail
+  fast.
 - **Transient / network / auth / 5xx** failures warn and boot, matching the
   existing catalog probe's "staging must still boot for non-LLM features" choice.
   This decouples app availability from provider uptime; a misconfigured sampling

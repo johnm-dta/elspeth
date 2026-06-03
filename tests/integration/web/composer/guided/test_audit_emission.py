@@ -718,7 +718,7 @@ class TestRejectionPathAuditDrain:
         that triggers the 400 path.  Assert the response is still 400 —
         not 500 from the persist failure.
         """
-        from elspeth.web.sessions import routes as routes_mod
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -727,7 +727,9 @@ class TestRejectionPathAuditDrain:
         async def _raising_persist(*args: object, **kwargs: object) -> None:
             raise RuntimeError("simulated audit-system failure")
 
-        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
+        # _persist_tool_invocations is called bare from the composer.py
+        # /guided/respond handler; patch the calling module.
+        monkeypatch.setattr(composer_module, "_persist_tool_invocations", _raising_persist)
 
         resp = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
@@ -757,7 +759,7 @@ class TestRejectionPathAuditDrain:
         """
         from structlog.testing import capture_logs
 
-        from elspeth.web.sessions import routes as routes_mod
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -766,7 +768,9 @@ class TestRejectionPathAuditDrain:
         async def _raising_persist(*args: object, **kwargs: object) -> None:
             raise RuntimeError("simulated audit-system failure")
 
-        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
+        # _persist_tool_invocations is called bare from the composer.py
+        # /guided/respond handler; patch the calling module.
+        monkeypatch.setattr(composer_module, "_persist_tool_invocations", _raising_persist)
 
         with capture_logs() as cap_logs:
             resp = composer_test_client.post(
@@ -804,7 +808,7 @@ class TestRejectionPathAuditDrain:
         must preserve the original HTTPException instead of surfacing a logger
         pipeline error to the browser.
         """
-        from elspeth.web.sessions import routes as routes_mod
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -816,8 +820,13 @@ class TestRejectionPathAuditDrain:
         def _raising_slog_error(*args: object, **kwargs: object) -> None:
             raise RuntimeError("simulated logger failure")
 
-        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
-        monkeypatch.setattr(routes_mod.slog, "error", _raising_slog_error)
+        # _persist_tool_invocations is called bare from composer.py; patch the
+        # calling module. ``slog`` is the same shared logger object across
+        # modules (re-exported from _helpers), so patching ``.error`` on
+        # composer_module.slog mutates that shared object — the route handler's
+        # slog.error call sees it regardless of which module reference is used.
+        monkeypatch.setattr(composer_module, "_persist_tool_invocations", _raising_persist)
+        monkeypatch.setattr(composer_module.slog, "error", _raising_slog_error)
 
         resp = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",

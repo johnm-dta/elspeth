@@ -67,12 +67,6 @@ per_file_rules:
   reason: Pydantic config field type validation (Tier 3 YAML boundary)
   expires: null
   max_hits: 9
-- pattern: contracts/data.py
-  rules:
-  - R5
-  reason: Union type detection for discriminated unions
-  expires: null
-  max_hits: 1
 - pattern: contracts/events.py
   rules:
   - R5
@@ -142,12 +136,6 @@ per_file_rules:
     '
   expires: null
   max_hits: 22
-- pattern: contracts/transform_contract.py
-  rules:
-  - R5
-  reason: Type annotation introspection for Union detection
-  expires: null
-  max_hits: 1
 - pattern: contracts/secret_scrub.py
   rules:
   - R5
@@ -455,3 +443,22 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[15]/body[0]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:8072f04508921266bced2a9ec1c85af8e2de1d713a3a66426ea11a4e1807f57d'
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=d48cac92b0418ba5
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — meaning-preserving optional read of an external (Tier-3) field on a typed-dict receiver. In PluginContext.record_call (contracts/plugin_context.py:315), `raw_usage = response_snapshot.get("usage")` reads the optional "usage" key from response_snapshot, which is the method's response_data parameter (typed `dict[str, Any] | None`, guarded by `response_snapshot is not None` at line 312). The receiver is therefore a typed dict — `.get` has a valid Mapping receiver, not an arbitrary object — but its CONTENTS are Tier-3: for an LLM call this dict is the external provider response, and "usage" is provider-OPTIONAL metadata that legitimately may be absent (not every response carries token usage). This is the sanctioned `.get()` use: a meaning-preserving optional read where absence is real. It passes the null-correctness test — there IS a case where None is correct (the provider returned no usage), so this is not papering over a missing key on data we own. No default is supplied, so absence maps to None, and TokenUsage.from_dict(raw_usage) is the boundary validator that accepts Any and returns unknown()/has_data=False for None or non-Mapping input (the comment documents this). No fabrication: an absent usage becomes token_usage=None, not a synthesized zero. R1 flags `.get()` generically and cannot tell a Tier-3 optional read from a Tier-1/Tier-2 defensive access. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:40.806140+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.8
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM — response_snapshot is the LLM provider's response_data (Tier-3 external content, not a first-party typed contract on the 'usage' key), and 'usage' is genuinely provider-optional metadata. The .get() is a meaning-preserving optional read: absence maps to None (not a fabricated zero), and TokenUsage.from_dict is the documented boundary validator that accepts Any. The decorator nudge does not apply: response_data is not the function's external-data entry-parameter in the @trust_boundary sense (it is internal telemetry plumbing within record_call), and the suppression is correctly scoped to one site.
+  judge_signature_version: 2
+  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[20]/body[10]/body[5]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:a3418d11187e07e3768c67f86edd1e629dd0f6850864b85962f959784de5d3ee'

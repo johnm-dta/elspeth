@@ -29,9 +29,13 @@ from ._helpers import (
     _record_composer_authoring_validation_telemetry,
     _record_composer_runtime_preflight_telemetry,
     _reject_hidden_field_submissions,
+    _runtime_preflight_for_state,
     _RuntimePreflightFailed,
+    _state_data_from_composer_state,
     _summarize_guided_response,
+    load_run_accounting_for_settings,
     slog,
+    solve_step_chat_with_auto_drop,
     step_advance,
 )
 from .composer import register_composer_routes
@@ -39,11 +43,6 @@ from .interpretation import register_interpretation_routes
 from .messages import register_message_routes
 from .runs import register_run_routes
 from .sessions import register_session_routes
-
-_runtime_preflight_for_state = _helpers_module._runtime_preflight_for_state_impl
-_state_data_from_composer_state = _helpers_module._state_data_from_composer_state_impl
-load_run_accounting_for_settings = _helpers_module._load_run_accounting_for_settings_impl
-solve_step_chat_with_auto_drop = _helpers_module._solve_step_chat_with_auto_drop_impl
 
 
 def create_session_router() -> APIRouter:
@@ -72,6 +71,7 @@ __all__ = [
     "_handle_convergence_error",
     "_handle_plugin_crash",
     "_handle_runtime_preflight_failure",
+    "_helpers_module",
     "_initial_composition_state_with_guided_session",
     "_litellm_error_detail",
     "_persist_tool_invocations",

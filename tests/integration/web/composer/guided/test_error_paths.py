@@ -662,22 +662,24 @@ class TestInvariantError500DetailIsSanitized:
         the sentinel content nor the field name ``sample_rows``.
         """
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         self._seed_guided_session(composer_test_client, session_id)
 
-        # Replace ``step_advance`` as the route module imported it (top-level
-        # ``from ... import step_advance``).  The patched function builds a
-        # message shaped like ``GuidedSession.from_dict``'s ``{d!r}`` repr so
-        # this test reproduces the leak vector the unpatched code would have
-        # surfaced into ``detail``.
+        # Patch ``step_advance`` on the CALLING module (composer.py), the only
+        # place the /guided/respond route invokes it. composer.py bound the
+        # name at import via ``from ._helpers import step_advance``, so a patch
+        # on the defining _helpers module would not reach this call site. The
+        # patched function builds a message shaped like
+        # ``GuidedSession.from_dict``'s ``{d!r}`` repr so this test reproduces
+        # the leak vector the unpatched code would have surfaced into ``detail``.
         leaky_record_repr = "{'sample_rows': [{'ssn': '" + self._SENTINEL + "', 'name': 'Alice'}], 'step': 'step_1_source'}"
 
         def _raise_invariant_with_leak(*args, **kwargs):
             raise InvariantError(f"GuidedSession.from_dict: malformed record {leaky_record_repr}")
 
-        monkeypatch.setattr(routes_module, "step_advance", _raise_invariant_with_leak)
+        monkeypatch.setattr(composer_module, "step_advance", _raise_invariant_with_leak)
 
         resp = _respond_raw(
             composer_test_client,
@@ -715,7 +717,7 @@ class TestInvariantError500DetailIsSanitized:
         directly to inject the leaky message.
         """
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         self._seed_guided_session(composer_test_client, session_id)
@@ -725,7 +727,9 @@ class TestInvariantError500DetailIsSanitized:
         async def _raise_invariant_in_dispatcher(*args, **kwargs):
             raise InvariantError(f"SourceResolved.from_dict: malformed record {leaky_record_repr}")
 
-        monkeypatch.setattr(routes_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
+        # _dispatch_guided_respond is called only from the composer.py
+        # /guided/respond handler; patch the calling module.
+        monkeypatch.setattr(composer_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
 
         resp = _respond_raw(
             composer_test_client,
@@ -786,7 +790,7 @@ class TestI1InvariantErrorStructuredLogging:
         from structlog.testing import capture_logs
 
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import composer as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -795,11 +799,12 @@ class TestI1InvariantErrorStructuredLogging:
         # The site is unreachable from a well-formed client (Step 3 can only
         # be entered after Steps 1+2 commit), so we patch the dispatcher to
         # synthesise the InvariantError shape that ``raise InvariantError(...)``
-        # at routes.py:~2396 now produces.
+        # at routes.py:~2396 now produces. _dispatch_guided_respond is called
+        # only from composer.py, so patch the calling module.
         async def _raise_invariant_in_dispatcher(*args, **kwargs):
             raise InvariantError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
 
-        monkeypatch.setattr(routes_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
+        monkeypatch.setattr(composer_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
 
         with capture_logs() as cap_logs:
             resp = _respond_raw(
@@ -893,6 +898,10 @@ class TestUnwindAuditDispositionFlag:
         async def _spy_llm(*args, plugin_crash_pending, **kwargs):
             captured.append(("llm_calls", plugin_crash_pending))
 
+        # All three helpers are imported and called bare in composer.py (the
+        # /guided/respond route this test drives), so each patch must target the
+        # composer module where those bare names resolve — not the defining
+        # _helpers module.
         monkeypatch.setattr(composer_module, "_dispatch_guided_respond", _raise_in_dispatcher)
         monkeypatch.setattr(composer_module, "_persist_tool_invocations", _spy_tool)
         monkeypatch.setattr(composer_module, "_persist_llm_calls", _spy_llm)

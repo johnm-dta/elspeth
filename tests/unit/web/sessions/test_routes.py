@@ -626,7 +626,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
     )
     app.state.catalog_service = catalog
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     input_path = tmp_path / "blobs" / "input.csv"
@@ -729,7 +729,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
     )
     app.state.catalog_service = catalog
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
@@ -824,7 +824,7 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
     )
     app.state.catalog_service = catalog
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
@@ -897,7 +897,7 @@ def test_accept_empty_inline_blob_proposal_without_composer_provenance_fails_clo
     )
     app.state.catalog_service = catalog
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
     )
     client = TestClient(app)
@@ -1354,7 +1354,7 @@ class TestSessionCRUDRoutes:
         )
 
         monkeypatch.setattr(
-            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            "elspeth.web.sessions.routes.runs.load_run_accounting_for_settings",
             lambda settings, run_ids: {str(run.id): _fanout_accounting()},
             raising=False,
         )
@@ -1398,7 +1398,7 @@ class TestSessionCRUDRoutes:
         )
 
         monkeypatch.setattr(
-            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            "elspeth.web.sessions.routes.runs.load_run_accounting_for_settings",
             lambda settings, run_ids: {},
             raising=False,
         )
@@ -1440,7 +1440,7 @@ class TestSessionCRUDRoutes:
         )
 
         monkeypatch.setattr(
-            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            "elspeth.web.sessions.routes.runs.load_run_accounting_for_settings",
             lambda settings, run_ids: {str(run.id): _open_completed_accounting()},
             raising=False,
         )
@@ -2831,7 +2831,7 @@ class TestMessageRoutes:
         service.add_message = flaky_add_message  # type: ignore[method-assign]
 
         with patch(
-            "elspeth.web.sessions.routes.solve_step_chat_with_auto_drop",
+            "elspeth.web.sessions.routes.composer.solve_step_chat_with_auto_drop",
             new=AsyncMock(
                 return_value=StepChatResult(
                     assistant_message="Use the source form first.",
@@ -3636,11 +3636,11 @@ class TestRecomposeConvergencePartialState:
             assert original_fn is not None
             return await original_fn(state, **kwargs)
 
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         original_fn = routes_module._state_data_from_composer_state
         with patch(
-            "elspeth.web.sessions.routes._state_data_from_composer_state",
+            "elspeth.web.sessions.routes._helpers._state_data_from_composer_state",
             side_effect=capture_user_id,
         ):
             resp = client.post("/api/sessions", json={"title": "Convergence + secrets"})
@@ -3714,11 +3714,11 @@ class TestRecomposeConvergencePartialState:
             assert original_fn is not None
             return await original_fn(state, **kwargs)
 
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         original_fn = routes_module._state_data_from_composer_state
         with patch(
-            "elspeth.web.sessions.routes._state_data_from_composer_state",
+            "elspeth.web.sessions.routes._helpers._state_data_from_composer_state",
             side_effect=capture_user_id,
         ):
             convergence_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -3964,7 +3964,7 @@ class TestYamlEndpoint:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
         assert resp.status_code == 200
         body = resp.json()
@@ -4009,7 +4009,7 @@ class TestYamlEndpoint:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4078,7 +4078,7 @@ class TestYamlEndpoint:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
         assert resp.status_code == 200
         assert "field_mapper" in resp.json()["yaml"]
@@ -4150,7 +4150,7 @@ class TestYamlEndpoint:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4214,7 +4214,7 @@ class TestYamlEndpoint:
                 ],
             )
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4224,7 +4224,7 @@ class TestYamlEndpoint:
 
     @pytest.mark.asyncio
     async def test_get_state_yaml_emits_yaml_export_telemetry_on_passed_preflight(self, tmp_path, monkeypatch) -> None:
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[str, dict[str, str]]] = []
 
@@ -4243,7 +4243,7 @@ class TestYamlEndpoint:
         async def pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4251,7 +4251,7 @@ class TestYamlEndpoint:
 
     @pytest.mark.asyncio
     async def test_get_state_yaml_emits_yaml_export_telemetry_on_failed_preflight(self, tmp_path, monkeypatch) -> None:
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[str, dict[str, str]]] = []
 
@@ -4276,7 +4276,7 @@ class TestYamlEndpoint:
         async def fail_preflight(state, *, settings, secret_service, user_id):
             return failure
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=fail_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fail_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4285,7 +4285,7 @@ class TestYamlEndpoint:
     @pytest.mark.asyncio
     async def test_get_state_yaml_handles_preflight_exception_with_telemetry_and_409(self, tmp_path, monkeypatch) -> None:
         """Preflight exceptions must surface as 409 with bounded telemetry, not 500 with raw exception text."""
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[str, dict[str, str]]] = []
 
@@ -4306,7 +4306,7 @@ class TestYamlEndpoint:
         async def boom(state, *, settings, secret_service, user_id):
             raise TimeoutError(secret_canary)
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=boom):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4339,7 +4339,7 @@ class TestYamlEndpoint:
         crash. Conflating them with user-fixable failures destroys the
         operator's ability to diagnose.
         """
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[str, dict[str, str]]] = []
 
@@ -4364,7 +4364,7 @@ class TestYamlEndpoint:
             # offensive-programming policy.
             raise AttributeError("'NoneType' object has no attribute 'plugin'")
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=programmer_bug):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=programmer_bug):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         # FastAPI's default 500 handler emits the bare 'Internal Server
@@ -4427,7 +4427,7 @@ class TestYamlEndpoint:
             assert state.to_dict()["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4836,7 +4836,7 @@ class TestComposerCancellationLifecycle:
         status=timed_out so a Grafana board can distinguish "the client gave
         up" from "the server gave up".
         """
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -4874,7 +4874,7 @@ class TestComposerCancellationLifecycle:
         forgets to set terminal_status before return falls back to the
         pessimistic default of 'failed' — and this test catches it.
         """
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -4962,7 +4962,7 @@ class TestComposerCancellationLifecycle:
         terminal counter must be 'recompose' (not 'send_message'), so a
         Grafana board can split the two routes' cancellation rates.
         """
-        from elspeth.web.sessions import routes as routes_module
+        from elspeth.web.sessions.routes import _helpers as routes_module
 
         emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -4995,7 +4995,11 @@ class TestComposerCancellationLifecycle:
         If the finally clause is removed or the increment is mis-placed,
         the gauge drifts and a Grafana 'currently in flight' panel lies.
         """
-        from elspeth.web.sessions import routes as routes_module
+        # ``_COMPOSER_REQUESTS_INFLIGHT.add`` is called from the send_message
+        # route handler in messages.py (the /messages route this test drives),
+        # which bound the name at import — so the patch must target that
+        # calling module, not the defining _helpers module.
+        from elspeth.web.sessions.routes import messages as messages_module
 
         emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -5003,7 +5007,7 @@ class TestComposerCancellationLifecycle:
             def add(self, value: int, attributes: dict[str, str]) -> None:
                 emitted.append((value, dict(attributes)))
 
-        monkeypatch.setattr(routes_module, "_COMPOSER_REQUESTS_INFLIGHT", FakeUpDownCounter())
+        monkeypatch.setattr(messages_module, "_COMPOSER_REQUESTS_INFLIGHT", FakeUpDownCounter())
 
         app, service = _make_progress_route_app(tmp_path)
         app.state.composer_service = _ProgressAwareComposer()
@@ -5826,7 +5830,7 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
     async def boom(state, *, settings, secret_service, user_id):
         raise AttributeError("'NoneType' has no attribute 'something_that_failed'")
 
-    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+    with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
         state_data, _validation = asyncio.run(
             _state_data_from_composer_state(
                 state,
@@ -6071,7 +6075,7 @@ async def test_state_data_from_composer_state_propagates_to_dict_errors() -> Non
 
 
 def test_runtime_preflight_telemetry_uses_bounded_attributes(monkeypatch) -> None:
-    from elspeth.web.sessions import routes
+    from elspeth.web.sessions.routes import _helpers as routes
 
     emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -6248,7 +6252,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
 
     runtime_preflight = _runtime_preflight_failed_result("runtime failure from convergence")
     with patch(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         new=AsyncMock(return_value=runtime_preflight),
     ):
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -6301,7 +6305,7 @@ def test_compose_plugin_crash_persists_runtime_invalid_partial_state(tmp_path) -
 
     runtime_preflight = _runtime_preflight_failed_result("runtime failure from plugin crash")
     with patch(
-        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         new=AsyncMock(return_value=runtime_preflight),
     ):
         response = client.post(
@@ -6391,7 +6395,7 @@ def test_compose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     async def boom(state, *, settings, secret_service, user_id):
         raise RuntimeError("preflight blew up during state persistence")
 
-    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+    with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"content": "Build me a pipeline"},
@@ -6463,7 +6467,7 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     async def boom(state, *, settings, secret_service, user_id):
         raise RuntimeError("preflight blew up on recompose")
 
-    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+    with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
         response = client.post(f"/api/sessions/{session_id}/recompose")
 
     assert response.status_code == 500
@@ -6544,7 +6548,7 @@ def test_runtime_preflight_handler_records_exception_telemetry(tmp_path, monkeyp
     failures on dashboards. Without telemetry, runtime-preflight crashes
     are invisible to monitoring.
     """
-    from elspeth.web.sessions import routes
+    from elspeth.web.sessions.routes import _helpers as routes
 
     emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -6574,7 +6578,7 @@ def test_runtime_preflight_handler_records_exception_telemetry(tmp_path, monkeyp
     async def boom(state, *, settings, secret_service, user_id):
         raise RuntimeError("preflight crashed")
 
-    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+    with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"content": "Build me a pipeline"},
@@ -6653,7 +6657,7 @@ def test_compose_cached_runtime_preflight_no_partial_state_records_telemetry(tmp
     must not be relabeled onto the cached path.
     """
     from elspeth.web.composer.protocol import ComposerRuntimePreflightError
-    from elspeth.web.sessions import routes
+    from elspeth.web.sessions.routes import _helpers as routes
 
     emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -6728,7 +6732,7 @@ def test_recompose_cached_runtime_preflight_no_partial_state_records_telemetry(t
     telemetry contract is identical.
     """
     from elspeth.web.composer.protocol import ComposerRuntimePreflightError
-    from elspeth.web.sessions import routes
+    from elspeth.web.sessions.routes import _helpers as routes
 
     emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -6805,7 +6809,7 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
     cannot reveal which originating route triggered the failure.
     """
     from elspeth.web.composer.protocol import ComposerRuntimePreflightError
-    from elspeth.web.sessions import routes
+    from elspeth.web.sessions.routes import _helpers as routes
 
     emitted: list[tuple[int, dict[str, str]]] = []
 
@@ -6820,7 +6824,7 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
 
     with (
         patch.object(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter()),
-        patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom),
+        patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom),
         pytest.raises(ComposerRuntimePreflightError) as excinfo,
     ):
         await routes._state_data_from_composer_state(
@@ -6895,7 +6899,7 @@ def test_runtime_preflight_handler_save_failure_sets_partial_state_save_failed_f
     async def boom(state, *, settings, secret_service, user_id):
         raise RuntimeError("preflight crashed before save")
 
-    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+    with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"content": "Build me a pipeline"},

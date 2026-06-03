@@ -32,13 +32,6 @@ per_file_rules:
   reason: PluginValidationError discrimination for cleanup logic
   expires: null
   max_hits: 1
-- pattern: telemetry/manager.py
-  rules:
-  - R5
-  reason: TELEMETRY_TRANSPORT_ERRORS and stored-exception raiseability guards for
-    inverted exception pattern
-  expires: null
-  max_hits: 5
 allow_hits:
 - key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=30047980e068a453
   owner: john

@@ -14,7 +14,7 @@ import pytest
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.core.canonical import canonical_json
 from elspeth.web.sessions.protocol import SessionServiceProtocol
-from elspeth.web.sessions.routes._helpers import _persist_tool_invocations_impl
+from elspeth.web.sessions.routes._helpers import _persist_tool_invocations
 
 
 @dataclass
@@ -92,7 +92,7 @@ async def test_legacy_tool_invocation_persistence_redacts_advisor_payloads() -> 
     )
     service = _CapturingSessionService()
 
-    await _persist_tool_invocations_impl(
+    await _persist_tool_invocations(
         cast(SessionServiceProtocol, service),
         uuid4(),
         (invocation,),
@@ -149,7 +149,7 @@ async def test_arg_error_result_for_response_model_tool_persists_without_success
     )
     service = _CapturingSessionService()
 
-    await _persist_tool_invocations_impl(
+    await _persist_tool_invocations(
         cast(SessionServiceProtocol, service),
         uuid4(),
         (invocation,),

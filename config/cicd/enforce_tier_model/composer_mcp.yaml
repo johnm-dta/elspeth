@@ -1,11 +1,6 @@
 per_file_rules:
 - pattern: composer_mcp/server.py
   rules:
-  - R1
-  reason: MCP tool arguments are external client data (Tier 3) - defensive access is correct
-  expires: null
-- pattern: composer_mcp/server.py
-  rules:
   - R5
   reason: Serialization boundary — isinstance checks convert Pydantic models and containers
     to JSON-safe types; RuntimePreflightFailure union dispatch in _mcp_preview_runtime_preflight

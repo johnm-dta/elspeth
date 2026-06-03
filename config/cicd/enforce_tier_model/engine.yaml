@@ -44,15 +44,6 @@ per_file_rules:
   reason: TransformProtocol dispatch on config.transforms
   expires: null
   max_hits: 1
-- pattern: engine/orchestrator/cleanup.py
-  rules:
-  - R5
-  reason: Tier-1 re-raise guard — record_cleanup_error() uses isinstance(error,
-    TIER_1_ERRORS) to bypass the cleanup-warning downgrade and propagate
-    FrameworkBugError/AuditIntegrityError immediately. Relocated from the core.py
-    R5 pattern when _cleanup_plugins was extracted to its own module.
-  expires: null
-  max_hits: 1
 - pattern: engine/orchestrator/core.py
   rules:
   - R5
@@ -330,3 +321,22 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[5]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:b33081a2dba1a9955f72da2b305972806b306f2058aa920097775acea264827e'
+- key: engine/orchestrator/cleanup.py:R4:cleanup_plugins:run_hook:fp=527c4066c37b2592
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — best-effort teardown: all non-Tier-1 faults (INCLUDING programming errors) are recorded and re-raised as an aggregated RuntimeError after every hook runs; nothing is swallowed. In cleanup_plugins.run_hook (engine/orchestrator/cleanup.py:93), `except Exception as exc` follows a dedicated `except contract_errors.TIER_1_ERRORS: raise` clause (lines 91-92), so FrameworkBugError / AuditIntegrityError crash IMMEDIATELY. The broad catch then records every OTHER exception via record_cleanup_error() — which appends "hook(plugin): Type: msg" to cleanup_errors and logs with exc_info — and lets the hook loop continue, because the best-effort lifecycle contract requires attempting every plugin's cleanup hook even when one fails (a transform's failed on_complete must not skip the sinks' close, which would leak resources). Critically — and unlike the hot-path sibling AuditedLLMClient._emit_telemetry_after_audit, which re-raises (TypeError, AttributeError, KeyError, NameError) IMMEDIATELY because a single telemetry emit has no multi-hook obligation — this handler deliberately does NOT re-raise programming errors on the spot; instead they too are recorded and then crash DEFERRED-AND-AGGREGATED: after all hooks finish, cleanup.py:120-121 does `if cleanup_errors: raise RuntimeError(f"Plugin cleanup failed: {error_summary}")` (chained `from pending_exc` when a pending exception exists), with each error's type, message, and exc_info preserved. So no exception is swallowed: Tier-1 corruption crashes at once, everything else (recoverable faults and programming bugs alike) crashes once the teardown obligation is discharged. The broad catch is the correct mechanism — a cleanup hook can fail in arbitrary ways and narrowing would let some failures abort the loop and leak resources. R4 flags `except Exception` generically and cannot recognise the Tier-1-first / record / aggregate-and-raise teardown pattern. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:50.023156+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM — the broad `except Exception` follows a dedicated `except contract_errors.TIER_1_ERRORS: raise` clause (lines 91-92), so Tier-1 corruption crashes immediately. All other exceptions are recorded via record_cleanup_error (which logs with exc_info and appends type+message to cleanup_errors) and then re-raised in aggregate at lines 120-123 as a RuntimeError chained from any pending exception. Nothing is swallowed; the broad catch is required by the best-effort multi-hook teardown contract (one plugin's cleanup failure must not skip sink.close and leak resources). R4's generic concern (suppressed bugs) does not apply since every non-Tier-1 error is preserved and surfaced after the loop completes.
+  judge_signature_version: 2
+  scope_fingerprint: feaff9eb928283fee618ad222806d226abe144005ce1db5103b8686b718f39ea
+  judge_transport: openrouter
+  ast_path: 'body[10]/body[5]/body[0]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:f9cde699173e19b1a223e94e5829f42bbd1d7d371d66115b423f4f4c457b3125'

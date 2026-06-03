@@ -91,9 +91,7 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalState,
     TurnRecord,
     mark_solver_exhausted,
-)
-from elspeth.web.composer.guided.state_machine import (
-    step_advance as _step_advance_impl,
+    step_advance,
 )
 from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
@@ -132,13 +130,13 @@ from elspeth.web.composer.telemetry_phase8 import (
 )
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
 from elspeth.web.composer.yaml_generator import generate_yaml
-from elspeth.web.execution.accounting import load_run_accounting_for_settings as _load_run_accounting_for_settings_impl
+from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
-from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop as _solve_step_chat_with_auto_drop_impl
+from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.audit_story_models import RunAuditStoryResponse
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
@@ -209,41 +207,6 @@ _REDACTED_SECRET_DETAIL = "<redacted-secret>"
 _PROVIDER_DETAIL_REDACTED = "Provider detail redacted because it may contain secrets."
 _MAX_PROVIDER_DETAIL_CHARS = 1_000
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
-
-
-def _patched_routes_attr(name: str, current: Any) -> Any | None:
-    # The parent package is necessarily imported before this submodule's code
-    # can run, so a direct subscript is correct — a missing key here would be a
-    # genuine interpreter-state bug, not a recoverable absence.
-    routes_package = sys.modules["elspeth.web.sessions.routes"]
-    # ``name`` is a dynamic attribute that a test may have monkeypatched onto
-    # the package; absence is the normal (unpatched) case, so the default is a
-    # real probe of optional override state, not a swallowed AttributeError on
-    # a contract we own.
-    patched = getattr(routes_package, name, None)
-    if patched is not None and patched is not current:
-        return patched
-    return None
-
-
-def load_run_accounting_for_settings(*args: Any, **kwargs: Any) -> Any:
-    patched = _patched_routes_attr(
-        "load_run_accounting_for_settings",
-        load_run_accounting_for_settings,
-    )
-    if patched is not None:
-        return patched(*args, **kwargs)
-    return _load_run_accounting_for_settings_impl(*args, **kwargs)
-
-
-async def solve_step_chat_with_auto_drop(*args: Any, **kwargs: Any) -> Any:
-    patched = _patched_routes_attr(
-        "solve_step_chat_with_auto_drop",
-        solve_step_chat_with_auto_drop,
-    )
-    if patched is not None:
-        return await patched(*args, **kwargs)
-    return await _solve_step_chat_with_auto_drop_impl(*args, **kwargs)
 
 
 class _SessionComposeLockRegistry:
@@ -889,61 +852,6 @@ _COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER = metrics.get_meter(__name__).cre
 )
 
 
-class _RoutesMetricProxy:
-    def __init__(self, package_name: str, delegate: Any) -> None:
-        self._package_name = package_name
-        self._delegate = delegate
-
-    def add(self, value: int, attributes: Mapping[str, Any] | None = None) -> Any:
-        patched = _patched_routes_attr(self._package_name, self)
-        target = patched if patched is not None else self._delegate
-        return target.add(value, attributes)
-
-
-_COMPOSER_RUNTIME_PREFLIGHT_COUNTER = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER",
-        _COMPOSER_RUNTIME_PREFLIGHT_COUNTER,
-    ),
-)
-_COMPOSER_AUTHORING_VALIDATION_COUNTER = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_AUTHORING_VALIDATION_COUNTER",
-        _COMPOSER_AUTHORING_VALIDATION_COUNTER,
-    ),
-)
-_COMPOSER_REQUESTS_INFLIGHT = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_REQUESTS_INFLIGHT",
-        _COMPOSER_REQUESTS_INFLIGHT,
-    ),
-)
-_COMPOSER_REQUEST_TERMINAL_COUNTER = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_REQUEST_TERMINAL_COUNTER",
-        _COMPOSER_REQUEST_TERMINAL_COUNTER,
-    ),
-)
-_COMPOSER_TIER1_VIOLATION_COUNTER = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_TIER1_VIOLATION_COUNTER",
-        _COMPOSER_TIER1_VIOLATION_COUNTER,
-    ),
-)
-_COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER = cast(
-    Any,
-    _RoutesMetricProxy(
-        "_COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER",
-        _COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER,
-    ),
-)
-
-
 def _record_composer_request_terminal(
     status: _ComposerRequestTerminalStatus,
     *,
@@ -1186,7 +1094,7 @@ def _composer_persisted_validation(
     return authoring.is_valid, messages or None
 
 
-async def _runtime_preflight_for_state_impl(
+async def _runtime_preflight_for_state(
     state: CompositionState,
     *,
     settings: Any,
@@ -1203,72 +1111,6 @@ async def _runtime_preflight_for_state_impl(
             user_id=user_id,
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
-    )
-
-
-async def _runtime_preflight_for_state(
-    state: CompositionState,
-    *,
-    settings: Any,
-    secret_service: Any | None,
-    user_id: str | None,
-) -> ValidationResult:
-    patched = _patched_routes_attr(
-        "_runtime_preflight_for_state",
-        _runtime_preflight_for_state,
-    )
-    if patched is not None:
-        return cast(
-            ValidationResult,
-            await patched(
-                state,
-                settings=settings,
-                secret_service=secret_service,
-                user_id=user_id,
-            ),
-        )
-    return await _runtime_preflight_for_state_impl(
-        state,
-        settings=settings,
-        secret_service=secret_service,
-        user_id=user_id,
-    )
-
-
-def step_advance(*args: Any, **kwargs: Any) -> Any:
-    patched = _patched_routes_attr("step_advance", step_advance)
-    if patched is not None:
-        return patched(*args, **kwargs)
-    return _step_advance_impl(*args, **kwargs)
-
-
-async def _persist_tool_invocations(
-    service: SessionServiceProtocol,
-    session_id: UUID,
-    tool_invocations: tuple[ComposerToolInvocation, ...],
-    composition_state_id: UUID | None,
-    *,
-    parent_assistant_id: UUID | None = None,
-    plugin_crash_pending: bool,
-) -> None:
-    patched = _patched_routes_attr("_persist_tool_invocations", _persist_tool_invocations)
-    if patched is not None:
-        await patched(
-            service,
-            session_id,
-            tool_invocations,
-            composition_state_id,
-            parent_assistant_id=parent_assistant_id,
-            plugin_crash_pending=plugin_crash_pending,
-        )
-        return
-    await _persist_tool_invocations_impl(
-        service,
-        session_id,
-        tool_invocations,
-        composition_state_id,
-        parent_assistant_id=parent_assistant_id,
-        plugin_crash_pending=plugin_crash_pending,
     )
 
 
@@ -1408,7 +1250,7 @@ def _redacted_tool_invocation_content_and_envelope(invocation: ComposerToolInvoc
     return content, {"_kind": "audit", "invocation": invocation_payload}
 
 
-async def _persist_tool_invocations_impl(
+async def _persist_tool_invocations(
     service: SessionServiceProtocol,
     session_id: UUID,
     tool_invocations: tuple[ComposerToolInvocation, ...],
@@ -1668,7 +1510,7 @@ async def _persist_chat_turns(
             )
 
 
-async def _state_data_from_composer_state_impl(
+async def _state_data_from_composer_state(
     state: CompositionState,
     *,
     settings: Any,
@@ -1765,50 +1607,6 @@ async def _state_data_from_composer_state_impl(
             composer_meta=persisted_composer_meta,
         ),
         authoring,
-    )
-
-
-async def _state_data_from_composer_state(
-    state: CompositionState,
-    *,
-    settings: Any,
-    secret_service: Any | None,
-    user_id: str | None,
-    runtime_preflight: _RuntimePreflightOutcome,
-    preflight_exception_policy: _PreflightExceptionPolicy,
-    initial_version: int | None,
-    telemetry_source: _ComposerPreflightTelemetrySource,
-    composer_meta: Mapping[str, Any] | None = None,
-) -> tuple[CompositionStateData, ValidationSummary]:
-    patched = _patched_routes_attr(
-        "_state_data_from_composer_state",
-        _state_data_from_composer_state,
-    )
-    if patched is not None:
-        return cast(
-            tuple[CompositionStateData, ValidationSummary],
-            await patched(
-                state,
-                settings=settings,
-                secret_service=secret_service,
-                user_id=user_id,
-                runtime_preflight=runtime_preflight,
-                preflight_exception_policy=preflight_exception_policy,
-                initial_version=initial_version,
-                telemetry_source=telemetry_source,
-                composer_meta=composer_meta,
-            ),
-        )
-    return await _state_data_from_composer_state_impl(
-        state,
-        settings=settings,
-        secret_service=secret_service,
-        user_id=user_id,
-        runtime_preflight=runtime_preflight,
-        preflight_exception_policy=preflight_exception_policy,
-        initial_version=initial_version,
-        telemetry_source=telemetry_source,
-        composer_meta=composer_meta,
     )
 
 
@@ -2740,59 +2538,6 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
 
 
 async def _dispatch_guided_respond(
-    *,
-    state: CompositionState,
-    guided: GuidedSession,
-    current_step: GuidedStep,
-    current_turn_type: TurnType,
-    turn_response: Mapping[str, Any],
-    catalog: CatalogServiceProtocol,
-    recorder: BufferingRecorder,
-    user_id: str,
-    data_dir: str | None,
-    session_engine: Any,
-    session_id: str,
-    blob_service: BlobServiceProtocol,
-    model: str,
-) -> tuple[CompositionState, GuidedSession, Any | None]:
-    patched = _patched_routes_attr("_dispatch_guided_respond", _dispatch_guided_respond)
-    if patched is not None:
-        return cast(
-            tuple[CompositionState, GuidedSession, Any | None],
-            await patched(
-                state=state,
-                guided=guided,
-                current_step=current_step,
-                current_turn_type=current_turn_type,
-                turn_response=turn_response,
-                catalog=catalog,
-                recorder=recorder,
-                user_id=user_id,
-                data_dir=data_dir,
-                session_engine=session_engine,
-                session_id=session_id,
-                blob_service=blob_service,
-                model=model,
-            ),
-        )
-    return await _dispatch_guided_respond_impl(
-        state=state,
-        guided=guided,
-        current_step=current_step,
-        current_turn_type=current_turn_type,
-        turn_response=turn_response,
-        catalog=catalog,
-        recorder=recorder,
-        user_id=user_id,
-        data_dir=data_dir,
-        session_engine=session_engine,
-        session_id=session_id,
-        blob_service=blob_service,
-        model=model,
-    )
-
-
-async def _dispatch_guided_respond_impl(
     *,
     state: CompositionState,
     guided: GuidedSession,
@@ -4043,7 +3788,6 @@ __all__ = [
     "_ComposerRequestEndpoint",
     "_ComposerRequestTerminalStatus",
     "_PreflightExceptionPolicy",
-    "_RoutesMetricProxy",
     "_RuntimePreflightFailed",
     "_RuntimePreflightOutcome",
     "_SessionComposeLockRegistry",
@@ -4076,9 +3820,7 @@ __all__ = [
     "_is_composer_llm_audit_tool_message",
     "_litellm_error_detail",
     "_llm_calls_from_exception",
-    "_load_run_accounting_for_settings_impl",
     "_message_response",
-    "_patched_routes_attr",
     "_pending_proposal_responses",
     "_persist_chat_turns",
     "_persist_llm_calls",
@@ -4093,12 +3835,9 @@ __all__ = [
     "_run_accounting_integrity_http",
     "_runtime_preflight_failure_errors",
     "_runtime_preflight_for_state",
-    "_runtime_preflight_for_state_impl",
     "_safe_frame_strings",
     "_session_response",
-    "_solve_step_chat_with_auto_drop_impl",
     "_state_data_from_composer_state",
-    "_state_data_from_composer_state_impl",
     "_state_from_record",
     "_state_response",
     "_summarize_guided_response",

@@ -107,12 +107,6 @@ per_file_rules:
   reason: Exception type discrimination for error prioritization
   expires: null
   max_hits: 1
-- pattern: core/security/web.py
-  rules:
-  - R5
-  reason: Union type narrowing for thread-safe URL validation
-  expires: null
-  max_hits: 2
 allow_hits:
 - key: core/payload_store.py:R6:FilesystemPayloadStore:store:fp=7ffad90e4cb20922
   owner: john
@@ -285,3 +279,41 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[24]/body[10]/body[2]/body[1]/body[0]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:09096384b5fa4d200b46499ba927ae544de7ae51fc80454cea32dc3136a6fcab'
+- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=052ffa76f74531c2
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — Tier-3 I/O fault returned as an explicit error result, not swallowed. In PurgeManager.purge_payloads (core/retention/purge.py:385), `except OSError as e` catches a filesystem fault from self._payload_store.delete(ref) — deleting a payload file is a Tier-3 I/O boundary (the filesystem is external to our authored values; the file may be missing, the disk may error, permissions may deny). This is not a silent swallow: it appends ref to failed_refs, which is RETURNED in PurgeResult (the method docstring documents failed_refs as "refs whose delete operation raised"), and `continue`s so one failed deletion does not abort purging the remaining refs. The returned failed_refs IS the explicit error result R6 asks for; the logger.warning is supplementary operational visibility, not the record of record. The catch is narrow (OSError only); a bug in our own purge code would raise a different exception and crash. Affected-run grade downgrades (Step 2) deliberately use ONLY successfully-deleted refs, so a ref that failed here is not treated as deleted. R6 is a syntactic detector that does not recognise append-to-returned-list + continue as an explicit error result. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:25.209503+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The except OSError catches a Tier-3 filesystem I/O fault at the payload-store boundary (external storage, not first-party data), narrowly typed to OSError so bugs in our code raise something else and crash. The handler is not a silent swallow: the ref is appended to failed_refs which is returned in PurgeResult and documented as the explicit failure record, and Step 2 correctly uses only deleted_refs so failed deletions don't trigger grade downgrades. R6 is a syntactic detector that doesn't recognise append-to-returned-list+continue as an explicit error result; the rationale shows the structural error-return path the rule asks for.
+  judge_signature_version: 2
+  scope_fingerprint: b79b0744f078d304d85ec3361bd62035cdcf04ff56fbac2f4969446968284a1a
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[8]/body[6]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f61cf09619f53e86fafa69776c79bfe18a785906ce60a3422c5b8467a65e75cb'
+- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=c9f0e93436c24030
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — narrow Tier-1-DB I/O fault returned as an explicit error result; Tier-1 semantic corruption deliberately propagates. In PurgeManager.purge_payloads (core/retention/purge.py:427), `except SQLAlchemyError as exc` catches a transient database I/O fault from update_grade_after_purge(...). The in-code comment states the doctrine exactly: update_grade_after_purge operates on our own Tier-1 audit DB, so the ONLY recoverable failure mode is database I/O (lock contention, connection loss); every SEMANTIC anomaly it can detect is raised as AuditIntegrityError — a Tier-1 error that is NOT a SQLAlchemyError — which therefore propagates uncaught and crashes the purge, because corruption of our audit trail must never be recorded as a recoverable "grade update failure". Any other exception (TypeError, AttributeError, RuntimeError) is a bug in our own code and likewise crashes. This is not a silent swallow: the failure is appended to grade_update_failures (returned in PurgeResult) and the loop continues, because the payloads are already irreversibly deleted so a transient DB failure for one run must not prevent grade updates for the remaining runs. The catch is narrow (SQLAlchemyError); the returned grade_update_failures is the explicit error result; the logger.warning is supplementary. R6 cannot distinguish a narrow recoverable-I/O catch (with Tier-1 corruption excluded and re-raising) from a silent swallow. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:32.701021+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The except is narrowly scoped to SQLAlchemyError (transient DB I/O), Tier-1 semantic corruption is raised as AuditIntegrityError which is not a SQLAlchemyError and therefore propagates uncaught, and any non-SQLAlchemy exception (TypeError/AttributeError/RuntimeError) likewise crashes. The handler is not a silent swallow: failures are appended to grade_update_failures and surfaced in the returned PurgeResult as an explicit error result, with logger.warning supplementary. The comment justifies why the loop must continue (payloads already irreversibly deleted; remaining runs must still have their grades updated). This is exactly the recoverable-Tier-3-style peel-off pattern that R6 cannot syntactically distinguish from a silent swallow.
+  judge_signature_version: 2
+  scope_fingerprint: b79b0744f078d304d85ec3361bd62035cdcf04ff56fbac2f4969446968284a1a
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[8]/body[9]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:106237b1a5dc9b1f5177556347f78cc89bb448e37e7aabe52684246bdf71e418'

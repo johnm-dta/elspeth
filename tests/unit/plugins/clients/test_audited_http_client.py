@@ -1450,3 +1450,76 @@ class TestAuditedHTTPClientGet:
         assert recorded_body["_json_parse_failed"] is True
         assert "NaN" in recorded_body["_error"] or "non-finite" in recorded_body["_error"]
         assert recorded_body["_raw_text"] == json_with_nan
+
+    def test_get_with_sensitive_query_params_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GET with sensitive query params fingerprints params in the recorded audit request, but sends original over the wire."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.get.return_value = mock_response
+
+            client.get("https://api.example.com/search", params={"q": "hello", "api_key": "SECRET123", "non_sensitive": "val"})
+
+        # Verify raw parameters were passed to httpx (not fingerprinted)
+        mock_client.get.assert_called_once()
+        call_args = mock_client.get.call_args
+        assert call_args[1]["params"] == {"q": "hello", "api_key": "SECRET123", "non_sensitive": "val"}
+
+        # Verify sensitive parameters were fingerprinted in the audit trail
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_params = call_kwargs["request_data"].to_dict()["params"]
+        assert recorded_params["q"] == "hello"
+        assert recorded_params["non_sensitive"] == "val"
+        assert recorded_params["api_key"] != "SECRET123"
+        assert str(recorded_params["api_key"]).startswith("<fingerprint:")
+
+    def test_get_with_sensitive_url_query_params_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GET with sensitive params in URL query string fingerprints them in recorded audit request, but sends original over the wire."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.get.return_value = mock_response
+
+            client.get("https://api.example.com/search?q=hello&token=SECRET_TOKEN")
+
+        # Verify raw URL was passed to httpx (not fingerprinted)
+        mock_client.get.assert_called_once()
+        call_args = mock_client.get.call_args
+        assert call_args[0][0] == "https://api.example.com/search?q=hello&token=SECRET_TOKEN"
+
+        # Verify sensitive parameters in URL query string were fingerprinted in the audit trail
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_url = call_kwargs["request_data"].to_dict()["url"]
+        assert "q=hello" in recorded_url
+        assert "token=SECRET_TOKEN" not in recorded_url
+        assert "token=%3Cfingerprint%3A" in recorded_url or "token=<fingerprint:" in recorded_url

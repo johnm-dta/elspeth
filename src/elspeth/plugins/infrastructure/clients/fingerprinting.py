@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from elspeth.contracts.errors import FrameworkBugError
 
@@ -156,3 +159,117 @@ def filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
         Headers dict with sensitive headers removed
     """
     return {k: v for k, v in headers.items() if not is_sensitive_header(k)}
+
+
+def is_sensitive_query_param(param_name: str) -> bool:
+    """Check if a query parameter name indicates sensitive content.
+
+    Checks exact match lists and word boundary patterns similar to headers.
+    """
+    lower_name = param_name.lower()
+    if lower_name in SENSITIVE_HEADERS_EXACT:
+        return True
+    segments = [seg for seg in re.split(r"[^a-z0-9]+", lower_name) if seg]
+    if any(seg in SENSITIVE_HEADER_WORDS for seg in segments):
+        return True
+    # Support common abbreviations in query parameters
+    additional_sensitive_words = {"sig", "signature", "pwd", "pass", "sid"}
+    return any(seg in additional_sensitive_words for seg in segments)
+
+
+def fingerprint_params(params: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Fingerprint sensitive query parameters for audit recording.
+
+    Sensitive parameters (auth, api keys, tokens, signatures) are replaced
+    with HMAC fingerprints so that:
+    1. Raw secrets are NEVER stored in the audit trail
+    2. Different credentials produce different fingerprints
+    3. Replay/verify can distinguish requests by credential identity
+
+    In dev mode (ELSPETH_ALLOW_RAW_SECRETS=true), sensitive parameters are
+    removed entirely (no fingerprint key required).
+    """
+    if params is None:
+        return None
+
+    from elspeth.core.security import get_fingerprint_key, secret_fingerprint
+
+    allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+
+    try:
+        get_fingerprint_key()
+        have_key = True
+    except ValueError:
+        have_key = False
+
+    result: dict[str, Any] = {}
+
+    for k, v in params.items():
+        if is_sensitive_query_param(k):
+            if allow_raw:
+                # Dev mode: remove query parameter
+                pass
+            elif have_key:
+                # Fingerprint the sensitive value (convert value to str for hashing)
+                fp = secret_fingerprint(str(v))
+                result[k] = f"<fingerprint:{fp}>"
+            else:
+                raise FrameworkBugError(
+                    f"Sensitive query parameter '{k}' cannot be fingerprinted: "
+                    f"ELSPETH_FINGERPRINT_KEY is not set and ELSPETH_ALLOW_RAW_SECRETS is not 'true'. "
+                    f"Authenticated HTTP calls require a fingerprint key for audit integrity. "
+                    f"Set ELSPETH_FINGERPRINT_KEY or ELSPETH_ALLOW_RAW_SECRETS=true for dev mode."
+                )
+        else:
+            result[k] = v
+
+    return result
+
+
+def fingerprint_url(url: str) -> str:
+    """Fingerprint sensitive query parameters inside a URL string for audit recording."""
+    if not url:
+        return url
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    if not parsed.query:
+        return url
+
+    from elspeth.core.security import get_fingerprint_key, secret_fingerprint
+
+    allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+
+    try:
+        get_fingerprint_key()
+        have_key = True
+    except ValueError:
+        have_key = False
+
+    query_params = parse_qsl(parsed.query, keep_blank_values=True)
+    fingerprinted_qsl = []
+
+    for k, v in query_params:
+        if is_sensitive_query_param(k):
+            if allow_raw:
+                # Dev mode: remove parameter
+                continue
+            elif have_key:
+                fp = secret_fingerprint(v)
+                fingerprinted_qsl.append((k, f"<fingerprint:{fp}>"))
+            else:
+                raise FrameworkBugError(
+                    f"Sensitive URL query parameter '{k}' cannot be fingerprinted: "
+                    f"ELSPETH_FINGERPRINT_KEY is not set and ELSPETH_ALLOW_RAW_SECRETS is not 'true'. "
+                    f"Authenticated HTTP calls require a fingerprint key for audit integrity. "
+                    f"Set ELSPETH_FINGERPRINT_KEY or ELSPETH_ALLOW_RAW_SECRETS=true for dev mode."
+                )
+        else:
+            fingerprinted_qsl.append((k, v))
+
+    new_query = urlencode(fingerprinted_qsl)
+    new_parsed = parsed._replace(query=new_query)
+    return urlunparse(new_parsed)

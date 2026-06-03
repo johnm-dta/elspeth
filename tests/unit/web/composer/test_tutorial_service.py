@@ -10,9 +10,12 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from elspeth.contracts import NodeType
 from elspeth.core.canonical import stable_hash
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import run_attributions_table
 from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
 from elspeth.web.composer.skills import load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialRunOutput
@@ -26,13 +29,14 @@ from elspeth.web.composer.tutorial_service import (
     _parse_rows_file,
     _plugin_nodes_from_composition_state,
     _plugin_nodes_from_pipeline_dict,
+    _replay_cache_entry,
     _rows_from_artifacts,
     _state_matches_cached_topology,
     _store_successful_live_projection,
     tutorial_model_id,
 )
 from elspeth.web.config import WebSettings
-from elspeth.web.preferences.tutorial_cache import TutorialCache
+from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT, TutorialCache, TutorialCacheEntry, tutorial_cache_key
 from elspeth.web.sessions.protocol import CompositionStateRecord, RunRecord
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
@@ -233,6 +237,72 @@ def _run_record(
         landscape_run_id="landscape-run-1",
         pipeline_yaml="source:\n  plugin: 'null'\nsinks:\n  out:\n    plugin: json\n",
     )
+
+
+@pytest.mark.asyncio
+async def test_replay_cache_entry_attributes_synthesised_landscape_run_to_requester(tmp_path: Path) -> None:
+    """Cached tutorial replays must have the same Landscape user attribution as live runs."""
+    landscape_url = f"sqlite:///{tmp_path / 'landscape.db'}"
+    settings = _make_tutorial_settings(tmp_path, landscape_url=landscape_url)
+    current_state = _make_state_record(
+        source={"plugin": "null"},
+        transform_nodes=[],
+        outputs=[{"name": "out", "plugin": "json"}],
+    )
+    started_at = datetime(2026, 5, 19, tzinfo=UTC)
+    run_record = RunRecord(
+        id=uuid4(),
+        session_id=current_state.session_id,
+        state_id=current_state.id,
+        status="pending",
+        started_at=started_at,
+        finished_at=None,
+        rows_processed=0,
+        rows_succeeded=0,
+        rows_failed=0,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+        rows_quarantined=0,
+        error=None,
+        landscape_run_id=None,
+        pipeline_yaml=None,
+    )
+    cache_entry = TutorialCacheEntry(
+        canonical_prompt=CANONICAL_SEED_PROMPT,
+        model_id="tutorial-model",
+        cached_at=started_at,
+        rows=[{"url": "https://example.gov", "rating": 5}],
+        source_data_hash="0" * 64,
+        llm_call_count=2,
+        pipeline_yaml="source:\n  plugin: 'null'\nsinks:\n  out:\n    plugin: json\n",
+    )
+
+    class _StubSessionService:
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[Any, dict[str, Any]]] = []
+
+        async def create_run(self, **_kwargs: Any) -> RunRecord:
+            return run_record
+
+        async def update_run_status(self, run_id: Any, **kwargs: Any) -> None:
+            self.status_updates.append((run_id, dict(kwargs)))
+
+    await _replay_cache_entry(
+        session_service=cast(Any, _StubSessionService()),
+        settings=settings,
+        session_id=current_state.session_id,
+        current_state=current_state,
+        cache_entry=cache_entry,
+        cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, "tutorial-model"),
+        user_id="alice",
+        auth_provider_type="local",
+    )
+
+    with LandscapeDB.from_url(landscape_url, create_tables=False) as db, db.read_only_connection() as conn:
+        attribution_row = conn.execute(select(run_attributions_table)).one()
+
+    assert attribution_row.initiated_by_user_id == "alice"
+    assert attribution_row.auth_provider_type == "local"
 
 
 def test_cache_seed_skip_reason_returns_none_for_clean_completed_run() -> None:

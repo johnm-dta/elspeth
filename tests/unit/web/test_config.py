@@ -723,6 +723,39 @@ class TestOIDCBlankStringRejection:
                 **self._COMPOSER_DEFAULTS,
             )
 
+    def test_oidc_http_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="must be an HTTPS URL"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint="http://issuer.example.com/oauth2/authorize",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_cross_origin_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="same origin as issuer"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_entra_cross_origin_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="same origin as issuer"):
+            WebSettings(
+                auth_provider="entra",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                entra_tenant_id="test-tenant-id",
+                oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                **self._COMPOSER_DEFAULTS,
+            )
+
     def test_local_auth_blank_oidc_field_still_rejected(self) -> None:
         """Field validator fires regardless of auth_provider — blank is always invalid."""
         with pytest.raises(ValidationError, match="must not be blank"):

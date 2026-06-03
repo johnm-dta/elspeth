@@ -137,6 +137,8 @@ async def run_tutorial_pipeline(
                     current_state=current_state,
                     cache_entry=cache_entry,
                     cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id),
+                    user_id=user.user_id,
+                    auth_provider_type=settings.auth_provider,
                 )
 
     await _normalise_current_tutorial_state_for_execution(
@@ -267,6 +269,8 @@ async def _replay_cache_entry(
     current_state: Any,
     cache_entry: TutorialCacheEntry,
     cache_key: str,
+    user_id: str,
+    auth_provider_type: str,
 ) -> TutorialRunResponse:
     """Project a cache hit into a synthesised Landscape run.
 
@@ -310,6 +314,8 @@ async def _replay_cache_entry(
                 },
                 openrouter_catalog_sha256=catalog_sha,
                 openrouter_catalog_source=catalog_source,
+                initiated_by_user_id=user_id,
+                auth_provider_type=auth_provider_type,
             )
 
     landscape_run_id = await run_sync_in_worker(_write_landscape_run)

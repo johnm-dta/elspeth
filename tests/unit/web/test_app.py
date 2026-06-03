@@ -10,6 +10,7 @@ import weakref
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from pydantic import SecretBytes, ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
@@ -73,6 +74,10 @@ class _StaticAsyncClient:
     async def get(self, url: str) -> _StaticJsonResponse:
         del url
         return next(self._responses)
+
+    async def request(self, method: str, url: str) -> _StaticJsonResponse:
+        request = httpx.Request(method, url)
+        raise httpx.ConnectError("catalog probe disabled in test", request=request)
 
 
 class TestCreateApp:
@@ -569,6 +574,9 @@ class TestOidcDiscoveryStartup:
             [],
             {"authorization_endpoint": 123},
             {"authorization_endpoint": "   "},
+            {"authorization_endpoint": "javascript:alert(1)"},
+            {"authorization_endpoint": "http://issuer.example.com/oauth2/authorize"},
+            {"authorization_endpoint": "https://evil.example.com/oauth2/authorize"},
         ],
     )
     async def test_lifespan_rejects_invalid_discovery_authorization_endpoint(self, tmp_path, payload) -> None:
@@ -581,6 +589,16 @@ class TestOidcDiscoveryStartup:
         ):
             async with lifespan(app):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_lifespan_accepts_same_origin_https_discovery_authorization_endpoint(self, tmp_path) -> None:
+        """Discovery authorization endpoints are stored only after issuer-origin validation."""
+        app = create_app(self._oidc_settings(tmp_path))
+
+        payload = {"authorization_endpoint": "https://issuer.example.com/oauth2/authorize"}
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([_StaticJsonResponse(payload)])):
+            async with lifespan(app):
+                assert app.state.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
 
 
 class TestLifespanShutdown:

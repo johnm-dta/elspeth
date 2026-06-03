@@ -48,6 +48,7 @@ from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.routes import catalog_router
@@ -125,13 +126,13 @@ class _AuthorizationEndpointDiscoveryDocument(BaseModel):
         return value
 
 
-def _validate_authorization_endpoint_discovery_document(discovery: object) -> str:
+def _validate_authorization_endpoint_discovery_document(discovery: object, *, issuer: str) -> str:
     """Validate the discovery document shape and return authorization_endpoint."""
     try:
         document = _AuthorizationEndpointDiscoveryDocument.model_validate(discovery)
     except ValidationError as exc:
         raise ValueError("OIDC discovery document must provide a non-empty string 'authorization_endpoint'") from exc
-    return document.authorization_endpoint
+    return validate_oidc_authorization_endpoint(document.authorization_endpoint, issuer=issuer)
 
 
 def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
@@ -238,21 +239,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Resolve OIDC authorization_endpoint from discovery or explicit config
     if settings.auth_provider in ("oidc", "entra"):
-        if settings.oidc_authorization_endpoint:
-            app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
+        if settings.oidc_issuer:
+            issuer = settings.oidc_issuer.rstrip("/")
+        elif settings.auth_provider == "entra" and settings.entra_tenant_id:
+            issuer = f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0"
         else:
-            if settings.oidc_issuer:
-                issuer = settings.oidc_issuer.rstrip("/")
-            elif settings.auth_provider == "entra" and settings.entra_tenant_id:
-                issuer = f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0"
-            else:
-                raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
+            raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
+
+        if settings.oidc_authorization_endpoint:
+            app.state.oidc_authorization_endpoint = validate_oidc_authorization_endpoint(
+                settings.oidc_authorization_endpoint,
+                issuer=issuer,
+            )
+        else:
             discovery_url = f"{issuer}/.well-known/openid-configuration"
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                     resp = await client.get(discovery_url)
                     resp.raise_for_status()
-                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(resp.json())
+                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(
+                        resp.json(),
+                        issuer=issuer,
+                    )
             except (httpx.HTTPError, ValueError) as exc:
                 raise SystemExit(
                     f"FATAL: OIDC discovery failed for issuer {issuer!r}: {exc}. "

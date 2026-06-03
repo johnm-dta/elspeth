@@ -26,6 +26,10 @@ attempt; no token is returned.
 
 Frozen-at-mark-time discipline (load-bearing):
 
+* ``get_shareable_link`` may re-mint only when the exact current
+  ``(session, state, payload_digest)`` already has a
+  ``mark_ready_for_review`` audit row and snapshot blob. It does not
+  create a new share decision.
 * ``resolve_token`` reads ``audit_readiness`` directly from the blob; it
   never re-calls ``ReadinessService.compute_snapshot``. This means:
     - The reviewer sees exactly what the owner saw at mark-time, even if
@@ -53,7 +57,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, TypedDict, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.engine import Engine
 
 from elspeth.core.canonical import canonical_json
@@ -89,6 +93,7 @@ _SHARE_URL_PREFIX = "/#/shared/"
 # hash algorithm is self-describing. The payload store accepts only the raw
 # hex; the prefix is added/stripped at the service boundary.
 _DIGEST_PREFIX = "sha256:"
+_NOT_MARKED_READY_DETAIL = "current composition state has not been marked ready for review"
 
 
 class CompositionNotRunnableError(Exception):
@@ -106,6 +111,9 @@ class CompositionNotRunnableError(Exception):
     * ``"readiness_error_row"`` — ``ReadinessService.compute_snapshot``
       returned a row with ``status == "error"``. Sharing a known-broken
       readiness state is share-theatre; the gate refuses.
+    * ``"not_marked_ready"`` — re-minting was requested before a
+      successful ``mark_ready_for_review`` audit row exists for the
+      current state and payload digest.
     """
 
     def __init__(self, *, reason: str, detail: str = "") -> None:
@@ -148,10 +156,10 @@ class _BlobShape(TypedDict):
     payload version + ship a migration before extending.
     """
 
-    pipeline_metadata: Any  # noqa: TID — CompositionObject (dict[str, JsonValue])
-    composition_snapshot: Any  # noqa: TID — CompositionObject
+    pipeline_metadata: Any  # CompositionObject (dict[str, JsonValue])
+    composition_snapshot: Any  # CompositionObject
     yaml: str
-    audit_readiness: Any  # noqa: TID — AuditReadinessSnapshot.model_dump output
+    audit_readiness: Any  # AuditReadinessSnapshot.model_dump output
     created_by_user_id: str
 
 
@@ -266,6 +274,29 @@ def _build_snapshot(
         state_id=state_record.id,
         created_at=datetime.now(UTC),
     )
+
+
+def _has_mark_ready_audit_row(*, engine: Engine, session_id: UUID, user_id: str, snapshot: _Snapshot) -> bool:
+    """Return whether the current snapshot is already marked ready.
+
+    This is the re-mint gate for ``GET /shareable-link``. The match uses
+    both ``composition_state_id`` and ``payload_digest``: state id catches
+    same-content state advancement, while digest catches same-state
+    readiness/content drift.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(composer_completion_events_table.c.id)
+            .where(
+                composer_completion_events_table.c.session_id == str(session_id),
+                composer_completion_events_table.c.composition_state_id == str(snapshot.state_id),
+                composer_completion_events_table.c.event_type == "mark_ready_for_review",
+                composer_completion_events_table.c.actor == user_id,
+                composer_completion_events_table.c.payload_digest == snapshot.payload_digest,
+            )
+            .limit(1)
+        ).first()
+    return row is not None
 
 
 # ── Service ──────────────────────────────────────────────────────────────
@@ -402,21 +433,19 @@ class ShareableReviewService:
         )
 
     async def get_shareable_link(self, *, session_id: UUID, user_id: str) -> ShareableLinkResponse:
-        """Re-mint a token for the current (session, state) on demand.
+        """Re-mint a token for an already-marked current snapshot.
 
         Always mints a fresh token. Content-addressing guarantees that two
         calls on an unchanged state produce identical ``payload_digest``
         even though the token strings differ (the nonce in each token's
         envelope ensures the byte sequence varies).
 
-        No audit row is written here — only ``mark_ready_for_review`` and
-        ``export_yaml`` are auditable completion events in v1. Re-minting
-        an already-shared snapshot is a UI affordance, not a new decision.
+        No audit row or blob is written here: this path is only allowed
+        when a prior ``mark_ready_for_review`` row and blob already exist
+        for the exact current ``(session, state, payload_digest)``. If the
+        state or readiness snapshot drifts, the owner must mark ready
+        again so the gate and audit row run on the new share decision.
         """
-        # No validation gate here — re-minting is a UI affordance, not a
-        # new "I want to share this" decision. The snapshot reflects the
-        # CURRENT state; if the state has drifted from the originally
-        # marked snapshot, the new digest is honest about that.
         audit_readiness = await self._readiness_service.compute_snapshot(session_id=session_id, user_id=user_id)
         state_record = await self._session_service.get_current_state(session_id)
         snapshot = _build_snapshot(
@@ -425,9 +454,17 @@ class ShareableReviewService:
             audit_readiness=audit_readiness,
             created_by_user_id=user_id,
         )
-        # Re-storing an identical content yields the same digest (the
-        # payload store's content-addressable layout dedupes silently).
-        self._payload_store.store(snapshot.canonical_bytes)
+        if not _has_mark_ready_audit_row(
+            engine=self._sessions_db_engine,
+            session_id=session_id,
+            user_id=user_id,
+            snapshot=snapshot,
+        ) or not self._payload_store.exists(snapshot.digest_hex):
+            raise CompositionNotRunnableError(
+                reason="not_marked_ready",
+                detail=_NOT_MARKED_READY_DETAIL,
+            )
+
         lifetime = timedelta(seconds=self._settings.shareable_link_lifetime_seconds)
         expires_at = snapshot.created_at + lifetime
         token = self._sign_token(

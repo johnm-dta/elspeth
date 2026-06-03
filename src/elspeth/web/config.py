@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator,
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -414,6 +415,16 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
+            if self.oidc_authorization_endpoint is not None:
+                assert self.oidc_issuer is not None
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=self.oidc_issuer,
+                    ),
+                )
         elif self.auth_provider == "entra":
             # oidc_issuer is NOT required — EntraAuthProvider derives it
             # from entra_tenant_id (login.microsoftonline.com/{tid}/v2.0).
@@ -428,6 +439,16 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
+            if self.oidc_authorization_endpoint is not None:
+                assert self.entra_tenant_id is not None
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
+                    ),
+                )
         return self
 
     @model_validator(mode="after")

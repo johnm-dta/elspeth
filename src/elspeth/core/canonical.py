@@ -166,6 +166,10 @@ def _normalize_for_canonical(data: Any) -> Any:
     Raises:
         ValueError: If data contains NaN, Infinity, or other non-serializable values
     """
+    # Optimization: Fast-path standard primitives at recursion entry to bypass mapping/list checks
+    if type(data) in (str, int, bool, type(None)):
+        return data
+
     # Handle PipelineRow - convert to dict before processing
     if isinstance(data, PipelineRow):
         data = data.to_dict()

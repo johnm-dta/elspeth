@@ -577,12 +577,20 @@ jobs:
           # CVE-2025-45768 / PYSEC-2025-183 has no fixed PyJWT release;
           # the disputed weakness is application-selected HMAC key length.
           # WebSettings enforces a 32-byte secret_key floor on non-loopback hosts.
+          #
+          # CVE-2026-45829 has no fixed chromadb release as of 2026-06-03 (the
+          # pip-audit "Fix Versions" column is empty). chromadb backs the
+          # chroma_sink + rag_retrieval plugins; remove this ignore and bump the
+          # pin once an upstream fix ships. PyJWT advisories PYSEC-2026-175/177/
+          # 178/179 are NOT ignored — they are resolved by the uv.lock bump to
+          # PyJWT 2.13.0 (constraint already permitted it).
           uv run --with "pip-audit>=2.9,<3" pip-audit \
             --strict \
             --requirement requirements-audit.txt \
             --no-deps \
             --disable-pip \
             --ignore-vuln PYSEC-2025-183 \
+            --ignore-vuln CVE-2026-45829 \
             --progress-spinner=off
 
       - name: Check Python dependency licenses

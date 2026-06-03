@@ -1494,928 +1494,1018 @@ async def _handle_runtime_preflight_failure(
     return response_body
 
 
-def create_session_router() -> APIRouter:
-    """Create the session router with /api/sessions prefix."""
-    router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+session_router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
-    @router.post("", status_code=201, response_model=SessionResponse)
-    async def create_session(
-        body: CreateSessionRequest,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> SessionResponse:
-        """Create a new session for the authenticated user."""
-        service = request.app.state.session_service
-        settings = request.app.state.settings
-        session = await service.create_session(
-            user.user_id,
-            body.title,
-            settings.auth_provider,
-        )
-        return _session_response(session)
 
-    @router.get("", response_model=list[SessionResponse])
-    async def list_sessions(
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-        limit: int = Query(50, ge=1, le=200),
-        offset: int = Query(0, ge=0),
-    ) -> list[SessionResponse]:
-        """List sessions for the authenticated user."""
-        service = request.app.state.session_service
-        settings = request.app.state.settings
-        sessions = await service.list_sessions(
-            user.user_id,
-            settings.auth_provider,
-            limit=limit,
-            offset=offset,
-        )
-        return [_session_response(s) for s in sessions]
-
-    # NOTE: Registered before "/{session_id}" so FastAPI matches "_active"
-    # against this exact-path route rather than attempting to parse "_active"
-    # as a UUID (which would 422). The leading underscore also guarantees
-    # the path can never collide with a real session id (UUIDs only contain
-    # hex digits and hyphens).
-    @router.get("/_active", response_model=list[ComposerProgressSnapshot])
-    async def list_active_composer_requests(
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> list[ComposerProgressSnapshot]:
-        """List in-flight composer requests for the authenticated user.
-
-        Closes the operator-visibility gap captured in the source report:
-        Uvicorn's access log only writes the POST line when the response
-        completes, so an in-flight or client-cancelled composer request
-        was previously invisible to operators unless they polled
-        ``/composer-progress`` for a specific session id.
-
-        Returns snapshots whose phase is in NON_TERMINAL_PROGRESS_PHASES
-        (starting / calling_model / using_tools / validating / saving),
-        ordered by ``updated_at`` ascending so the longest-running request
-        is at the top — typical triage starting point. Filtered by the
-        authenticated user's id against the registry's internal user
-        index, so a caller cannot see other users' active sessions even
-        when they share a server.
-
-        ``cancelled``, ``failed``, ``complete``, and ``idle`` snapshots
-        are intentionally excluded from this view: those requests are no
-        longer in flight and the per-session ``/composer-progress`` GET
-        is the right surface for inspecting a terminal outcome.
-        """
-        registry = _get_composer_progress_registry(request)
-        snapshots = await registry.list_active(user_id=str(user.user_id))
-        return list(snapshots)
-
-    @router.get("/{session_id}", response_model=SessionResponse)
-    async def get_session(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> SessionResponse:
-        """Get a single session. IDOR-protected."""
-        session = await _verify_session_ownership(session_id, user, request)
-        return _session_response(session)
-
-    @router.get(
-        "/{session_id}/composer-progress",
-        response_model=ComposerProgressSnapshot,
+@session_router.post("", status_code=201, response_model=SessionResponse)
+async def create_session(
+    body: CreateSessionRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> SessionResponse:
+    """Create a new session for the authenticated user."""
+    service = request.app.state.session_service
+    settings = request.app.state.settings
+    session = await service.create_session(
+        user.user_id,
+        body.title,
+        settings.auth_provider,
     )
-    async def get_composer_progress(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> ComposerProgressSnapshot:
-        """Return the latest provider-safe composer progress for a session."""
-        session = await _verify_session_ownership(session_id, user, request)
-        registry = _get_composer_progress_registry(request)
-        return await registry.get_latest(str(session.id))
+    return _session_response(session)
 
-    @router.delete("/{session_id}", status_code=204)
-    async def delete_session(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> None:
-        """Archive (delete) a session and all associated data.
 
-        Rejects deletion while a pipeline run is active — archive_session()
-        would delete run rows and blob directories out from under the
-        background worker, causing status update failures and data loss.
-        """
-        session = await _verify_session_ownership(session_id, user, request)
-        service = request.app.state.session_service
-
-        active_run = await service.get_active_run(session.id)
-        if active_run is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
-            )
-
-        try:
-            await service.archive_session(session.id)
-        finally:
-            # Clean up ephemeral per-session state regardless of archive outcome.
-            # If archive fails, the session still exists and a retry will re-enter
-            # this path. The lock cleanup is idempotent.
-            execution_service = request.app.state.execution_service
-            execution_service.cleanup_session_lock(str(session.id))
-            compose_lock_registry = _get_session_compose_lock_registry(request)
-            await compose_lock_registry.cleanup_session_lock(str(session.id))
-            progress_registry = _get_composer_progress_registry(request)
-            await progress_registry.clear(str(session.id))
-
-    @router.post(
-        "/{session_id}/messages",
-        response_model=MessageWithStateResponse,
+@session_router.get("", response_model=list[SessionResponse])
+async def list_sessions(
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[SessionResponse]:
+    """List sessions for the authenticated user."""
+    service = request.app.state.session_service
+    settings = request.app.state.settings
+    sessions = await service.list_sessions(
+        user.user_id,
+        settings.auth_provider,
+        limit=limit,
+        offset=offset,
     )
-    async def send_message(
-        session_id: UUID,
-        body: SendMessageRequest,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-        rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
-    ) -> MessageWithStateResponse:
-        """Send a user message, run the LLM composer, persist results.
+    return [_session_response(s) for s in sessions]
 
-        1. Rate limit check (per-user).
-        2. Load or create the current CompositionState (pre-send provenance).
-        3. Persist the user message with pre-send state_id.
-        4. Pre-fetch chat history for the composer.
-        5. Run the LLM composition loop.
-        6. Save state if version changed (post-compose provenance).
-        7. Persist the assistant response message with post-compose state_id.
-        8. Return the assistant message and (optionally) the new state.
-        """
-        # 0. Rate limit check — before any work
-        await rate_limiter.check(user.user_id)
 
-        session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        settings = request.app.state.settings
-        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
-        async with compose_lock:
-            # 1. Load or create CompositionState — needed before user message
-            #    for pre-send provenance (AD-7: user msg records what user saw).
-            state_record = await service.get_current_state(session.id)
-            if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
-                pre_send_state_id: UUID | None = None
-            else:
-                state = _state_from_record(state_record)
-                # If client provided a state_id, verify it belongs to this session.
-                # Use client-asserted state for provenance (AD-2) — it reflects
-                # what the user was looking at, which may differ from current if
-                # another tab mutated state.
-                if body.state_id is not None:
-                    client_state_id = body.state_id
-                    # Two 404 paths below return byte-identical bodies by
-                    # design. The commit that introduced this validation
-                    # called the RuntimeError/ValueError mapping
-                    # "load-bearing ... to avoid leaking other sessions'
-                    # state existence" — but distinguishable 404 *details*
-                    # would leak exactly that (an attacker could observe
-                    # "State not found" vs "State not found for this
-                    # session" and conclude the UUID exists in some OTHER
-                    # user's session, which is the IDOR information leak
-                    # the check exists to prevent). Keep both details
-                    # identical; if a future refactor needs diagnostic
-                    # precision, route it through structured audit/
-                    # telemetry (server-side only), not through the HTTP
-                    # response body.
-                    try:
-                        client_state = await service.get_state(client_state_id)
-                    except ValueError:
-                        raise HTTPException(
-                            status_code=404,
-                            detail="State not found",
-                        ) from None
-                    if client_state.session_id != session.id:
-                        raise HTTPException(
-                            status_code=404,
-                            detail="State not found",
-                        )
-                    pre_send_state_id = client_state_id
-                else:
-                    pre_send_state_id = state_record.id
+# NOTE: Registered before "/{session_id}" so FastAPI matches "_active"
+# against this exact-path route rather than attempting to parse "_active"
+# as a UUID (which would 422). The leading underscore also guarantees
+# the path can never collide with a real session id (UUIDs only contain
+# hex digits and hyphens).
+@session_router.get("/_active", response_model=list[ComposerProgressSnapshot])
+async def list_active_composer_requests(
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> list[ComposerProgressSnapshot]:
+    """List in-flight composer requests for the authenticated user.
 
-            # 2. Persist user message with pre-send provenance.
-            # Keep the inserted row so the subsequent snapshot can prove
-            # it is composing against the transcript that actually ends
-            # at this request's user turn.
-            user_msg = await service.add_message(
-                session.id,
-                "user",
-                body.content,
-                composition_state_id=pre_send_state_id,
+    Closes the operator-visibility gap captured in the source report:
+    Uvicorn's access log only writes the POST line when the response
+    completes, so an in-flight or client-cancelled composer request
+    was previously invisible to operators unless they polled
+    ``/composer-progress`` for a specific session id.
+
+    Returns snapshots whose phase is in NON_TERMINAL_PROGRESS_PHASES
+    (starting / calling_model / using_tools / validating / saving),
+    ordered by ``updated_at`` ascending so the longest-running request
+    is at the top — typical triage starting point. Filtered by the
+    authenticated user's id against the registry's internal user
+    index, so a caller cannot see other users' active sessions even
+    when they share a server.
+
+    ``cancelled``, ``failed``, ``complete``, and ``idle`` snapshots
+    are intentionally excluded from this view: those requests are no
+    longer in flight and the per-session ``/composer-progress`` GET
+    is the right surface for inspecting a terminal outcome.
+    """
+    registry = _get_composer_progress_registry(request)
+    snapshots = await registry.list_active(user_id=str(user.user_id))
+    return list(snapshots)
+
+
+@session_router.get("/{session_id}", response_model=SessionResponse)
+async def get_session(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> SessionResponse:
+    """Get a single session. IDOR-protected."""
+    session = await _verify_session_ownership(session_id, user, request)
+    return _session_response(session)
+
+
+@session_router.get(
+    "/{session_id}/composer-progress",
+    response_model=ComposerProgressSnapshot,
+)
+async def get_composer_progress(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> ComposerProgressSnapshot:
+    """Return the latest provider-safe composer progress for a session."""
+    session = await _verify_session_ownership(session_id, user, request)
+    registry = _get_composer_progress_registry(request)
+    return await registry.get_latest(str(session.id))
+
+
+@session_router.delete("/{session_id}", status_code=204)
+async def delete_session(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> None:
+    """Archive (delete) a session and all associated data.
+
+    Rejects deletion while a pipeline run is active — archive_session()
+    would delete run rows and blob directories out from under the
+    background worker, causing status update failures and data loss.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+
+    active_run = await service.get_active_run(session.id)
+    if active_run is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
+        )
+
+    try:
+        await service.archive_session(session.id)
+    finally:
+        # Clean up ephemeral per-session state regardless of archive outcome.
+        # If archive fails, the session still exists and a retry will re-enter
+        # this path. The lock cleanup is idempotent.
+        execution_service = request.app.state.execution_service
+        execution_service.cleanup_session_lock(str(session.id))
+        compose_lock_registry = _get_session_compose_lock_registry(request)
+        await compose_lock_registry.cleanup_session_lock(str(session.id))
+        progress_registry = _get_composer_progress_registry(request)
+        await progress_registry.clear(str(session.id))
+
+
+@session_router.post(
+    "/{session_id}/messages",
+    response_model=MessageWithStateResponse,
+)
+async def send_message(
+    session_id: UUID,
+    body: SendMessageRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
+) -> MessageWithStateResponse:
+    """Send a user message, run the LLM composer, persist results.
+
+    1. Rate limit check (per-user).
+    2. Load or create the current CompositionState (pre-send provenance).
+    3. Persist the user message with pre-send state_id.
+    4. Pre-fetch chat history for the composer.
+    5. Run the LLM composition loop.
+    6. Save state if version changed (post-compose provenance).
+    7. Persist the assistant response message with post-compose state_id.
+    8. Return the assistant message and (optionally) the new state.
+    """
+    # 0. Rate limit check — before any work
+    await rate_limiter.check(user.user_id)
+
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    settings = request.app.state.settings
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    async with compose_lock:
+        # 1. Load or create CompositionState — needed before user message
+        #    for pre-send provenance (AD-7: user msg records what user saw).
+        state_record = await service.get_current_state(session.id)
+        if state_record is None:
+            state = CompositionState(
+                source=None,
+                nodes=(),
+                edges=(),
+                outputs=(),
+                metadata=PipelineMetadata(),
+                version=1,
             )
-            progress_registry = _get_composer_progress_registry(request)
-            progress_sink = _composer_progress_sink(
-                progress_registry,
-                session_id=str(session.id),
-                request_id=str(user_msg.id),
-                user_id=str(user.user_id),
-            )
-            await _publish_progress(
-                progress_registry,
-                session_id=str(session.id),
-                request_id=str(user_msg.id),
-                user_id=str(user.user_id),
-                event=ComposerProgressEvent(
-                    phase="starting",
-                    headline="I'm reading your request and current pipeline.",
-                    evidence=("The request was accepted for this session.",),
-                    likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
-                ),
-            )
-
-            _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "send_message"})
-            terminal_status: _ComposerRequestTerminalStatus = "failed"
-            try:
-                # 3. Pre-fetch chat history as plain dicts (seam contract B)
-                # Pass limit=None to fetch the full conversation — the default
-                # limit=100 would silently drop recent context once a session
-                # exceeds 100 turns, causing the LLM to lose conversation state.
-                # Exclude the just-persisted user message — the composer receives
-                # it separately via body.content and appends it in _build_messages.
-                records = await service.get_messages(session.id, limit=None)
-                if not records or records[-1].id != user_msg.id:
-                    raise AuditIntegrityError(
-                        "Tier 1 audit anomaly: send_message transcript snapshot "
-                        f"for session {session.id} does not end at inserted user "
-                        f"message {user_msg.id}. Refusing to compose against "
-                        "interleaved session history."
-                    )
-                chat_messages = _composer_chat_history(records[:-1])
-
-                # 4. Run the LLM composition loop
-                composer: ComposerService = request.app.state.composer_service
-                from litellm.exceptions import APIError as LiteLLMAPIError
-                from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-
+            pre_send_state_id: UUID | None = None
+        else:
+            state = _state_from_record(state_record)
+            # If client provided a state_id, verify it belongs to this session.
+            # Use client-asserted state for provenance (AD-2) — it reflects
+            # what the user was looking at, which may differ from current if
+            # another tab mutated state.
+            if body.state_id is not None:
+                client_state_id = body.state_id
+                # Two 404 paths below return byte-identical bodies by
+                # design. The commit that introduced this validation
+                # called the RuntimeError/ValueError mapping
+                # "load-bearing ... to avoid leaking other sessions'
+                # state existence" — but distinguishable 404 *details*
+                # would leak exactly that (an attacker could observe
+                # "State not found" vs "State not found for this
+                # session" and conclude the UUID exists in some OTHER
+                # user's session, which is the IDOR information leak
+                # the check exists to prevent). Keep both details
+                # identical; if a future refactor needs diagnostic
+                # precision, route it through structured audit/
+                # telemetry (server-side only), not through the HTTP
+                # response body.
                 try:
-                    result = await composer.compose(
-                        body.content,
-                        chat_messages,
-                        state,
-                        session_id=str(session_id),
-                        user_id=str(user.user_id),
-                        progress=progress_sink,
-                    )
-                except ComposerConvergenceError as exc:
-                    terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
-                    # Discriminate the three sub-causes (composition / discovery /
-                    # wall-clock timeout) using exc.budget_exhausted. Without this
-                    # dispatch the three failure modes would collapse into a single
-                    # generic event — the original bug filed as elspeth-5030f7373d.
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=convergence_progress_event(budget_exhausted=exc.budget_exhausted),
-                    )
-                    response_body = await _handle_convergence_error(
-                        exc,
-                        service,
-                        session.id,
-                        str(user.user_id),
-                        "convergence",
-                        pre_send_state_id,
-                        settings=settings,
-                        secret_service=request.app.state.scoped_secret_resolver,
-                    )
-                    raise HTTPException(status_code=422, detail=response_body) from exc
-                except LiteLLMAuthError as exc:
-                    # ``str(exc)`` on LiteLLM exceptions can embed the provider
-                    # name, model ID, request payload fragments, and — on
-                    # certain provider code paths — the upstream HTTP response
-                    # body, which has been observed to echo the Authorization
-                    # header.  Redact the HTTP ``detail`` field to the class
-                    # name only; route the full exception to structured
-                    # server-side logging via ``slog.error`` with session
-                    # correlation.  Mirrors the ``partial_state_save_error``
-                    # contract on the SQLAlchemy 422 path in
-                    # ``_handle_convergence_error`` above.
-                    # exc_info deliberately omitted for the same reason
-                    # SQLAlchemy ``exc_info`` is dropped in the canonical
-                    # narrow-catch sites: ``__cause__`` chains on these
-                    # exception classes can carry upstream provider detail
-                    # that must not be retained in structured logs either.
-                    slog.error(
-                        "compose_llm_auth_error",
-                        session_id=str(session_id),
-                        exc_class=type(exc).__name__,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer model is not available.",
-                            evidence=("The model provider rejected the composer request.",),
-                            likely_next="Check the composer provider configuration before retrying.",
-                            reason="provider_auth_failed",
-                        ),
-                    )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                    client_state = await service.get_state(client_state_id)
+                except ValueError:
                     raise HTTPException(
-                        status_code=502,
-                        detail=_litellm_error_detail(
-                            "llm_auth_error",
-                            exc,
-                            expose_provider_error=settings.composer_expose_provider_errors,
-                        ),
-                    ) from exc
-                except LiteLLMAPIError as exc:
-                    # Same redaction rationale as the auth-error block above.
-                    # ``LiteLLMAPIError`` message shape varies by provider (OpenAI,
-                    # Azure OpenAI, Anthropic, Bedrock) and can include
-                    # rate-limit window details, account/tenant identifiers,
-                    # and upstream request IDs that are operator-only material.
-                    slog.error(
-                        "compose_llm_unavailable",
-                        session_id=str(session_id),
-                        exc_class=type(exc).__name__,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer model is temporarily unavailable.",
-                            evidence=("The model provider did not complete the request.",),
-                            likely_next="Retry when the provider is available.",
-                            reason="provider_unavailable",
-                        ),
-                    )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        status_code=404,
+                        detail="State not found",
+                    ) from None
+                if client_state.session_id != session.id:
                     raise HTTPException(
-                        status_code=502,
-                        detail=_litellm_error_detail(
-                            "llm_unavailable",
-                            exc,
-                            expose_provider_error=settings.composer_expose_provider_errors,
-                        ),
-                    ) from exc
-                except ComposerPluginCrashError as crash:
-                    # Plugin-crash path: _compose_loop wraps any non-ToolArgumentError
-                    # escape from execute_tool into ComposerPluginCrashError carrying
-                    # partial_state — the accumulated mutations from earlier successful
-                    # tool calls within the same request. _handle_plugin_crash persists
-                    # that state into composition_states symmetrically with the
-                    # convergence-error path, so recompose does not lose those
-                    # mutations. The HTTP response body is fully redacted; the cause
-                    # chain is preserved via `from crash.original_exc` for the ASGI /
-                    # server-level error machinery only.
-                    #
-                    # MUST be caught BEFORE the generic `except ComposerServiceError`
-                    # below — ComposerPluginCrashError inherits from
-                    # ComposerServiceError (so it isn't caught by a later bare
-                    # Exception or mistakenly promoted by the route's convergence
-                    # handler), and Python evaluates except clauses top-to-bottom.
-                    # Inverting this order routes plugin crashes into the 502
-                    # composer_error branch, re-introducing the silent-laundering
-                    # behaviour this plan exists to eliminate.
-                    #
-                    # The same precedence rule applies to the
-                    # `except ComposerRuntimePreflightError` clause below:
-                    # ComposerRuntimePreflightError also inherits from
-                    # ComposerServiceError, and demoting it past the generic
-                    # 502 catch would convert a recoverable preflight failure
-                    # (with persisted partial_state) into an opaque 502 with
-                    # no audit trail. Both narrow catches MUST precede the
-                    # generic ComposerServiceError catch.
-                    response_body = await _handle_plugin_crash(
-                        crash,
-                        service,
-                        session.id,
-                        str(user.user_id),
-                        "compose",
-                        pre_send_state_id,
-                        settings=settings,
-                        secret_service=request.app.state.scoped_secret_resolver,
+                        status_code=404,
+                        detail="State not found",
                     )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer could not safely finish this request.",
-                            evidence=("A pipeline tool failed on the server side.",),
-                            likely_next="Review the visible error message, then retry after the issue is resolved.",
-                            reason="plugin_crash",
-                        ),
-                    )
-                    raise HTTPException(status_code=500, detail=response_body) from crash.original_exc
-                except ComposerRuntimePreflightError as rpf_exc:
-                    # Path 1 (cached preflight): composer.compose() re-raised a
-                    # previously-cached runtime-preflight failure via
-                    # _raise_cached_runtime_preflight_failure in
-                    # web/composer/service.py. The shared
-                    # _handle_runtime_preflight_failure helper persists
-                    # rpf_exc.partial_state symmetrically with
-                    # _handle_plugin_crash so accumulated tool-call mutations
-                    # are not silently dropped from the audit trail. The
-                    # SAME helper is invoked from the post-compose
-                    # state-save catch below for path 2.
-                    #
-                    # Telemetry primacy (elspeth-0891e8da73): the cached
-                    # raise site does NOT have a paired primary emission
-                    # inside _state_data_from_composer_state (path-2's
-                    # raise arm) because the failure originates inside
-                    # composer.compose() before that helper is reached.
-                    # Emit cached_preflight here so dashboards filtering
-                    # composer.runtime_preflight.total{result=exception}
-                    # do not silently under-count cache-hit re-raises —
-                    # particularly the "no LLM mutation before re-raise"
-                    # case, where the recovery handler also short-circuits
-                    # past its persist_invalid emission. The outer catch
-                    # is unambiguously the cached path: path-2 is caught
-                    # inline around the post-compose
-                    # _state_data_from_composer_state call below.
-                    _record_composer_runtime_preflight_telemetry(
-                        "exception",
-                        source="cached_preflight",
-                        exception_class=rpf_exc.exc_class,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer could not safely finish this request.",
-                            evidence=("Runtime preflight failed before the compose loop returned.",),
-                            likely_next="Review the visible error message, then retry after the issue is resolved.",
-                            reason="runtime_preflight_failed",
-                        ),
-                    )
-                    response_body = await _handle_runtime_preflight_failure(
-                        rpf_exc,
-                        service,
-                        session.id,
-                        str(user.user_id),
-                        "compose",
-                        pre_send_state_id,
-                        settings=settings,
-                        secret_service=request.app.state.scoped_secret_resolver,
-                    )
-                    raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
-                except ComposerServiceError as exc:
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer could not finish this request.",
-                            evidence=("Prompt preparation or composer service setup failed.",),
-                            likely_next="Retry once the composer service is available.",
-                            reason="service_setup_failed",
-                        ),
-                    )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
-                    raise HTTPException(
-                        status_code=502,
-                        detail={"error_type": "composer_error", "detail": str(exc)},
-                    ) from exc
+                pre_send_state_id = client_state_id
+            else:
+                pre_send_state_id = state_record.id
 
-                # 5. Save state if version changed — post-compose provenance.
-                #
-                # Path 2 (post-compose runtime preflight): the call to
-                # _state_data_from_composer_state below uses
-                # preflight_exception_policy="raise", which raises
-                # ComposerRuntimePreflightError when the post-compose
-                # preflight crashes. That raise site sits OUTSIDE the
-                # compose-time try/except above, so the post-compose block is
-                # wrapped in its own try/except that delegates to the same
-                # shared helper. Without this wrapper, a path-2 raise escapes
-                # as Starlette's bare 500 — partial_state is dropped from
-                # the audit trail and the frontend receives an opaque error.
-                state_response: CompositionStateResponse | None = None
-                post_compose_state_id: UUID | None = pre_send_state_id
-                if result.state.version != state.version:
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="validating",
-                            headline="The composer has updated the pipeline and is validating the result.",
-                            evidence=("The updated pipeline state is being checked before persistence.",),
-                            likely_next="ELSPETH will save the validated pipeline snapshot.",
-                        ),
-                    )
-                    try:
-                        state_data, validation = await _state_data_from_composer_state(
-                            result.state,
-                            settings=settings,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                            user_id=str(user.user_id),
-                            runtime_preflight=result.runtime_preflight,
-                            preflight_exception_policy="raise",
-                            initial_version=state.version,
-                            telemetry_source="compose",
-                            composer_meta={"repair_turns_used": result.repair_turns_used},
-                        )
-                    except ComposerRuntimePreflightError as rpf_exc:
-                        rpf_exc = ComposerRuntimePreflightError(
-                            original_exc=rpf_exc.original_exc,
-                            partial_state=rpf_exc.partial_state,
-                            tool_invocations=result.tool_invocations,
-                            llm_calls=result.llm_calls,
-                        )
-                        # UX-distinct from path 1 above: the LLM call already
-                        # succeeded, so the failure messaging frames this as
-                        # a validation/persistence-stage failure rather than
-                        # a compose-stage failure.
-                        await _publish_progress(
-                            progress_registry,
-                            session_id=str(session.id),
-                            request_id=str(user_msg.id),
-                            user_id=str(user.user_id),
-                            event=ComposerProgressEvent(
-                                phase="failed",
-                                headline="The composer could not safely validate the pipeline update.",
-                                evidence=("Runtime preflight failed during state persistence.",),
-                                likely_next="Review the visible error message, then retry after the issue is resolved.",
-                                reason="runtime_preflight_failed",
-                            ),
-                        )
-                        response_body = await _handle_runtime_preflight_failure(
-                            rpf_exc,
-                            service,
-                            session.id,
-                            str(user.user_id),
-                            "compose",
-                            pre_send_state_id,
-                            settings=settings,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                        )
-                        raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=str(user_msg.id),
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="saving",
-                            headline="ELSPETH is saving the pipeline update.",
-                            evidence=("A new composition state version is being stored for this session.",),
-                            likely_next="The assistant response will appear after the save completes.",
-                        ),
-                    )
-                    new_state_record = await service.save_composition_state(
-                        session.id,
-                        state_data,
-                    )
-                    state_response = _state_response(new_state_record, live_validation=validation)
-                    post_compose_state_id = new_state_record.id
+        # 2. Persist user message with pre-send provenance.
+        # Keep the inserted row so the subsequent snapshot can prove
+        # it is composing against the transcript that actually ends
+        # at this request's user turn.
+        user_msg = await service.add_message(
+            session.id,
+            "user",
+            body.content,
+            composition_state_id=pre_send_state_id,
+        )
+        progress_registry = _get_composer_progress_registry(request)
+        progress_sink = _composer_progress_sink(
+            progress_registry,
+            session_id=str(session.id),
+            request_id=str(user_msg.id),
+            user_id=str(user.user_id),
+        )
+        await _publish_progress(
+            progress_registry,
+            session_id=str(session.id),
+            request_id=str(user_msg.id),
+            user_id=str(user.user_id),
+            event=ComposerProgressEvent(
+                phase="starting",
+                headline="I'm reading your request and current pipeline.",
+                evidence=("The request was accepted for this session.",),
+                likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
+            ),
+        )
 
-                # 6. Persist assistant message with post-compose provenance
-                assistant_msg = await service.add_message(
-                    session.id,
-                    "assistant",
-                    result.message,
-                    composition_state_id=post_compose_state_id,
-                    raw_content=result.raw_assistant_content,
+        _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "send_message"})
+        terminal_status: _ComposerRequestTerminalStatus = "failed"
+        try:
+            # 3. Pre-fetch chat history as plain dicts (seam contract B)
+            # Pass limit=None to fetch the full conversation — the default
+            # limit=100 would silently drop recent context once a session
+            # exceeds 100 turns, causing the LLM to lose conversation state.
+            # Exclude the just-persisted user message — the composer receives
+            # it separately via body.content and appends it in _build_messages.
+            records = await service.get_messages(session.id, limit=None)
+            if not records or records[-1].id != user_msg.id:
+                raise AuditIntegrityError(
+                    "Tier 1 audit anomaly: send_message transcript snapshot "
+                    f"for session {session.id} does not end at inserted user "
+                    f"message {user_msg.id}. Refusing to compose against "
+                    "interleaved session history."
                 )
-                # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
-                # lands as one role=tool chat message linked to the post-compose
-                # state id (when version advanced) so the audit trail records
-                # which tool calls produced this state.
-                if result.tool_invocations:
-                    await _persist_tool_invocations(
-                        service,
-                        session.id,
-                        result.tool_invocations,
-                        post_compose_state_id,
-                    )
-                if result.llm_calls:
-                    await _persist_llm_calls(
-                        service,
-                        session.id,
-                        result.llm_calls,
-                        pre_send_state_id,
-                    )
+            chat_messages = _composer_chat_history(records[:-1])
+
+            # 4. Run the LLM composition loop
+            composer: ComposerService = request.app.state.composer_service
+            from litellm.exceptions import APIError as LiteLLMAPIError
+            from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+
+            try:
+                result = await composer.compose(
+                    body.content,
+                    chat_messages,
+                    state,
+                    session_id=str(session_id),
+                    user_id=str(user.user_id),
+                    progress=progress_sink,
+                )
+            except ComposerConvergenceError as exc:
+                terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
+                # Discriminate the three sub-causes (composition / discovery /
+                # wall-clock timeout) using exc.budget_exhausted. Without this
+                # dispatch the three failure modes would collapse into a single
+                # generic event — the original bug filed as elspeth-5030f7373d.
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=convergence_progress_event(budget_exhausted=exc.budget_exhausted),
+                )
+                response_body = await _handle_convergence_error(
+                    exc,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "convergence",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                raise HTTPException(status_code=422, detail=response_body) from exc
+            except LiteLLMAuthError as exc:
+                # ``str(exc)`` on LiteLLM exceptions can embed the provider
+                # name, model ID, request payload fragments, and — on
+                # certain provider code paths — the upstream HTTP response
+                # body, which has been observed to echo the Authorization
+                # header.  Redact the HTTP ``detail`` field to the class
+                # name only; route the full exception to structured
+                # server-side logging via ``slog.error`` with session
+                # correlation.  Mirrors the ``partial_state_save_error``
+                # contract on the SQLAlchemy 422 path in
+                # ``_handle_convergence_error`` above.
+                # exc_info deliberately omitted for the same reason
+                # SQLAlchemy ``exc_info`` is dropped in the canonical
+                # narrow-catch sites: ``__cause__`` chains on these
+                # exception classes can carry upstream provider detail
+                # that must not be retained in structured logs either.
+                slog.error(
+                    "compose_llm_auth_error",
+                    session_id=str(session_id),
+                    exc_class=type(exc).__name__,
+                )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
                     request_id=str(user_msg.id),
                     user_id=str(user.user_id),
                     event=ComposerProgressEvent(
-                        phase="complete",
-                        headline="The composer has updated the pipeline."
-                        if result.state.version != state.version
-                        else "The composer response is ready.",
-                        evidence=("The assistant response has been saved for this session.",),
-                        likely_next="Review the response and current pipeline.",
-                        reason="composer_complete",
+                        phase="failed",
+                        headline="The composer model is not available.",
+                        evidence=("The model provider rejected the composer request.",),
+                        likely_next="Check the composer provider configuration before retrying.",
+                        reason="provider_auth_failed",
                     ),
                 )
-
-                # 7. Return response.
-                #
-                # Build the response object FIRST so a Pydantic packaging
-                # failure (very unlikely — the inputs are already shaped
-                # UUID/string fields, but contractually possible) does not
-                # poison the terminal counter with a misleading
-                # ``status=completed`` for a request that ultimately 500'd.
-                # The flag flips only once the response is fully
-                # constructed and ready to hand back to FastAPI.
-                response = MessageWithStateResponse(
-                    message=_message_response(assistant_msg),
-                    state=state_response,
-                )
-                terminal_status = "completed"
-                return response
-            except asyncio.CancelledError as exc:
-                # Client-disconnect or operator cancel during the
-                # composer-engaged window. Publish a discriminated
-                # ``cancelled`` snapshot under ``asyncio.shield`` so the
-                # registry update reaches /_active and per-session pollers
-                # even though the outer task is being torn down. The
-                # nested except absorbs the CancelledError that ``await
-                # asyncio.shield`` re-raises on the cancelling task — the
-                # shielded coroutine itself runs to completion in the
-                # background.
                 llm_calls = _llm_calls_from_exception(exc)
                 if llm_calls:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
-                with contextlib.suppress(asyncio.CancelledError):
-                    # The shielded publish runs to completion in the
-                    # background; the outer await re-raises CancelledError
-                    # on the cancelling task, which we deliberately swallow
-                    # because we already know we're being cancelled and
-                    # ``raise`` two lines below restores the cancel chain.
-                    await asyncio.shield(
-                        _publish_progress(
-                            progress_registry,
-                            session_id=str(session.id),
-                            request_id=str(user_msg.id),
-                            user_id=str(user.user_id),
-                            event=client_cancelled_progress_event(),
-                        )
-                    )
-                terminal_status = "cancelled"
-                raise
-            finally:
-                _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "send_message"})
-                _record_composer_request_terminal(terminal_status, endpoint="send_message")
-
-    @router.post(
-        "/{session_id}/recompose",
-        response_model=MessageWithStateResponse,
-    )
-    async def recompose(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-        rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
-    ) -> MessageWithStateResponse:
-        """Re-run the composer without inserting a new user message.
-
-        Used by the frontend retry flow when the original send_message
-        persisted the user message but the composer failed. Skips step 2
-        of send_message (user message insertion) and uses the existing
-        conversation history.
-        """
-        await rate_limiter.check(user.user_id)
-        session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        settings = request.app.state.settings
-        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
-        async with compose_lock:
-            # Load current state
-            state_record = await service.get_current_state(session.id)
-            if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
-                pre_send_state_id: UUID | None = None
-            else:
-                state = _state_from_record(state_record)
-                pre_send_state_id = state_record.id
-
-            # Fetch full chat history. Audit-only tool rows can trail a failed
-            # user turn, so the recompose precondition is the last
-            # conversational message rather than the last persisted row.
-            # Reject if the conversation does not end at a user turn; blindly
-            # dropping the final conversational row would corrupt the transcript.
-            records = await service.get_messages(session.id, limit=None)
-            conversation_records = _composer_conversation_messages(records)
-            if not conversation_records:
-                raise HTTPException(status_code=400, detail="No messages to recompose from")
-            if conversation_records[-1].role != "user":
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                 raise HTTPException(
-                    status_code=409,
-                    detail="Cannot recompose: the last message is not a user message. "
-                    "Recompose is only valid when the most recent message is the "
-                    "user turn whose composition failed.",
+                    status_code=502,
+                    detail=_litellm_error_detail(
+                        "llm_auth_error",
+                        exc,
+                        expose_provider_error=settings.composer_expose_provider_errors,
+                    ),
+                ) from exc
+            except LiteLLMAPIError as exc:
+                # Same redaction rationale as the auth-error block above.
+                # ``LiteLLMAPIError`` message shape varies by provider (OpenAI,
+                # Azure OpenAI, Anthropic, Bedrock) and can include
+                # rate-limit window details, account/tenant identifiers,
+                # and upstream request IDs that are operator-only material.
+                slog.error(
+                    "compose_llm_unavailable",
+                    session_id=str(session_id),
+                    exc_class=type(exc).__name__,
                 )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer model is temporarily unavailable.",
+                        evidence=("The model provider did not complete the request.",),
+                        likely_next="Retry when the provider is available.",
+                        reason="provider_unavailable",
+                    ),
+                )
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail=_litellm_error_detail(
+                        "llm_unavailable",
+                        exc,
+                        expose_provider_error=settings.composer_expose_provider_errors,
+                    ),
+                ) from exc
+            except ComposerPluginCrashError as crash:
+                # Plugin-crash path: _compose_loop wraps any non-ToolArgumentError
+                # escape from execute_tool into ComposerPluginCrashError carrying
+                # partial_state — the accumulated mutations from earlier successful
+                # tool calls within the same request. _handle_plugin_crash persists
+                # that state into composition_states symmetrically with the
+                # convergence-error path, so recompose does not lose those
+                # mutations. The HTTP response body is fully redacted; the cause
+                # chain is preserved via `from crash.original_exc` for the ASGI /
+                # server-level error machinery only.
+                #
+                # MUST be caught BEFORE the generic `except ComposerServiceError`
+                # below — ComposerPluginCrashError inherits from
+                # ComposerServiceError (so it isn't caught by a later bare
+                # Exception or mistakenly promoted by the route's convergence
+                # handler), and Python evaluates except clauses top-to-bottom.
+                # Inverting this order routes plugin crashes into the 502
+                # composer_error branch, re-introducing the silent-laundering
+                # behaviour this plan exists to eliminate.
+                #
+                # The same precedence rule applies to the
+                # `except ComposerRuntimePreflightError` clause below:
+                # ComposerRuntimePreflightError also inherits from
+                # ComposerServiceError, and demoting it past the generic
+                # 502 catch would convert a recoverable preflight failure
+                # (with persisted partial_state) into an opaque 502 with
+                # no audit trail. Both narrow catches MUST precede the
+                # generic ComposerServiceError catch.
+                response_body = await _handle_plugin_crash(
+                    crash,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "compose",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not safely finish this request.",
+                        evidence=("A pipeline tool failed on the server side.",),
+                        likely_next="Review the visible error message, then retry after the issue is resolved.",
+                        reason="plugin_crash",
+                    ),
+                )
+                raise HTTPException(status_code=500, detail=response_body) from crash.original_exc
+            except ComposerRuntimePreflightError as rpf_exc:
+                # Path 1 (cached preflight): composer.compose() re-raised a
+                # previously-cached runtime-preflight failure via
+                # _raise_cached_runtime_preflight_failure in
+                # web/composer/service.py. The shared
+                # _handle_runtime_preflight_failure helper persists
+                # rpf_exc.partial_state symmetrically with
+                # _handle_plugin_crash so accumulated tool-call mutations
+                # are not silently dropped from the audit trail. The
+                # SAME helper is invoked from the post-compose
+                # state-save catch below for path 2.
+                #
+                # Telemetry primacy (elspeth-0891e8da73): the cached
+                # raise site does NOT have a paired primary emission
+                # inside _state_data_from_composer_state (path-2's
+                # raise arm) because the failure originates inside
+                # composer.compose() before that helper is reached.
+                # Emit cached_preflight here so dashboards filtering
+                # composer.runtime_preflight.total{result=exception}
+                # do not silently under-count cache-hit re-raises —
+                # particularly the "no LLM mutation before re-raise"
+                # case, where the recovery handler also short-circuits
+                # past its persist_invalid emission. The outer catch
+                # is unambiguously the cached path: path-2 is caught
+                # inline around the post-compose
+                # _state_data_from_composer_state call below.
+                _record_composer_runtime_preflight_telemetry(
+                    "exception",
+                    source="cached_preflight",
+                    exception_class=rpf_exc.exc_class,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not safely finish this request.",
+                        evidence=("Runtime preflight failed before the compose loop returned.",),
+                        likely_next="Review the visible error message, then retry after the issue is resolved.",
+                        reason="runtime_preflight_failed",
+                    ),
+                )
+                response_body = await _handle_runtime_preflight_failure(
+                    rpf_exc,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "compose",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+            except ComposerServiceError as exc:
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not finish this request.",
+                        evidence=("Prompt preparation or composer service setup failed.",),
+                        likely_next="Retry once the composer service is available.",
+                        reason="service_setup_failed",
+                    ),
+                )
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error_type": "composer_error", "detail": str(exc)},
+                ) from exc
 
-            last_user_content = conversation_records[-1].content
-            request_id = str(conversation_records[-1].id)
-            progress_registry = _get_composer_progress_registry(request)
-            progress_sink = _composer_progress_sink(
-                progress_registry,
-                session_id=str(session.id),
-                request_id=request_id,
-                user_id=str(user.user_id),
+            # 5. Save state if version changed — post-compose provenance.
+            #
+            # Path 2 (post-compose runtime preflight): the call to
+            # _state_data_from_composer_state below uses
+            # preflight_exception_policy="raise", which raises
+            # ComposerRuntimePreflightError when the post-compose
+            # preflight crashes. That raise site sits OUTSIDE the
+            # compose-time try/except above, so the post-compose block is
+            # wrapped in its own try/except that delegates to the same
+            # shared helper. Without this wrapper, a path-2 raise escapes
+            # as Starlette's bare 500 — partial_state is dropped from
+            # the audit trail and the frontend receives an opaque error.
+            state_response: CompositionStateResponse | None = None
+            post_compose_state_id: UUID | None = pre_send_state_id
+            if result.state.version != state.version:
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="validating",
+                        headline="The composer has updated the pipeline and is validating the result.",
+                        evidence=("The updated pipeline state is being checked before persistence.",),
+                        likely_next="ELSPETH will save the validated pipeline snapshot.",
+                    ),
+                )
+                try:
+                    state_data, validation = await _state_data_from_composer_state(
+                        result.state,
+                        settings=settings,
+                        secret_service=request.app.state.scoped_secret_resolver,
+                        user_id=str(user.user_id),
+                        runtime_preflight=result.runtime_preflight,
+                        preflight_exception_policy="raise",
+                        initial_version=state.version,
+                        telemetry_source="compose",
+                        composer_meta={"repair_turns_used": result.repair_turns_used},
+                    )
+                except ComposerRuntimePreflightError as rpf_exc:
+                    rpf_exc = ComposerRuntimePreflightError(
+                        original_exc=rpf_exc.original_exc,
+                        partial_state=rpf_exc.partial_state,
+                        tool_invocations=result.tool_invocations,
+                        llm_calls=result.llm_calls,
+                    )
+                    # UX-distinct from path 1 above: the LLM call already
+                    # succeeded, so the failure messaging frames this as
+                    # a validation/persistence-stage failure rather than
+                    # a compose-stage failure.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=str(user_msg.id),
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The composer could not safely validate the pipeline update.",
+                            evidence=("Runtime preflight failed during state persistence.",),
+                            likely_next="Review the visible error message, then retry after the issue is resolved.",
+                            reason="runtime_preflight_failed",
+                        ),
+                    )
+                    response_body = await _handle_runtime_preflight_failure(
+                        rpf_exc,
+                        service,
+                        session.id,
+                        str(user.user_id),
+                        "compose",
+                        pre_send_state_id,
+                        settings=settings,
+                        secret_service=request.app.state.scoped_secret_resolver,
+                    )
+                    raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=str(user_msg.id),
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="saving",
+                        headline="ELSPETH is saving the pipeline update.",
+                        evidence=("A new composition state version is being stored for this session.",),
+                        likely_next="The assistant response will appear after the save completes.",
+                    ),
+                )
+                new_state_record = await service.save_composition_state(
+                    session.id,
+                    state_data,
+                )
+                state_response = _state_response(new_state_record, live_validation=validation)
+                post_compose_state_id = new_state_record.id
+
+            # 6. Persist assistant message with post-compose provenance
+            assistant_msg = await service.add_message(
+                session.id,
+                "assistant",
+                result.message,
+                composition_state_id=post_compose_state_id,
+                raw_content=result.raw_assistant_content,
             )
+            # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
+            # lands as one role=tool chat message linked to the post-compose
+            # state id (when version advanced) so the audit trail records
+            # which tool calls produced this state.
+            if result.tool_invocations:
+                await _persist_tool_invocations(
+                    service,
+                    session.id,
+                    result.tool_invocations,
+                    post_compose_state_id,
+                )
+            if result.llm_calls:
+                await _persist_llm_calls(
+                    service,
+                    session.id,
+                    result.llm_calls,
+                    pre_send_state_id,
+                )
             await _publish_progress(
                 progress_registry,
                 session_id=str(session.id),
-                request_id=request_id,
+                request_id=str(user_msg.id),
                 user_id=str(user.user_id),
                 event=ComposerProgressEvent(
-                    phase="starting",
-                    headline="I'm rereading your request and current pipeline.",
-                    evidence=("The retry was accepted for this session.",),
-                    likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
+                    phase="complete",
+                    headline="The composer has updated the pipeline."
+                    if result.state.version != state.version
+                    else "The composer response is ready.",
+                    evidence=("The assistant response has been saved for this session.",),
+                    likely_next="Review the response and current pipeline.",
+                    reason="composer_complete",
                 ),
             )
-            _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "recompose"})
-            terminal_status: _ComposerRequestTerminalStatus = "failed"
+
+            # 7. Return response.
+            #
+            # Build the response object FIRST so a Pydantic packaging
+            # failure (very unlikely — the inputs are already shaped
+            # UUID/string fields, but contractually possible) does not
+            # poison the terminal counter with a misleading
+            # ``status=completed`` for a request that ultimately 500'd.
+            # The flag flips only once the response is fully
+            # constructed and ready to hand back to FastAPI.
+            response = MessageWithStateResponse(
+                message=_message_response(assistant_msg),
+                state=state_response,
+            )
+            terminal_status = "completed"
+            return response
+        except asyncio.CancelledError as exc:
+            # Client-disconnect or operator cancel during the
+            # composer-engaged window. Publish a discriminated
+            # ``cancelled`` snapshot under ``asyncio.shield`` so the
+            # registry update reaches /_active and per-session pollers
+            # even though the outer task is being torn down. The
+            # nested except absorbs the CancelledError that ``await
+            # asyncio.shield`` re-raises on the cancelling task — the
+            # shielded coroutine itself runs to completion in the
+            # background.
+            llm_calls = _llm_calls_from_exception(exc)
+            if llm_calls:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
+            with contextlib.suppress(asyncio.CancelledError):
+                # The shielded publish runs to completion in the
+                # background; the outer await re-raises CancelledError
+                # on the cancelling task, which we deliberately swallow
+                # because we already know we're being cancelled and
+                # ``raise`` two lines below restores the cancel chain.
+                await asyncio.shield(
+                    _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=str(user_msg.id),
+                        user_id=str(user.user_id),
+                        event=client_cancelled_progress_event(),
+                    )
+                )
+            terminal_status = "cancelled"
+            raise
+        finally:
+            _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "send_message"})
+            _record_composer_request_terminal(terminal_status, endpoint="send_message")
+
+
+@session_router.post(
+    "/{session_id}/recompose",
+    response_model=MessageWithStateResponse,
+)
+async def recompose(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
+) -> MessageWithStateResponse:
+    """Re-run the composer without inserting a new user message.
+
+    Used by the frontend retry flow when the original send_message
+    persisted the user message but the composer failed. Skips step 2
+    of send_message (user message insertion) and uses the existing
+    conversation history.
+    """
+    await rate_limiter.check(user.user_id)
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    settings = request.app.state.settings
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    async with compose_lock:
+        # Load current state
+        state_record = await service.get_current_state(session.id)
+        if state_record is None:
+            state = CompositionState(
+                source=None,
+                nodes=(),
+                edges=(),
+                outputs=(),
+                metadata=PipelineMetadata(),
+                version=1,
+            )
+            pre_send_state_id: UUID | None = None
+        else:
+            state = _state_from_record(state_record)
+            pre_send_state_id = state_record.id
+
+        # Fetch full chat history. Audit-only tool rows can trail a failed
+        # user turn, so the recompose precondition is the last
+        # conversational message rather than the last persisted row.
+        # Reject if the conversation does not end at a user turn; blindly
+        # dropping the final conversational row would corrupt the transcript.
+        records = await service.get_messages(session.id, limit=None)
+        conversation_records = _composer_conversation_messages(records)
+        if not conversation_records:
+            raise HTTPException(status_code=400, detail="No messages to recompose from")
+        if conversation_records[-1].role != "user":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot recompose: the last message is not a user message. "
+                "Recompose is only valid when the most recent message is the "
+                "user turn whose composition failed.",
+            )
+
+        last_user_content = conversation_records[-1].content
+        request_id = str(conversation_records[-1].id)
+        progress_registry = _get_composer_progress_registry(request)
+        progress_sink = _composer_progress_sink(
+            progress_registry,
+            session_id=str(session.id),
+            request_id=request_id,
+            user_id=str(user.user_id),
+        )
+        await _publish_progress(
+            progress_registry,
+            session_id=str(session.id),
+            request_id=request_id,
+            user_id=str(user.user_id),
+            event=ComposerProgressEvent(
+                phase="starting",
+                headline="I'm rereading your request and current pipeline.",
+                evidence=("The retry was accepted for this session.",),
+                likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
+            ),
+        )
+        _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "recompose"})
+        terminal_status: _ComposerRequestTerminalStatus = "failed"
+        try:
+            # Exclude the last user message — the composer receives it
+            # separately via the message arg and appends it in _build_messages.
+            chat_messages = _composer_chat_history(conversation_records[:-1])
+
+            # Run the LLM composition loop
+            composer: ComposerService = request.app.state.composer_service
+            from litellm.exceptions import APIError as LiteLLMAPIError
+            from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+
             try:
-                # Exclude the last user message — the composer receives it
-                # separately via the message arg and appends it in _build_messages.
-                chat_messages = _composer_chat_history(conversation_records[:-1])
-
-                # Run the LLM composition loop
-                composer: ComposerService = request.app.state.composer_service
-                from litellm.exceptions import APIError as LiteLLMAPIError
-                from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-
-                try:
-                    result = await composer.compose(
-                        last_user_content,
-                        chat_messages,
-                        state,
-                        session_id=str(session_id),
-                        user_id=str(user.user_id),
-                        progress=progress_sink,
-                    )
-                except ComposerConvergenceError as exc:
-                    terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
-                    # Same three-sub-cause discriminator as the /messages catch
-                    # above — recompose mirrors send_message exactly so the two
-                    # routes cannot drift on failure UX.
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=convergence_progress_event(budget_exhausted=exc.budget_exhausted),
-                    )
-                    response_body = await _handle_convergence_error(
+                result = await composer.compose(
+                    last_user_content,
+                    chat_messages,
+                    state,
+                    session_id=str(session_id),
+                    user_id=str(user.user_id),
+                    progress=progress_sink,
+                )
+            except ComposerConvergenceError as exc:
+                terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
+                # Same three-sub-cause discriminator as the /messages catch
+                # above — recompose mirrors send_message exactly so the two
+                # routes cannot drift on failure UX.
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=convergence_progress_event(budget_exhausted=exc.budget_exhausted),
+                )
+                response_body = await _handle_convergence_error(
+                    exc,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "recompose_convergence",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                raise HTTPException(status_code=422, detail=response_body) from exc
+            except LiteLLMAuthError as exc:
+                # Recompose mirror of the redaction contract in send_message
+                # (see block comment there for full rationale).  The two
+                # paths MUST carry byte-identical response shapes and
+                # redaction granularity — any future divergence becomes a
+                # selective leak surface (attacker picks whichever endpoint
+                # still echoes str(exc)).
+                slog.error(
+                    "recompose_llm_auth_error",
+                    session_id=str(session_id),
+                    exc_class=type(exc).__name__,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer model is not available.",
+                        evidence=("The model provider rejected the composer request.",),
+                        likely_next="Check the composer provider configuration before retrying.",
+                        reason="provider_auth_failed",
+                    ),
+                )
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail=_litellm_error_detail(
+                        "llm_auth_error",
                         exc,
-                        service,
-                        session.id,
-                        str(user.user_id),
-                        "recompose_convergence",
-                        pre_send_state_id,
+                        expose_provider_error=settings.composer_expose_provider_errors,
+                    ),
+                ) from exc
+            except LiteLLMAPIError as exc:
+                slog.error(
+                    "recompose_llm_unavailable",
+                    session_id=str(session_id),
+                    exc_class=type(exc).__name__,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer model is temporarily unavailable.",
+                        evidence=("The model provider did not complete the request.",),
+                        likely_next="Retry when the provider is available.",
+                        reason="provider_unavailable",
+                    ),
+                )
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail=_litellm_error_detail(
+                        "llm_unavailable",
+                        exc,
+                        expose_provider_error=settings.composer_expose_provider_errors,
+                    ),
+                ) from exc
+            except ComposerPluginCrashError as crash:
+                # Plugin-crash path: mirror /messages handler. See the send_message
+                # block comment for full rationale on why the response body is
+                # redacted but partial_state is still persisted, AND for why this
+                # catch MUST precede `except ComposerServiceError` below.
+                response_body = await _handle_plugin_crash(
+                    crash,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "recompose",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not safely finish this retry.",
+                        evidence=("A pipeline tool failed on the server side.",),
+                        likely_next="Review the visible error message, then retry after the issue is resolved.",
+                        reason="plugin_crash",
+                    ),
+                )
+                raise HTTPException(status_code=500, detail=response_body) from crash.original_exc
+            except ComposerRuntimePreflightError as rpf_exc:
+                # Path 1 (cached preflight) mirror of the send_message catch;
+                # see the send_message handler for the full rationale on
+                # why both raise sites delegate to the shared
+                # _handle_runtime_preflight_failure helper, on the
+                # path-1 vs path-2 distinction, and on the
+                # cached_preflight telemetry attribution
+                # (elspeth-0891e8da73).
+                _record_composer_runtime_preflight_telemetry(
+                    "exception",
+                    source="cached_preflight",
+                    exception_class=rpf_exc.exc_class,
+                )
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not safely finish this retry.",
+                        evidence=("Runtime preflight failed before the compose loop returned.",),
+                        likely_next="Review the visible error message, then retry after the issue is resolved.",
+                        reason="runtime_preflight_failed",
+                    ),
+                )
+                response_body = await _handle_runtime_preflight_failure(
+                    rpf_exc,
+                    service,
+                    session.id,
+                    str(user.user_id),
+                    "recompose",
+                    pre_send_state_id,
+                    settings=settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                )
+                raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+            except ComposerServiceError as exc:
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not finish this retry.",
+                        evidence=("Prompt preparation or composer service setup failed.",),
+                        likely_next="Retry once the composer service is available.",
+                        reason="service_setup_failed",
+                    ),
+                )
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error_type": "composer_error", "detail": str(exc)},
+                ) from exc
+
+            # Save state if version changed.
+            # Path 2 (post-compose runtime preflight): mirror of the
+            # send_message post-compose try/except — see the send_message
+            # block for the full rationale on the structural fix.
+            state_response: CompositionStateResponse | None = None
+            post_compose_state_id: UUID | None = pre_send_state_id
+            if result.state.version != state.version:
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="validating",
+                        headline="The composer has updated the pipeline and is validating the result.",
+                        evidence=("The updated pipeline state is being checked before persistence.",),
+                        likely_next="ELSPETH will save the validated pipeline snapshot.",
+                    ),
+                )
+                try:
+                    state_data, validation = await _state_data_from_composer_state(
+                        result.state,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
-                    )
-                    raise HTTPException(status_code=422, detail=response_body) from exc
-                except LiteLLMAuthError as exc:
-                    # Recompose mirror of the redaction contract in send_message
-                    # (see block comment there for full rationale).  The two
-                    # paths MUST carry byte-identical response shapes and
-                    # redaction granularity — any future divergence becomes a
-                    # selective leak surface (attacker picks whichever endpoint
-                    # still echoes str(exc)).
-                    slog.error(
-                        "recompose_llm_auth_error",
-                        session_id=str(session_id),
-                        exc_class=type(exc).__name__,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
                         user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer model is not available.",
-                            evidence=("The model provider rejected the composer request.",),
-                            likely_next="Check the composer provider configuration before retrying.",
-                            reason="provider_auth_failed",
-                        ),
+                        runtime_preflight=result.runtime_preflight,
+                        preflight_exception_policy="raise",
+                        initial_version=state.version,
+                        telemetry_source="recompose",
+                        composer_meta={"repair_turns_used": result.repair_turns_used},
                     )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
-                    raise HTTPException(
-                        status_code=502,
-                        detail=_litellm_error_detail(
-                            "llm_auth_error",
-                            exc,
-                            expose_provider_error=settings.composer_expose_provider_errors,
-                        ),
-                    ) from exc
-                except LiteLLMAPIError as exc:
-                    slog.error(
-                        "recompose_llm_unavailable",
-                        session_id=str(session_id),
-                        exc_class=type(exc).__name__,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer model is temporarily unavailable.",
-                            evidence=("The model provider did not complete the request.",),
-                            likely_next="Retry when the provider is available.",
-                            reason="provider_unavailable",
-                        ),
-                    )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
-                    raise HTTPException(
-                        status_code=502,
-                        detail=_litellm_error_detail(
-                            "llm_unavailable",
-                            exc,
-                            expose_provider_error=settings.composer_expose_provider_errors,
-                        ),
-                    ) from exc
-                except ComposerPluginCrashError as crash:
-                    # Plugin-crash path: mirror /messages handler. See the send_message
-                    # block comment for full rationale on why the response body is
-                    # redacted but partial_state is still persisted, AND for why this
-                    # catch MUST precede `except ComposerServiceError` below.
-                    response_body = await _handle_plugin_crash(
-                        crash,
-                        service,
-                        session.id,
-                        str(user.user_id),
-                        "recompose",
-                        pre_send_state_id,
-                        settings=settings,
-                        secret_service=request.app.state.scoped_secret_resolver,
-                    )
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer could not safely finish this retry.",
-                            evidence=("A pipeline tool failed on the server side.",),
-                            likely_next="Review the visible error message, then retry after the issue is resolved.",
-                            reason="plugin_crash",
-                        ),
-                    )
-                    raise HTTPException(status_code=500, detail=response_body) from crash.original_exc
                 except ComposerRuntimePreflightError as rpf_exc:
-                    # Path 1 (cached preflight) mirror of the send_message catch;
-                    # see the send_message handler for the full rationale on
-                    # why both raise sites delegate to the shared
-                    # _handle_runtime_preflight_failure helper, on the
-                    # path-1 vs path-2 distinction, and on the
-                    # cached_preflight telemetry attribution
-                    # (elspeth-0891e8da73).
-                    _record_composer_runtime_preflight_telemetry(
-                        "exception",
-                        source="cached_preflight",
-                        exception_class=rpf_exc.exc_class,
+                    rpf_exc = ComposerRuntimePreflightError(
+                        original_exc=rpf_exc.original_exc,
+                        partial_state=rpf_exc.partial_state,
+                        tool_invocations=result.tool_invocations,
+                        llm_calls=result.llm_calls,
                     )
                     await _publish_progress(
                         progress_registry,
@@ -2424,8 +2514,8 @@ def create_session_router() -> APIRouter:
                         user_id=str(user.user_id),
                         event=ComposerProgressEvent(
                             phase="failed",
-                            headline="The composer could not safely finish this retry.",
-                            evidence=("Runtime preflight failed before the compose loop returned.",),
+                            headline="The composer could not safely validate the pipeline update.",
+                            evidence=("Runtime preflight failed during state persistence.",),
                             likely_next="Review the visible error message, then retry after the issue is resolved.",
                             reason="runtime_preflight_failed",
                         ),
@@ -2441,643 +2531,569 @@ def create_session_router() -> APIRouter:
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
-                except ComposerServiceError as exc:
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="failed",
-                            headline="The composer could not finish this retry.",
-                            evidence=("Prompt preparation or composer service setup failed.",),
-                            likely_next="Retry once the composer service is available.",
-                            reason="service_setup_failed",
-                        ),
-                    )
-                    llm_calls = _llm_calls_from_exception(exc)
-                    if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
-                    raise HTTPException(
-                        status_code=502,
-                        detail={"error_type": "composer_error", "detail": str(exc)},
-                    ) from exc
-
-                # Save state if version changed.
-                # Path 2 (post-compose runtime preflight): mirror of the
-                # send_message post-compose try/except — see the send_message
-                # block for the full rationale on the structural fix.
-                state_response: CompositionStateResponse | None = None
-                post_compose_state_id: UUID | None = pre_send_state_id
-                if result.state.version != state.version:
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="validating",
-                            headline="The composer has updated the pipeline and is validating the result.",
-                            evidence=("The updated pipeline state is being checked before persistence.",),
-                            likely_next="ELSPETH will save the validated pipeline snapshot.",
-                        ),
-                    )
-                    try:
-                        state_data, validation = await _state_data_from_composer_state(
-                            result.state,
-                            settings=settings,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                            user_id=str(user.user_id),
-                            runtime_preflight=result.runtime_preflight,
-                            preflight_exception_policy="raise",
-                            initial_version=state.version,
-                            telemetry_source="recompose",
-                            composer_meta={"repair_turns_used": result.repair_turns_used},
-                        )
-                    except ComposerRuntimePreflightError as rpf_exc:
-                        rpf_exc = ComposerRuntimePreflightError(
-                            original_exc=rpf_exc.original_exc,
-                            partial_state=rpf_exc.partial_state,
-                            tool_invocations=result.tool_invocations,
-                            llm_calls=result.llm_calls,
-                        )
-                        await _publish_progress(
-                            progress_registry,
-                            session_id=str(session.id),
-                            request_id=request_id,
-                            user_id=str(user.user_id),
-                            event=ComposerProgressEvent(
-                                phase="failed",
-                                headline="The composer could not safely validate the pipeline update.",
-                                evidence=("Runtime preflight failed during state persistence.",),
-                                likely_next="Review the visible error message, then retry after the issue is resolved.",
-                                reason="runtime_preflight_failed",
-                            ),
-                        )
-                        response_body = await _handle_runtime_preflight_failure(
-                            rpf_exc,
-                            service,
-                            session.id,
-                            str(user.user_id),
-                            "recompose",
-                            pre_send_state_id,
-                            settings=settings,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                        )
-                        raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
-                    await _publish_progress(
-                        progress_registry,
-                        session_id=str(session.id),
-                        request_id=request_id,
-                        user_id=str(user.user_id),
-                        event=ComposerProgressEvent(
-                            phase="saving",
-                            headline="ELSPETH is saving the pipeline update.",
-                            evidence=("A new composition state version is being stored for this session.",),
-                            likely_next="The assistant response will appear after the save completes.",
-                        ),
-                    )
-                    new_state_record = await service.save_composition_state(
-                        session.id,
-                        state_data,
-                    )
-                    state_response = _state_response(new_state_record, live_validation=validation)
-                    post_compose_state_id = new_state_record.id
-
-                # Persist assistant message
-                assistant_msg = await service.add_message(
-                    session.id,
-                    "assistant",
-                    result.message,
-                    composition_state_id=post_compose_state_id,
-                    raw_content=result.raw_assistant_content,
-                )
-                # Per-tool-call audit trail (recompose path; symmetric with send_message).
-                if result.tool_invocations:
-                    await _persist_tool_invocations(
-                        service,
-                        session.id,
-                        result.tool_invocations,
-                        post_compose_state_id,
-                    )
-                if result.llm_calls:
-                    await _persist_llm_calls(
-                        service,
-                        session.id,
-                        result.llm_calls,
-                        pre_send_state_id,
-                    )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
                     request_id=request_id,
                     user_id=str(user.user_id),
                     event=ComposerProgressEvent(
-                        phase="complete",
-                        headline="The composer has updated the pipeline."
-                        if result.state.version != state.version
-                        else "The composer response is ready.",
-                        evidence=("The assistant response has been saved for this session.",),
-                        likely_next="Review the response and current pipeline.",
-                        reason="composer_complete",
+                        phase="saving",
+                        headline="ELSPETH is saving the pipeline update.",
+                        evidence=("A new composition state version is being stored for this session.",),
+                        likely_next="The assistant response will appear after the save completes.",
                     ),
                 )
-
-                # See send_message return-flow comment for why response
-                # construction precedes the terminal_status flip.
-                response = MessageWithStateResponse(
-                    message=_message_response(assistant_msg),
-                    state=state_response,
+                new_state_record = await service.save_composition_state(
+                    session.id,
+                    state_data,
                 )
-                terminal_status = "completed"
-                return response
-            except asyncio.CancelledError as exc:
-                # Mirror of send_message cancellation path. See block
-                # comment there for the shielded-publish rationale.
-                llm_calls = _llm_calls_from_exception(exc)
-                if llm_calls:
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
+                state_response = _state_response(new_state_record, live_validation=validation)
+                post_compose_state_id = new_state_record.id
+
+            # Persist assistant message
+            assistant_msg = await service.add_message(
+                session.id,
+                "assistant",
+                result.message,
+                composition_state_id=post_compose_state_id,
+                raw_content=result.raw_assistant_content,
+            )
+            # Per-tool-call audit trail (recompose path; symmetric with send_message).
+            if result.tool_invocations:
+                await _persist_tool_invocations(
+                    service,
+                    session.id,
+                    result.tool_invocations,
+                    post_compose_state_id,
+                )
+            if result.llm_calls:
+                await _persist_llm_calls(
+                    service,
+                    session.id,
+                    result.llm_calls,
+                    pre_send_state_id,
+                )
+            await _publish_progress(
+                progress_registry,
+                session_id=str(session.id),
+                request_id=request_id,
+                user_id=str(user.user_id),
+                event=ComposerProgressEvent(
+                    phase="complete",
+                    headline="The composer has updated the pipeline."
+                    if result.state.version != state.version
+                    else "The composer response is ready.",
+                    evidence=("The assistant response has been saved for this session.",),
+                    likely_next="Review the response and current pipeline.",
+                    reason="composer_complete",
+                ),
+            )
+
+            # See send_message return-flow comment for why response
+            # construction precedes the terminal_status flip.
+            response = MessageWithStateResponse(
+                message=_message_response(assistant_msg),
+                state=state_response,
+            )
+            terminal_status = "completed"
+            return response
+        except asyncio.CancelledError as exc:
+            # Mirror of send_message cancellation path. See block
+            # comment there for the shielded-publish rationale.
+            llm_calls = _llm_calls_from_exception(exc)
+            if llm_calls:
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(
-                        _publish_progress(
-                            progress_registry,
-                            session_id=str(session.id),
-                            request_id=request_id,
-                            user_id=str(user.user_id),
-                            event=client_cancelled_progress_event(),
-                        )
+                    await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(
+                    _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=request_id,
+                        user_id=str(user.user_id),
+                        event=client_cancelled_progress_event(),
                     )
-                terminal_status = "cancelled"
-                raise
-            finally:
-                _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "recompose"})
-                _record_composer_request_terminal(terminal_status, endpoint="recompose")
-
-    @router.get(
-        "/{session_id}/messages",
-        response_model=list[ChatMessageResponse],
-    )
-    async def get_messages(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-        limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
-        include_llm_audit: bool = Query(False),
-        include_raw_content: bool = Query(False),
-    ) -> list[ChatMessageResponse]:
-        """Get conversation history for a session.
-
-        ``include_raw_content`` opts in to the assistant message's
-        pre-synthesis prose (the model's actual final text when the
-        empty-state synthesizer replaced the visible content). Default
-        omits it — the SPA conversation channel does not need audit data.
-        Eval/diagnosis tooling enables it to verify whether the model
-        converged on useful output that the synthesizer hid.
-        """
-        session = await _verify_session_ownership(session_id, user, request)
-        service = request.app.state.session_service
-        # Fetch before slicing so hidden audit rows cannot skew normal-chat
-        # pagination. The service remains the durable audit store; this route
-        # is the user-facing conversation channel. The eval harness can opt in
-        # to LLM-call sidecars, which contain model/usage/cost metadata but not
-        # raw prompts, tool arguments, or tool results.
-        messages = await service.get_messages(session.id, limit=None)
-        conversation_messages = (
-            _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
-        )
-        paged_messages = conversation_messages[offset : offset + limit]
-        return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
-
-    @router.get(
-        "/{session_id}/runs",
-        response_model=list[RunResponse],
-    )
-    async def list_session_runs(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> list[RunResponse]:
-        """List all runs for a session, newest first."""
-        session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        runs = await service.list_runs_for_session(session.id)
-        from elspeth.web.execution.discard_summary import load_discard_summaries_for_settings
-
-        terminal_landscape_run_ids = tuple(
-            run.landscape_run_id for run in runs if run.status in SESSION_TERMINAL_RUN_STATUS_VALUES and run.landscape_run_id is not None
-        )
-        accounting_by_run_id = {}
-        if terminal_landscape_run_ids:
-            try:
-                accounting_by_run_id = await run_sync_in_worker(
-                    load_run_accounting_for_settings,
-                    request.app.state.settings,
-                    terminal_landscape_run_ids,
                 )
-            except ValueError as exc:
-                raise _run_accounting_integrity_http(
-                    "Session run accounting projection failed.",
-                    landscape_run_ids=terminal_landscape_run_ids,
-                    error=str(exc),
-                ) from exc
-        discard_summaries = {}
-        if terminal_landscape_run_ids:
-            discard_summaries = await run_sync_in_worker(
-                load_discard_summaries_for_settings,
+            terminal_status = "cancelled"
+            raise
+        finally:
+            _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "recompose"})
+            _record_composer_request_terminal(terminal_status, endpoint="recompose")
+
+
+@session_router.get(
+    "/{session_id}/messages",
+    response_model=list[ChatMessageResponse],
+)
+async def get_messages(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    include_llm_audit: bool = Query(False),
+    include_raw_content: bool = Query(False),
+) -> list[ChatMessageResponse]:
+    """Get conversation history for a session.
+
+    ``include_raw_content`` opts in to the assistant message's
+    pre-synthesis prose (the model's actual final text when the
+    empty-state synthesizer replaced the visible content). Default
+    omits it — the SPA conversation channel does not need audit data.
+    Eval/diagnosis tooling enables it to verify whether the model
+    converged on useful output that the synthesizer hid.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+    # Fetch before slicing so hidden audit rows cannot skew normal-chat
+    # pagination. The service remains the durable audit store; this route
+    # is the user-facing conversation channel. The eval harness can opt in
+    # to LLM-call sidecars, which contain model/usage/cost metadata but not
+    # raw prompts, tool arguments, or tool results.
+    messages = await service.get_messages(session.id, limit=None)
+    conversation_messages = (
+        _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
+    )
+    paged_messages = conversation_messages[offset : offset + limit]
+    return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
+
+
+@session_router.get(
+    "/{session_id}/runs",
+    response_model=list[RunResponse],
+)
+async def list_session_runs(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> list[RunResponse]:
+    """List all runs for a session, newest first."""
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    runs = await service.list_runs_for_session(session.id)
+    from elspeth.web.execution.discard_summary import load_discard_summaries_for_settings
+
+    terminal_landscape_run_ids = tuple(
+        run.landscape_run_id for run in runs if run.status in SESSION_TERMINAL_RUN_STATUS_VALUES and run.landscape_run_id is not None
+    )
+    accounting_by_run_id = {}
+    if terminal_landscape_run_ids:
+        try:
+            accounting_by_run_id = await run_sync_in_worker(
+                load_run_accounting_for_settings,
                 request.app.state.settings,
                 terminal_landscape_run_ids,
             )
-
-        # Resolve composition_version from each run's state_id.
-        # A missing state is Tier 1 data corruption — crash, don't hide.
-        # Scope the read to the current session: the current-schema
-        # composite FK prevents cross-session state refs at the schema
-        # layer. ``get_state_in_session`` raises
-        # ``AuditIntegrityError`` on session mismatch, surfacing Tier 1
-        # corruption rather than silently returning the wrong state's
-        # version number in another session's listing.
-        responses: list[RunResponse] = []
-        for run in runs:
-            state = await service.get_state_in_session(run.state_id, session.id)
-            version = state.version
-            discard_summary = None
-            if run.landscape_run_id is not None and run.landscape_run_id in discard_summaries:
-                discard_summary = discard_summaries[run.landscape_run_id]
-            accounting = None
-            if run.landscape_run_id is not None and run.landscape_run_id in accounting_by_run_id:
-                accounting = accounting_by_run_id[run.landscape_run_id]
-            _validate_run_status_accounting_for_list(run, accounting)
-            responses.append(
-                RunResponse(
-                    id=str(run.id),
-                    session_id=str(run.session_id),
-                    status=run.status,
-                    accounting=accounting,
-                    error=run.error,
-                    started_at=run.started_at,
-                    finished_at=run.finished_at,
-                    composition_version=version,
-                    discard_summary=discard_summary,
-                )
-            )
-        return responses
-
-    @router.get("/{session_id}/state")
-    async def get_current_state(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> CompositionStateResponse | None:
-        """Get the current (highest-version) composition state."""
-        session = await _verify_session_ownership(session_id, user, request)
-        service = request.app.state.session_service
-        state = await service.get_current_state(session.id)
-        if state is None:
-            return None
-        return _state_response(state)
-
-    @router.get(
-        "/{session_id}/state/versions",
-        response_model=list[CompositionStateResponse],
-    )
-    async def get_state_versions(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-        limit: int = Query(50, ge=1, le=200),
-        offset: int = Query(0, ge=0),
-    ) -> list[CompositionStateResponse]:
-        """Get composition state versions for a session."""
-        session = await _verify_session_ownership(session_id, user, request)
-        service = request.app.state.session_service
-        versions = await service.get_state_versions(session.id, limit=limit, offset=offset)
-        return [_state_response(v) for v in versions]
-
-    @router.post(
-        "/{session_id}/state/revert",
-        response_model=CompositionStateResponse,
-    )
-    async def revert_state(
-        session_id: UUID,
-        body: RevertStateRequest,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> CompositionStateResponse:
-        """Revert the pipeline to a prior composition state version (R1).
-
-        Creates a new version that is a copy of the specified prior state.
-        Injects a system message recording the revert.
-        """
-        session = await _verify_session_ownership(session_id, user, request)
-        service = request.app.state.session_service
-
-        try:
-            new_state = await service.set_active_state(
-                session.id,
-                body.state_id,
-            )
-        except ValueError:
-            raise HTTPException(
-                status_code=404,
-                detail="State not found",
-            ) from None
-
-        # Look up the original version number for the system message
-        original_state = await service.get_state(body.state_id)
-        await service.add_message(
-            session.id,
-            role="system",
-            content=f"Pipeline reverted to version {original_state.version}.",
-        )
-
-        return _state_response(new_state)
-
-    @router.get("/{session_id}/state/yaml")
-    async def get_state_yaml(
-        session_id: UUID,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> dict[str, str]:
-        """Get YAML representation of the current composition state (M1).
-
-        Runs runtime preflight on the exact CompositionState reconstructed
-        from the persisted record, then generates deterministic YAML via
-        generate_yaml() against that same snapshot. The two operations see
-        the same Python object — there is no re-fetch between preflight
-        and serialization, so a state that passes the gate is byte-
-        identical to the state that gets serialized.
-        """
-        session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        state_record = await service.get_current_state(session.id)
-        if state_record is None:
-            raise HTTPException(status_code=404, detail="No composition state exists")
-        state = _state_from_record(state_record)
-        try:
-            runtime_validation = await _runtime_preflight_for_state(
-                state,
-                settings=request.app.state.settings,
-                secret_service=request.app.state.scoped_secret_resolver,
-                user_id=str(user.user_id),
-            )
-        except (
-            TimeoutError,
-            OSError,
-            PluginConfigError,
-            PluginNotFoundError,
-            GraphValidationError,
-        ) as exc:
-            # Narrowed per CLAUDE.md offensive-programming policy. This
-            # tuple covers the user-fixable preflight failure modes:
-            #
-            # * TimeoutError — asyncio.wait_for exceeded
-            #   composer_runtime_preflight_timeout_seconds. Operator
-            #   action: increase timeout or fix the slow plugin.
-            # * OSError — filesystem error during plugin instantiation
-            #   (file not found, permission denied, broken pipe, etc.).
-            #   Operator action: fix the file/permissions.
-            # * PluginConfigError / PluginNotFoundError — the user's
-            #   pipeline references a misconfigured or missing plugin.
-            #   Operator action: fix the pipeline config.
-            # * GraphValidationError — the pipeline graph is structurally
-            #   invalid (validate_pipeline normally absorbs this, but
-            #   it's listed here for defense-in-depth in case a future
-            #   refactor lets it escape).
-            #
-            # Programmer-bug classes (AttributeError, TypeError,
-            # KeyError, RuntimeError, ImportError, etc.) are deliberately
-            # NOT caught — they propagate to FastAPI's default 500
-            # handler so operators see real tracebacks rather than the
-            # misleading "fix your pipeline" 409 message. The
-            # exception-counter is reserved for the user-fixable bucket
-            # so dashboards measure real preflight failure rate, not
-            # bugs we introduced ourselves.
-            _record_composer_runtime_preflight_telemetry(
-                "exception",
-                source="yaml_export",
-                exception_class=type(exc).__name__,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail="Runtime preflight could not complete; YAML export aborted.",
-            ) from exc
-        _record_composer_runtime_preflight_telemetry(
-            "passed" if runtime_validation.is_valid else "failed",
-            source="yaml_export",
-        )
-        if not runtime_validation.is_valid:
-            detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
-            if runtime_validation.errors:
-                detail = f"{detail} First error: {runtime_validation.errors[0].message}"
-            raise HTTPException(status_code=409, detail=detail)
-        yaml_str = generate_yaml(state)
-        response = {"yaml": yaml_str}
-        if state.source is not None and "blob_ref" in state.source.options:
-            response["source_blob_id"] = str(state.source.options["blob_ref"])
-        return response
-
-    @router.post(
-        "/{session_id}/fork",
-        status_code=201,
-        response_model=ForkSessionResponse,
-    )
-    async def fork_from_message(
-        session_id: UUID,
-        body: ForkSessionRequest,
-        request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> ForkSessionResponse:
-        """Fork a session from a specific user message.
-
-        Creates a new session inheriting history and composition state up to
-        the fork point, with the edited message replacing the original.
-        The original session is never mutated.
-        """
-        await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        settings = request.app.state.settings
-
-        try:
-            new_session, new_messages, copied_state = await service.fork_session(
-                source_session_id=session_id,
-                fork_message_id=body.from_message_id,
-                new_message_content=body.new_message_content,
-                user_id=user.user_id,
-                auth_provider_type=settings.auth_provider,
-            )
-        except InvalidForkTargetError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise _run_accounting_integrity_http(
+                "Session run accounting projection failed.",
+                landscape_run_ids=terminal_landscape_run_ids,
+                error=str(exc),
+            ) from exc
+    discard_summaries = {}
+    if terminal_landscape_run_ids:
+        discard_summaries = await run_sync_in_worker(
+            load_discard_summaries_for_settings,
+            request.app.state.settings,
+            terminal_landscape_run_ids,
+        )
 
-        # Everything after fork_session() is a compensatable post-commit
-        # phase.  If ANY step fails, archive the fork to avoid orphaned
-        # sessions/blobs/state.  BlobQuotaExceededError gets a specific
-        # 413; all other failures re-raise after cleanup.
-        blob_service: BlobServiceProtocol = request.app.state.blob_service
-        try:
-            source_blobs = await blob_service.list_blobs(session_id)
-            # Copy blobs from source session into the forked session.
-            # Returns old_id → new_blob mapping for source reference rewriting.
-            blob_map = await blob_service.copy_blobs_for_fork(session_id, new_session.id)
-            source_blob_path_map = {blob.storage_path: blob_map[blob.id] for blob in source_blobs if blob.id in blob_map}
+    # Resolve composition_version from each run's state_id.
+    # A missing state is Tier 1 data corruption — crash, don't hide.
+    # Scope the read to the current session: the current-schema
+    # composite FK prevents cross-session state refs at the schema
+    # layer. ``get_state_in_session`` raises
+    # ``AuditIntegrityError`` on session mismatch, surfacing Tier 1
+    # corruption rather than silently returning the wrong state's
+    # version number in another session's listing.
+    responses: list[RunResponse] = []
+    for run in runs:
+        state = await service.get_state_in_session(run.state_id, session.id)
+        version = state.version
+        discard_summary = None
+        if run.landscape_run_id is not None and run.landscape_run_id in discard_summaries:
+            discard_summary = discard_summaries[run.landscape_run_id]
+        accounting = None
+        if run.landscape_run_id is not None and run.landscape_run_id in accounting_by_run_id:
+            accounting = accounting_by_run_id[run.landscape_run_id]
+        _validate_run_status_accounting_for_list(run, accounting)
+        responses.append(
+            RunResponse(
+                id=str(run.id),
+                session_id=str(run.session_id),
+                status=run.status,
+                accounting=accounting,
+                error=run.error,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+                composition_version=version,
+                discard_summary=discard_summary,
+            )
+        )
+    return responses
 
-            # Rewrite source references in the forked state so the fork is
-            # self-contained.  Without this, blob_ref and path in the source
-            # options still point at the original session's assets.
-            if copied_state is not None and copied_state.source is not None and blob_map:
-                source_dict = deep_thaw(copied_state.source) if copied_state.source else None
-                if not isinstance(source_dict, dict):
+
+@session_router.get("/{session_id}/state")
+async def get_current_state(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse | None:
+    """Get the current (highest-version) composition state."""
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+    state = await service.get_current_state(session.id)
+    if state is None:
+        return None
+    return _state_response(state)
+
+
+@session_router.get(
+    "/{session_id}/state/versions",
+    response_model=list[CompositionStateResponse],
+)
+async def get_state_versions(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[CompositionStateResponse]:
+    """Get composition state versions for a session."""
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+    versions = await service.get_state_versions(session.id, limit=limit, offset=offset)
+    return [_state_response(v) for v in versions]
+
+
+@session_router.post(
+    "/{session_id}/state/revert",
+    response_model=CompositionStateResponse,
+)
+async def revert_state(
+    session_id: UUID,
+    body: RevertStateRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse:
+    """Revert the pipeline to a prior composition state version (R1).
+
+    Creates a new version that is a copy of the specified prior state.
+    Injects a system message recording the revert.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+
+    try:
+        new_state = await service.set_active_state(
+            session.id,
+            body.state_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail="State not found",
+        ) from None
+
+    # Look up the original version number for the system message
+    original_state = await service.get_state(body.state_id)
+    await service.add_message(
+        session.id,
+        role="system",
+        content=f"Pipeline reverted to version {original_state.version}.",
+    )
+
+    return _state_response(new_state)
+
+
+@session_router.get("/{session_id}/state/yaml")
+async def get_state_yaml(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> dict[str, str]:
+    """Get YAML representation of the current composition state (M1).
+
+    Runs runtime preflight on the exact CompositionState reconstructed
+    from the persisted record, then generates deterministic YAML via
+    generate_yaml() against that same snapshot. The two operations see
+    the same Python object — there is no re-fetch between preflight
+    and serialization, so a state that passes the gate is byte-
+    identical to the state that gets serialized.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    state_record = await service.get_current_state(session.id)
+    if state_record is None:
+        raise HTTPException(status_code=404, detail="No composition state exists")
+    state = _state_from_record(state_record)
+    try:
+        runtime_validation = await _runtime_preflight_for_state(
+            state,
+            settings=request.app.state.settings,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+        )
+    except (
+        TimeoutError,
+        OSError,
+        PluginConfigError,
+        PluginNotFoundError,
+        GraphValidationError,
+    ) as exc:
+        # Narrowed per CLAUDE.md offensive-programming policy. This
+        # tuple covers the user-fixable preflight failure modes:
+        #
+        # * TimeoutError — asyncio.wait_for exceeded
+        #   composer_runtime_preflight_timeout_seconds. Operator
+        #   action: increase timeout or fix the slow plugin.
+        # * OSError — filesystem error during plugin instantiation
+        #   (file not found, permission denied, broken pipe, etc.).
+        #   Operator action: fix the file/permissions.
+        # * PluginConfigError / PluginNotFoundError — the user's
+        #   pipeline references a misconfigured or missing plugin.
+        #   Operator action: fix the pipeline config.
+        # * GraphValidationError — the pipeline graph is structurally
+        #   invalid (validate_pipeline normally absorbs this, but
+        #   it's listed here for defense-in-depth in case a future
+        #   refactor lets it escape).
+        #
+        # Programmer-bug classes (AttributeError, TypeError,
+        # KeyError, RuntimeError, ImportError, etc.) are deliberately
+        # NOT caught — they propagate to FastAPI's default 500
+        # handler so operators see real tracebacks rather than the
+        # misleading "fix your pipeline" 409 message. The
+        # exception-counter is reserved for the user-fixable bucket
+        # so dashboards measure real preflight failure rate, not
+        # bugs we introduced ourselves.
+        _record_composer_runtime_preflight_telemetry(
+            "exception",
+            source="yaml_export",
+            exception_class=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Runtime preflight could not complete; YAML export aborted.",
+        ) from exc
+    _record_composer_runtime_preflight_telemetry(
+        "passed" if runtime_validation.is_valid else "failed",
+        source="yaml_export",
+    )
+    if not runtime_validation.is_valid:
+        detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        if runtime_validation.errors:
+            detail = f"{detail} First error: {runtime_validation.errors[0].message}"
+        raise HTTPException(status_code=409, detail=detail)
+    yaml_str = generate_yaml(state)
+    response = {"yaml": yaml_str}
+    if state.source is not None and "blob_ref" in state.source.options:
+        response["source_blob_id"] = str(state.source.options["blob_ref"])
+    return response
+
+
+@session_router.post(
+    "/{session_id}/fork",
+    status_code=201,
+    response_model=ForkSessionResponse,
+)
+async def fork_from_message(
+    session_id: UUID,
+    body: ForkSessionRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> ForkSessionResponse:
+    """Fork a session from a specific user message.
+
+    Creates a new session inheriting history and composition state up to
+    the fork point, with the edited message replacing the original.
+    The original session is never mutated.
+    """
+    await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    settings = request.app.state.settings
+
+    try:
+        new_session, new_messages, copied_state = await service.fork_session(
+            source_session_id=session_id,
+            fork_message_id=body.from_message_id,
+            new_message_content=body.new_message_content,
+            user_id=user.user_id,
+            auth_provider_type=settings.auth_provider,
+        )
+    except InvalidForkTargetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Everything after fork_session() is a compensatable post-commit
+    # phase.  If ANY step fails, archive the fork to avoid orphaned
+    # sessions/blobs/state.  BlobQuotaExceededError gets a specific
+    # 413; all other failures re-raise after cleanup.
+    blob_service: BlobServiceProtocol = request.app.state.blob_service
+    try:
+        source_blobs = await blob_service.list_blobs(session_id)
+        # Copy blobs from source session into the forked session.
+        # Returns old_id → new_blob mapping for source reference rewriting.
+        blob_map = await blob_service.copy_blobs_for_fork(session_id, new_session.id)
+        source_blob_path_map = {blob.storage_path: blob_map[blob.id] for blob in source_blobs if blob.id in blob_map}
+
+        # Rewrite source references in the forked state so the fork is
+        # self-contained.  Without this, blob_ref and path in the source
+        # options still point at the original session's assets.
+        if copied_state is not None and copied_state.source is not None and blob_map:
+            source_dict = deep_thaw(copied_state.source) if copied_state.source else None
+            if not isinstance(source_dict, dict):
+                raise AuditIntegrityError(
+                    f"Tier 1 audit anomaly: composition_state {copied_state.id} "
+                    f"has source type {type(source_dict).__name__}, expected dict "
+                    f"before fork blob rewrite for session {new_session.id}."
+                )
+
+            options = source_dict.get("options")
+            if options is None:
+                rewritten = False
+            else:
+                if not isinstance(options, dict):
                     raise AuditIntegrityError(
                         f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                        f"has source type {type(source_dict).__name__}, expected dict "
-                        f"before fork blob rewrite for session {new_session.id}."
+                        f"has source.options type {type(options).__name__}, expected "
+                        f"dict before fork blob rewrite for session {new_session.id}."
                     )
 
-                options = source_dict.get("options")
-                if options is None:
-                    rewritten = False
-                else:
-                    if not isinstance(options, dict):
+                rewritten = False
+                rewrite_target = None
+                # Remap blob_ref to the new blob's ID.
+                # composition_states.source is Tier 1 ("our data") — the
+                # composer writes blob_ref as the blob's UUID string
+                # (composer/tools.py _execute_set_source_from_blob).  A
+                # non-UUID value here means a write-path bug, DB
+                # corruption, or tampering — crash with a diagnostic
+                # rather than silently skipping the remap.  Silent skip
+                # would leave the forked state's blob_ref pointing at
+                # the source session's blob, which is the cross-session
+                # reference class closed at the FK layer by the
+                # current-schema composite FK and is audit-contradictory
+                # on its face.  The enclosing ``except Exception``
+                # block archives the partially-created fork (see the
+                # cleanup-rollback site below), so this crash does
+                # not leak artifacts.
+                old_ref = options.get("blob_ref")
+                if old_ref is not None:
+                    try:
+                        old_uuid = UUID(old_ref) if isinstance(old_ref, str) else old_ref
+                    except ValueError as exc:
                         raise AuditIntegrityError(
-                            f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                            f"has source.options type {type(options).__name__}, expected "
-                            f"dict before fork blob rewrite for session {new_session.id}."
-                        )
+                            f"Tier 1 audit anomaly: composition_state "
+                            f"{copied_state.id} has non-UUID blob_ref "
+                            f"{old_ref!r} in source.options (expected a "
+                            f"UUID string written by composer/tools.py). "
+                            f"Fork aborted to prevent cross-session blob "
+                            f"reference in forked session {new_session.id}."
+                        ) from exc
+                    rewrite_target = blob_map.get(old_uuid)
 
-                    rewritten = False
-                    rewrite_target = None
-                    # Remap blob_ref to the new blob's ID.
-                    # composition_states.source is Tier 1 ("our data") — the
-                    # composer writes blob_ref as the blob's UUID string
-                    # (composer/tools.py _execute_set_source_from_blob).  A
-                    # non-UUID value here means a write-path bug, DB
-                    # corruption, or tampering — crash with a diagnostic
-                    # rather than silently skipping the remap.  Silent skip
-                    # would leave the forked state's blob_ref pointing at
-                    # the source session's blob, which is the cross-session
-                    # reference class closed at the FK layer by the
-                    # current-schema composite FK and is audit-contradictory
-                    # on its face.  The enclosing ``except Exception``
-                    # block archives the partially-created fork (see the
-                    # cleanup-rollback site below), so this crash does
-                    # not leak artifacts.
-                    old_ref = options.get("blob_ref")
-                    if old_ref is not None:
-                        try:
-                            old_uuid = UUID(old_ref) if isinstance(old_ref, str) else old_ref
-                        except ValueError as exc:
-                            raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state "
-                                f"{copied_state.id} has non-UUID blob_ref "
-                                f"{old_ref!r} in source.options (expected a "
-                                f"UUID string written by composer/tools.py). "
-                                f"Fork aborted to prevent cross-session blob "
-                                f"reference in forked session {new_session.id}."
-                            ) from exc
-                        rewrite_target = blob_map.get(old_uuid)
+                if rewrite_target is None:
+                    for path_key in ("path", "file"):
+                        path_value = options.get(path_key)
+                        if isinstance(path_value, str) and path_value in source_blob_path_map:
+                            rewrite_target = source_blob_path_map[path_value]
+                            break
 
-                    if rewrite_target is None:
-                        for path_key in ("path", "file"):
-                            path_value = options.get(path_key)
-                            if isinstance(path_value, str) and path_value in source_blob_path_map:
-                                rewrite_target = source_blob_path_map[path_value]
-                                break
+                if rewrite_target is not None:
+                    options["blob_ref"] = str(rewrite_target.id)
+                    if "path" in options or "file" not in options:
+                        options["path"] = rewrite_target.storage_path
+                    if "file" in options:
+                        options["file"] = rewrite_target.storage_path
+                    rewritten = True
 
-                    if rewrite_target is not None:
-                        options["blob_ref"] = str(rewrite_target.id)
-                        if "path" in options or "file" not in options:
-                            options["path"] = rewrite_target.storage_path
-                        if "file" in options:
-                            options["file"] = rewrite_target.storage_path
-                        rewritten = True
-
-                if rewritten:
-                    source_dict["options"] = options
-                    # Save updated state with remapped source. Preserve the
-                    # source state's composer_meta — fork inherits the
-                    # operational provenance of the parent compose.
-                    state_data = CompositionStateData(
-                        source=source_dict,
-                        nodes=deep_thaw(copied_state.nodes),
-                        edges=deep_thaw(copied_state.edges),
-                        outputs=deep_thaw(copied_state.outputs),
-                        metadata_=deep_thaw(copied_state.metadata_),
-                        is_valid=copied_state.is_valid,
-                        validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
-                        composer_meta=deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None,
-                    )
-                    copied_state = await service.save_composition_state(
-                        new_session.id,
-                        state_data,
-                    )
-
-                    # The edited user message (last in list) still references
-                    # the pre-rewrite state.  Re-point it at the replacement
-                    # state so message-state lineage is self-contained.
-                    user_msg = new_messages[-1]
-                    await service.update_message_composition_state(
-                        user_msg.id,
-                        copied_state.id,
-                    )
-                    new_messages[-1] = ChatMessageRecord(
-                        id=user_msg.id,
-                        session_id=user_msg.session_id,
-                        role=user_msg.role,
-                        content=user_msg.content,
-                        raw_content=user_msg.raw_content,
-                        tool_calls=user_msg.tool_calls,
-                        created_at=user_msg.created_at,
-                        composition_state_id=copied_state.id,
-                    )
-        except BlobQuotaExceededError:
-            # Build the HTTPException up-front so cleanup failures can be
-            # attached as a note on the object that actually propagates —
-            # the inner BlobQuotaExceededError is suppressed by `from None`
-            # and any note attached to it would never reach operator logs.
-            # Cleanup catch is narrowed to recoverable IO/DB failures so
-            # programmer bugs (AttributeError, TypeError) still crash.
-            quota_exc = HTTPException(
-                status_code=413,
-                detail="Blob quota exceeded during fork — unable to copy files",
-            )
-            try:
-                await service.archive_session(new_session.id)
-            except (SQLAlchemyError, OSError) as cleanup_exc:
-                quota_exc.add_note(
-                    f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
-                    f"could not archive forked session {new_session.id} "
-                    f"after blob quota rollback ({cleanup_exc}). "
-                    f"Manual cleanup of sessions.id={new_session.id} required."
+            if rewritten:
+                source_dict["options"] = options
+                # Save updated state with remapped source. Preserve the
+                # source state's composer_meta — fork inherits the
+                # operational provenance of the parent compose.
+                state_data = CompositionStateData(
+                    source=source_dict,
+                    nodes=deep_thaw(copied_state.nodes),
+                    edges=deep_thaw(copied_state.edges),
+                    outputs=deep_thaw(copied_state.outputs),
+                    metadata_=deep_thaw(copied_state.metadata_),
+                    is_valid=copied_state.is_valid,
+                    validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
+                    composer_meta=deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None,
                 )
-            raise quota_exc from None
-        except Exception as primary_exc:
-            # Mirror the RecoveryFailed[...] convention from
-            # ``BlobServiceImpl.copy_blobs_for_fork`` and
-            # ``BlobServiceImpl.finalize_run_output_blobs`` (web/blobs/service.py):
-            # cleanup failures must NOT mask the original error.  Narrow the
-            # catch to (SQLAlchemyError, OSError) — programmer bugs in
-            # archive_session must propagate — and attach the cleanup
-            # failure as a note so the orphan session row is visible to
-            # operators reading the traceback.  Bare `raise` preserves
-            # primary_exc and its original traceback as the headline.
-            try:
-                await service.archive_session(new_session.id)
-            except (SQLAlchemyError, OSError) as cleanup_exc:
-                primary_exc.add_note(
-                    f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
-                    f"could not archive forked session {new_session.id} "
-                    f"during fork rollback ({cleanup_exc}). "
-                    f"Manual cleanup of sessions.id={new_session.id} required."
+                copied_state = await service.save_composition_state(
+                    new_session.id,
+                    state_data,
                 )
-            raise
 
-        return ForkSessionResponse(
-            session=_session_response(new_session),
-            messages=[_message_response(m) for m in new_messages],
-            composition_state=_state_response(copied_state) if copied_state else None,
+                # The edited user message (last in list) still references
+                # the pre-rewrite state.  Re-point it at the replacement
+                # state so message-state lineage is self-contained.
+                user_msg = new_messages[-1]
+                await service.update_message_composition_state(
+                    user_msg.id,
+                    copied_state.id,
+                )
+                new_messages[-1] = ChatMessageRecord(
+                    id=user_msg.id,
+                    session_id=user_msg.session_id,
+                    role=user_msg.role,
+                    content=user_msg.content,
+                    raw_content=user_msg.raw_content,
+                    tool_calls=user_msg.tool_calls,
+                    created_at=user_msg.created_at,
+                    composition_state_id=copied_state.id,
+                )
+    except BlobQuotaExceededError:
+        # Build the HTTPException up-front so cleanup failures can be
+        # attached as a note on the object that actually propagates —
+        # the inner BlobQuotaExceededError is suppressed by `from None`
+        # and any note attached to it would never reach operator logs.
+        # Cleanup catch is narrowed to recoverable IO/DB failures so
+        # programmer bugs (AttributeError, TypeError) still crash.
+        quota_exc = HTTPException(
+            status_code=413,
+            detail="Blob quota exceeded during fork — unable to copy files",
         )
+        try:
+            await service.archive_session(new_session.id)
+        except (SQLAlchemyError, OSError) as cleanup_exc:
+            quota_exc.add_note(
+                f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
+                f"could not archive forked session {new_session.id} "
+                f"after blob quota rollback ({cleanup_exc}). "
+                f"Manual cleanup of sessions.id={new_session.id} required."
+            )
+        raise quota_exc from None
+    except Exception as primary_exc:
+        # Mirror the RecoveryFailed[...] convention from
+        # ``BlobServiceImpl.copy_blobs_for_fork`` and
+        # ``BlobServiceImpl.finalize_run_output_blobs`` (web/blobs/service.py):
+        # cleanup failures must NOT mask the original error.  Narrow the
+        # catch to (SQLAlchemyError, OSError) — programmer bugs in
+        # archive_session must propagate — and attach the cleanup
+        # failure as a note so the orphan session row is visible to
+        # operators reading the traceback.  Bare `raise` preserves
+        # primary_exc and its original traceback as the headline.
+        try:
+            await service.archive_session(new_session.id)
+        except (SQLAlchemyError, OSError) as cleanup_exc:
+            primary_exc.add_note(
+                f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
+                f"could not archive forked session {new_session.id} "
+                f"during fork rollback ({cleanup_exc}). "
+                f"Manual cleanup of sessions.id={new_session.id} required."
+            )
+        raise
 
-    return router
+    return ForkSessionResponse(
+        session=_session_response(new_session),
+        messages=[_message_response(m) for m in new_messages],
+        composition_state=_state_response(copied_state) if copied_state else None,
+    )
+
+
+def create_session_router() -> APIRouter:
+    """Create the session router with /api/sessions prefix."""
+    return session_router

@@ -95,13 +95,31 @@ class TestGateEvaluationContext:
 
 class TestAggregationFlushContext:
     def test_canonical_json_produces_valid_json(self) -> None:
-        ctx = AggregationFlushContext(trigger_type="END_OF_SOURCE", buffer_size=37, batch_id="batch-final")
+        ctx = AggregationFlushContext(
+            trigger_type="END_OF_SOURCE",
+            buffer_size=37,
+            batch_id="batch-final",
+            flush_index=4,
+            rows_seen_total=137,
+            row_start=101,
+            row_end=137,
+            is_end_of_source=True,
+        )
         json_str = canonical_json(ctx.to_dict())
         parsed = json.loads(json_str)
         assert parsed == ctx.to_dict()
 
     def test_canonical_json_deterministic(self) -> None:
-        ctx = AggregationFlushContext(trigger_type="COUNT", buffer_size=10, batch_id="batch-xyz")
+        ctx = AggregationFlushContext(
+            trigger_type="COUNT",
+            buffer_size=10,
+            batch_id="batch-xyz",
+            flush_index=2,
+            rows_seen_total=20,
+            row_start=11,
+            row_end=20,
+            is_end_of_source=False,
+        )
         json1 = canonical_json(ctx.to_dict())
         json2 = canonical_json(ctx.to_dict())
         assert json1 == json2
@@ -157,7 +175,16 @@ class TestRequireIntValidation:
 
     def test_aggregation_flush_context_rejects_bool_buffer_size(self) -> None:
         with pytest.raises(TypeError, match="buffer_size must be int"):
-            AggregationFlushContext(trigger_type="COUNT", buffer_size=True, batch_id="b1")
+            AggregationFlushContext(
+                trigger_type="COUNT",
+                buffer_size=True,
+                batch_id="b1",
+                flush_index=1,
+                rows_seen_total=1,
+                row_start=1,
+                row_end=1,
+                is_end_of_source=False,
+            )
 
 
 class TestFromExecutorStats:
@@ -259,7 +286,16 @@ class TestProtocolConformance:
 
     def test_aggregation_flush_context_has_to_dict(self) -> None:
         """AggregationFlushContext satisfies NodeStateContext protocol."""
-        ctx = AggregationFlushContext(trigger_type="COUNT", buffer_size=10, batch_id="b1")
+        ctx = AggregationFlushContext(
+            trigger_type="COUNT",
+            buffer_size=10,
+            batch_id="b1",
+            flush_index=1,
+            rows_seen_total=10,
+            row_start=1,
+            row_end=10,
+            is_end_of_source=False,
+        )
         d = ctx.to_dict()
         assert isinstance(d, dict)
         assert "trigger_type" in d

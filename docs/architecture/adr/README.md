@@ -38,6 +38,14 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [016](016-source-guaranteed-fields-contract.md) | Source Guaranteed Fields Contract | - | **Accepted** |
 | [017](017-sink-required-fields-contract.md) | Sink Required Fields Contract | - | **Accepted** |
 | [018](018-producer-site-outcome-discrimination.md) | Producer-Site Outcome Discrimination | 2026-05-02 | **Accepted** |
+| [019](019-two-axis-terminal-model.md) | Two-Axis Terminal Model — Lifecycle, Outcome, and Path | 2026-05-04 | **Accepted** |
+| [020](020-retire-batch-llm-transforms.md) | Retire Batch-LLM Transforms (`azure_batch_llm`, `openrouter_batch_llm`) | 2026-05-06 | **Accepted** |
+| [021](021-sources-and-sinks-uniformly-boundary.md) | Sources and Sinks Are Uniformly Boundary by Architecture | 2026-05-18 | **Accepted** |
+| [022](022-shareable-reviews.md) | Shareable Reviews — Completion Gestures, Signed Tokens, and the Composer Completion Events Table | 2026-05-19 | **Accepted** |
+| [023](023-custom-python-ci-analyzer.md) | Custom Python Static Analyzer for ELSPETH-Specific CI Invariants (the `elspeth-lints` Package) | 2026-05-19 | **Accepted** |
+| [024](024-delivery-governance-for-single-maintainer-mode.md) | Delivery Governance for Single-Maintainer Mode | 2026-05-19 | **Accepted** |
+| [025](025-audited-inline-blob-content.md) | Audited Inline Blob Content | 2026-05-24 | **Accepted** |
+| [026](026-audit-hash-raw-vs-stored-asymmetry.md) | Audit Hashes Fingerprint What Arrived vs What Was Stored — the Raw/Sanitized Asymmetry Is Deliberate | 2026-05-30 | **Accepted** |
 
 ## Status Definitions
 

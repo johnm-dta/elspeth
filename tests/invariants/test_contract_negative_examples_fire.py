@@ -22,9 +22,6 @@ from elspeth.contracts.declaration_contracts import (
     registered_declaration_contracts,
     resolve_payload_schema_key_sets,
 )
-from elspeth.contracts.errors import PluginContractViolation
-
-_CONTRACT_VIOLATION_TYPES = (DeclarationContractViolation, PluginContractViolation)
 
 
 def _assert_exception_passed_through_dispatch_method(exc: BaseException, *, contract_name: str, bundle: ExampleBundle) -> None:
@@ -57,34 +54,28 @@ def test_negative_example_fires_violation(contract) -> None:
     Post-H2 (ADR-010 §Semantics amendment): the harness reads the
     site-tagged ``ExampleBundle`` and invokes the method named by
     ``bundle.site.value``. It accepts only the DCV hierarchy and the
-    pre-ADR-010 PluginContractViolation hierarchy (PassThroughContractViolation);
-    generic RuntimeError must not satisfy the invariant.
+    generic RuntimeError or legacy plugin-contract families must not satisfy
+    the invariant.
     """
     for bundle in negative_example_bundles(contract):
         method = getattr(contract, bundle.site.value)
-        with pytest.raises(_CONTRACT_VIOLATION_TYPES) as exc_info:
+        with pytest.raises(contract.violation_class) as exc_info:
             method(*bundle.args)
         assert exc_info.value is not None, (
             f"Contract {contract.name!r}'s runtime_check did not raise on its own negative_example — VAL is dormant for this contract."
         )
         violation = exc_info.value
         _assert_exception_passed_through_dispatch_method(violation, contract_name=contract.name, bundle=bundle)
-        if isinstance(violation, DeclarationContractViolation):
-            # C1 (plan-review B1-amended): reject bare-base raises for DCV-family
-            # contracts so triage SQL can filter by exception_type. The isinstance
-            # guard skips this check for pre-ADR-010 hierarchies (e.g.
-            # PassThroughContractViolation via PluginContractViolation) which have
-            # their own purpose-built subclass and carry no bare-base risk.
-            assert type(violation) is not DeclarationContractViolation, (
-                f"Contract {contract.name!r} raised the bare base "
-                f"DeclarationContractViolation rather than its declared subclass. "
-                f"Each contract MUST raise a purpose-built subclass of "
-                f"DeclarationContractViolation so triage SQL can filter by "
-                f"exception_type. Bare-base raises serialize to "
-                f"exception_type = 'DeclarationContractViolation', which is "
-                f"unfiltered in triage SQL and masks attribution at the audit "
-                f"boundary."
-            )
+        assert type(violation) is contract.violation_class, (
+            f"Contract {contract.name!r} raised {type(violation).__name__}, "
+            f"but registered {contract.violation_class.__name__} as its "
+            f"violation_class. Each contract MUST raise its declared "
+            f"purpose-built DeclarationContractViolation subclass so triage SQL "
+            f"can filter by exception_type."
+        )
+        assert type(violation) is not DeclarationContractViolation, (
+            f"Contract {contract.name!r} raised the bare base DeclarationContractViolation rather than its declared subclass."
+        )
 
 
 @pytest.mark.parametrize(
@@ -101,28 +92,18 @@ def test_negative_example_payload_covers_required_schema_keys(contract) -> None:
     """
     for bundle in negative_example_bundles(contract):
         method = getattr(contract, bundle.site.value)
-        with pytest.raises(_CONTRACT_VIOLATION_TYPES) as exc_info:
+        with pytest.raises(contract.violation_class) as exc_info:
             method(*bundle.args)
 
         violation = exc_info.value
         _assert_exception_passed_through_dispatch_method(violation, contract_name=contract.name, bundle=bundle)
-        if not isinstance(violation, DeclarationContractViolation):
-            # PassThroughContractViolation predates the ADR-010 DeclarationContract
-            # Violation hierarchy (kept as a dedicated subclass for triage-SQL
-            # continuity per ADR-010 §Consequences line 86). It does not carry the
-            # payload_schema + __init__-time Layer 1 validation, so this layer of
-            # representativeness cannot be asserted against it today. Phase 2B
-            # transform adopters register native DeclarationContractViolation
-            # subclasses and will be covered here automatically.
-            pytest.skip(
-                f"Contract {contract.name!r} raises {type(violation).__name__} — a "
-                f"pre-ADR-010-framework exception class (PluginContractViolation "
-                f"subclass). N2 Layer B payload-representativeness applies to "
-                f"DeclarationContractViolation subclasses only; the transitional "
-                f"PassThroughContractViolation does not have a payload_schema "
-                f"enforced at __init__ time, so the invariant is vacuously "
-                f"satisfied here."
-            )
+        assert isinstance(violation, DeclarationContractViolation)
+        assert type(violation).payload_schema is contract.payload_schema, (
+            f"Contract {contract.name!r} declares payload_schema "
+            f"{contract.payload_schema.__name__}, but its raised "
+            f"{type(violation).__name__} declares "
+            f"{type(violation).payload_schema.__name__}."
+        )
 
         # Violations raised outside the dispatcher have no contract_name
         # attached (C4 read-only property). The payload itself is populated at

@@ -13,9 +13,10 @@ def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
 
     Background — elspeth-e4949acbe1: when ``run_sync_in_worker``'s caller is
     cancelled (outer ``asyncio.wait_for`` timeout, or a ``CancelledError``
-    raised on the request task), the shielded future continues running on
-    its worker thread under ``asyncio.shield``. If the underlying sync work
-    eventually raises, the asyncio future holds an unretrieved exception.
+    raised on the request task), the future continues running on its worker
+    thread because ``asyncio.wait`` never cancels the awaitables it is
+    waiting on. If the underlying sync work eventually raises, the asyncio
+    future holds an unretrieved exception.
     Python's GC then fires the loop's exception handler with the message
     ``"Future exception was never retrieved"``, whose default handler logs
     a traceback through ``logging.getLogger("asyncio")``. In production that
@@ -27,9 +28,10 @@ def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
     exception as retrieved and silences the misleading journal noise.
 
     The exception itself is intentionally discarded: the only reason we
-    reach this drain path is that the caller's task has been cancelled,
-    so the abandoned work's outcome is no longer load-bearing for the
-    cancelled request. If the worker raised because of a real
+    reach this drain path is that the caller's task has been cancelled
+    (so ``run_sync_in_worker`` exited via its ``finally`` while the future
+    was still running), so the abandoned work's outcome is no longer
+    load-bearing for the cancelled request. If the worker raised because of a real
     infrastructure problem (DB down, disk full), other concurrent
     requests will surface it through their own paths — this drain does
     not hide such a failure mode, only its echo on a request that is
@@ -55,17 +57,26 @@ async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwar
     executor = ThreadPoolExecutor(max_workers=1)
     future = loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
     try:
+        # ``asyncio.wait`` returns ``(done, pending)`` on each 0.1s tick rather
+        # than raising on timeout, so there is no error-shaped sentinel to
+        # catch — the empty ``done`` set is the explicit "not finished yet"
+        # signal and we simply loop again. The short timeout keeps an explicit
+        # event-loop timer active so the selector wakes promptly even in
+        # sandboxed runtimes. Unlike ``wait_for(shield(...))``, ``asyncio.wait``
+        # never cancels the future it is waiting on, so no ``shield`` wrapper is
+        # needed to keep the worker alive across a caller cancellation.
         while True:
-            try:
-                return await asyncio.wait_for(asyncio.shield(future), timeout=0.1)
-            except TimeoutError:
-                continue
+            done, _pending = await asyncio.wait({future}, timeout=0.1)
+            if done:
+                # ``future.result()`` retrieves the value or re-raises the
+                # worker's exception on the awaited (non-cancelled) path.
+                return future.result()
     finally:
         # If the await above was abandoned mid-flight (cancellation,
-        # outer timeout), the shielded future may still be running. Make
-        # sure any exception it eventually raises is retrieved so the
-        # misleading request_id-middleware traceback never reaches the
-        # journal — see ``_drain_future_exception``'s docstring.
+        # outer timeout), the future may still be running. Make sure any
+        # exception it eventually raises is retrieved so the misleading
+        # request_id-middleware traceback never reaches the journal — see
+        # ``_drain_future_exception``'s docstring.
         if not future.done():
             future.add_done_callback(_drain_future_exception)
         executor.shutdown(wait=future.done(), cancel_futures=True)

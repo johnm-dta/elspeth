@@ -7,8 +7,9 @@ schema contracts, secret resolutions, export status, and reproducibility grading
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -35,6 +36,7 @@ from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
     preflight_results_table,
+    run_attributions_table,
     runs_table,
     secret_resolutions_table,
 )
@@ -57,6 +59,59 @@ _TERMINAL_RUN_STATUSES = frozenset(
         RunStatus.INTERRUPTED,
     }
 )
+_IMMUTABLE_SUCCESS_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.EMPTY,
+    }
+)
+_IMMUTABLE_SUCCESS_RUN_STATUS_VALUES = tuple(status.value for status in _IMMUTABLE_SUCCESS_RUN_STATUSES)
+
+_AUTH_PROVIDER_TYPES = frozenset({"local", "oidc", "entra"})
+_OPENROUTER_CATALOG_SOURCES = frozenset({"live", "bundled"})
+
+# 64 lowercase hex chars — matches the canonical sha256 hex digest format
+# produced by ``hashlib.sha256(...).hexdigest()``. Used by the Tier-1
+# write-side guards in this module, ``write_repository.py``, and
+# ``web/execution/service.py`` to reject malformed snapshot ids that
+# would otherwise corrupt the audit trail without a downstream signal.
+_SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+
+
+def is_valid_sha256_hex(value: str) -> bool:
+    """Return True if ``value`` is exactly 64 lowercase hex chars.
+
+    Canonical home for the sha256-hex shape check; imported by
+    ``write_repository.py`` and ``web/execution/service.py`` so all three
+    write-side guards reject the same out-of-domain values (empty,
+    whitespace-only, non-hex strings, upper-case, wrong length).
+    """
+    return _SHA256_HEX_RE.fullmatch(value) is not None
+
+
+def _validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider_type: str | None) -> None:
+    if initiated_by_user_id is None and auth_provider_type is None:
+        return
+    if type(initiated_by_user_id) is not str or not initiated_by_user_id.strip():
+        raise AuditIntegrityError("run attribution requires a non-blank initiated_by_user_id")
+    if auth_provider_type not in _AUTH_PROVIDER_TYPES:
+        raise AuditIntegrityError(f"run attribution requires auth_provider_type to be one of {sorted(_AUTH_PROVIDER_TYPES)!r}")
+
+
+def _validate_openrouter_catalog_snapshot(*, sha256: str, source: str) -> None:
+    """Tier-1 write-side guard for the OpenRouter catalog snapshot fields.
+
+    Both fields are NOT NULL on the ``runs`` table and define the
+    audit-trail anchor for "which catalog blessed this run's model
+    decisions". A defective caller passing an empty string or an
+    out-of-domain source value would silently corrupt the audit record;
+    catch it here so the failure points at the wiring bug.
+    """
+    if type(sha256) is not str or not is_valid_sha256_hex(sha256):
+        raise AuditIntegrityError(f"openrouter_catalog_sha256 must be 64 lowercase hex chars, got {sha256!r}")
+    if source not in _OPENROUTER_CATALOG_SOURCES:
+        raise AuditIntegrityError(f"openrouter_catalog_source must be one of {sorted(_OPENROUTER_CATALOG_SOURCES)!r}, got {source!r}")
 
 
 class RunLifecycleRepository:
@@ -81,6 +136,10 @@ class RunLifecycleRepository:
         status: RunStatus = RunStatus.RUNNING,
         source_schema_json: str | None = None,
         schema_contract: SchemaContract | None = None,
+        initiated_by_user_id: str | None = None,
+        auth_provider_type: str | None = None,
+        openrouter_catalog_sha256: str,
+        openrouter_catalog_source: str,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -95,6 +154,16 @@ class RunLifecycleRepository:
                 type fidelity (datetime/Decimal restoration from payload JSON strings).
             schema_contract: Optional schema contract for audit trail field resolution.
                 Stored via ContractAuditRecord for complete field mapping traceability.
+            initiated_by_user_id: Optional authenticated user ID that initiated the run.
+            auth_provider_type: Optional auth provider namespace for the initiating user.
+            openrouter_catalog_sha256: Canonical sha256 of the OpenRouter
+                model catalog active at run-create time. Required (Tier-1
+                audit completeness): every run records which catalog
+                blessed its model decisions. Resolved at the L3 entry
+                point via :func:`elspeth.plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id`.
+            openrouter_catalog_source: ``"live"`` if the lifespan probed
+                OpenRouter successfully, ``"bundled"`` if the fallback
+                served the snapshot. Required (NOT NULL on the column).
 
         Returns:
             Run model with generated run_id
@@ -103,6 +172,11 @@ class RunLifecycleRepository:
             raise AuditIntegrityError(
                 "begin_run() cannot create a COMPLETED run. Use complete_run() so completed_at is recorded in the audit trail."
             )
+        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        _validate_openrouter_catalog_snapshot(
+            sha256=openrouter_catalog_sha256,
+            source=openrouter_catalog_source,
+        )
 
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
@@ -149,8 +223,23 @@ class RunLifecycleRepository:
                 schema_contract_json=schema_contract_json,
                 schema_contract_hash=schema_contract_hash,
                 runtime_val_manifest_json=runtime_val_manifest_json,
+                llm_call_count=None,
+                seeded_from_cache=False,
+                cache_key=None,
+                openrouter_catalog_sha256=openrouter_catalog_sha256,
+                openrouter_catalog_source=openrouter_catalog_source,
             )
         )
+        if initiated_by_user_id is not None and auth_provider_type is not None:
+            self._ops.execute_insert(
+                run_attributions_table.insert().values(
+                    run_id=run.run_id,
+                    recorded_at=timestamp,
+                    initiated_by_user_id=initiated_by_user_id,
+                    auth_provider_type=auth_provider_type,
+                ),
+                context="run_attributions",
+            )
 
         return run
 
@@ -238,6 +327,20 @@ class RunLifecycleRepository:
         if row is None:
             return None
         return self._run_loader.load(row)
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        """Return ``(initiated_by_user_id, auth_provider_type)`` for a run if present."""
+        query = select(
+            run_attributions_table.c.initiated_by_user_id,
+            run_attributions_table.c.auth_provider_type,
+        ).where(run_attributions_table.c.run_id == run_id)
+        row = self._ops.execute_fetchone(query)
+        if row is None:
+            return None
+        initiated_by_user_id = row.initiated_by_user_id
+        auth_provider_type = row.auth_provider_type
+        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        return initiated_by_user_id, auth_provider_type
 
     def get_source_schema(self, run_id: str) -> str:
         """Get source schema JSON for a run (for resume/type restoration).
@@ -442,9 +545,10 @@ class RunLifecycleRepository:
             record is final. FAILED and INTERRUPTED runs CAN be transitioned back
             to RUNNING during resume (orchestrator recovery path).
         """
-        if status == RunStatus.COMPLETED:
+        if status in _IMMUTABLE_SUCCESS_RUN_STATUSES:
             raise AuditIntegrityError(
-                "update_run_status() cannot set status to COMPLETED. Use complete_run() so completed_at is recorded in the audit trail."
+                f"update_run_status() cannot set status to {status.value!r}. "
+                "Use complete_run() so completed_at is recorded in the audit trail."
             )
 
         with self._db.connection() as conn:
@@ -457,15 +561,16 @@ class RunLifecycleRepository:
             result = conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
-                .where(runs_table.c.status != RunStatus.COMPLETED.value)
+                .where(runs_table.c.status.notin_(_IMMUTABLE_SUCCESS_RUN_STATUS_VALUES))
                 .values(**values)
             )
             if result.rowcount == 0:
                 existing = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == run_id)).fetchone()
-                if existing is not None and existing.status == RunStatus.COMPLETED.value:
+                if existing is not None and existing.status in _IMMUTABLE_SUCCESS_RUN_STATUS_VALUES:
+                    existing_status = RunStatus(existing.status)
                     raise AuditIntegrityError(
-                        f"Cannot transition run {run_id} from COMPLETED to {status.value!r}. "
-                        f"Completed runs are immutable. "
+                        f"Cannot transition run {run_id} from {existing_status.name} ({existing_status.value!r}) to {status.value!r}. "
+                        f"Successful terminal runs are immutable. "
                         f"FAILED/INTERRUPTED runs can be resumed via update_run_status."
                     )
                 raise AuditIntegrityError(f"Cannot update run status to {status.value!r}: run {run_id} not found")

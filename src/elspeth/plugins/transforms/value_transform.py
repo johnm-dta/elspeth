@@ -13,7 +13,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.core.expression_parser import (
@@ -111,8 +113,9 @@ class ValueTransform(BaseTransform):
     """
 
     name = "value_transform"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5a371ef8d6e0a5e9"
+    source_file_hash: str | None = "sha256:522e7300a596508f"
     config_model = ValueTransformConfig
     passes_through_input = True
 
@@ -240,3 +243,18 @@ class ValueTransform(BaseTransform):
     def close(self) -> None:
         """No resources to release."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="value_transform",
+                issue_code=None,
+                summary="Apply per-field expressions (map / filter / aggregate operations) using a restricted expression grammar. Stateless and pure.",
+                composer_hints=(
+                    "Call get_expression_grammar to see the allowed operations — only stdlib-safe expressions are permitted.",
+                    "Use this for field-level transformations (uppercase, regex extract, arithmetic). For type changes use type_coerce.",
+                    "Expressions are sandboxed — file I/O, imports, and external calls are rejected at parse time.",
+                ),
+            )
+        return None

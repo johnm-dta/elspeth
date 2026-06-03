@@ -165,7 +165,7 @@ class TestCheckpointRecoveryIntegration:
         # Create checkpoint with aggregation state — typed DTO
         # Use token ID that was created by _setup_partial_run (tok-001-003)
         agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "test_agg": AggregationNodeCheckpoint(
                     tokens=(
@@ -196,6 +196,8 @@ class TestCheckpointRecoveryIntegration:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=2,
+                    completed_flush_count=0,
                 ),
             },
         )
@@ -314,6 +316,8 @@ class TestCheckpointRecoveryIntegration:
                     status=RunStatus.FAILED,
                     schema_contract_json=contract_json,
                     schema_contract_hash=contract_hash,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 

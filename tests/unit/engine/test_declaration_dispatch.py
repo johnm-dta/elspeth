@@ -81,6 +81,7 @@ def _empty_example_bundle() -> ExampleBundle:
 class _AppliesContract(DeclarationContract):
     name = "applies"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationA] = _TestViolationA
     invoked: bool = False
 
     def applies_to(self, plugin: Any) -> bool:
@@ -106,6 +107,7 @@ class _AppliesContract(DeclarationContract):
 class _SkipsContract(DeclarationContract):
     name = "skips"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationA] = _TestViolationA
     invoked: bool = False
 
     def applies_to(self, plugin: Any) -> bool:
@@ -131,6 +133,7 @@ class _SkipsContract(DeclarationContract):
 class _RaisesViolationContract(DeclarationContract):
     name = "raises_violation"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationA] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -165,6 +168,7 @@ class _RaisesSecondViolationContract(DeclarationContract):
 
     name = "raises_second_violation"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationB] = _TestViolationB
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -200,6 +204,7 @@ class _ApplyRaisesContract(DeclarationContract):
 
     name = "apply_raises"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationA] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         raise KeyError("bug in applies_to")
@@ -226,6 +231,7 @@ class _CheckRaisesContract(DeclarationContract):
 
     name = "check_raises"
     payload_schema: type = _Payload
+    violation_class: type[_TestViolationA] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -321,6 +327,7 @@ def test_single_violation_raises_via_reference_identity() -> None:
     class _CapturingContract(DeclarationContract):
         name = "capturing"
         payload_schema: type = _Payload
+        violation_class: type[_TestViolationA] = _TestViolationA
         last_raised: DeclarationContractViolation | None = None
 
         def applies_to(self, plugin: Any) -> bool:
@@ -555,6 +562,7 @@ def test_audit_complete_runs_every_applicable_contract() -> None:
     class _TracingContract(DeclarationContract):
         name = "tracing_second"
         payload_schema: type = _Payload
+        violation_class: type[_TestViolationB] = _TestViolationB
 
         def applies_to(self, plugin: Any) -> bool:
             return True
@@ -613,6 +621,7 @@ def test_contract_without_post_emission_marker_not_invoked_by_post_emission_disp
     class _BatchOnlyContract(DeclarationContract):
         name = "batch_only"
         payload_schema: type = _Payload
+        violation_class: type[_TestViolationA] = _TestViolationA
 
         def applies_to(self, plugin: Any) -> bool:
             nonlocal invoked

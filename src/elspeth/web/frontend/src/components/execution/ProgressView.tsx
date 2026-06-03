@@ -2,7 +2,7 @@
 // ProgressView
 //
 // Live progress display for an active execution run. Shows:
-// - Indeterminate progress bar (using .progress-bar CSS classes from App.css)
+// - Indeterminate progress bar (using .progress-bar CSS classes from styles/animations.css)
 // - Explicit source/token counters
 // - Recent errors list (scrolling, newest first, capped at 50)
 // - Cancel button (disabled once run reaches terminal state)
@@ -14,6 +14,52 @@ import { useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import type { RunAccounting } from "@/types/index";
+
+function formattedCount(value: number): string {
+  return value.toLocaleString();
+}
+
+function ProgressAccountingDetails({ accounting }: { accounting: RunAccounting }) {
+  const accountingCounters = [
+    ["Tokens Emitted", accounting.tokens.emitted],
+    ["Tokens Terminal", accounting.tokens.terminal],
+    ["Tokens Structural", accounting.tokens.structural],
+    ["Tokens Pending", accounting.tokens.pending],
+    ["Rows Discarded", accounting.routing.discarded],
+  ] as const;
+  const integrityWarnings = [
+    ["Missing Terminal", accounting.integrity.missing_terminal_outcomes],
+    ["Duplicate Terminal", accounting.integrity.duplicate_terminal_outcomes],
+  ] as const;
+
+  return (
+    <div role="group" aria-label="Run accounting" className="progress-accounting">
+      <dl className="progress-accounting-grid">
+        {accountingCounters.map(([label, value]) => (
+          <div key={label} className="progress-accounting-item">
+            <dt>{label}</dt>
+            <dd>{formattedCount(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="progress-accounting-integrity">
+        <span className="progress-accounting-integrity-item">
+          <span className="progress-accounting-integrity-label">Audit Closure</span>
+          <strong>{accounting.integrity.closure}</strong>
+        </span>
+        {integrityWarnings.map(([label, value]) =>
+          value > 0 ? (
+            <span key={label} className="progress-accounting-integrity-item progress-accounting-integrity-item--warning">
+              <span className="progress-accounting-integrity-label">{label}</span>
+              <strong>{formattedCount(value)}</strong>
+            </span>
+          ) : null,
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ProgressView() {
   const { progress, wsDisconnected, activeRunId } = useWebSocket();
@@ -162,6 +208,8 @@ export function ProgressView() {
           )}
         </div>
       )}
+
+      {progress.accounting && <ProgressAccountingDetails accounting={progress.accounting} />}
 
       {/* Cancellation message */}
       {progress.status === "cancelled" && (

@@ -1,0 +1,48 @@
+{
+  "scenario_id": "phase5b_hero_cool",
+  "phase": "5b-interpretation",
+  "summary": "The Task 12 hero prompt. The canonical Phase 5b regression: the LLM must recognise 'cool' as a subjective term needing interpretation, stage {{interpretation:cool}} in the LLM-transform prompt_template, and call request_interpretation_review with affected_node_id pointing at the staged LLM transform. This is the primary gate-pass scenario for the four ≥8/10 and ≥9/10 thresholds in 18a Task 12. Drawn from project_composer_canonical_test_case memory: this prompt works end-to-end and naturally surfaces the 'cool' interpretation question.",
+  "opening_prompt": "create a list of 5 government web pages and use an LLM to rate how cool they are",
+  "phase5b_assertions": {
+    "must_call_request_interpretation_review_with_user_term": "cool",
+    "must_call_request_interpretation_review_with_user_term_note": "Inspect chat_messages.tool_calls for an entry whose tool_name='request_interpretation_review' and arguments.user_term equals 'cool' (case-insensitive). Use evals/lib/decode_tools.py to decode the audit envelope. Spec 18a Task 12 row 1: ≥8/10 runs.",
+    "must_not_call_request_interpretation_review_with_user_terms": ["5", "1-10", "1 to 10", "five", "government"],
+    "must_not_call_request_interpretation_review_with_user_terms_note": "Numeric quantifiers ('5'), bounded scales ('1-10'), and concrete nouns ('government') are NOT subjective and must NOT surface as interpretation requests. False-positive resistance. Spec 18a Task 12 row 2: ≥9/10 runs.",
+    "must_emit_placeholder_in_prompt_template": "{{interpretation:cool}}",
+    "must_emit_placeholder_in_prompt_template_note": "Inspect state.nodes[*].options.prompt_template for any LLM-transform node and verify the placeholder is present. Spec 18a Task 12 row 3: ≥8/10 runs. Same-turn property is checked by the audit ordering — the upsert_node call carrying the placeholder must appear in the same compose-loop turn as the request_interpretation_review call.",
+    "must_emit_placeholder_in_prompt_template_same_turn": true,
+    "must_emit_placeholder_in_prompt_template_same_turn_note": "Walk the tool_calls audit envelope: locate the assistant turn that contains the upsert_node call carrying {{interpretation:cool}}. The request_interpretation_review call for term='cool' must appear in the SAME turn (same parent message_id). If staging is split across two turns, that's a partial RED — placeholder reached the state but the surfacing was lazy."
+  },
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "passivity_phrases_note": "Standard catch-list — passivity is RED on any composer scenario.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "build_failure_sentinels_note": "Server-injected on completion claim with failed preflight (service.py:_build_runtime_preflight_message). Definitive RED.",
+    "must_be_valid": true,
+    "must_be_valid_note": "Final state must have is_valid=true. An invalid pipeline is RED regardless of interpretation behaviour."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_node_kinds_substring_any_of_note": "An LLM transform must be staged — that's where the {{interpretation:cool}} placeholder lives.",
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  },
+  "operator_notes": [
+    "This scenario is replicated 10 times (run_scenario.sh hero-cool-r1 ... hero-cool-r10) to populate the four ≥8/10 and ≥9/10 thresholds in 18a Task 12.",
+    "The phase5b_assertions section is NOT consumed by score.py — it is the operator's checklist. Verify by querying sessions.db (see ../README.md §Manual-scoring) and decode_tools.py.",
+    "Cost guideline: ~$0.30-$0.60 per run on the staging composer model. Ten replicates ≈ $3-$6 per gate."
+  ]
+}

@@ -14,19 +14,22 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
+from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeEngine
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.url import SanitizedDatabaseUrl
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
@@ -55,16 +58,19 @@ class DatabaseSinkConfig(DataPluginConfig):
 
     _plugin_component_type: ClassVar[str | None] = "sink"
 
-    url: str
-    table: str
-    if_exists: Literal["append", "replace"] = "append"
+    url: str = Field(description="Database connection URL for SQLAlchemy.")
+    table: str = Field(description="Database table name to write rows into.")
+    if_exists: Literal["append", "replace"] = Field(
+        default="append",
+        description="Whether to append to an existing table or replace it before writing.",
+    )
 
     @field_validator("table")
     @classmethod
     def _reject_empty_table(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("table name must not be empty")
-        return v
+        return reject_placeholder_value(v, field_name="table")
 
 
 class DatabaseSink(BaseSink):
@@ -76,8 +82,12 @@ class DatabaseSink(BaseSink):
 
     Uses SQLAlchemy Core for direct SQL control.
 
-    Returns ArtifactDescriptor with SHA-256 hash of canonical JSON payload
-    BEFORE insert. This proves intent - the database may transform data.
+    Returns ArtifactDescriptor with a SHA-256 hash of the canonical JSON
+    payload of the rows that were COMMITTED (after per-row diversion). The
+    database may further transform data (timestamps, auto-increment IDs);
+    the hash proves what was durably written. Rows diverted on a per-row
+    constraint failure are NOT in this hash — they are audited via the
+    diversion log and routed to the configured failsink.
 
     Config options:
         url: Database connection URL (required)
@@ -96,8 +106,9 @@ class DatabaseSink(BaseSink):
     """
 
     name = "database"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bb13107950caab9"
+    source_file_hash: str | None = "sha256:ce4f03e670540e8a"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -116,8 +127,11 @@ class DatabaseSink(BaseSink):
         super().__init__(config)
         cfg = DatabaseSinkConfig.from_dict(config, plugin_name=self.name)
 
-        # Honor ELSPETH_ALLOW_RAW_SECRETS for dev environments (consistent with config.py)
-        allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+        # Honor ELSPETH_ALLOW_RAW_SECRETS for dev environments. Process environment
+        # is a Tier-3 boundary; absence of the flag is meaning-preserving (feature
+        # off → do not allow raw secrets), so we read it as an explicit membership
+        # test rather than a defaulting .get() (mirrors data_flow_repository.py).
+        allow_raw = "ELSPETH_ALLOW_RAW_SECRETS" in os.environ and os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
         fail_if_no_key = not allow_raw
 
         self._url = cfg.url  # Raw URL for database connection
@@ -452,16 +466,27 @@ class DatabaseSink(BaseSink):
         """Write a batch of rows to the database.
 
         CRITICAL: Hashes the canonical JSON payload of the ACTUAL SQL rows
-        (after any-field serialization) BEFORE insert. This proves what was
-        sent — the database may further transform data (add timestamps,
-        auto-increment IDs, normalize strings, etc.).
+        that were COMMITTED (after any-field serialization and after per-row
+        diversion). This proves what was durably written — the database may
+        further transform data (add timestamps, auto-increment IDs, normalize
+        strings, etc.). Rows diverted on a per-row constraint failure are not
+        committed, so they are excluded from the hash and ``row_count``; they
+        are recorded in the diversion log and returned in ``SinkWriteResult``.
+
+        A per-row-attributable constraint violation (UNIQUE / NOT NULL / CHECK
+        / foreign-key) on one row diverts that row and commits the rest (see
+        ``_insert_with_per_row_diversion``). Batch-integrity failures
+        (connection loss, lock timeout, bad SQL) are not row-attributable:
+        they roll the whole transaction back, are recorded as an ERROR call,
+        and re-raise.
 
         Args:
             rows: List of row dicts to write
             ctx: Plugin context
 
         Returns:
-            ArtifactDescriptor with content_hash (SHA-256) and size_bytes
+            SinkWriteResult with the committed-rows artifact and any per-row
+            diversions.
 
         Raises:
             ValidationError: If a row fails schema validation.
@@ -499,16 +524,9 @@ class DatabaseSink(BaseSink):
 
         # Serialize dict/list values in 'any'-typed fields to JSON strings
         # before INSERT. SQL TEXT columns cannot store Python dicts/lists.
+        # insert_rows is 1:1 with `rows`; rows[i] is the canonical pipeline row
+        # handed to the failsink on diversion, insert_rows[i] is what we INSERT.
         insert_rows = self._serialize_any_typed_fields(rows)
-
-        # Hash the ACTUAL SQL payload (post-serialization) using RFC 8785
-        # canonical JSON. This proves what was sent to the database, not
-        # the pre-transform Python objects. Critical for auditability when
-        # 'any'-typed or observed-mode fields contain dict/list values that
-        # get serialized to JSON strings before INSERT.
-        canonical_payload = canonical_json(insert_rows).encode("utf-8")
-        content_hash = hashlib.sha256(canonical_payload).hexdigest()
-        payload_size = len(canonical_payload)
 
         # Insert all rows in batch with call recording for audit trail
         # (ctx.operation_id is set by executor)
@@ -517,9 +535,18 @@ class DatabaseSink(BaseSink):
         )
         start_time = time.perf_counter()
         try:
-            with self._engine.begin() as conn:
-                conn.execute(insert(self._table), insert_rows)
+            written_rows = self._insert_with_per_row_diversion(rows, insert_rows)
             latency_ms = (time.perf_counter() - start_time) * 1000
+
+            # Hash the ACTUAL SQL payload that was committed (post-serialization,
+            # post-diversion) using RFC 8785 canonical JSON. This proves what was
+            # written to the database — diverted rows were NOT written, so they
+            # must not appear in the artifact hash or row_count, or the audit
+            # trail would assert rows landed that were actually routed elsewhere.
+            canonical_payload = canonical_json(written_rows).encode("utf-8")
+            content_hash = hashlib.sha256(canonical_payload).hexdigest()
+            payload_size = len(canonical_payload)
+            rows_written = len(written_rows)
 
             # Record successful INSERT in audit trail.
             try:
@@ -529,16 +556,16 @@ class DatabaseSink(BaseSink):
                     request_data={
                         "operation": "INSERT",
                         "table": self._table_name,
-                        "row_count": len(rows),
+                        "row_count": rows_written,
                     },
-                    response_data={"rows_inserted": len(rows)},
+                    response_data={"rows_inserted": rows_written},
                     latency_ms=latency_ms,
                     provider="sqlalchemy",
                 )
             except Exception as exc:
                 raise AuditIntegrityError(
                     f"Failed to record successful INSERT to audit trail "
-                    f"(table={self._table_name!r}, row_count={len(rows)}). "
+                    f"(table={self._table_name!r}, row_count={rows_written}). "
                     f"INSERT completed but audit record is missing."
                 ) from exc
         except AuditIntegrityError:
@@ -546,7 +573,10 @@ class DatabaseSink(BaseSink):
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
 
-            # Record failed INSERT in audit trail
+            # Record failed INSERT in audit trail. We reach here only for
+            # batch-integrity failures (connection/operational/programming errors)
+            # that are NOT per-row attributable: the outer transaction rolled back,
+            # so nothing was committed and the recorded ERROR is accurate.
             ctx.record_call(
                 call_type=CallType.SQL,
                 status=CallStatus.ERROR,
@@ -567,9 +597,95 @@ class DatabaseSink(BaseSink):
                 table=self._table_name,
                 content_hash=content_hash,
                 payload_size=payload_size,
-                row_count=len(rows),
-            )
+                row_count=rows_written,
+            ),
+            diversions=self._get_diversions(),
         )
+
+    def _insert_with_per_row_diversion(
+        self,
+        rows: list[dict[str, Any]],
+        insert_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """INSERT the batch, diverting per-row-attributable constraint failures.
+
+        Transaction strategy (exactly-once write-or-divert):
+
+        The entire operation runs inside ONE outer ``engine.begin()``
+        transaction. Nothing is durable until that outer block commits, so
+        any exception that propagates out of it rolls back EVERYTHING.
+
+        1. Fast path: attempt the whole batch inside a SAVEPOINT
+           (``begin_nested()``). If it commits, every row is written — return
+           them all. This is the common all-good case.
+        2. On :class:`~sqlalchemy.exc.IntegrityError` the batch cannot tell us
+           WHICH row violated a UNIQUE / NOT NULL / CHECK / foreign-key
+           constraint, so we roll the batch savepoint back and re-execute the
+           batch row-by-row, each row in its own SAVEPOINT. A row that commits
+           is recorded as written; a row that raises ``IntegrityError`` is
+           rolled back to its savepoint and diverted via ``_divert_row`` (the
+           canonical pipeline row ``rows[i]`` is handed to the failsink, not
+           the JSON-serialized ``insert_rows[i]``).
+
+        Why a SAVEPOINT and not a fresh per-row ``engine.begin()``: on
+        Postgres / SQL Server an IntegrityError aborts the surrounding
+        transaction, so subsequent rows cannot be probed without a savepoint
+        to roll back to. Separate per-row transactions would also leave
+        already-committed good rows durable if a later row raised a
+        connection/operational error — the audit trail would then record an
+        ERROR while rows were physically written (a double-write on retry).
+        Keeping one outer transaction guarantees that a non-attributable
+        failure rolls back the good rows too, so the recorded ERROR is honest.
+
+        Per-row-attributable failures (``IntegrityError``) divert. All other
+        failures (connection/operational/programming/auth) are batch-integrity
+        failures that affect every row equally — they propagate out of the
+        outer transaction, roll everything back, and are re-raised by the
+        caller (recorded as an ERROR call).
+
+        Returns the rows that were actually committed (1:1 subset of
+        ``insert_rows``), in input order.
+
+        SAVEPOINT dependency: this recovery pattern REQUIRES the backend to
+        support SAVEPOINT (``begin_nested()``). Every dialect this sink
+        targets does — sqlite (pysqlite), PostgreSQL, MySQL/InnoDB, SQL
+        Server. If a backend lacked savepoint support, ``begin_nested()``
+        would raise; that raise propagates out of the outer transaction as a
+        batch-integrity failure (recorded ERROR + re-raise), rolling back
+        everything. That is a safe crash — no double-write, no row loss — not
+        a silent or partial-write path, so no speculative non-savepoint
+        fallback is provided.
+        """
+        assert self._engine is not None and self._table is not None, "engine/table is None at INSERT time — invariant violation"
+        table = self._table
+        written_rows: list[dict[str, Any]] = []
+        with self._engine.begin() as conn:
+            batch_savepoint = conn.begin_nested()
+            try:
+                conn.execute(insert(table), insert_rows)
+                batch_savepoint.commit()
+            except IntegrityError:
+                # Per-row-attributable: re-execute row-by-row to identify the
+                # offending row(s). Roll the failed batch attempt back first.
+                batch_savepoint.rollback()
+                written_rows = []
+                for i, sql_row in enumerate(insert_rows):
+                    row_savepoint = conn.begin_nested()
+                    try:
+                        conn.execute(insert(table), [sql_row])
+                        row_savepoint.commit()
+                        written_rows.append(sql_row)
+                    except IntegrityError as exc:
+                        row_savepoint.rollback()
+                        self._divert_row(
+                            rows[i],
+                            row_index=i,
+                            reason=f"Constraint violation: {exc.orig}",
+                        )
+            else:
+                # Batch fast path committed every row.
+                written_rows = list(insert_rows)
+        return written_rows
 
     def flush(self) -> None:
         """Flush any pending operations.
@@ -593,3 +709,40 @@ class DatabaseSink(BaseSink):
             self._table = None
             self._metadata = None
             self._table_replaced = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="database",
+                issue_code=None,
+                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write modes: insert, upsert, replace.",
+                composer_hints=(
+                    "write_mode: 'insert' (default, append-only), 'upsert' (requires unique key constraint), 'replace' (drops + recreates table at run start — destructive).",
+                    "url is sanitised and audit-recorded — never put credentials inline; use the secrets store.",
+                    "Schema fields map to column types: string→TEXT, int→Integer, float→Float, bool→Boolean. Other types need explicit type_coerce upstream.",
+                    "table-replace mode is irreversible mid-run. Confirm with the operator before declaring 'replace' on existing data.",
+                    "on_write_failure routes per-row constraint violations (UNIQUE / NOT NULL / CHECK / foreign-key) — the offending row is diverted and the rest of the batch commits. Batch-integrity failures (connection loss, lock timeout, bad SQL) are not row-attributable and crash the run.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        if "write_mode" in config_snapshot:
+            write_mode = config_snapshot["write_mode"]
+            if write_mode == "replace":
+                hints.append(
+                    "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
+                )
+            elif write_mode == "upsert":
+                hints.append(
+                    "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
+                )
+        return tuple(hints)

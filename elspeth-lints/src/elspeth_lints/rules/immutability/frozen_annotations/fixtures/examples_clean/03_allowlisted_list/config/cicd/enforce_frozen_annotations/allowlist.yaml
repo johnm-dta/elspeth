@@ -1,0 +1,5 @@
+allow_hits:
+  - key: "good.py:immutability.frozen_annotations:_module_:fp=good.py:Example:items"
+    owner: "@elspeth-maintainers"
+    reason: "Fixture example demonstrating an allowlisted mutable annotation."
+    safety: "fixture exemption"

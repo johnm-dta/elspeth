@@ -22,7 +22,7 @@ from elspeth.web.composer.service import ComposerAvailability, ComposerServiceIm
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 
 @dataclass
@@ -71,6 +71,15 @@ def _empty_state() -> CompositionState:
     )
 
 
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
+
+
 def _mock_catalog() -> MagicMock:
     catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
@@ -83,6 +92,7 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV source",
         json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
     )
     return catalog
 
@@ -95,6 +105,7 @@ def _make_settings(**overrides: Any) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
@@ -301,10 +312,8 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
 
     with (
         patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, side_effect=[tool_turn, final_turn]),
-        patch("elspeth.web.composer.service.execute_tool", return_value=tool_result),
-        patch.object(
-            service, "_cached_runtime_preflight", new_callable=AsyncMock, return_value=ValidationResult(is_valid=True, checks=[], errors=[])
-        ),
+        patch("elspeth.web.composer.tool_batch.execute_tool", return_value=tool_result),
+        patch.object(service, "_cached_runtime_preflight", new_callable=AsyncMock, return_value=_passing_preflight()),
     ):
         result = await service.compose("Set a name", [], state)
 
@@ -353,6 +362,28 @@ async def test_bad_request_records_redacted_llm_call_on_service_error() -> None:
     assert call.status is ComposerLLMCallStatus.BAD_REQUEST_ERROR
     assert call.error_class == "BadRequestError"
     assert call.error_message == "BadRequestError"
+
+
+@pytest.mark.asyncio
+async def test_unclassified_provider_exception_records_api_error_call() -> None:
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+
+    with (
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=ValueError("unexpected codec failure"),
+        ),
+        pytest.raises(ValueError, match="unexpected codec failure") as exc_info,
+    ):
+        await service.compose("Hello", [], _empty_state())
+
+    llm_calls = _captured_llm_calls(exc_info.value)
+    assert len(llm_calls) == 1
+    call = llm_calls[0]
+    assert call.status is ComposerLLMCallStatus.API_ERROR
+    assert call.error_class == "ValueError"
+    assert call.error_message == "ValueError"
 
 
 @pytest.mark.asyncio

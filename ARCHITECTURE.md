@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-05-11 (synchronized with RC-5.1 branch)
-**Framework Version:** 0.5.1 (RC-5.1)
+**Last Updated:** 2026-05-20 (synchronized with RC-5.2 documentation line)
+**Framework Version:** 0.5.2 (RC-5.2 release documentation; package metadata remains 0.5.1 in this checkout)
 **Status:** Pre-release
 
 ---
@@ -17,8 +17,8 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~121,400 Python lines across 359 files in `src/elspeth/` (RC-5 baseline; not refreshed for RC-5.1; frontend TSX/CSS counts not refreshed; see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`) |
-| **Test LOC** | ~274,900 Python lines (731 files, 2.6:1 ratio; RC-5 baseline) |
+| **Production LOC** | ~173,900 Python lines across 447 files in `src/elspeth/` (frontend TSX/CSS counts not included) |
+| **Test LOC** | ~448,300 Python lines across 1,095 files (2.6:1 ratio) |
 
 ---
 
@@ -165,7 +165,7 @@ C4Container
 | **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (21 tables) |
 | **Payload Store** | Filesystem | — | Content-addressable blob storage with retention |
 
-**Total Production LOC:** ~121,400 (359 Python files in `src/elspeth/`; frontend TSX/CSS not refreshed in this pass) | **Total Test LOC:** ~274,900 (731 files) | **Test Ratio:** 2.6:1
+**Total Production LOC:** ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included) | **Total Test LOC:** ~448,300 (1,095 Python files) | **Test Ratio:** 2.6:1
 
 ---
 
@@ -292,7 +292,7 @@ secret_resolutions (Key Vault usage)
 field_resolutions (header normalization)
 ```
 
-**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries (see CLAUDE.md).
+**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries.
 
 ### 3.3 Plugins Components
 
@@ -312,14 +312,14 @@ C4Component
         Component(hookspecs, "Hookspecs", "pluggy", "Hook specifications")
     }
 
-    Container_Boundary(sources, "Sources (4)") {
+    Container_Boundary(sources, "Sources (6 registered)") {
         Component(csv_source, "CSVSource", "Python", "Load from CSV")
         Component(json_source, "JSONSource", "Python", "Load from JSON/JSONL")
         Component(azure_blob_source, "AzureBlobSource", "Python", "Load from Azure Blob")
         Component(null_source, "NullSource", "Python", "Empty source for testing")
     }
 
-    Container_Boundary(transforms, "Transforms (13)") {
+    Container_Boundary(transforms, "Transforms (26 registered)") {
         Component(passthrough, "PassThrough", "Python", "Identity transform")
         Component(field_mapper, "FieldMapper", "Python", "Rename/select fields")
         Component(batch_stats, "BatchStats", "Python", "Aggregation statistics")
@@ -336,7 +336,7 @@ C4Component
         Component(llm_transform, "LLMTransform", "Python", "Unified LLM (azure/openrouter providers, single/multi-query)")
     }
 
-    Container_Boundary(sinks, "Sinks (4)") {
+    Container_Boundary(sinks, "Sinks (6 registered)") {
         Component(csv_sink, "CSVSink", "Python", "Write to CSV")
         Component(json_sink, "JSONSink", "Python", "Write to JSON/JSONL")
         Component(db_sink, "DatabaseSink", "Python", "Write to database")
@@ -377,13 +377,13 @@ C4Component
 | **Results** | Typed results (`TransformResult`, `SourceRow`) |
 | **PluginContext** | Runtime context passed to all plugin methods — phase-typed via `SourceContext`, `TransformContext`, `SinkContext`, `LifecycleContext` protocols (defined in `contracts/contexts.py`) |
 | **PluginManager** | pluggy-based discovery and registration |
-| **Sources** | 4 plugins (csv, json, azure_blob, null) |
-| **Transforms** | 11 plugins (field_mapper, passthrough, truncate, keyword_filter, batch_stats, batch_replicate, json_explode, web_scrape, content_safety, prompt_shield, LLM) |
+| **Sources** | 6 plugins (azure_blob, csv, dataverse, json, null, text) |
+| **Transforms** | 26 plugins (including LLM, RAG retrieval, web scrape, field/value/type transforms, and statistical batch transforms) |
 | **LLM Transforms** | Unified LLMTransform (azure/openrouter providers, single/multi-query strategies) |
-| **Sinks** | 4 plugins (csv, json, database, azure_blob) |
+| **Sinks** | 6 plugins (azure_blob, chroma_sink, csv, database, dataverse, json) |
 | **Clients** | 4 audited clients (HTTP, LLM, Replayer, Verifier) |
 
-**Total Plugin Ecosystem:** 29 plugins across the Source/Transform/Sink categories (6 sources + 17 transforms + 6 sinks, verified against the `discover_all_plugins()` registry; the per-category breakdown above is from an earlier RC and has drifted — see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`). Sub-package layout: `infrastructure/`, `sources/`, `transforms/`, `sinks/`.
+**Total Plugin Ecosystem:** 38 plugins across the Source/Transform/Sink categories (6 sources + 26 transforms + 6 sinks, verified against the `discover_all_plugins()` registry). The per-category table above is retained as a reader-friendly summary; refresh it from the registry before treating the exact counts as release evidence. Sub-package layout: `infrastructure/`, `sources/`, `transforms/`, `sinks/`.
 
 #### Plugin Context Protocols
 
@@ -898,6 +898,13 @@ ELSPETH uses ADRs to document significant architectural choices.
 | **ADR-015** | `creates_tokens` remains a permission flag | Path 1 chosen — `creates_tokens=True` means multi-row expansion permitted, not required | Dispatcher cannot distinguish "single-row is correct, expansion permitted" from "single-row is incorrect, expansion required" |
 | **ADR-016** | Source guaranteed fields contract | `SourceGuaranteedFieldsContract` on `boundary_check`; new `declared_guaranteed_fields` runtime attribute | Runs after token creation in `RowProcessor.process_row()`, never on `process_existing_row()` (resume must not re-cross source boundary) |
 | **ADR-017** | Sink required fields contract | Two-layer architecture: dispatcher-owned `SinkRequiredFieldsViolation` plus inline `SinkTransactionalInvariantError` backstop | The two signals must not be merged; runs before `_validate_sink_input()` and before sink I/O on both primary and failsink paths |
+| **ADR-018** | Producer-site outcome discrimination | Keep producer-site predicate roles distinct across contracts, web schemas, and frontend readers | Prevents terminal-outcome counters from conflating where a decision was made with what happened next |
+| **ADR-019** | Two-axis terminal model | Separate lifecycle/status from disposition/outcome and execution path | Makes terminal accounting explainable without overloading a single status enum |
+| **ADR-020** | Retire batch-LLM transforms | Remove legacy provider-specific batch LLM transforms in favor of unified `llm` strategies | Reduces duplicate contract surfaces and concentrates provider dispatch in one transform |
+| **ADR-021** | Sources and sinks uniformly boundary | Treat sources and sinks as architecture boundary components | Applies trust and contract enforcement consistently at ingress and egress |
+| **ADR-022** | Shareable reviews | Add signed share tokens and composer completion events | Freezes reviewable composition state with auditable completion gestures |
+| **ADR-023** | Custom Python CI analyzer | Maintain `elspeth-lints` for project-specific static invariants | Captures architecture and audit rules that general linters cannot express |
+| **ADR-024** | Delivery governance for single-maintainer mode | Govern release and CI/CD delivery for single-maintainer operation | Makes delivery controls explicit where team-size assumptions do not apply |
 
 ### Implicit Architectural Decisions
 
@@ -916,7 +923,8 @@ ELSPETH uses ADRs to document significant architectural choices.
 
 ## Quality Assessment
 
-Based on automated analysis (2026-03-26) and ongoing CI enforcement.
+Based on automated analysis, live registry checks, source-count refreshes, and
+ongoing CI enforcement.
 
 ### Design Characteristics
 
@@ -925,7 +933,7 @@ Based on automated analysis (2026-03-26) and ongoing CI enforcement.
 | **Maintainability** | Clean module boundaries, consistent patterns across subsystems |
 | **Testability** | 2.6:1 test-to-production LOC ratio, mutation testing, property tests |
 | **Type Safety** | mypy strict mode, runtime-checkable protocols, NewType aliases |
-| **Documentation** | CLAUDE.md (10K+ words), 6 ADRs, runbooks, architecture docs |
+| **Documentation** | ADRs, runbooks, architecture docs, and trust-boundary guides |
 | **Error Handling** | Three-tier trust model with distinct rules per boundary |
 | **Security** | HMAC fingerprinting, AST-based expression parsing (no eval), SQLCipher support |
 | **Performance** | Batch operations, connection pooling, rate limiting |
@@ -989,12 +997,12 @@ Based on automated analysis (2026-03-26) and ongoing CI enforcement.
 
 **Key Metrics:**
 
-- Production LOC: ~121,400 (359 Python files in `src/elspeth/`; frontend TSX/CSS not refreshed in this pass)
-- Test LOC: ~274,900 (731 Python files, 2.6:1 ratio)
+- Production LOC: ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included)
+- Test LOC: ~448,300 (1,095 Python files, 2.6:1 ratio)
 - Subsystems: 11 major (20+ including sub-components)
-- Plugins: 29 (6 sources + 17 transforms + 6 sinks; verified via the registry's `discover_all_plugins()` — same code path as `elspeth plugins list`)
-- ADRs: 17 (001–017)
-- Status: Pre-release (RC-5.1)
+- Plugins: 38 (6 sources + 26 transforms + 6 sinks; verified via the registry's `discover_all_plugins()` — same code path as `elspeth plugins list`)
+- ADRs: 24 accepted records (001–024, excluding the 000 template)
+- Status: Pre-release (RC-5.2 documentation line)
 
 All diagrams use Mermaid syntax for version control compatibility.
 
@@ -1004,5 +1012,4 @@ All diagrams use Mermaid syntax for version control compatibility.
 
 - [README.md](README.md) - Project overview and quick start
 - [PLUGIN.md](PLUGIN.md) - Plugin development guide
-- [CLAUDE.md](CLAUDE.md) - Complete project context and patterns
 - [docs/reference/](docs/reference/) - Configuration reference

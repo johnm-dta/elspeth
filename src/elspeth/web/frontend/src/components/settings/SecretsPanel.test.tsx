@@ -18,8 +18,20 @@ describe("SecretsPanel", () => {
     vi.clearAllMocks();
     useSecretsStore.setState({
       secrets: [
-        { name: "OPENAI_API_KEY", scope: "user" as const, available: true, source_kind: "user" },
-        { name: "SERVER_KEY", scope: "server" as const, available: true, source_kind: "env" },
+        {
+          name: "OPENAI_API_KEY",
+          scope: "user" as const,
+          available: true,
+          source_kind: "user",
+          reason: null,
+        },
+        {
+          name: "SERVER_KEY",
+          scope: "server" as const,
+          available: true,
+          source_kind: "env",
+          reason: null,
+        },
       ],
       isLoading: false,
       error: null,
@@ -38,6 +50,44 @@ describe("SecretsPanel", () => {
     render(<SecretsPanel onClose={onClose} />);
     expect(screen.getByText("OPENAI_API_KEY")).toBeInTheDocument();
     expect(screen.getByText("SERVER_KEY")).toBeInTheDocument();
+  });
+
+  it("surfaces human-readable reasons for unavailable secrets", () => {
+    useSecretsStore.setState({
+      secrets: [
+        {
+          name: "OPENROUTER_API_KEY",
+          scope: "server" as const,
+          available: false,
+          source_kind: "env",
+          reason: "fingerprint_resolver_not_configured",
+        },
+        {
+          name: "ANTHROPIC_API_KEY",
+          scope: "server" as const,
+          available: false,
+          source_kind: "env",
+          reason: "env_var_not_set",
+        },
+        {
+          name: "BROKEN_USER_KEY",
+          scope: "user" as const,
+          available: false,
+          source_kind: "user",
+          reason: "value_decryption_failed",
+        },
+      ],
+    });
+
+    render(<SecretsPanel onClose={onClose} />);
+
+    expect(
+      screen.getByText("Fingerprint resolver is not configured"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Environment variable is not set")).toBeInTheDocument();
+    expect(
+      screen.getByText("Stored value could not be decrypted"),
+    ).toBeInTheDocument();
   });
 
   it("closes on Escape key", async () => {

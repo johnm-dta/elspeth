@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import Determinism, RunStatus
 from elspeth.core.config import GateSettings
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.testing import make_pipeline_row
@@ -134,6 +134,7 @@ class TestGateToGateWithDownstreamTransform:
             """Adds a 'tagged' field to prove the transform ran."""
 
             name = "tag_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 

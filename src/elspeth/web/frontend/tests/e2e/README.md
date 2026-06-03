@@ -38,7 +38,6 @@ tests/e2e/
 │   └── api.ts                   typed REST helpers (no UI driving)
 ├── page-objects/
 │   ├── composer-page.ts         left/main panel (chat + empty state)
-│   ├── inspector-page.ts        right panel (spec/graph/yaml/runs tabs)
 │   └── catalog-page.ts          plugin catalog drawer
 └── *.spec.ts                    one file per logical scenario
 ```

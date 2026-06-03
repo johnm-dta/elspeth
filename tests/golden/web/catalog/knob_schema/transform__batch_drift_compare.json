@@ -1,0 +1,64 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Field that partitions rows into baseline/current cohorts",
+        "kind": "text",
+        "label": "Cohort Field",
+        "name": "cohort_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Field whose distribution should be compared",
+        "kind": "text",
+        "label": "Value Field",
+        "name": "value_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "numeric",
+        "description": "Distribution type to compare: numeric uses empirical CDF distance; categorical uses total variation.",
+        "enum": [
+          "numeric",
+          "categorical"
+        ],
+        "kind": "enum",
+        "label": "Value Type",
+        "name": "value_type",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional baseline cohort. When omitted, the first-seen cohort is the baseline.",
+        "kind": "json-value",
+        "label": "Baseline Cohort",
+        "name": "baseline_cohort",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_drift_compare"
+}

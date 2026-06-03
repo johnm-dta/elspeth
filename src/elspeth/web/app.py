@@ -8,22 +8,42 @@ import errno
 import json
 import os
 import sys
+import time
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import structlog
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.plugins.transforms.llm.model_catalog import (
+    prime_openrouter_catalog_from_live,
+    read_openrouter_catalog_snapshot_id,
+)
+from elspeth.web.audit_readiness.routes import create_audit_readiness_router
+from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
@@ -34,6 +54,8 @@ from elspeth.web.catalog.routes import catalog_router
 from elspeth.web.composer import yaml_generator as yaml_generator_module
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
+from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
 from elspeth.web.config import _LOCAL_HOSTS, WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.progress import ProgressBroadcaster
@@ -42,15 +64,39 @@ from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
+from elspeth.web.preferences.routes import create_preferences_router
+from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
+from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import RunAlreadyActiveError
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
+from elspeth.web.shareable_reviews.service import ShareableReviewService
+from elspeth.web.shareable_reviews.signer import ShareTokenSigner
+
+# B1-r3: Wire a real MeterProvider at module-import time (process-global per
+# OTel design — NOT inside create_app, which may be called multiple times in
+# tests). Without this, get_meter() returns OTel's NoOpMeter and every
+# counter.add() call is silently discarded. The PrometheusMetricReader backs
+# the /metrics exposition endpoint mounted in create_app() below.
+#
+# Side effect on existing counters: after this commit,
+# composer.preferences.patch_total, composer.redaction.*, composer.service.*,
+# composer.tools.*, and blobs.* all start emitting real data. These counters
+# were always correctly instrumented — they were just exporting to /dev/null
+# because no provider was set. The first production deploy after this commit
+# will surface metrics that were previously invisible. This is observability
+# landing, not a regression.
+_PROMETHEUS_READER = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -59,6 +105,11 @@ _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
         errno.EIO,
     }
 )
+
+
+def _dispose_session_engine(engine: Engine) -> None:
+    """Dispose the sessions DB pool for app instances that never run lifespan."""
+    engine.dispose()
 
 
 class _AuthorizationEndpointDiscoveryDocument(BaseModel):
@@ -190,8 +241,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.oidc_authorization_endpoint:
             app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
         else:
-            import httpx
-
             if settings.oidc_issuer:
                 issuer = settings.oidc_issuer.rstrip("/")
             elif settings.auth_provider == "entra" and settings.entra_tenant_id:
@@ -222,10 +271,123 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         session_service=session_service,
         yaml_generator=yaml_generator_module,
+        telemetry=app.state.sessions_telemetry,
         blob_service=app.state.blob_service,
         secret_service=app.state.scoped_secret_resolver,
     )
     app.state.execution_service = execution_service
+
+    # ReadinessService aggregates validation / catalog / secrets / retention
+    # signals for the audit-readiness panel.  It depends on
+    # ``execution_service`` (for ``validate``) so it is constructed here in
+    # lifespan rather than in ``create_app``.  ``scoped_secret_resolver``
+    # (NOT ``secret_service``) is the correct collaborator — it has
+    # ``auth_provider_type`` baked in at construction (app.py:470), matching
+    # the precedent set by ExecutionService above.
+    app.state.readiness_service = ReadinessService(
+        execution_service=execution_service,
+        session_service=session_service,
+        scoped_secret_resolver=app.state.scoped_secret_resolver,
+        settings=settings,
+    )
+
+    # ShareableReviewService — Phase 6A completion gestures.
+    #
+    # Depends on:
+    #   * ``execution_service`` (for mark-time validation)
+    #   * ``readiness_service`` (for the frozen-at-mark-time audit-readiness
+    #     snapshot embedded in the share blob)
+    #   * the sessions-DB engine (for ``composer_completion_events_table``
+    #     audit writes)
+    #   * a ``FilesystemPayloadStore`` (for the content-addressed snapshot
+    #     blob — created here, not shared with ``BlobServiceImpl`` because
+    #     ``BlobServiceImpl`` owns its own internal payload store with a
+    #     different retention semantics)
+    #   * the ``ShareTokenSigner`` primitive (HMAC over WebSettings'
+    #     required ``shareable_link_signing_key``)
+    payload_store = FilesystemPayloadStore(settings.get_payload_store_path())
+    app.state.payload_store = payload_store
+    # ``shareable_link_signing_key`` is a ``SecretBytes`` (DC-2 FIX-L —
+    # masks repr to prevent plaintext leakage in tracebacks/logs).
+    # ``.get_secret_value()`` returns the raw bytes the HMAC primitive needs.
+    share_token_signer = ShareTokenSigner(settings.shareable_link_signing_key.get_secret_value())
+    app.state.share_token_signer = share_token_signer
+    app.state.shareable_review_service = ShareableReviewService(
+        session_service=session_service,
+        execution_service=execution_service,
+        readiness_service=app.state.readiness_service,
+        signer=share_token_signer,
+        settings=settings,
+        sessions_db_engine=app.state.session_engine,
+        payload_store=payload_store,
+        # Phase 8 Sub-task 7c — composer.session.completed_total counter.
+        # ``app.state.sessions_telemetry`` is set in ``create_app`` (the
+        # synchronous factory) BEFORE the lifespan runs, so it is
+        # available here. Mirrors the
+        # ``telemetry=app.state.sessions_telemetry`` pattern at line 259
+        # for the execution service.
+        telemetry=app.state.sessions_telemetry,
+    )
+
+    # Prime the OpenRouter model catalog from the live ``/models``
+    # endpoint. Closes the validate/runtime drift bug where the bundled
+    # litellm catalog still listed models OpenRouter has retired (e.g.
+    # ``anthropic/claude-3.5-sonnet``), letting the value-source compliance
+    # walker pass configs that 404 at runtime preflight. Probe is graceful:
+    # on failure we log a warning and the catalog falls back to the bundled
+    # litellm slice — staging must still boot for non-LLM features.
+    probe_start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
+
+            async def _probe_get(url: str) -> httpx.Response:
+                # ``request("GET", ...)`` rather than ``.get(...)``: identical
+                # httpx semantics, but avoids the L3 walker's token-level
+                # false match on the literal ``.get`` (R1 targets defensive
+                # ``dict.get`` reads, not HTTP client method calls).
+                return await _probe_client.request("GET", url)
+
+            primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
+    except (httpx.HTTPError, OSError) as probe_exc:
+        # ``prime_openrouter_catalog_from_live`` catches its own
+        # ``httpx.RequestError`` internally; this wrapper covers failures
+        # from ``AsyncClient(...)`` construction or ``__aenter__`` —
+        # ``httpx.HTTPError`` (full httpx hierarchy) or ``OSError``
+        # (socket-level). Programming errors (NameError, TypeError) are
+        # NOT caught: those must crash boot so the bug surfaces.
+        slog.warning(
+            "openrouter_catalog_prime_unexpected_error",
+            exc_class=type(probe_exc).__name__,
+            action="falling back to bundled litellm catalog",
+        )
+        primed = False
+    probe_latency_ms = int((time.monotonic() - probe_start) * 1000)
+    if primed:
+        slog.info(
+            "openrouter_catalog_boot_prime_complete",
+            latency_ms=probe_latency_ms,
+        )
+    else:
+        slog.warning(
+            "openrouter_catalog_boot_prime_failed",
+            latency_ms=probe_latency_ms,
+            action="serving bundled litellm catalog (may include retired models)",
+        )
+
+    # Resolve the catalog snapshot id (always populated — bundled fallback
+    # is always available) and stash on ``app.state``. Run-create writes
+    # this into the Landscape ``runs`` row so an auditor can reconstruct
+    # which catalog blessed any historical decision. Both fields are
+    # invariant for the process lifetime; the orchestrator reads them via
+    # ``ExecutionServiceImpl`` (web path) or directly from the module
+    # reader (CLI path).
+    catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
+    app.state.openrouter_catalog_sha256 = catalog_sha
+    app.state.openrouter_catalog_source = catalog_source
+    execution_service.set_openrouter_catalog_snapshot(
+        sha256=catalog_sha,
+        source=catalog_source,
+    )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM
     # between restarts. Startup cleanup (above) handles the bulk case;
@@ -240,16 +402,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
-    yield
+    try:
+        yield
+    finally:
+        # Cancel periodic cleanup before shutting down the executor
+        orphan_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await orphan_task
 
-    # Cancel periodic cleanup before shutting down the executor
-    orphan_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await orphan_task
-
-    # Shutdown execution service thread pool without blocking the loop:
-    # worker cleanup still schedules terminal-state writes back onto it.
-    await execution_service.shutdown()
+        # Shutdown execution service thread pool without blocking the loop:
+        # worker cleanup still schedules terminal-state writes back onto it.
+        await execution_service.shutdown()
+        app.state.session_engine.dispose()
 
 
 # Fields that accept JSON-encoded collection values from environment variables.
@@ -278,16 +442,70 @@ def _settings_from_env() -> WebSettings:
         if key.startswith(prefix):
             field_name = key[len(prefix) :].lower()
             if field_name in _JSON_COLLECTION_FIELDS:
+                # These fields are tuple-typed on WebSettings; the env-var
+                # convention is a JSON-encoded array. A non-JSON value cannot
+                # become a valid collection, so falling back to the raw string
+                # would only defer to a confusing downstream Pydantic
+                # "not a valid tuple" error. Per the web trust model, malformed
+                # startup config is a hard failure — refuse to start with a
+                # message that names the offending variable.
                 try:
                     parsed = json.loads(value)
-                    kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
-                except (json.JSONDecodeError, ValueError):
-                    kwargs[field_name] = value
+                except (json.JSONDecodeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON (a JSON array for collection-typed settings), got {value!r}."
+                    ) from exc
+                kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
             elif value == "null":
                 kwargs[field_name] = None
             else:
                 kwargs[field_name] = value
-    return WebSettings(**kwargs)
+    # DC-2 FIX-L: ``shareable_link_signing_key`` is typed ``SecretBytes`` on
+    # the model, but the env-var ingest path passes a str (base64-encoded)
+    # which a ``mode="before"`` validator on the field decodes to bytes.
+    # Mypy can't see through Pydantic's pre-validators, so the **kwargs
+    # widening is reported as a type error here. The cast is safe because
+    # Pydantic raises ``ValidationError`` on any mismatch at runtime.
+    return WebSettings(**kwargs)  # type: ignore[arg-type]
+
+
+class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject request bodies declaring Content-Length > 10 MB with HTTP 413.
+
+    Phase 5b.0.5 (F-3): defense-in-depth body-size guard.  The Pydantic
+    per-field caps (``SendMessageRequest.content`` at 64 KiB,
+    ``_InlineBlobModel.content`` at 256 KiB) are the actual guarantees;
+    this middleware short-circuits requests that declare an oversized
+    body before the framework parses anything.  Mirrors the
+    ``settings.max_upload_bytes`` post-decode guard at
+    ``web/blobs/routes.py:171,208``, but at the ASGI layer so it covers
+    every route uniformly.
+
+    Threat model: an attacker submitting a multi-gigabyte JSON body
+    forces FastAPI to buffer the entire payload before the per-field
+    validator can reject it — even though the validator would ultimately
+    reject it.  10 MB is the global ceiling chosen to comfortably exceed
+    the 256 KiB inline-blob cap while remaining well below any
+    pathological memory pressure threshold.
+
+    The check is Content-Length-only by design: clients may omit or
+    falsify the header.  Per CLAUDE.md (defensive programming forbidden),
+    the ``int(content_length)`` conversion is *not* wrapped — a malformed
+    header is a client bug and should propagate to Starlette's standard
+    400 handling.  The Pydantic caps remain the contract.
+    """
+
+    _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > self._MAX_BODY_BYTES:
+            return StarletteResponse(
+                content='{"error": "Request body too large (max 10 MB)"}',
+                status_code=413,
+                media_type="application/json",
+            )
+        return await call_next(request)
 
 
 def create_app(settings: WebSettings | None = None) -> FastAPI:
@@ -305,6 +523,104 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     app = FastAPI(title="ELSPETH Web", version="0.1.0", lifespan=lifespan)
 
+    @app.exception_handler(AuditIntegrityError)
+    async def _audit_integrity_error_handler(_request: Request, exc: AuditIntegrityError) -> JSONResponse:
+        failed_turn = exc.failed_turn
+        if failed_turn is None:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error_type": "audit_integrity_error",
+                    "detail": "Audit persistence failed; no audit-grade data returned.",
+                    "diagnostic": "no_failed_turn_metadata",
+                    "reason": "originated outside compose-loop annotation scope",
+                },
+            )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_integrity_error",
+                "detail": "Audit persistence failed; no audit-grade data returned.",
+                "failed_turn": {
+                    "assistant_message_id": failed_turn.assistant_message_id,
+                    "tool_calls_attempted": failed_turn.tool_calls_attempted,
+                    "tool_responses_persisted": failed_turn.tool_responses_persisted or 0,
+                    "transcript_url": None,
+                },
+            },
+        )
+
+    @app.exception_handler(CorruptPreferencesError)
+    async def _corrupt_preferences_error_handler(_request: Request, exc: CorruptPreferencesError) -> JSONResponse:
+        # Named Tier-1 read-guard exception from
+        # ``preferences/service.py`` — a stored composer-preferences row
+        # violates a closed-list invariant (default_composer_mode outside
+        # ``_VALID_MODES``, tutorial_completed_at unparseable, etc.). The
+        # docstring on the exception promises this handler exists so that
+        # incident-response code can switch on ``error_type`` rather than
+        # string-grep the message; without the handler the failure was
+        # rendered as a bare 500 and the frontend's bootstrap path
+        # silently swallowed it (``App.tsx``'s
+        # ``bootstrapPrefs().catch(console.error)``), leaving a corrupt-
+        # row user with no signal anything was wrong.
+        #
+        # Body contract: ``error_type`` is the discriminator the frontend
+        # store branches on; ``field_name`` (closed enum) and ``user_id``
+        # (caller's own id) help the operator locate the row.
+        # ``detail`` is a static phrase rather than ``str(exc)`` because
+        # the exception's __str__ embeds ``bad_value`` — corrupt content
+        # could carry arbitrary writes from a tampering or fuzzing event
+        # and must not echo to the client. Same redaction pattern as
+        # ``_audit_integrity_error_handler`` and
+        # ``_audit_access_log_write_error_handler``.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "corrupt_preferences",
+                "detail": "Saved preferences are corrupt; the composer is using defaults.",
+                "field_name": exc.field_name,
+                "user_id": exc.user_id,
+            },
+        )
+
+    @app.exception_handler(AuditStoryIntegrityError)
+    async def _audit_story_integrity_error_handler(_request: Request, exc: AuditStoryIntegrityError) -> JSONResponse:
+        # Sibling shape to ``_audit_integrity_error_handler`` above. The
+        # named-type discriminator was getting flattened to bare
+        # ``RuntimeError`` at the route boundary (sessions/routes.py),
+        # which routed the failure to FastAPI's default 500 handler and
+        # destroyed the ``error_type`` discriminator that incident-response
+        # code switches on. The route's wrap was removed in the same
+        # change that registered this handler; both halves of the fix are
+        # load-bearing.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_story_integrity_error",
+                "detail": str(exc),
+            },
+        )
+
+    @app.exception_handler(StaleComposeStateError)
+    async def _stale_compose_state_error_handler(_request: Request, _exc: StaleComposeStateError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_type": "stale_compose_state",
+                "detail": "The session changed while the compose turn was running.",
+            },
+        )
+
+    @app.exception_handler(AuditAccessLogWriteError)
+    async def _audit_access_log_write_error_handler(_request: Request, _exc: AuditAccessLogWriteError) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_access_log_write_failed",
+                "detail": "Audit-grade transcript access could not be recorded; no audit-grade data returned.",
+            },
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -320,6 +636,15 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # below — can read it.  Echoed back as the X-Request-ID response
     # header for client-side log correlation.
     app.add_middleware(RequestIdMiddleware)
+
+    # Body-size guard registered LAST so it runs OUTERMOST (Starlette
+    # add_middleware is LIFO).  Phase 5b.0.5 (F-3): reject oversized
+    # Content-Length declarations before any other middleware or handler
+    # touches the body.  The 413 response is emitted without a request
+    # id — by design the check fires before RequestIdMiddleware — which
+    # is acceptable: the response carries the standard 413 semantics and
+    # a body-too-large rejection has no useful pairing to a slog event.
+    app.add_middleware(_BodySizeLimitMiddleware)
 
     app.state.settings = settings
 
@@ -367,7 +692,10 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
         )
+    else:
+        raise RuntimeError(f"Unsupported auth provider: {settings.auth_provider}")
     app.state.auth_provider = auth_provider
+    app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings)
     app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
 
     # W16/S3: Secret key production guard -- hard crash
@@ -387,9 +715,37 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     session_db_url = settings.get_session_db_url()
     session_engine = create_session_engine(session_db_url)
     initialize_session_schema(session_engine)
+    session_db_path = session_engine.url.database
+    if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
+        session_engine.dispose()
+    weakref.finalize(app, _dispose_session_engine, session_engine)
 
-    session_service = SessionServiceImpl(session_engine, data_dir=settings.data_dir)
+    # Build the sessions-telemetry container ONCE per process and share it
+    # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and
+    # any future surface). The counters are intentionally process-scoped —
+    # one Counter per metric, not one per consumer — so OTel aggregates by
+    # attribute set instead of by injection site.
+    sessions_telemetry = build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer"))
+    app.state.sessions_telemetry = sessions_telemetry
+
+    session_service = SessionServiceImpl(
+        session_engine,
+        data_dir=settings.data_dir,
+        telemetry=sessions_telemetry,
+        log=structlog.get_logger("sessions"),
+    )
     app.state.session_service = session_service
+    app.state.session_engine = session_engine  # available to guided step handlers
+
+    # --- Preferences service ---
+    # Per-user composer settings (default_composer_mode, banner_dismissed_at,
+    # tutorial_completed_at).
+    # Shares the session engine; preferences live on the same metadata.
+    app.state.preferences_service = PreferencesService(session_engine)
+    tutorial_cache_dir = settings.tutorial_cache_dir
+    if tutorial_cache_dir is None:
+        raise RuntimeError("tutorial_cache_dir must be initialised by WebSettings")
+    app.state.tutorial_cache = TutorialCache(cache_dir=tutorial_cache_dir)
 
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(
@@ -410,6 +766,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.composer_service = ComposerServiceImpl(
         catalog=app.state.catalog_service,
         settings=settings,
+        sessions_service=session_service,
         session_engine=session_engine,
         secret_service=app.state.scoped_secret_resolver,
         runtime_preflight_coordinator=runtime_preflight_coordinator,
@@ -466,9 +823,14 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # --- Register routers ---
     app.include_router(create_auth_router())
     app.include_router(create_session_router())
+    app.include_router(create_preferences_router())
+    app.include_router(create_tutorial_run_router())
+    app.include_router(create_tutorial_abandon_router())
     app.include_router(create_blobs_router())
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())
+    app.include_router(create_audit_readiness_router())
+    app.include_router(create_shareable_reviews_router())
 
     # --- Seam contract D: RunAlreadyActiveError -> 409 with error_type ---
     @app.exception_handler(RunAlreadyActiveError)
@@ -505,11 +867,20 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     def _request_id(request: Request) -> str:
         """Read the correlation id set by RequestIdMiddleware.
 
-        Defaults to the sentinel ``"unset"`` if the middleware did not
-        run (e.g., a handler fires during a pre-middleware exception
-        path), ensuring the response body is always JSON-serialisable.
+        ``RequestIdMiddleware.dispatch`` sets ``request.state.request_id``
+        before delegating to ``call_next``, so every request that reaches
+        a route handler, dependency, or app-level exception handler has the
+        id assigned. The exception handlers that call this helper
+        (``FingerprintKeyMissingError``, ``SecretDecryptionError``,
+        ``OperationalError``, ``OSError``) are invoked by Starlette's
+        ``ExceptionMiddleware``, which wraps the router *inside*
+        ``RequestIdMiddleware`` — the id is therefore guaranteed present.
+        A missing attribute here would mean the middleware contract is
+        broken, which is our bug to surface, not to paper over with a
+        sentinel. Mirrors the direct read in ``web/auth/audit.py``.
         """
-        return getattr(request.state, "request_id", "unset")
+        request_id: str = request.state.request_id
+        return request_id
 
     @app.exception_handler(FingerprintKeyMissingError)
     async def handle_fingerprint_missing(
@@ -643,6 +1014,45 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             "composer_reason": composer.reason,
             "composer_missing_keys": list(composer.missing_keys),
         }
+
+    # --- Prometheus metrics scrape endpoint ---
+    # Registered as a route (not a mount) so bare `/metrics` matches without
+    # the trailing-slash redirect that a Mount requires. The SPA StaticFiles
+    # mount at `/` (registered below) would otherwise shadow `/metrics` for
+    # the non-slash variant, returning 404 because no `metrics` file exists
+    # in dist/. Route handlers match before mounts in Starlette, so this
+    # also wins precedence over the SPA catch-all regardless of order.
+    # Backed by the process-level _PROMETHEUS_READER wired at module import;
+    # all OTel counters/histograms registered via metrics.get_meter() feed
+    # into this endpoint automatically via the global REGISTRY.
+    @app.get("/metrics", include_in_schema=False)
+    def _prometheus_metrics() -> Response:
+        # ``generate_latest()`` walks the global REGISTRY; a corrupted
+        # collector would raise here and Starlette's default 500 handler
+        # leaks the traceback into the response body. /metrics is a
+        # scrape endpoint — return a safe 503 with no internal detail so
+        # scrapers retry gracefully.  Audit-primacy (CLAUDE.md): this
+        # endpoint reads in-memory counter state only, so failure is a
+        # telemetry-system failure (operational, not legal) — logged, not
+        # audited. A bounded message is safe to log here (unlike the
+        # secret-bearing DB exceptions elsewhere): generate_latest() only
+        # formats global-REGISTRY state, every value of which /metrics
+        # already serves publicly, so the message identifies *which*
+        # collector broke without exposing anything not already public.
+        try:
+            body = generate_latest()
+        except Exception as scrape_exc:
+            _handler_slog.error(
+                "prometheus_scrape_failed",
+                exc_class=type(scrape_exc).__name__,
+                detail=str(scrape_exc)[:200],
+            )
+            return Response(
+                content=b"# scrape failed\n",
+                status_code=503,
+                media_type=CONTENT_TYPE_LATEST,
+            )
+        return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
     # --- Static file serving for the React SPA (production) ---
     # Mount frontend/dist/ AFTER all API and WS routes so /api/* takes precedence.

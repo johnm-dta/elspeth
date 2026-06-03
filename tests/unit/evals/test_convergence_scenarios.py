@@ -22,6 +22,7 @@ from evals.lib.composer_rgr_score import score
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
+_GOV_PAGES_RATE_COOL = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "gov-pages-rate-cool" / "scenario.json"
 
 _KNOWN_RED_KEYS = {
     "passivity_phrases",
@@ -55,6 +56,39 @@ def _scenario_paths() -> list[Path]:
 
 def _load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
+
+
+def _gov_pages_messages_with_tool_calls(count: int) -> list[dict[str, Any]]:
+    """Build a successful tool trajectory with an exact persisted-call count."""
+    if count < 2:
+        raise ValueError("gov-pages boundary fixtures need discovery plus mutation")
+    tool_calls: list[dict[str, Any]] = [
+        {"id": "call_schema", "type": "function", "function": {"name": "get_plugin_schema", "arguments": "{}"}},
+        {"id": "call_set_pipeline", "type": "function", "function": {"name": "set_pipeline", "arguments": "{}"}},
+    ]
+    tool_calls.extend(
+        {
+            "id": f"call_state_{index}",
+            "type": "function",
+            "function": {"name": "get_pipeline_state", "arguments": "{}"},
+        }
+        for index in range(count - 2)
+    )
+    return [
+        {"role": "assistant", "content": "", "tool_calls": tool_calls},
+        {"role": "tool", "tool_call_id": "call_set_pipeline", "content": json.dumps({"success": True})},
+        {"role": "assistant", "content": "Pipeline ready."},
+    ]
+
+
+def _gov_pages_valid_state() -> dict[str, Any]:
+    """Small state satisfying the gov-pages structural green criteria."""
+    return {
+        "is_valid": True,
+        "source": {"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+        "nodes": [{"id": "rate_coolness", "node_type": "transform", "plugin": "llm"}],
+        "outputs": [{"name": "rated_pages", "plugin": "json"}],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -184,6 +218,37 @@ def test_passivity_phrase_scores_red(scenario_path: Path) -> None:
     )
     assert result["verdict"] == "RED"
     assert any("passivity" in r for r in result["red_reasons"])
+
+
+@pytest.mark.parametrize(
+    ("persisted_tool_calls", "expected_verdict"),
+    [
+        (8, "GREEN"),
+        (9, "AMBER"),
+        (12, "AMBER"),
+        (13, "RED"),
+    ],
+)
+def test_gov_pages_rate_cool_tool_call_efficiency_boundaries(
+    persisted_tool_calls: int,
+    expected_verdict: str,
+) -> None:
+    """The gov-pages rate-cool 9-12 call window is intentionally AMBER.
+
+    The scenario prose distinguishes the green target (8 or fewer tool
+    calls), amber inefficiency (9-12), and red catastrophic thrash (>12).
+    This test loads the real scenario so the executable criteria cannot
+    drift from that prose.
+    """
+    scenario = _load(_GOV_PAGES_RATE_COOL)
+    result = score(
+        scenario,
+        _gov_pages_messages_with_tool_calls(persisted_tool_calls),
+        _gov_pages_valid_state(),
+    )
+    assert result["verdict"] == expected_verdict, (
+        f"{persisted_tool_calls} calls scored {result['verdict']}; red={result['red_reasons']} amber={result['amber_reasons']}"
+    )
 
 
 @pytest.mark.parametrize("scenario_path", _scenario_paths(), ids=lambda p: p.parent.name)

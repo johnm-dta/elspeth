@@ -53,7 +53,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
-from tests.unit.web.composer.test_service import (
+from tests.unit.web.composer._helpers import (
     FakeChoice,
     _empty_state,
     _make_llm_response,
@@ -101,18 +101,25 @@ ENVELOPE_MAX_PROMPT_TOKENS_TRIVIAL_PROMPT = 50_000
 # ``_get_litellm_tools`` actually serialize and what would land on the
 # provider wire.
 #
-# Measured baseline (2026-05-06, 1-turn happy script): ~100 KB
-# (76 KB skill prompt + 20 KB tools spec for 34 tools + small overhead).
-# A 200 KB envelope gives 2x headroom on the trivial happy path and bites
-# loudly when a regression either (a) doubles the per-turn payload (e.g.,
-# the system prompt grows uncontrolled), or (b) adds an unexpected
-# additional full-payload turn for a trivial prompt.
+# Recalibrated baseline (2026-05-18, 1-turn happy script): ~210 KB
+# (~177 KB skill prompt + ~31 KB tools spec for 39 tools + small overhead).
+# The original baseline (2026-05-06: ~100 KB / 200 KB envelope) was overtaken
+# by ~20 incremental skill-prompt commits — recipe-first fork-coalesce
+# guidance, mandatory advisor escalation for Recipe #10, fabrication and
+# silent-downgrade loophole closures, abuse_contact/scraping_reason
+# requirements, audit-backend skill+tool additions — and by five new tool
+# definitions added to the LLM-visible toolset. Each commit was a deliberate
+# bug-fix; the growth is structural, not regressional. Setting the envelope
+# at 300 KB gives ~45 % headroom over the recalibrated baseline so a
+# subsequent uncontrolled doubling still bites loudly, without rejecting
+# the committed prompt improvements that landed since the original gate
+# was set.
 #
 # Note: Phase 3 (provider prompt caching) will NOT change this number —
 # caching reduces the provider's billable token accounting, not the bytes
 # we send. This envelope is a pure regression gate, independent of
 # whether prompt caching is wired.
-ENVELOPE_MAX_PRODUCTION_BYTES_TRIVIAL_PROMPT = 200_000
+ENVELOPE_MAX_PRODUCTION_BYTES_TRIVIAL_PROMPT = 300_000
 
 
 def _serialize_call(messages: Any, tools: Any) -> int:

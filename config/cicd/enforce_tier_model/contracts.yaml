@@ -2,50 +2,52 @@ per_file_rules:
 - pattern: contracts/schema.py
   rules:
   - R1
-  reason: SchemaConfig.from_dict() parses user YAML config (Tier 3) - defensive access for optional fields
+  reason: SchemaConfig.from_dict() parses user YAML config (Tier 3) - defensive access
+    for optional fields
   expires: null
 - pattern: contracts/schema.py
   rules:
   - R5
   reason: Type discrimination for schema field parsing and union detection
   expires: null
-  max_hits: 17
+  max_hits: 19
 - pattern: contracts/contract_records.py
   rules:
   - R5
-  reason: Violation type dispatch requires isinstance() for polymorphic serialization of ContractViolation subclasses, plus Tier 1 structural validation of JSON shape and boolean fields in from_json() and to_schema_contract()
+  reason: Violation type dispatch requires isinstance() for polymorphic serialization
+    of ContractViolation subclasses, plus Tier 1 structural validation of JSON shape
+    and boolean fields in from_json() and to_schema_contract()
   expires: null
   max_hits: 12
 - pattern: contracts/type_normalization.py
   rules:
   - R5
-  reason: Type normalization requires isinstance() for polymorphic serialization of numeric types — includes both strict (normalize_type_for_contract) and non-throwing (classify_runtime_type) variants
+  reason: Type normalization requires isinstance() for polymorphic serialization of
+    numeric types — includes both strict (normalize_type_for_contract) and non-throwing
+    (classify_runtime_type) variants
   expires: null
   max_hits: 14
 - pattern: contracts/identity.py
   rules:
   - R5
-  reason: Tier 1 __post_init__ type guards — validates row_id, token_id, and optional lineage fields are str
+  reason: Tier 1 __post_init__ type guards — validates row_id, token_id, and optional
+    lineage fields are str
   expires: null
   max_hits: 3
 - pattern: contracts/aggregation_checkpoint.py
   rules:
   - R5
-  reason: Deep-freeze guards, from_dict validation, and Tier 1 __post_init__ type guards
+  reason: Deep-freeze guards, from_dict validation, and Tier 1 __post_init__ type
+    guards (extended for accepted_count_total / completed_flush_count counters in
+    checkpoint v5.0)
   expires: null
-  max_hits: 7
+  max_hits: 13
 - pattern: contracts/audit.py
   rules:
   - R5
   reason: Deep-freeze guards and enum validation at construction
   expires: null
   max_hits: 5
-- pattern: contracts/checkpoint.py
-  rules:
-  - R5
-  reason: Tier 1 __post_init__ type guards on ResumePoint — validates checkpoint, token_id, node_id, sequence_number, aggregation_state, coalesce_state
-  expires: null
-  max_hits: 8
 - pattern: contracts/call_data.py
   rules:
   - R5
@@ -55,7 +57,8 @@ per_file_rules:
 - pattern: contracts/coalesce_checkpoint.py
   rules:
   - R5
-  reason: Deep-freeze guards, from_dict deserialization, and branch-key/lost-branch validation
+  reason: Deep-freeze guards, from_dict deserialization, and branch-key/lost-branch
+    validation
   expires: null
   max_hits: 17
 - pattern: contracts/config/runtime.py
@@ -64,12 +67,6 @@ per_file_rules:
   reason: Pydantic config field type validation (Tier 3 YAML boundary)
   expires: null
   max_hits: 9
-- pattern: contracts/data.py
-  rules:
-  - R5
-  reason: Union type detection for discriminated unions
-  expires: null
-  max_hits: 1
 - pattern: contracts/events.py
   rules:
   - R5
@@ -85,7 +82,9 @@ per_file_rules:
 - pattern: contracts/hashing.py
   rules:
   - R5
-  reason: Float type detection for NaN/Infinity rejection in canonical hashing; frozen container type dispatch for MappingProxyType/tuple/frozenset normalization; recursive type dispatch in _stable_repr for deterministic hashing of unordered containers
+  reason: Float type detection for NaN/Infinity rejection in canonical hashing; frozen
+    container type dispatch for MappingProxyType/tuple/frozenset normalization; recursive
+    type dispatch in _stable_repr for deterministic hashing of unordered containers
   expires: null
   max_hits: 9
 - pattern: contracts/header_modes.py
@@ -103,45 +102,46 @@ per_file_rules:
 - pattern: contracts/results.py
   rules:
   - R5
-  reason: Strict PipelineRow output guards for transform result construction, SanitizedUrl type validation at Tier 3 boundary, and strict isinstance(error, FailureInfo) guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit attributability)
+  reason: Strict PipelineRow output guards for transform result construction, SanitizedUrl
+    type validation at Tier 3 boundary, and strict isinstance(error, FailureInfo)
+    guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit
+    attributability)
   expires: null
   max_hits: 4
 - pattern: contracts/diversion.py
   rules:
   - R5
-  reason: Offensive __post_init__ type guards — validates artifact is ArtifactDescriptor, diversions is tuple, elements are RowDiversion
+  reason: Offensive __post_init__ type guards — validates artifact is ArtifactDescriptor,
+    diversions is tuple, elements are RowDiversion
   expires: null
   max_hits: 3
-- pattern: contracts/routing.py
-  rules:
-  - R5
-  reason: Enum validation (RoutingKind, RoutingMode, RouteDestinationKind) at construction
-  expires: null
-  max_hits: 5
 - pattern: contracts/token_usage.py
   rules:
   - R1
   - R5
-  reason: |
-    Tier 3 LLM API response dict validation in from_dict and __post_init__.
+  reason: 'Tier 3 LLM API response dict validation in from_dict and __post_init__.
+
     Every dict.get() and isinstance() inside this file is the canonical
+
     Tier-3 boundary for token-usage data. Provider responses may be
+
     absent, malformed, or carry varying nesting shapes (OpenAI nested
+
     prompt_tokens_details vs Anthropic flat sibling fields per
+
     elspeth-4e79436719 §Bug C). All absence cases coerce to None,
+
     never zero — the audit row records what the provider actually said.
+
+    '
   expires: null
   max_hits: 22
-- pattern: contracts/transform_contract.py
-  rules:
-  - R5
-  reason: Type annotation introspection for Union detection
-  expires: null
-  max_hits: 1
 - pattern: contracts/secret_scrub.py
   rules:
   - R5
-  reason: Secret-scrubbing dispatch — _scrub_value recurses over arbitrary Mapping[str, Any] payloads (Tier 3) and uses isinstance to distinguish Mapping, str, sequence, and set/frozenset types for correct redaction routing
+  reason: Secret-scrubbing dispatch — _scrub_value recurses over arbitrary Mapping[str,
+    Any] payloads (Tier 3) and uses isinstance to distinguish Mapping, str, sequence,
+    and set/frozenset types for correct redaction routing
   expires: null
   max_hits: 4
 - pattern: contracts/runtime_val_manifest.py
@@ -149,178 +149,316 @@ per_file_rules:
   - R2
   - R5
   - R6
-  reason: "ADR-010 §Decision 3 M3 + H2 N1 runtime-VAL manifest hashing. Six cohesive introspection patterns, each intrinsic to the data shape: (1) _normalize_code_constant x6 isinstance dispatches over CodeType/tuple/list/frozenset/bytes/scalar — CPython co_consts is a genuinely heterogeneous tuple and dispatch is the only way to normalize it; (2) _callable_implementation_hash x1 isinstance + x6 getattr on __code__/__defaults__/__kwdefaults__/__annotations__/__module__/__qualname__ — C-implemented callables legitimately lack these, the None-default branch feeds the repr-fallback hash; (3) _strip_docstrings x1 getattr + x4 isinstance over ast.Expr/ast.Constant/str — AST node dispatch has no Protocol alternative; (4) _unwrap_callable x3 isinstance(staticmethod/classmethod/property) — descriptor unwrapping over distinct CPython runtime types; (5) _payload_schema_hash x1 isinstance(type) + x3 getattr(__annotations__/__required_keys__/__optional_keys__) and x1 getattr(payload_schema) in _declaration_contract_implementation_hash + x1 getattr(__module__) in _iter_relevant_method_hashes — TypedDict introspection API differs by declaration style; (6) delegated-helper dependency hashing inspects function code/globals/module metadata to include helper drift without recursively hashing unrelated globals. Plus 1x except (OSError, TypeError) in _class_source_hash for inspect.getsource() on builtin/dynamically-generated classes; it raises FrameworkBugError rather than emitting a nullable source_hash, so source-unavailable classes cannot enter the resume-trust manifest. Total: 35. Direct attribute access would crash on legitimate inputs (builtins, C functions, functional-syntax TypedDicts, non-global co_names, and dependency cycles). Ceiling pinned to 35 — adding a 36th site requires explicit review, not silent absorption."
+  reason: 'ADR-010 §Decision 3 M3 + H2 N1 runtime-VAL manifest hashing. Six cohesive
+    introspection patterns, each intrinsic to the data shape: (1) _normalize_code_constant
+    x6 isinstance dispatches over CodeType/tuple/list/frozenset/bytes/scalar — CPython
+    co_consts is a genuinely heterogeneous tuple and dispatch is the only way to normalize
+    it; (2) _callable_implementation_hash x1 isinstance + x6 getattr on __code__/__defaults__/__kwdefaults__/__annotations__/__module__/__qualname__
+    — C-implemented callables legitimately lack these, the None-default branch feeds
+    the repr-fallback hash; (3) _strip_docstrings x1 getattr + x4 isinstance over
+    ast.Expr/ast.Constant/str — AST node dispatch has no Protocol alternative; (4)
+    _unwrap_callable x3 isinstance(staticmethod/classmethod/property) — descriptor
+    unwrapping over distinct CPython runtime types; (5) _payload_schema_hash x1 isinstance(type)
+    + x3 getattr(__annotations__/__required_keys__/__optional_keys__) and x1 getattr(payload_schema)
+    in _declaration_contract_implementation_hash + x1 getattr(__module__) in _iter_relevant_method_hashes
+    — TypedDict introspection API differs by declaration style; (6) delegated-helper
+    dependency hashing inspects function code/globals/module metadata to include helper
+    drift without recursively hashing unrelated globals. Plus 1x except (OSError,
+    TypeError) in _class_source_hash for inspect.getsource() on builtin/dynamically-generated
+    classes; it raises FrameworkBugError rather than emitting a nullable source_hash,
+    so source-unavailable classes cannot enter the resume-trust manifest. Total: 35.
+    Direct attribute access would crash on legitimate inputs (builtins, C functions,
+    functional-syntax TypedDicts, non-global co_names, and dependency cycles). Ceiling
+    pinned to 35 — adding a 36th site requires explicit review, not silent absorption.'
   expires: null
   max_hits: 35
 allow_hits:
 - key: contracts/url.py:R6:SanitizedDatabaseUrl:from_raw_url:fp=a8a9139e2ff09e37
-  owner: architecture
-  reason: except ValueError on get_fingerprint_key() — explicit branch for dev mode (no key) vs production (fail_if_no_key)
-  safety: Raises SecretFingerprintError when fail_if_no_key=True; only silently continues in dev mode
-  expires: null
+  owner: john
+  reason: |-
+    In SanitizedDatabaseUrl.from_raw_url, line 169 (`except ValueError: have_key = False`) is exception-as-control-flow, not error swallowing. get_fingerprint_key() raises ValueError as its documented signal that ELSPETH_FINGERPRINT_KEY is unset; the except converts that into a `have_key` flag and the code then branches explicitly: if have_key, compute the secret fingerprint; elif fail_if_no_key, raise SecretFingerprintError (production path); else dev-mode sanitize without fingerprint. The ValueError is a configuration probe with both outcomes handled and the production path re-raising a typed error, so no failure is hidden. This is the EAFP/narrow-except control-flow signal pattern, not defensive suppression, and there is no fabrication or audit-trail loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:40:35.572157+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 fires on shape (ValueError caught without re-raise in the handler) but the code is the legitimate exception-as-control-flow pattern. Verified at contracts/security.py:47-58 that get_fingerprint_key() raises ValueError as its DOCUMENTED signal for 'ELSPETH_FINGERPRINT_KEY is unset' — a configuration probe, not an error. The handler converts that signal into have_key and then both outcomes are explicitly handled: have_key=True computes the fingerprint, have_key=False with fail_if_no_key raises a typed SecretFingerprintError (production loud-fail path, lines 177-183), else dev-mode sanitizes without fingerprint per documented contract. No error is swallowed, no fabrication, and the audit-relevant production failure is a typed raise the caller can route. R6's concern (hidden failure) does not apply here.
+  judge_signature_version: 2
+  scope_fingerprint: 2dcb8451d77ff38628637a63c8482f7cfa403cc5510dd43ac8256901378f5cad
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[8]/body[4]/body[4]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:fae253e65af04e80397598c9b9176d1cab7fb321aac89eb6c67c40069eae8d31'
 - key: contracts/url.py:R6:SanitizedWebhookUrl:from_raw_url:fp=ec8dd835c4c43c96
-  owner: architecture
-  reason: except ValueError on get_fingerprint_key() — explicit branch for dev mode (no key) vs production (fail_if_no_key)
-  safety: Raises SecretFingerprintError when fail_if_no_key=True; only silently continues in dev mode
-  expires: null
-- key: contracts/plugin_context.py:TC:_module_:fp=5dfc642462528293
-  owner: architecture
-  reason: TYPE_CHECKING import of RateLimitRegistry — PluginContext type annotations need L1 rate limiter type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
-- key: contracts/contexts.py:TC:_module_:fp=b29b41656c78b873
-  owner: architecture
-  reason: TYPE_CHECKING import of RateLimitRegistry — context protocols declare rate_limiter property type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
-- key: contracts/config/runtime.py:TC:_module_:fp=07abedf4392ba82e
-  owner: architecture
-  reason: TYPE_CHECKING import of Settings models — Runtime*Config.from_settings() type annotations
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
+  owner: john
+  reason: |-
+    In SanitizedWebhookUrl.from_raw_url, line 341 (`except ValueError: have_key = False`) is the same documented two-branch control flow as the database-URL sibling. get_fingerprint_key() raises ValueError to signal 'no fingerprint key configured'; the except records have_key=False and the code branches explicitly: if have_key, fingerprint the collected sensitive values; elif fail_if_no_key, raise SecretFingerprintError; else dev-mode sanitize without fingerprint. The exception is used as a configuration probe with both outcomes audited and the production path re-raising a typed error. This is EAFP control-flow, not defensive error swallowing, and credentials are still stripped on every path so there is no silent secret leak or audit loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:40:52.995454+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 fires on the bare `except ValueError: have_key = False`, but the visible code shows this is a configuration probe, not silent suppression: get_fingerprint_key()'s ValueError signals 'no fingerprint key configured' and is immediately translated into a have_key boolean that gates three explicit, audited branches — fingerprint when keyed (line 344), raise typed SecretFingerprintError when fail_if_no_key is set (line 351), or proceed to dev-mode sanitisation without fingerprint (line 358 comment). The production path re-raises a typed error, the credential-stripping at lines 362-371 runs on every path so no secret leaks, and the rationale's mapping to each branch is corroborated by the excerpt. EAFP probe with a typed re-raise on the production branch is the prescribed legitimate form for R6.
+  judge_signature_version: 2
+  scope_fingerprint: a0ca40a8ecf31894e0237a767120cd97d2d4edb54a9acd721c6eeda4cc902734
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[9]/body[4]/body[14]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:04528d6605dae557a505f7185114974bb88a4ac2cfeb437e300d7767587907c1'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 22
+      redacted_hash: fce1f9a1f9fa3c94
 - key: contracts/data.py:R6:_get_allow_inf_nan:fp=a073efa3e28410f3
-  owner: bugfix
-  reason: vars(item) raises TypeError on non-object Pydantic metadata (plain strings, ints); skipping is correct since only object metadata can carry allow_inf_nan
-  safety: Only catches TypeError from vars(); attribute access on the result uses direct dict lookup, not hasattr
-  expires: '2026-05-15'
-- key: contracts/contract_builder.py:R6:ContractBuilder:process_first_row:fp=4d3f0bdcf6fdd56f
-  owner: bugfix
-  reason: TypeError from normalize_type_for_contract for unsupported types (dict, list, Decimal) — maps to object
-  safety: Preserves field in contract as 'any' type; no data loss or silent skip
-  expires: '2026-05-14'
-- key: contracts/transform_contract.py:R2:_get_python_type:fp=24df5cf5593bf5fa
-  owner: bugfix
-  reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
-  safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/transform_contract.py:R2:_get_python_type:fp=37ef1f2fbd33537f
-  owner: bugfix
-  reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
-  safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/declaration_contracts.py:R5:BoundaryInputs:__post_init__:fp=db78bae36c2f61ba
-  owner: architecture
-  reason: Row-attributed source/sink boundary DTO — row_data must be a mapping before deep_freeze so declaration-contract adopters never receive arbitrary sequence/scalar payloads
-  safety: Non-mapping values raise TypeError immediately; no coercion or fallback is attempted
-- key: contracts/run_result.py:R5:RunResult:__post_init__:fp=fac5bfd1b22037fa
-  owner: architecture
-  reason: Offensive guard — validates status is RunStatus enum at contract construction
-  safety: TypeError raised immediately; prevents str from leaking through to consumers
-- key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e
-  owner: feature
-  reason: Intentional identity fallback - fields without resolution mapping use normalized name as original name
-  safety: Fallback to same value is correct behavior, not silent coercion
-- key: contracts/security.py:R1:get_fingerprint_key:fp=f8bc47a912fd28d8
-  owner: architecture
-  reason: os.environ.get() is the correct API for checking env var existence — followed by explicit ValueError raise
-  safety: Raises ValueError immediately if env var not set — not a silent fallback
+  owner: john
+  reason: |-
+    _get_allow_inf_nan iterates over Pydantic FieldInfo.metadata, a heterogeneous list whose items may be marker objects, dataclass-like metadata, or plain scalars (strings/ints). Line 155 (`except TypeError: continue`) catches the TypeError that vars(item) raises on items lacking __dict__, and skips them — only object metadata can carry the allow_inf_nan attribute. This is type-system introspection branching on a structural fact of the Pydantic metadata protocol, not bug-hiding: the except is narrowly scoped to TypeError with a known cause, and a non-match returns the honest default None (no such constraint declared). No error is masked and no value is fabricated.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T02:36:53.284695+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES. The R6 concern is silent suppression of errors that hide bugs or fabricate values. Here, `vars(item)` raising TypeError is not an error — it is the documented Python signal that an item lacks `__dict__` (e.g., a plain string metadata marker), and Pydantic's FieldInfo.metadata is heterogeneous by design with exactly such items mixed in. The except is narrowly scoped to TypeError, continues iteration (the structurally correct response: 'this item cannot carry the attribute, check the next one'), and the function returns the honest `None` when no metadata item declares the constraint — no value is fabricated and no genuine fault is swallowed. The alternative LBYL form would be `hasattr`, which policy unconditionally bans for being broader; this EAFP form is the narrower, more precise check.
+  judge_signature_version: 2
+  scope_fingerprint: 4daec480060aa899444cc2d333d3e2dd02d92e011a40938970cdf2fea104c45b
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[11]/body[1]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:29f3261e96c4e89d6aa61f5bb44c1ec7034e90db09f08b596fe97be9ce756981'
 - key: contracts/schema_contract.py:R5:PipelineRow:to_dict:fp=19c383f767c4ed8c
-  owner: architecture
-  reason: Tier 1 offensive guard — deep_thaw must return dict; isinstance check crashes on corruption
-  safety: Raises TypeError immediately if invariant violated
+  owner: john
+  reason: |-
+    PipelineRow.to_dict line 666 (`if not isinstance(thawed, dict)`) is an offensive Tier-1 invariant guard, not a defensive Tier-3 shape check. self._data is our own deep-frozen row data, and deep_thaw on a dict-rooted structure must return a dict; the isinstance check is paired with an immediate TypeError raise (line 667) carrying the actual type. It crashes maximally-informatively on a deep_thaw contract violation rather than coercing or returning a default — exactly the offensive-programming pattern policy encourages for our authored data. No silent recovery, no data loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:41:24.680525+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. `deep_thaw` at contracts/freeze.py:112 returns `Any`, so the call site needs to narrow it; on first-party Tier-1/2 internal data (`self._data` is frozen row data authored by us) the policy-prescribed narrowing is offensive `isinstance` → immediate informative `raise`, which is exactly what lines 666-667 do: a TypeError naming the actual type, with no coercion, no default, no silent recovery. This is the Plugin-Ownership / Tier-1 'crash maximally informatively on a contract violation' pattern, not a defensive Tier-3 shape guard. Decorator nudge is N/A: `to_dict(self)` takes no external parameter and the subject is rooted at `self._data`, not an external arg.
+  judge_signature_version: 2
+  scope_fingerprint: 651c12ac96d9dfd98fc94b86e123911d3cd257db13abb69be48c4e8195c22dc8
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[12]/body[7]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:30a3f277707e79ed637963842eb6537ff7da6cf9618ba98c0d57555b0f54d23f'
 - key: contracts/schema_contract.py:R5:PipelineRow:to_checkpoint_format:fp=13c2f8a3bfbe5f2a
-  owner: architecture
-  reason: Tier 1 offensive guard — deep_thaw must return dict; isinstance check crashes on corruption
-  safety: Raises TypeError immediately if invariant violated
-- key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=b77bb8f4e1cd3d1d
-  owner: architecture
-  reason: Optional lookup for original name - new fields from transforms may not have input mapping
-  safety: Fallback to output field's original_name is correct behavior for transform-added fields
-- key: contracts/tier_registry.py:R5:tier_1_error:fp=360d94dd51a67c28
-  owner: architecture
-  reason: Decorator API boundary — isinstance(reason, str) validates the caller-supplied reason kwarg; enforces non-empty string contract before the value is stored in the registry
-  safety: Raises ValueError immediately on empty/non-string reason; no silent coercion or data loss
-  expires: null
-- key: contracts/tier_registry.py:R5:tier_1_error:fp=b6d17d7d22d3b69b
-  owner: architecture
-  reason: Decorator API boundary (ADR-010 M8, issue elspeth-3af772b9e3) — isinstance(caller_module, str) validates the caller-supplied caller_module kwarg; the value feeds the module-prefix allowlist in _register_with_module_prefix, so empty-string or non-string values must crash before reaching allowlist spoofing
-  safety: Raises ValueError immediately on empty/non-string caller_module; the scanner rule TDE2 also rejects non-literal values statically
-  expires: null
+  owner: john
+  reason: |-
+    PipelineRow.to_checkpoint_format line 750 (`if not isinstance(thawed, dict)`) is an offensive Tier-1 invariant guard on the checkpoint serialization path. self._data is our authored row data and deep_thaw must return a dict; the check raises TypeError with the offending type (line 751) rather than coercing or falling back, then proceeds to build the checkpoint dict. Crashing loudly on a deep_thaw contract violation is the correct Tier-1 response for checkpoint integrity; the isinstance is the detection half of an offensive raise, not a defensive boundary guard. No fabrication or silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:43:22.092510+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.8
+  judge_rationale: |-
+    PRESCRIBED FORM. The R5 isinstance is the detection-half of an offensive raise at a Tier-1 checkpoint-integrity boundary. Data flow (verified): PipelineRow.__init__ at schema_contract.py:566 enforces type(data) is dict; _data = deep_freeze(data) at line 573 yields MappingProxyType; deep_thaw at freeze.py:129-130 maps MappingProxyType→dict. The expected runtime shape of `thawed` is dict by our own freeze/thaw contract. Crucially, without this check a broken deep_thaw would NOT crash naturally — the next-line dict literal `{"data": thawed, ...}` would silently embed a non-dict into the checkpoint, corrupting Tier-1 audit data. The site raises TypeError with the offending type and does not coerce or fall back, which is the policy-prescribed offensive form for a Tier-1 integrity invariant.
+  judge_signature_version: 2
+  scope_fingerprint: 6407817c21ea388618bd580d8f954f8cca5593e92064065e79367209f6da9f01
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[12]/body[14]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:8809abc84909329919947a845be1c4591b151700740ee50147694ce4ab31c193'
 - key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=ce98be6cf59df4d5
-  owner: architecture
-  reason: Decorator API boundary — isinstance(cls, type) and issubclass(cls, BaseException) validates that the decorated object is a BaseException subclass; this is an offensive invariant check, not defensive coercion
-  safety: Raises TypeError immediately on non-exception class; no silent fallback
-  expires: null
-- key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=18d4ee87363f8490
-  owner: architecture
-  reason: Decorator API boundary — isinstance(class_module, str) validates the registered exception class exposes a concrete owning module string before the allowlist checks enforce Tier-1 ownership
-  safety: Raises TypeError immediately on invalid module metadata and PermissionError on disallowed module ownership; no silent fallback
-  expires: null
+  owner: john
+  reason: |-
+    _register_with_module_prefix line 146 (`if not (isinstance(cls, type) and issubclass(cls, BaseException))`) is an offensive invariant check at the @tier_1_error decorator API boundary. The decorated object is supplied by framework code at import time (Tier-1, our own code registering our own exceptions), not external Tier-3 data; the check validates that the decorator target is a BaseException subclass and raises TypeError on violation (line 147). This is the 'detect an invalid state and throw a meaningful error' branch of the Decision Test — a non-class or non-exception target is a framework bug that must crash before the registry freezes. No coercion, no suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T02:37:02.817384+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The flagged `isinstance(cls, type) and issubclass(cls, BaseException)` at line 146 is an offensive invariant check at the `@tier_1_error` decorator API boundary, paired with `raise TypeError` on line 147 — the prescribed 'detect an invalid state and throw a meaningful error' form. The decorator target is supplied by framework code at import time, and Python decorator syntax does not statically enforce that the argument is a BaseException subclass; this is the sole runtime enforcement of that contract before the registry mutation. No `.get()`, no coercion, no suppression — wrong type crashes loudly with a contextual message, exactly matching the Defensive vs Offensive Decision Test's 'Assert it (offensive)' branch.
+  judge_signature_version: 2
+  scope_fingerprint: 9e7e6866356f379dd95fd63f9ec209bc5ac84e317afdb11da8a4eb4274bdc5be
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[18]/body[1]/body[0]/test/operand/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:a5088be8d40b2e479e9ebd3e6c797e4c4cda76a760ea9da3dac7f43648f93ac5'
 - key: contracts/declaration_contracts.py:R5:_normalise_row_tuple:fp=6cd7a87f9b40bc62
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization helper for emitted row bundles; list inputs are normalized to deep-frozen tuples and non-list/non-tuple values crash immediately."
-  safety: TypeError raised immediately on any non-list/non-tuple input; tuple members are deep-frozen before storage
-  expires: null
+  owner: john
+  reason: |-
+    _normalise_row_tuple line 179 (`if isinstance(value, list)`) is offensive type-dispatch in a freeze-guard normalization helper for internal contract row bundles, not a Tier-3 shape guard. The list branch normalizes to a tuple; the helper then deep-freezes it, and any value that is neither list nor tuple hits the else branch and crashes immediately with a TypeError naming the field and type (line 184). The data is framework-internal (emitted row bundles), not external input, so a non-sequence is a framework bug that should crash. The isinstance feeds an explicit raise, not a silent fallback — encouraged offensive programming.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T02:37:55.009215+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. _normalise_row_tuple (declaration_contracts.py:172-185) is invoked from frozen dataclass __post_init__ methods (PostEmissionOutputs:255-264, BatchFlushOutputs:310-319, BoundaryOutputs:368-377) to normalise a row-sequence field. The isinstance is offensive type-dispatch over the two valid ordered-sequence shapes — list is coerced to tuple (meaning-preserving; both are ordered sequences, only mutability differs) and tuple is passed through. Anything else hits the else branch and crashes with a TypeError naming owner_cls, field_name, and actual type (line 184) — the encouraged offensive 'detect invalid state, throw meaningful err' pattern, not a silent suppression or fallback. emitted_rows is a plugin-return value, so a wrong type is a plugin/framework bug and CRASH is correct per Plugin Ownership. Decorator nudge does not apply: this is not a Tier-3 boundary function with an external source_param.
+  judge_signature_version: 2
+  scope_fingerprint: 739f01b28bc7eb5b2448abac05e3331ec0952798c1f31c92fd626a3cfd122d49
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[22]/body[1]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:5a328dba250002b1b6126e12a99709b35dd8f71e18d146843906b12a534e6e7a'
 - key: contracts/declaration_contracts.py:R5:_normalise_row_tuple:fp=2be5b2edada71a02
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization helper for emitted row bundles; tuple inputs are accepted as the already-normalized immutable shape."
-  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=a2e0caa17576e635
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
-  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=4ec415cce6bbe35e
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
-  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=ea9262fbccfdb527
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — list inputs are normalized to deep-frozen tuples and any non-list/non-tuple input must crash immediately."
-  safety: TypeError raised immediately on any non-list/non-tuple input; tuple members are deep-frozen before storage
-  expires: null
-- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=4f2d78378d9ca2ea
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — the tuple-only branch is an offensive invariant check, not a silent fallback."
-  safety: TypeError raised immediately when args is not list or tuple; no coercion beyond the explicit list->tuple normalization
-  expires: null
+  owner: john
+  reason: |-
+    _normalise_row_tuple line 181 (`elif isinstance(value, tuple)`) is the second arm of the same offensive type-dispatch in this internal freeze-guard helper: a tuple is accepted as the already-normalized immutable shape. Together with the list branch it dispatches between the two valid input shapes and crashes via the else branch's TypeError (line 184) on anything else. This is offensive type discrimination on framework-internal row bundles, not defensive Tier-3 guarding; the value is deep-frozen regardless, so there is no data loss or coercion of meaning.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:31:05.611614+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.94
+  judge_rationale: |-
+    PRESCRIBED FORM. _normalise_row_tuple (declaration_contracts.py:172-185) takes value: object and is invoked from frozen-bundle __post_init__ at lines 259, 314, 372 (PostEmissionOutputs / BatchFlushOutputs / BoundaryOutputs). The two isinstance arms dispatch between the two accepted input shapes (list → tuple, tuple → kept), and the else branch raises TypeError naming owner class, field name, and actual type (line 184). The sibling docstring at line 248 explicitly invokes 'CLAUDE.md §Offensive Programming' and explains why arbitrary Sequence subtypes (lazy wrappers, generators) must not silently bypass the freeze guard. The rationale correctly identifies this arm as the second leg of the same offensive dispatch, and the visible code matches — no silent coercion, no default, no shape laundering. deep_freeze is applied unconditionally so the immutability invariant holds. R5's concern (isinstance masking bugs) does not apply: this isinstance surfaces bugs by routing to a meaningful raise.
+  judge_signature_version: 2
+  scope_fingerprint: 739f01b28bc7eb5b2448abac05e3331ec0952798c1f31c92fd626a3cfd122d49
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[22]/body[1]/orelse[0]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:e4e6a32d85d48d8730f8642e6848bd7a9c3d6a3f10aad5979a82ef27eb69d22f'
 - key: contracts/declaration_contracts.py:R2:_collect_contract_sites:fp=8d6e48bba4566067
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) getattr(candidate, _DISPATCH_SITE_MARKER_ATTR, None) probes for the @implements_dispatch_site decorator marker on contract methods. The default-None is semantic: 'this method did not declare a dispatch site'. Using direct attribute access (bare .x access) would crash on every non-decorated method walked (applies_to, negative_example, __init_subclass__, etc.), defeating the discovery pass. This is the canonical marker-discovery pattern the @implements_dispatch_site decorator contract specifies."
-  safety: Invalid marker values (site_name not in _DISPATCH_SITE_VALUES) raise FrameworkBugError immediately — no silent fallthrough
-  expires: null
+  owner: john
+  reason: |-
+    _collect_contract_sites line 1120 (`getattr(candidate, _DISPATCH_SITE_MARKER_ATTR, None)`) is the canonical marker-discovery pattern: it walks every attribute of every class in the contract MRO probing for the optional @implements_dispatch_site decorator marker. Absence of the marker is the expected normal case for the vast majority of attributes (dunders, helpers, undecorated methods), so the default None carries real semantic meaning ('not a dispatch site'), and the code immediately branches on `site_name is None` to skip non-sites. Direct attribute access would crash on every undecorated attribute and make discovery impossible. This is a sentinel-based discovery probe, not defensive suppression on a typed object; it is not silent data loss or fabrication.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:31:26.849719+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.95
+  judge_rationale: |-
+    RULE MISFIRES. The getattr call is a sentinel-based introspection probe walking `type(contract).__mro__` and `vars(klass).items()` (lines 1116-1119) to discover which attributes carry the optional `@implements_dispatch_site` decorator marker. Absence of the marker is not a bug — it is the expected normal case for the vast majority of attributes (dunders, helpers, undecorated methods), and the immediate `if site_name is None: continue` branch (line 1138) uses None as the canonical 'not a dispatch site' signal. R2's premise — that the default suppresses a missing-attribute bug — is false here: the missingness IS the discovery semantic. Direct `candidate.<marker>` access would raise AttributeError on every undecorated attribute, making MRO-walk marker discovery impossible. The decorator nudge does not apply (no external parameter; rule is R2, not R1/R5; the data is first-party class internals).
+  judge_signature_version: 2
+  scope_fingerprint: 6fe5c8de46e8b51edfdec146a1d3847bbb0460d950800562f01677b0d6d73fd3
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[55]/body[3]/body[1]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:97b7f9433a04f376341ba4fa6feccdf7e10d0b2200a73f42234cbf7494efd3d1'
 - key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=e770539007d53958
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) nominal ABC gate — register_declaration_contract uses isinstance(contract, DeclarationContract) to enforce ADR-010 §Alternative 3 nominal-typing posture (rejects structural Protocol matching). This is a Tier-1 trust boundary check at the registry's entry point; a non-DeclarationContract passed here is a framework bug that MUST crash loudly before the registry freezes. TypeError raised with a self-diagnosing message."
-  safety: TypeError raised immediately naming ADR-010 §Alternative 3 rationale
-  expires: null
+  owner: john
+  reason: |-
+    register_declaration_contract line 1175 (`if not isinstance(contract, DeclarationContract)`) is an offensive nominal-ABC gate at the registry entry point. Contract registration is system code registering system code (Tier-1), and the check enforces ADR-010 §Alternative 3's rejection of structural Protocol matching by raising TypeError with a self-diagnosing message (lines 1176-1181) when a non-DeclarationContract is passed. A bad type here is a framework bug that must crash loudly before the registry freezes — the 'detect invalid state, throw meaningful error' pattern, not a defensive Tier-3 shape guard. No suppression or coercion.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:31:44.650947+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The rule fires on the isinstance check, but the code is the offensive form policy prescribes: an isinstance→raise TypeError with a self-diagnosing message (lines 1176-1181) that cites the specific design decision (ADR-010 §Alternative 3 rejection of structural Protocol matching). This is not Tier-3 boundary data — it is first-party framework code registering first-party contracts, and per the Defensive-vs-Offensive Decision Test ('Can I detect an invalid state and throw a meaningful err? → Assert it'), an isinstance→raise gate enforcing a nominal-ABC contract at a registry entry point is the encouraged pattern, not the forbidden one. The rationale plainly states the why (nominal ABC enforcement over structural Protocol), names ADR-010, and the visible code corroborates: no suppression, no coercion, no swallowed exception — just a typed crash. The surrounding code (lines 1188, 1201) shows the same offensive isinstance/identity-then-raise discipline applied consistently, confirming this is the file's idiom.
+  judge_signature_version: 2
+  scope_fingerprint: a23c2f384ea45d4c30468486d60fcd28789abab73c71303c5566b3795a458fe8
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[56]/body[1]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:cbf08fd447970d92404b1fddb5287e32b5580130138ea748bb30b7de7fae5ac2'
 - key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=28b565efc229de07
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) payload_schema type gate — register_declaration_contract uses isinstance(payload_schema, type) to reject non-type payload_schema values (must be a TypedDict class, not an instance or string). Tier-1 trust boundary at registry entry; caller-supplied bad shape is a framework bug that crashes before the registry freezes. Predates H2 (C2 closure); H2 preserves the same pattern."
-  safety: TypeError raised immediately with diagnostic message
-  expires: null
-- key: contracts/contract_propagation.py:R6:_infer_new_field_contract:fp=7af526cf8ac3b4be
-  owner: bugfix
-  reason: >-
-    TypeError from normalize_type_for_contract for unsupported transform-created
-    field values is intentionally mapped to object by the shared inference helper.
-  safety: >-
-    The field remains present in the propagated contract as object/any; non-finite
-    values still raise ValueError and no row data is dropped or coerced.
-  expires: null
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=ded2e01b10149753
-  owner: composer-audit
-  reason: >-
-    Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata from an external LLM
-    response snapshot.
-  safety: >-
-    Missing usage preserves None; TokenUsage.from_dict validates present mappings before telemetry emission.
-  expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=482af02b41f7c916
-  owner: composer-audit
-  reason: >-
-    Telemetry transport failures must not corrupt the primary Landscape call recording after it has already
-    succeeded.
-  safety: >-
-    Only OSError, ConnectionError, and TimeoutError are caught; the warning carries class metadata and call
-    recording still returns.
-  expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=55506bc73df2d0c0
-  owner: composer-audit
-  reason: >-
-    Tier 3 boundary - stable_hash can reject non-canonical external row data such as NaN or non-serializable
-    values.
-  safety: >-
-    Narrow ValueError/TypeError catch falls back to repr_hash, logs no row content, and still records a
-    validation-error token.
-  expires: null
+  owner: john
+  reason: |-
+    register_declaration_contract line 1188 (`if not isinstance(payload_schema, type)`) is an offensive validation gate at the registry entry: it rejects a payload_schema that is not a type object (must be a TypedDict class, not an instance or string) by raising TypeError (line 1189). This is framework-internal contract registration where a malformed payload_schema is a framework bug, not external Tier-3 data — the Decision Test's 'detect invalid state and assert' branch. The surrounding code applies the same offensive-validation idiom consistently (the adjacent violation_class checks). No defensive suppression, no fabrication.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:32:05.246152+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The isinstance at line 1188 is the offensive-validation idiom: it detects an invalid framework-internal state (a DeclarationContract subclass whose payload_schema is not a type object) and immediately raises a typed, informative TypeError naming the contract and the required shape (TypedDict subclass). This is the Decision Test's 'detect invalid state and assert' branch — payload_schema originates from a first-party DeclarationContract subclass (the function already validated `contract` via isinstance/raise at line 1175), not from external Tier-3 data, so the @trust_boundary decorator does not apply. The surrounding block applies the same offensive idiom consistently (violation_class identity and issubclass checks at 1201/1206), and the docstring at 1166-1168 declares TypeError as the contract for malformed payload_schema. No silent suppression, no coercion, no fabrication.
+  judge_signature_version: 2
+  scope_fingerprint: a23c2f384ea45d4c30468486d60fcd28789abab73c71303c5566b3795a458fe8
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[56]/body[1]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:4a226a1f7e10dcac50d97d69379922a76b8c355b964a11d78887f129bbef0d15'
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=b105d00f0725cd72
+  owner: john
+  reason: |-
+    PluginContext.record_call line 347 (`except (OSError, ConnectionError, TimeoutError) as tel_err`) wraps only the telemetry_emit call, which fires AFTER the call has already been recorded to the Landscape (the primary audit channel, returned at line 361). Per the primacy order, audit fires first sync/crash-on-failure and telemetry second async/best-effort, so suppressing transport-level network errors at the telemetry emit site is correct. The except is narrowly scoped to transport exceptions; the comment and code confirm Tier-1 and programming errors (e.g. KeyError) propagate naturally. The failure is recorded via logger.warning rather than silently dropped, and the legal record (Landscape) is already written, so there is no audit loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:43:53.603121+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.93
+  judge_rationale: |-
+    PRESCRIBED FORM. The Landscape audit recording at lines 243-252/258-266 completes synchronously BEFORE the try block opens at line 295, so the audit channel is already committed when the except runs. The except at line 347 is narrowly typed to (OSError, ConnectionError, TimeoutError) — transport-level network failures only; FrameworkBugError raised at lines 220/227/240/257/276/279/287 and any KeyError/TypeError from the telemetry payload construction propagate naturally, matching the comment at lines 348-350. This is exactly the primacy order CLAUDE.md prescribes: audit first sync/crash-on-failure, telemetry second best-effort, logger.warning as last-resort surfacing when telemetry transport breaks. R6's concern (swallowing without re-raise) does not apply because the legal record is already written and only async transport noise is being absorbed.
+  judge_signature_version: 2
+  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[17]/body[20]/body[10]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:b4b316df230c540bdd23cd3b00bbc7c2cd1b5155a18edaffbab1be5baeab3710'
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=5e7b2d9d784b791f
+  owner: john
+  reason: |-
+    PluginContext.record_validation_error records the audit row for external source data that has ALREADY failed validation — by definition malformed Tier-3 input (the docstring notes it may be a non-dict like a JSON array of primitives). Line 401 (`except (ValueError, TypeError) as e`) wraps stable_hash(row), which raises on non-canonical content (NaN, Infinity, non-serializable types), and falls back to repr_hash to derive a row_id so the quarantined row is still recorded. This is the Tier-3 'record what we got even when malformed' rule: the catch is narrow, it preserves rather than loses the audit trail, and it logs only the error type (no row content), honoring the logging policy. Not silent error swallowing — it is boundary-correct degradation that keeps the audit complete.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:44:22.266656+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except at line 401 sits inside `record_validation_error`, whose contractual job is to record already-malformed Tier-3 source rows for audit; the `row` parameter is explicitly documented as possibly non-dict, non-serializable external data. The catch is narrow (`ValueError, TypeError` — exactly what `stable_hash` raises on NaN/Infinity/non-serializable content), not bare; it does not swallow but falls back to `repr_hash` so the quarantined row still gets a deterministic id and reaches the Landscape audit row recorded just below. A warning logs the exception type/message without leaking row content, consistent with the logging-policy. This is the Tier-3 'record what we got even when malformed' form, not silent suppression — losing the audit row instead would itself be the defect. Decorator nudge does not apply: R6 is outside the decorator's suppressible set ({R1, R5}).
+  judge_signature_version: 2
+  scope_fingerprint: f14807a26f9691fba20e774857bcc99b5677ececa3639e69e256339e3e4986fa
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[17]/body[21]/body[2]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:10fe4e3886a52064ef983b2683385c1b22e9accc63412aad6868a66b38bfa30a'
+- key: contracts/composer_interpretation.py:R5:_validate_enum_member:fp=ffdde8578491891c
+  owner: john
+  reason: |-
+    _validate_enum_member line 122 (`if not isinstance(value, enum_type)`) is an offensive construction-time validator: it takes an `object` and asserts conformance to an enum type, raising ValueError with a meaningful message (line 123) on mismatch. It is called from InterpretationEventRecord.__post_init__ (lines 244-247), whose docstring states it validates Tier-1 row-shape invariants at construction. The isinstance here is not a defensive shape-guard that suppresses an error — it IS the error-raising mechanism that converts a malformed-record bug into a maximally-informative crash before the audit record is constructed. This is the Decision Test's offensive 'assert it' branch; no coercion, no default, no silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:32:32.711221+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.95
+  judge_rationale: |-
+    PRESCRIBED FORM. The R5 isinstance fires, and the code is the offensive 'assert it' form: `_validate_enum_member(value: object, ...)` takes an untyped parameter and the isinstance→raise ValueError IS the enforcement mechanism, not a defensive guard that swallows. Called from InterpretationEventRecord.__post_init__ (composer_interpretation.py:244-247), whose docstring states it 'Validate Tier-1 row-shape invariants at construction time' and the class docstring states 'Constructors crash loudly on any anomaly'. The raised ValueError carries field name, expected enum class, actual type, and repr of the bad value — maximally informative, no coercion, no default, no silent recovery. This is the Decision Test's 'detect an invalid state and throw a meaningful err → Assert it (offensive)' branch, applied at the Tier-1 construction boundary where the type annotation is `object` and so runtime is the only enforcement point.
+  judge_signature_version: 2
+  scope_fingerprint: f624fff8954f5e27f52c257eee19f377a08d8e9c7d7fd88ad8c2f6c889180308
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[15]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:8072f04508921266bced2a9ec1c85af8e2de1d713a3a66426ea11a4e1807f57d'
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=d48cac92b0418ba5
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — meaning-preserving optional read of an external (Tier-3) field on a typed-dict receiver. In PluginContext.record_call (contracts/plugin_context.py:315), `raw_usage = response_snapshot.get("usage")` reads the optional "usage" key from response_snapshot, which is the method's response_data parameter (typed `dict[str, Any] | None`, guarded by `response_snapshot is not None` at line 312). The receiver is therefore a typed dict — `.get` has a valid Mapping receiver, not an arbitrary object — but its CONTENTS are Tier-3: for an LLM call this dict is the external provider response, and "usage" is provider-OPTIONAL metadata that legitimately may be absent (not every response carries token usage). This is the sanctioned `.get()` use: a meaning-preserving optional read where absence is real. It passes the null-correctness test — there IS a case where None is correct (the provider returned no usage), so this is not papering over a missing key on data we own. No default is supplied, so absence maps to None, and TokenUsage.from_dict(raw_usage) is the boundary validator that accepts Any and returns unknown()/has_data=False for None or non-Mapping input (the comment documents this). No fabrication: an absent usage becomes token_usage=None, not a synthesized zero. R1 flags `.get()` generically and cannot tell a Tier-3 optional read from a Tier-1/Tier-2 defensive access. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:40.806140+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.8
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM — response_snapshot is the LLM provider's response_data (Tier-3 external content, not a first-party typed contract on the 'usage' key), and 'usage' is genuinely provider-optional metadata. The .get() is a meaning-preserving optional read: absence maps to None (not a fabricated zero), and TokenUsage.from_dict is the documented boundary validator that accepts Any. The decorator nudge does not apply: response_data is not the function's external-data entry-parameter in the @trust_boundary sense (it is internal telemetry plumbing within record_call), and the suppression is correctly scoped to one site.
+  judge_signature_version: 2
+  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[20]/body[10]/body[5]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:a3418d11187e07e3768c67f86edd1e629dd0f6850864b85962f959784de5d3ee'

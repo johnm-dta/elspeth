@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Commit-msg hook: telemetry-backfill cohort attribution
+#
+# A telemetry harvest landed counter emits whose natural home is outside the
+# commit that added them. Without an explicit trailer, a future maintainer doing
+# `git blame` on those files sees a telemetry commit editing code that "belongs"
+# to a different cohort with no inline rationale. This hook rejects commits that
+# touch a cohort directory without the corresponding stable
+# `telemetry-backfill: <cohort-token>` trailer, making the attribution
+# mechanically discoverable.
+#
+# Cohorts (per docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
+# §"Cohort attribution via commit trailers (A4 — load-bearing)"):
+#   (a)  src/elspeth/web/shareable_reviews/   →  telemetry-backfill: shareable-reviews
+#   (b1) interpretation-opt-out path          →  telemetry-backfill: interpretation-opt-out
+#        (matched as: sessions/routes.py OR sessions/service.py with an
+#         added line referencing the opt-out telemetry counter or the
+#         auto_interpreted_opt_out audit-row commit site)
+#   (b2) src/elspeth/web/audit_readiness/    →  telemetry-backfill: audit-readiness
+#
+# Trailer format (must appear on its own line in the commit-message body):
+#     telemetry-backfill: shareable-reviews
+#     telemetry-backfill: interpretation-opt-out
+#     telemetry-backfill: audit-readiness
+#
+# A single commit may touch multiple cohorts; in that case ALL applicable
+# trailers must be present (one trailer line per cohort).
+#
+# Removing this hook is a governance decision and MUST cite the
+# §"Cohort attribution via commit trailers" section in the removing commit.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="${1:?commit-msg hook expects path to commit message file as arg 1}"
+SPEC_REF='docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
+§"Cohort attribution via commit trailers (A4 — load-bearing)"'
+
+# ---------------------------------------------------------------------------
+# Skip merge commits and revert commits — those do not introduce a new
+# semantic change in the cohort; their trailers come from the merged or
+# reverted commits.
+# ---------------------------------------------------------------------------
+if head -n 1 "$COMMIT_MSG_FILE" | grep -qE '^(Merge|Revert)\b'; then
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Identify which cohorts this commit touches.
+# ---------------------------------------------------------------------------
+
+# Staged file list.  In a commit-msg hook the index is exactly the content
+# about to be committed, so `git diff --cached --name-only` is the right
+# scope.
+mapfile -t STAGED_FILES < <(git diff --cached --name-only)
+
+cohort_a_hit=0
+cohort_b1_hit=0
+cohort_b2_hit=0
+
+for f in "${STAGED_FILES[@]}"; do
+    case "$f" in
+        src/elspeth/web/shareable_reviews/*) cohort_a_hit=1 ;;
+        src/elspeth/web/audit_readiness/*)   cohort_b2_hit=1 ;;
+    esac
+done
+
+# Cohort (b1) is content-scoped: sessions/ has unrelated traffic, so a
+# bare directory match would over-fire.  Trigger only when an added or
+# context line in the staged diff references the opt-out telemetry
+# counter name or the audit-row interpretation_source value that the
+# cohort guards.
+sessions_touched=0
+for f in "${STAGED_FILES[@]}"; do
+    case "$f" in
+        src/elspeth/web/sessions/routes.py | \
+        src/elspeth/web/sessions/service.py) sessions_touched=1 ;;
+    esac
+done
+
+if [[ $sessions_touched -eq 1 ]]; then
+    if git diff --cached -- src/elspeth/web/sessions/routes.py \
+                            src/elspeth/web/sessions/service.py \
+       | grep -qE '^\+.*(interpretation_opt_out_total|record_interpretation_opt_out|auto_interpreted_opt_out)'; then
+        cohort_b1_hit=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Allowlist: a per-cohort YAML file may name commits that pre-date the
+# hook's introduction or that legitimately bypass the rule.  The mechanism
+# mirrors enforce_tier_model's allowlist shape so future legitimate
+# exceptions have a controlled escape valve.  No entries are expected at
+# 8a landing.
+# ---------------------------------------------------------------------------
+# Implementation note: at landing the allowlist directory is empty (a
+# README documents the schema).  When the first legitimate exception
+# arises, ratchet via a tracked YAML entry rather than removing the hook.
+# The README documents the schema so future contributors know how to add
+# an entry.
+
+# ---------------------------------------------------------------------------
+# Trailer requirement check.
+# ---------------------------------------------------------------------------
+
+require_trailer() {
+    local cohort="$1"
+    local trailer_token="$2"
+    local reason="$3"
+
+    if grep -qE "^telemetry-backfill: ${trailer_token}\$" "$COMMIT_MSG_FILE"; then
+        return 0
+    fi
+
+    cat >&2 <<EOM
+
+COMMIT REJECTED — telemetry-backfill cohort attribution missing.
+
+  Cohort:   ${cohort}
+  Trigger:  ${reason}
+  Required: a trailer line of exactly:
+
+      telemetry-backfill: ${trailer_token}
+
+  Place the trailer on its own line in the commit message body (after the
+  subject + blank line + body), per the git-interpret-trailers convention.
+  Multiple trailers are allowed if the commit touches multiple cohorts.
+
+Why this matters
+  The cohort emit code "belongs" semantically to a different delivery
+  cohort from the commit that added it. Without the trailer, \`git blame\`
+  + \`git log -1\` does not reveal the attribution and the coupling becomes
+  invisible debt. See:
+
+      ${SPEC_REF}
+
+EOM
+    exit 1
+}
+
+(( cohort_a_hit ))  && require_trailer "(a)  — shareable_reviews" "shareable-reviews" "commit touches src/elspeth/web/shareable_reviews/"
+(( cohort_b1_hit )) && require_trailer "(b1) — interpretation opt-out" "interpretation-opt-out" "commit adds opt-out telemetry / audit-content in sessions/{routes,service}.py"
+(( cohort_b2_hit )) && require_trailer "(b2) — audit_readiness" "audit-readiness" "commit touches src/elspeth/web/audit_readiness/"
+
+exit 0

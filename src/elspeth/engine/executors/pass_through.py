@@ -25,7 +25,7 @@ at startup), so the ``transform=<name>`` tag is safe.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, TypedDict, cast
+from typing import Any, ClassVar, cast
 
 from opentelemetry import metrics
 
@@ -44,12 +44,15 @@ from elspeth.contracts.errors import (
     FrameworkBugError,
     OrchestrationInvariantError,
     PassThroughContractViolation,
+    PassThroughPayload,
 )
 from elspeth.contracts.schema_contract import PipelineRow
 
 # Module-level counter — both call sites import this module and share the
-# same instrument.
-_VIOLATIONS_COUNTER = metrics.get_meter(__name__).create_counter(
+# same instrument.  Tests that need to assert on increments should monkeypatch
+# this module global with a counter created from a local MeterProvider+reader
+# pair; see tests/unit/engine/test_executors.py for the canonical pattern.
+_VIOLATIONS_COUNTER: metrics.Counter = metrics.get_meter(__name__).create_counter(
     "pass_through_cross_check_violations_total",
     description="Count of passes_through_input=True transforms that dropped input fields at runtime",
 )
@@ -76,9 +79,9 @@ def verify_pass_through(
 
     Raises ``PassThroughContractViolation`` on the first row that drops any
     input field (per-adopter semantics preserved from ADR-008 / ADR-009).
-    Under audit-complete dispatch the violation is caught by the
-    dispatcher's ``PluginContractViolation`` branch and aggregated with any
-    other contract's raise on the same row.
+    Under audit-complete dispatch the DCV subclass is caught by the shared
+    declaration-contract branch and aggregated with any other contract's
+    raise on the same row.
     """
     if not emitted_rows:
         if can_drop_rows or not input_fields:
@@ -126,22 +129,6 @@ def verify_pass_through(
             )
 
 
-class PassThroughPayload(TypedDict):
-    """Shape of PassThroughContractViolation.divergence_set projected into
-    the DeclarationContractViolation payload.
-
-    PassThroughContractViolation carries its own rich 9-key payload; this
-    TypedDict is consulted when the contract is queried via
-    ``payload_schema``. Under audit-complete aggregation, each child's
-    ``to_audit_dict`` surfaces independently — this schema is for harness
-    introspection only.
-    """
-
-    divergence_set: list[str]
-    static_contract: list[str]
-    runtime_observed: list[str]
-
-
 class PassThroughDeclarationContract(DeclarationContract):
     """ADR-007/008/009 pass-through contract — ADR-010 framework adopter.
 
@@ -154,6 +141,7 @@ class PassThroughDeclarationContract(DeclarationContract):
 
     name: ClassVar[str] = "passes_through_input"
     payload_schema: ClassVar[type] = PassThroughPayload
+    violation_class: ClassVar[type[PassThroughContractViolation]] = PassThroughContractViolation
 
     def applies_to(self, plugin: Any) -> bool:
         # Direct attribute access, NOT getattr with default (CLAUDE.md

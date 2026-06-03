@@ -1,0 +1,339 @@
+/* tokens.css — Design tokens.
+   Primary: :root (dark theme defaults) and [data-theme="light"] overrides.
+   Both blocks MUST remain TOP-LEVEL selectors (not nested under @media)
+   because src/styles/colorContrast.test.ts and statusBadgeAccessibility.test.ts
+   parse ^:root and [data-theme="light"] as anchored selectors. */
+
+/* ---------------------------------------------------------------------------
+   Colour Palette
+   --------------------------------------------------------------------------- */
+:root {
+  /* ── Backgrounds — DTA/AGDS three-family role palette ────────────────────── */
+  /* Workspace family — DTA Pacific teal (active editing surfaces) */
+  --color-bg:                #0f2d35;
+  --color-surface:           #122f37;
+  --color-surface-elevated:  #1a3d47;
+  --color-surface-hover:     rgba(255, 255, 255, 0.04);
+
+  /* Navigation family — AGDS Foundation navy (header chrome) */
+  --color-surface-nav:        #0a1d2e;
+  --color-surface-nav-raised: #13283a;
+
+  /* Inspection family — desaturated warm neutral (right-rail, paper modals).
+     Used by .layout-siderail and modal panels so they read as paper-on-desk
+     against the navy/teal columns instead of a third teal slab. */
+  --color-surface-inspector: #2a2826;
+  --color-surface-paper:     #332f2c;
+
+  /* ── Text ────────────────────────────────────────────────────────────────── */
+  --color-text:              #dff0ee;
+  --color-text-secondary:    #a8d0d0;
+  --color-text-muted:        #7a9a9a;
+  --color-text-inverse:      #ffffff;
+
+  /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
+  --color-border:            rgba(143, 200, 200, 0.12);
+  --color-border-strong:     rgba(143, 200, 200, 0.25);
+
+  /* ── Chat bubbles ────────────────────────────────────────────────────────── */
+  --color-bubble-user:           rgba(40, 130, 100, 0.14);
+  --color-bubble-user-border:    rgba(40, 130, 100, 0.35);
+  --color-bubble-assistant:      rgba(255, 255, 255, 0.05);
+  --color-bubble-assistant-border: rgba(255, 255, 255, 0.18);
+  --color-bubble-system:         rgba(255, 255, 255, 0.03);
+
+  /* ── Component type badges — functional colour coding ────────────────────── */
+  --color-badge-source:      #4db89a;
+  --color-badge-transform:   #e8a030;
+  --color-badge-gate:        #c390f9;
+  --color-badge-sink:        #e07040;
+  --color-badge-aggregation: #61daff;
+  /* Coalesce shifted from #14b0ae to break the byte-identical collision with
+     --color-success — previously a "completed" badge next to a coalesce node
+     was indistinguishable. The cyan-leaning teal sits clearly off the success
+     hue while staying in the same chromatic family. */
+  --color-badge-coalesce:    #18c2c0;
+
+  /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
+  --color-badge-source-bg:   rgba(77, 184, 154, 0.15);
+  --color-badge-transform-bg: rgba(232, 160, 48, 0.15);
+  --color-badge-gate-bg:     rgba(195, 144, 249, 0.15);
+  --color-badge-sink-bg:     rgba(224, 112, 64, 0.15);
+  --color-badge-aggregation-bg: rgba(97, 218, 255, 0.15);
+  --color-badge-coalesce-bg: rgba(24, 194, 192, 0.15);
+
+  /* ── Component type badge borders ────────────────────────────────────────── */
+  --color-badge-source-border:      rgba(77, 184, 154, 0.3);
+  --color-badge-transform-border:   rgba(232, 160, 48, 0.3);
+  --color-badge-gate-border:        rgba(195, 144, 249, 0.3);
+  --color-badge-sink-border:        rgba(224, 112, 64, 0.3);
+  --color-badge-aggregation-border: rgba(97, 218, 255, 0.3);
+  --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
+
+  /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
+  --color-success:           #14b0ae;
+  --color-error:             #e85653;
+  --color-warning:           #e38444;
+  --color-info:              #61daff;
+  --color-state-positive:    #14b0ae;
+
+  /* ── Semantic backgrounds — for inline alert/banner components ────────────── */
+  --color-success-bg:        rgba(20, 176, 174, 0.12);
+  --color-success-border:    rgba(20, 176, 174, 0.30);
+  --color-error-bg:          rgba(232, 86, 83, 0.12);
+  --color-error-border:      rgba(232, 86, 83, 0.30);
+  --color-warning-bg:        rgba(227, 132, 68, 0.14);
+  --color-warning-border:    rgba(227, 132, 68, 0.30);
+  --color-info-bg:           rgba(97, 218, 255, 0.10);
+  --color-info-border:       rgba(97, 218, 255, 0.25);
+
+  /* Per-node validation indicator borders */
+  --color-node-valid: #14b0ae;
+  --color-node-warning: #e38444;
+  --color-node-invalid: #e85653;
+  --color-node-unchecked: var(--color-border-strong);
+
+  /* ── Interactive / accent ────────────────────────────────────────────────── */
+  --color-accent:            #1a7a52;
+  --color-focus-ring:        #ffffff;
+  --color-btn-primary-bg:    #16664a;
+  --color-btn-primary-bg-hover: #1a5840;
+  --color-btn-danger-bg:     #b23835;
+  --color-btn-danger-bg-hover: #912f2d;
+  --color-link:              #61daff;
+  --color-highlight:         rgba(26, 122, 82, 0.14);
+  --color-selected-ring:     rgba(26, 122, 82, 0.55);
+
+  /* ── Status badges ───────────────────────────────────────────────────────── */
+  --color-status-pending:    #7a9a9a;
+  --color-status-running:    #61daff;
+  --color-status-completed:  #14b0ae;
+  --color-status-failed:     #e85653;
+  --color-status-cancelled:  #e38444;
+  /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
+     darker than --color-status-pending so the two non-success-but-clean
+     statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
+     reuses --color-status-completed (teal) and signals "with caveats"
+     via the warning glyph rather than a different colour. */
+  --color-status-empty:      #888888;
+
+  /* ── Surface variants ─────────────────────────────────────────────────── */
+  --color-surface-raised:    #1a3d47;
+  --color-surface-input:     #0f2d35;
+  --color-accent-muted:      rgba(20, 176, 174, 0.18);
+
+  /* ── Dimming ─────────────────────────────────────────────────────────────── */
+  --opacity-dimmed: 0.35;
+
+  /* ── Scrollbar — teal-tinted ─────────────────────────────────────────────── */
+  --color-scrollbar-track:       var(--color-bg);
+  --color-scrollbar-thumb:       rgba(143, 200, 200, 0.15);
+  --color-scrollbar-thumb-hover: rgba(143, 200, 200, 0.28);
+
+  /* ── React Flow canvas grid ──────────────────────────────────────────────── */
+  /* Used by GraphView's <Background> dot grid. Previously the grid painted
+     with --color-border (12% alpha) which fell to ~1.34:1 against the
+     workspace and read as flat. This token raises grid visibility to ~2.2:1
+     — clearly perceptible as a grid without competing with node content.
+     Note: orientation grids sit below WCAG 1.4.11's 3:1 UI-component bar by
+     design; pushing higher would visually fight with nodes. */
+  --color-canvas-grid:           rgba(170, 220, 220, 0.28);
+
+  /* ── Sizing ──────────────────────────────────────────────────────────────── */
+  --inspector-default-width: 320px;
+  --inspector-min-width:     240px;
+
+  /* ── Typography — Inter for body, system fallback ────────────────────────── */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code",
+    "Source Code Pro", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  --font-size-3xs:  10px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — a distinct register, smaller than 2xs */
+  --font-size-2xs:  11px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) */
+  --font-size-xs:   12px;
+  --font-size-sm:   13px;
+  --font-size-md:   15px;   /* preserves the h2/h3 hierarchy step in markdown-body rendering — h3 sits between h2 (base/16) and body (sm/13) */
+  --font-size-base: 16px;
+  --font-size-lg:   18px;
+  --font-size-xl:   22px;   /* empty-state heroes, loud headings (was 18px duplicate of --lg) */
+  --font-size-2xl:  32px;   /* display headings */
+
+  --line-height-tight:   1.3;
+  --line-height-snug:    1.35;  /* chat bubble body — tighter than normal but readable for multi-line responses */
+  --line-height-normal:  1.5;
+  --line-height-relaxed: 1.7;
+
+  /* ── Spacing ─────────────────────────────────────────────────────────────── */
+  --space-2xs: 2px;          /* chip insets, badge padding (covers the 2px axis) */
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  12px;
+  --space-lg:  16px;
+  --space-xl:  24px;
+  --space-2xl: 32px;
+
+  /* ── Radius ──────────────────────────────────────────────────────────────── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-pill: 9999px;   /* fully-rounded pills, circular FABs, progress-bar tracks */
+
+  /* ── Control heights ─────────────────────────────────────────────────────── */
+  /* --size-control is the WCAG 2.5.5 (AAA) 44×44 touch-target floor used by
+     .btn for canvas-area primary actions. --size-control-compact is the smaller
+     chrome-row control size used by header buttons and tightly-packed toolbars;
+     it meets WCAG 2.5.8 (AA, ≥24×24) but not AAA. New buttons must compose
+     .btn or .btn-compact — do not redeclare min-height literally. */
+  --size-control:         44px;
+  --size-control-compact: 36px;
+
+  /* ── Transitions ─────────────────────────────────────────────────────────── */
+  --transition-fast:   100ms ease;
+  --transition-normal: 150ms ease;
+  --transition-slow:   250ms ease;
+
+  /* ── Z-index layers ─────────────────────────────────────────────────────── */
+  --z-panel-controls:  10;   /* floating panel controls */
+  --z-catalog-backdrop: 38;  /* catalog drawer backdrop */
+  --z-catalog:         40;   /* catalog drawer panel */
+  /* Tooltip/popover layer — sits above panel-controls (10) and below the
+     overlay/dialog stack (100+). Consumed by .tool-call-info-bubble and
+     any future hover-revealed help bubbles that must clear inline chrome
+     without competing with modal layers. */
+  --z-popover:         50;
+  --z-overlay-backdrop: 99;  /* full-screen overlay backdrop */
+  --z-overlay:         100;  /* full-screen overlay panels, dropdowns */
+  --z-dialog-backdrop: 200;  /* modal dialog backdrop */
+  --z-dialog:          201;  /* modal dialog */
+  --z-palette-backdrop: 300; /* command palette backdrop */
+  --z-palette:         301;  /* command palette */
+  --z-skip-link:       1000; /* skip-to-content (always on top) */
+}
+
+
+/* ---------------------------------------------------------------------------
+   Light Theme Tokens
+   --------------------------------------------------------------------------- */
+
+/* Light theme — applied via data-theme="light" attribute (set by useTheme hook) */
+[data-theme="light"] {
+  /* ── Backgrounds — DTA/AGDS three-family role palette (light) ──────────── */
+  /* Workspace family — light teal (active editing surfaces) */
+  --color-bg:                #f4f8f9;
+  --color-surface:           #ffffff;
+  --color-surface-elevated:  #ffffff;
+  --color-surface-hover:     rgba(0, 45, 53, 0.04);
+
+  /* Navigation family — pale navy chrome */
+  --color-surface-nav:        #e8edf3;
+  --color-surface-nav-raised: #dbe3ec;
+
+  /* Inspection family — warm cream (right-rail, paper modals) */
+  --color-surface-inspector: #faf7f3;
+  --color-surface-paper:     #f0eae3;
+
+  /* ── Surface variants ──────────────────────────────────────────────────── */
+  --color-surface-raised:    #eaf2f3;
+  --color-surface-input:     #ffffff;
+  --color-accent-muted:      rgba(21, 96, 72, 0.12);
+
+  /* ── Text ────────────────────────────────────────────────────────────────── */
+  --color-text:              #0f2d35;
+  --color-text-secondary:    #3a5a64;
+  --color-text-muted:        #426069;
+  --color-text-inverse:      #ffffff;
+
+  /* ── Borders — darker for light backgrounds ───────────────────────────── */
+  --color-border:            rgba(15, 45, 53, 0.12);
+  --color-border-strong:     rgba(15, 45, 53, 0.25);
+
+  /* ── Chat bubbles ────────────────────────────────────────────────────────── */
+  --color-bubble-user:           rgba(40, 130, 100, 0.10);
+  --color-bubble-user-border:    rgba(40, 130, 100, 0.30);
+  --color-bubble-assistant:      rgba(15, 45, 53, 0.05);
+  --color-bubble-assistant-border: rgba(15, 45, 53, 0.15);
+  --color-bubble-system:         rgba(15, 45, 53, 0.03);
+
+  /* ── Semantic backgrounds — adjusted for light theme ────────────────────── */
+  --color-success-bg:        rgba(20, 160, 158, 0.10);
+  --color-success-border:    rgba(20, 160, 158, 0.35);
+  --color-error-bg:          rgba(210, 70, 67, 0.10);
+  --color-error-border:      rgba(210, 70, 67, 0.35);
+  --color-warning-bg:        rgba(200, 115, 55, 0.12);
+  --color-warning-border:    rgba(200, 115, 55, 0.35);
+  --color-info-bg:           rgba(40, 150, 190, 0.10);
+  --color-info-border:       rgba(40, 150, 190, 0.30);
+
+  /* ── Semantic colours — slightly darkened for light backgrounds ───────── */
+  /* --color-info and --color-link were deepened from #2890b8 to #176d8a so
+     they meet WCAG AA (4.5:1) as text on --color-bg (#f4f8f9). Verified by
+     colorContrast.test.ts. The semantic-colour-on-tinted-bg pairings (e.g.
+     --color-info on --color-info-bg) become slightly higher-contrast, which
+     is the desired direction. */
+  --color-success:           #0d8a88;
+  --color-error:             #c93b38;
+  --color-warning:           #b86830;
+  --color-info:              #176d8a;
+  --color-state-positive:    #056e6c;
+
+  /* ── Component type badges — WCAG AA 4.5:1 on 12% badge backgrounds ──── */
+  --color-badge-source:      #257963;
+  --color-badge-transform:   #926414;
+  --color-badge-gate:        #8356b6;
+  --color-badge-sink:        #ad502d;
+  --color-badge-aggregation: #207595;
+  /* Coalesce shifted cyan-ward to break the proximity to --color-success
+     (#0d8a88) on light mode; sits between aggregation and success. */
+  --color-badge-coalesce:    #0e8090;
+
+  /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
+  --color-badge-source-bg:   rgba(42, 138, 112, 0.12);
+  --color-badge-transform-bg: rgba(176, 120, 24, 0.12);
+  --color-badge-gate-bg:     rgba(138, 90, 192, 0.12);
+  --color-badge-sink-bg:     rgba(184, 85, 48, 0.12);
+  --color-badge-aggregation-bg: rgba(40, 144, 184, 0.12);
+  --color-badge-coalesce-bg: rgba(14, 128, 144, 0.12);
+
+  /* ── Component type badge borders ────────────────────────────────────────── */
+  --color-badge-source-border:      rgba(42, 138, 112, 0.35);
+  --color-badge-transform-border:   rgba(176, 120, 24, 0.35);
+  --color-badge-gate-border:        rgba(138, 90, 192, 0.35);
+  --color-badge-sink-border:        rgba(184, 85, 48, 0.35);
+  --color-badge-aggregation-border: rgba(40, 144, 184, 0.35);
+  --color-badge-coalesce-border:    rgba(14, 128, 144, 0.35);
+
+  /* Per-node validation indicator borders */
+  --color-node-valid: #0d8a88;
+  --color-node-warning: #b86830;
+  --color-node-invalid: #c93b38;
+  --color-node-unchecked: var(--color-border-strong);
+
+  /* ── Interactive / accent ────────────────────────────────────────────────── */
+  --color-accent:            #156048;
+  --color-focus-ring:        #0f2d35;
+  --color-btn-primary-bg:    #1a7a5a;
+  --color-btn-primary-bg-hover: #156048;
+  --color-btn-danger-bg:     #b23835;
+  --color-btn-danger-bg-hover: #912f2d;
+  --color-link:              #176d8a;
+  --color-highlight:         rgba(21, 96, 72, 0.12);
+  --color-selected-ring:     rgba(21, 96, 72, 0.45);
+
+  /* ── Status badges ───────────────────────────────────────────────────────── */
+  --color-status-pending:    #5a7a84;
+  --color-status-running:    #2890b8;
+  --color-status-completed:  #0d8a88;
+  --color-status-failed:     #c93b38;
+  --color-status-cancelled:  #b86830;
+  --color-status-empty:      #4d6a73;
+
+  /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */
+  --color-scrollbar-track:       var(--color-bg);
+  --color-scrollbar-thumb:       rgba(15, 45, 53, 0.18);
+  --color-scrollbar-thumb-hover: rgba(15, 45, 53, 0.30);
+
+  /* ── React Flow canvas grid (light) ──────────────────────────────────── */
+  --color-canvas-grid:           rgba(15, 45, 53, 0.20);
+}

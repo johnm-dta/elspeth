@@ -1,0 +1,75 @@
+{
+  "verdict": "NO_GO_REV_4",
+  "scope": "single-axis architecture re-review",
+  "reviewer": "axiom-planning:plan-review-architecture",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+  "reviewed_at": "2026-05-14",
+  "baseline_reviewed": "RC5.2 current checkout; plan rev-4 (2452 lines)",
+  "prior_verdict": "NO_GO_REV_3 (see .review.json) — four-axis review; six blockers (B1–B6).",
+  "rev3_to_rev4_diff": "Plan grew by 338 lines. Rev-4 revision-history note (line 5) enumerates the rev-3 response: missing FastAPI exception-handler task added, SessionServiceProtocol injection into ComposerServiceImpl made explicit, persisted assistant IDs threaded through composer result/carrier contract, semantic route-disposition categories replaced with literal call-site rows, Task 7 literal ellipsis removed, property-test pass-skeleton replaced with concrete state/injection requirements, raw_assistant_content=None preserved, Tier-1 runbook moved into Phase 3 scope.",
+  "summary": "Rev-4 patched the surfaces rev-3 named but did not generalize. The required keyword-only sessions_service parameter on ComposerServiceImpl.__init__ has roughly 150 unenumerated test-side construction sites that will fail with TypeError the moment the constructor change lands. This is the fourth consecutive revision to exhibit the same under-specification pattern: surface identification left to the implementer, adjacent surfaces unswept. Two of three rev-4 fixes are coherent (AuditAccessLogWriteError raise/handle pairing; literal-table Task 6 with persisted_tool_call_turn runtime flag); one is incomplete (the DI sweep).",
+  "rev3_blocker_status_in_rev4": {
+    "B1_FastAPI_handlers": {
+      "status": "resolved",
+      "notes": "Task 7b registers @app.exception_handler for AuditIntegrityError, StaleComposeStateError, and AuditAccessLogWriteError. Raise/handle pairing for AuditAccessLogWriteError verified coherent: Task 11 Step 3 raises from inside record_audit_grade_view's narrow except SQLAlchemyError; Task 11 Step 4 calls record_audit_grade_view_async from the route handler before returning rows; propagates to the registered handler; route-level except Exception forbidden at plan line 1871. AuditAccessLogWriteError correctly NOT placed in TIER_1_ERRORS — it is an audit-access boundary failure, not a Tier-1 audit-trail integrity failure."
+    },
+    "B2_sessions_service_DI": {
+      "status": "incomplete",
+      "notes": "Constructor parameter added at plan line 808 as required keyword-only with no default. App-factory wiring named at plan line 818. Test-side construction sites NOT enumerated. See B-rev4-1 below."
+    },
+    "B3_ComposerResult_assistant_id_source": {
+      "status": "resolved",
+      "notes": "persisted_assistant_message_id: str | None = None and persisted_tool_call_turn: bool = False added to ComposerResult with defaults. Defaults mean existing ComposerResult consumers are not broken by the addition. Genuine generalization here."
+    },
+    "B4_Task_6_literal_table": {
+      "status": "resolved",
+      "notes": "All 9 _persist_tool_invocations sites enumerated (routes.py:1364, 1514, 1737, 3444, 3986, 4944, 4964, 5533, 5553) plus symmetric add_message('assistant', ...) sites at 3433 and 3978. Runtime branching uses ComposerResult.persisted_tool_call_turn flag — mechanical, not implementer-judgment. Plan line 901 pre-emptively requires re-running rg if RC5.2 has advanced. Genuine fix."
+    },
+    "B5_literal_ellipsis": {
+      "status": "resolved",
+      "notes": "Static grep across 36 fenced python blocks returns zero \\w+(...) matches."
+    },
+    "B6_property_machine_pass_skeleton": {
+      "status": "resolved",
+      "notes": "ComposeLoopAuditMachine(RuleBasedStateMachine) at plan line 1996 with concrete @initialize, @rule, and three @invariant decorators (lines 2034/2039/2043). Plan line 2067–2071 requires every cancellation enum to be mechanically injectable and provides drive_single_example_trace fallback helper."
+    }
+  },
+  "blocking_issues": [
+    {
+      "id": "B-rev4-1",
+      "title": "ComposerServiceImpl constructor adds required keyword-only sessions_service param; ~150 test-side construction sites unenumerated",
+      "source": "architecture (Audit 4 — recurrence-pattern sweep)",
+      "severity": "critical",
+      "issue": "Plan line 808 adds sessions_service: SessionServiceProtocol as a required keyword-only argument with no default. Plan line 818 names one construction site (src/elspeth/web/app.py:create_app). Codebase grep returns ~150 ComposerServiceImpl(...) call sites in tests alone. Sampled files all fail to pass sessions_service.",
+      "evidence_call_sites": [
+        "tests/integration/pipeline/test_composer_llm_eval_characterization.py — 4 sites (lines 445, 548, 578, 686)",
+        "tests/unit/evals/test_convergence_scenarios_mocked_llm.py — 4 sites (lines 278, 416, 533, 725)",
+        "tests/unit/web/composer/test_compose_loop_anti_anchor.py — 4 sites (lines 140, 208, 286, 340)",
+        "tests/unit/web/composer/test_compose_loop_llm_audit.py — 2 sites (lines 170, 201)",
+        "tests/integration/web/composer/guided/test_progressive_disclosure.py — 1 site (line 129)"
+      ],
+      "failure_mode": "TypeError: ComposerServiceImpl.__init__() missing 1 required keyword-only argument: 'sessions_service' — on every existing test construction site the moment the constructor change lands. This is the direct recurrence of rev-3 B2 displaced one layer downstream: rev-3 missed the DI parameter, rev-4 added the parameter but did not sweep the construction-site inventory.",
+      "remediation_option_1": "Enumerate the inventory. Task 6 Step 2b's Files: block lists every file with a construction site that needs updating, with the expected change per site (add sessions_service=... factory call, or confirm the test exercises a non-persistence path and assert why a stub/None sentinel is acceptable). Rigorous; scales poorly across ~150 sites.",
+      "remediation_option_2": "Add a sentinel default. Change the constructor to sessions_service: SessionServiceProtocol | None = None with a guard that raises RuntimeError('sessions_service not wired') at first use of self._sessions_service. Tests that don't exercise compose-turn persistence continue to work without modification; tests that do exercise it receive an informative error rather than a constructor TypeError. Document sentinel semantics in the constructor docstring. Lower blast radius; recommended.",
+      "recommendation": "Option 2 — sentinel default with first-use guard. Acceptable under No-Legacy-Code because these tests are existing callers that simply don't exercise the new path, not legacy compatibility shims."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W-rev4-1",
+      "title": "Seam-contract docstring location not named in plan",
+      "source": "architecture (Audit 1)",
+      "severity": "warning",
+      "issue": "Plan lines 90 and 818 say 'update the existing composer seam documentation that currently says the composer does not depend on SessionService' without citing the file or symbol.",
+      "evidence": "Stale docstring text lives at /home/john/elspeth/src/elspeth/web/composer/protocol.py lines 614–615 ('Does NOT depend on SessionService — the route handler mediates (seam contract B).') and line 636 ('depend on SessionService (seam contract B).')",
+      "remediation": "Add to Task 6 Step 2b's Files: block: 'src/elspeth/web/composer/protocol.py — update seam contract B docstring at lines 614–615 and 636 to reflect that ComposerService now depends on SessionServiceProtocol for compose-turn audit-row persistence.' One sentence; same recurrence-pattern shape as every prior under-specification finding."
+    }
+  ],
+  "coherent_surfaces": [
+    "Audit 2 — AuditAccessLogWriteError raise/handle pairing: closed loop verified; correct tier classification.",
+    "Audit 3 — Task 6 literal table + add_message retention flag: mechanical branching via ComposerResult.persisted_tool_call_turn.",
+    "B3 generalization — new ComposerResult fields have safe defaults; existing consumers unaffected."
+  ],
+  "recurrence_pattern_note": "This is now the fourth consecutive revision to exhibit the under-specification pattern: rev-2 named one surface (deletion seam) and the plan fixed exactly that; rev-3 named the next surface (insertion seam, FastAPI handler chain, semantic-vs-literal enumeration) and the plan fixed exactly those; rev-4 names test-side construction inventory + docstring location and continues the pattern. Each revision is a strictly local fix. The mechanical signature is that the planner treats the reviewer's enumerated surfaces as the complete defect inventory, rather than as observed instances of a broader defect class. For rev-5, recommend the operator require the planner to perform a pre-commit grep sweep for every type-signature change (every constructor parameter, every dataclass field, every protocol method) against the whole codebase, and either enumerate every call site or restructure the change to tolerate missing callers (default values, sentinel types, gradual migration).",
+  "verdict_next_step": "Fix B-rev4-1 (Option 2 recommended). Address W-rev4-1 (one sentence). Then either land rev-5 directly or run one more single-axis architecture re-review against the recurrence-pattern litmus test."
+}

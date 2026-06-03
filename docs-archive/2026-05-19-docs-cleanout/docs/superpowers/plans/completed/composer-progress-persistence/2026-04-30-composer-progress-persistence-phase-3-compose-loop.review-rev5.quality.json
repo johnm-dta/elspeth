@@ -1,0 +1,90 @@
+{
+  "verdict": "NO_GO_REV_5_QUALITY",
+  "scope": "single-axis quality re-review of rev-5",
+  "reviewer": "axiom-planning:plan-review-quality",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+  "reviewed_at": "2026-05-14",
+  "baseline_reviewed": "RC5.2 current checkout; plan rev-5 (2503 lines)",
+  "prior_verdicts_in_chain": [
+    ".review.json — NO_GO_REV_3 (four-axis review; six blockers B1–B6)",
+    ".review-rev4.architecture.json — NO_GO_REV_4 (single-axis architecture; one blocker B-rev4-1)",
+    "ARCHITECTURE rev-5: GO_FOR_ARCHITECTURE_AXIS (verified via static check; line-102 ground rule closes recurrence cycle on architecture axis)"
+  ],
+  "summary": "Rev-5's architecture-axis fix is genuine. The line-102 signature-change-sweep ground rule structurally breaks the architecture-axis recurrence pattern. Rev-5 did not, however, add an analogous quality-axis discipline. The 11-fixture undefined-fixture defect that rev-3 quality reviewer flagged as W1 (warning) has persisted through rev-4 and rev-5 unchanged, and rev-5 introduced 2 additional undefined helpers (`_run_one_turn_for_test`, `composer_service_without_sessions_service`) on top. This is the quality-axis analogue of B-rev4-1: rev-5 patched the surface its reviewer named but left the broader defect class on an adjacent surface. Plan also introduces one fresh defensive-programming violation in the AuditIntegrityError handler body.",
+  "rev3_quality_blocker_status_in_rev5": {
+    "Q3-1_literal_ellipsis": {
+      "status": "resolved",
+      "notes": "Zero ellipsis-in-arglist matches across 36+ fenced python blocks. The single `pass` at plan line 475 is a loop-body comment, not a test placeholder."
+    },
+    "Q3-2_FastAPI_handlers": {
+      "status": "partially_resolved",
+      "notes": "All three handlers (AuditIntegrityError 500, StaleComposeStateError 409, AuditAccessLogWriteError 500) tasked in Task 8 with coherent `error_type` strings. But the `_audit_integrity_error_handler` body at plan line 1239 uses `getattr(exc, 'failed_turn', None)` — defensive programming on a Tier-1 exception, forbidden by CLAUDE.md. New defect introduced by rev-5; see B-QA-3."
+    },
+    "Q3-3_property_pass_skeleton": {
+      "status": "resolved",
+      "notes": "Plan lines 2031–2081 show ComposeLoopAuditMachine with concrete @initialize, @rule, and three @invariant decorators each calling named helpers. No `pass` or `assert True` in invariant bodies. Plan line 2083 explicitly forbids committing helpers undefined."
+    },
+    "Q3-4_cancellation_injection_mechanism": {
+      "status": "resolved",
+      "notes": "Injection table at plan lines 1997–2008 names concrete mechanisms for all nine cancellation arrival times: SQLAlchemy event hook for during_run_sync_between_insert_and_commit; monkeypatch on advisory-lock helper with asyncio.Event for during_advisory_lock_acquisition; in-coroutine hook after persist_compose_turn_async returns for after_commit_before_response_yielded."
+    }
+  },
+  "rev3_quality_warning_status_in_rev5": {
+    "W1_undefined_fixtures": {
+      "status": "PERSISTED_UNRESOLVED_AND_PROMOTED_TO_BLOCKER",
+      "notes": "Rev-3 quality reviewer flagged 11 fixtures as W1 (undefined in plan or codebase): fake_composer_service, fake_llm_emitting_n_tool_calls, _run_one_turn_for_test, inject_commit_OperationalError, inject_audit_access_log_write_failure, add_message_spy, sqlalchemy_event_listener, composer_service_with_real_sessions, composer_test_client, session_with_pending_compose_request, populated_audit_db. Rev-4 and rev-5 did not address W1. Plus rev-5 added composer_service_without_sessions_service and other undefined helpers on top. Spot-check: fake_composer_service at 6 call sites; inject_commit_OperationalError at 2 sites; populated_audit_db at 1 site — none defined. This is the quality-axis recurrence-pattern analogue of B-rev4-1."
+    }
+  },
+  "blocking_issues": [
+    {
+      "id": "B-QA-1",
+      "title": "_run_one_turn_for_test is not a real method on ComposerServiceImpl",
+      "severity": "high",
+      "issue": "ComposerServiceImpl._run_one_turn_for_test does not exist in src/elspeth/web/composer/service.py and is not tasked for creation anywhere in the plan. It appears at 16 call sites across test snippets including the rev-5-new red test at plan line 829 (`test_persistence_path_without_sessions_service_crashes_loudly`).",
+      "failure_mode": "Every test that calls _run_one_turn_for_test fails with AttributeError before reaching any assertion. The RED step of TDD cannot fail for the assertion the plan intends — it fails for a missing method. The implementer cannot tell whether the production code is unimplemented (TDD RED) or whether the test infrastructure is broken (test scaffolding gap).",
+      "remediation_option_1": "Add a task that implements _run_one_turn_for_test on ComposerServiceImpl as a thin test-only wrapper around the loop body (e.g., one iteration of the loop with the inputs passed as parameters). Document the contract: it must traverse _require_sessions_service() so the unwired-path test fires.",
+      "remediation_option_2": "Replace every _run_one_turn_for_test call site with the actual invocation path that exercises the loop end-to-end. Higher churn but no production-code test-affordance.",
+      "recommendation": "Option 1 — add the test-only helper. Document why it exists (test isolation). The alternative (driving _compose_loop from outside) forces every test to set up a full request context."
+    },
+    {
+      "id": "B-QA-2",
+      "title": "Test fixtures used across plan red tests are not defined",
+      "severity": "high",
+      "issue": "At minimum 13 fixtures are referenced in plan red tests but have no `def` in the plan and do not exist in any current conftest: fake_composer_service, composer_service_with_real_sessions, composer_service_without_sessions_service, fake_llm_two_tool_calls, fake_llm_three_tool_calls, fake_llm_emitting_n_tool_calls, inject_commit_OperationalError, inject_audit_access_log_write_failure, populated_audit_db, build_test_sessions_service, composer_test_client, session_with_pending_compose_request, result_session_id.",
+      "failure_mode": "Following the plan task-by-task and running each red test yields `fixture 'fake_composer_service' not found` rather than `AssertionError`. The TDD RED is a test-infrastructure failure, not a unimplemented-production-code failure. The implementer may invent fixture semantics the plan never specified.",
+      "remediation": "Add a Task 0 (or a dedicated conftest appendix in Task 6 Step 0) that specifies the concrete implementation of each fixture. Either: (a) inline the fixture defs in the plan (preferred for fixtures the plan invents); or (b) cite the existing conftest path that defines each (preferred when reusing existing fixtures). The plan's claim 'fixture names for the integration harness implementer to bind to existing factories' is too weak — existing test factories do not provide these specific fixtures (verified by codebase grep). The 11 fixtures rev-3 quality reviewer flagged as W1 must now ship as B-QA-2 closure deliverables."
+    },
+    {
+      "id": "B-QA-3",
+      "title": "getattr on Tier-1 exception in _audit_integrity_error_handler body",
+      "severity": "medium",
+      "issue": "Plan line 1239 in the AuditIntegrityError exception handler: `failed_turn = getattr(exc, 'failed_turn', None)`. AuditIntegrityError.failed_turn is added by this phase; it is a typed dataclass field on a Tier-1 exception. CLAUDE.md forbids getattr() on system types.",
+      "failure_mode": "If `failed_turn` is genuinely sometimes absent (which the getattr suggests), the plan has a Tier-1 invariant gap: the exception is raised before failed_turn is populated. The defensive getattr papers over the gap rather than enforcing the invariant. Code review or the enforce_tier_model / ruff passes will reject the getattr if they surface defensive patterns on first-party objects.",
+      "remediation": "Access exc.failed_turn directly. Add an invariant test that asserts AuditIntegrityError instances always carry failed_turn populated (or with a sentinel value). If a raise-site doesn't have the failed_turn data, fix the raise-site to pass it; do not let the handler paper over the omission. Same for request.state.request_id — if request-id middleware is optional, justify that explicitly in the handler docstring; if it's mandatory, drop the getattr."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W-QA-1",
+      "title": "Property machine helper create_real_session_for_machine() must wire sessions_service explicitly",
+      "severity": "medium",
+      "issue": "ComposeLoopAuditMachine helpers are tasked as 'placeholders for real helpers implemented in the test module' (plan line 2083). The plan does not state that create_real_session_for_machine() must construct ComposerServiceImpl with sessions_service= wired. Given rev-5's sentinel default, the obvious-looking ComposerServiceImpl() construction will silently set sessions_service=None and the machine will fail with RuntimeError('sessions_service not wired') on the first @rule invocation.",
+      "remediation": "Add a one-sentence constraint to the property-machine task: 'create_real_session_for_machine() must construct ComposerServiceImpl with sessions_service= bound to a real or protocol-faithful SessionService; the sentinel default is for non-persistence callers only and not appropriate here.'"
+    },
+    {
+      "id": "W-QA-2",
+      "title": "Signature-change sweep has no failure-escalation path for un-bucketable callers",
+      "severity": "low",
+      "issue": "Plan lines 845–851 define three acceptance buckets for ComposerServiceImpl callers but don't specify what to do if a caller doesn't fit any bucket. The CL-PP assertion-churn gate at plan line 1962 has the right shape ('If the other bucket is non-empty, stop and surface it to the operator before committing.') The signature-change sweep should match.",
+      "remediation": "Add a sentence to line 851: 'If a caller cannot be classified into (a), (b), or (c), stop and surface it to the operator before committing.'"
+    }
+  ],
+  "coherent_surfaces": [
+    "Q3-1 literal ellipsis — fully resolved across all rev-5 fenced blocks.",
+    "Q3-3 property machine — concrete @initialize/@rule/@invariant bodies with named (placeholder) helpers and explicit no-undefined-commit rule.",
+    "Q3-4 cancellation injection mechanisms — all nine arrival points have concrete mechanisms.",
+    "Rev-5 sentinel-default constructor + first-use guard architecture pattern itself is sound; the gap is that downstream test fixtures don't wire it where they need to."
+  ],
+  "recurrence_pattern_note_quality_axis": "Rev-5's line-102 ground rule closed the architecture-axis recurrence cycle. The quality-axis equivalent — a procedural rule that every red test must reference only defined fixtures and defined helpers, or carry a task that creates them — is absent. The defect class first manifested as Q3-1 (literal ellipsis: unrunnable red tests) in rev-3 quality and was patched specifically. The same class persisted as 11 undefined fixtures in rev-3 W1 (warning) and was not patched. Rev-4 and rev-5 added new test snippets that reference even more undefined helpers (_run_one_turn_for_test, composer_service_without_sessions_service). The mechanical signature is the same as the architecture-axis pattern: planner treats reviewer-enumerated surfaces as the complete defect inventory rather than as observed instances of a broader class.",
+  "verdict_next_step": "Fix B-QA-1 (add _run_one_turn_for_test as a tasked test-only helper), B-QA-2 (define the 13 fixtures in plan or cite existing conftest), and B-QA-3 (replace getattr with direct field access in the AuditIntegrityError handler body). Also add the line-851 escalation sentence (W-QA-2) and the property-machine wiring constraint (W-QA-1). Recommend rev-6 add a quality-axis ground rule alongside line 102: 'Every red test in this plan must reference only fixtures and helpers defined in the plan or in existing conftests; for each, name the def location.' This is the quality-axis analogue of the signature-change sweep rule and structurally closes the recurrence cycle on this axis."
+}

@@ -14,8 +14,12 @@ const TEST_USER = {
   display_name: "E2E Tester",
 };
 
-const FRONTEND_ORIGIN = "http://localhost:5173";
-const BACKEND_BASE_URL = "http://127.0.0.1:8451";
+const FRONTEND_PORT = process.env.PLAYWRIGHT_FRONTEND_PORT ?? "5173";
+const BACKEND_PORT = process.env.PLAYWRIGHT_BACKEND_PORT ?? "8451";
+const FRONTEND_ORIGIN =
+  process.env.PLAYWRIGHT_FRONTEND_BASE_URL ?? `http://127.0.0.1:${FRONTEND_PORT}`;
+const BACKEND_BASE_URL =
+  process.env.PLAYWRIGHT_BACKEND_BASE_URL ?? `http://127.0.0.1:${BACKEND_PORT}`;
 const TOKEN_KEY = "auth_token";
 
 async function obtainToken(apiBaseURL: string): Promise<string> {
@@ -53,6 +57,29 @@ async function obtainToken(apiBaseURL: string): Promise<string> {
   }
 }
 
+async function markTutorialCompleted(apiBaseURL: string, token: string): Promise<void> {
+  const ctx = await request.newContext({
+    baseURL: apiBaseURL,
+    extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+  });
+  try {
+    const resp = await ctx.patch("/api/composer-preferences", {
+      data: {
+        default_mode: "guided",
+        tutorial_completed_at: new Date().toISOString(),
+      },
+    });
+    if (!resp.ok()) {
+      const detail = await resp.text();
+      throw new Error(
+        `mark tutorial completed failed (${resp.status()}): ${detail.slice(0, 500)}`,
+      );
+    }
+  } finally {
+    await ctx.dispose();
+  }
+}
+
 function writeStorageState(path: string, token: string): void {
   const state = {
     cookies: [],
@@ -75,6 +102,10 @@ const STORAGE_STATE_PATH = resolve(HERE, "..", ".auth", "user.json");
 
 export default async function globalSetup(): Promise<void> {
   const token = await obtainToken(BACKEND_BASE_URL);
+  // Most E2E specs predate the first-run tutorial and assert on the normal
+  // composer shell. Keep the baseline tester out of tutorial mode; specs that
+  // exercise the tutorial explicitly reset the preference in their own setup.
+  await markTutorialCompleted(BACKEND_BASE_URL, token);
   writeStorageState(STORAGE_STATE_PATH, token);
   // Confirm to the operator that globalSetup completed — otherwise a
   // mis-pathed write looks identical to "globalSetup never ran" in the

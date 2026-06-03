@@ -2,9 +2,12 @@ per_file_rules:
 - pattern: core/secrets.py
   rules:
   - R5
-  reason: Tree-walk over Tier-3 config dicts requires isinstance() for structural dispatch (dict/list/leaf), and exact ${NAME} secret-env marker detection requires confirming scalar strings before regex parsing. The entire point of this module is to inspect an arbitrary config dict whose shape is external/user-provided.
+  reason: Tree-walk over Tier-3 config dicts requires isinstance() for structural
+    dispatch (dict/list/leaf), and exact ${NAME} secret-env marker detection requires
+    confirming scalar strings before regex parsing. The entire point of this module
+    is to inspect an arbitrary config dict whose shape is external/user-provided.
   expires: null
-  max_hits: 10
+  max_hits: 13
 - pattern: core/expression_parser.py
   rules:
   - R5
@@ -14,14 +17,16 @@ per_file_rules:
 - pattern: core/templates.py
   rules:
   - R5
-  reason: Jinja2 template AST walker requires isinstance() for node type traversal - fundamental to field extraction
+  reason: Jinja2 template AST walker requires isinstance() for node type traversal
+    - fundamental to field extraction
   expires: null
   max_hits: 22
 - pattern: core/config.py
   rules:
   - R1
   - R6
-  reason: Configuration loading parses user YAML (Tier 3) - defensive optional field access required
+  reason: Configuration loading parses user YAML (Tier 3) - defensive optional field
+    access required
   expires: null
 - pattern: core/config.py
   rules:
@@ -32,7 +37,8 @@ per_file_rules:
 - pattern: core/security/*
   rules:
   - R1
-  reason: Security utilities access optional environment variables (Tier 3) - defensive access for missing keys
+  reason: Security utilities access optional environment variables (Tier 3) - defensive
+    access for missing keys
   expires: null
 - pattern: core/canonical.py
   rules:
@@ -45,7 +51,7 @@ per_file_rules:
   - R5
   reason: Type envelope detection, NaN rejection, and reserved key escaping
   expires: null
-  max_hits: 13
+  max_hits: 26
 - pattern: core/dag/builder.py
   rules:
   - R5
@@ -85,7 +91,8 @@ per_file_rules:
 - pattern: core/landscape/journal.py
   rules:
   - R5
-  reason: SQL parameter format normalization (list/tuple/dict) + IntegrityError prefix dispatch
+  reason: SQL parameter format normalization (list/tuple/dict) + IntegrityError prefix
+    dispatch
   expires: null
   max_hits: 5
 - pattern: core/landscape/run_lifecycle_repository.py
@@ -100,127 +107,213 @@ per_file_rules:
   reason: Exception type discrimination for error prioritization
   expires: null
   max_hits: 1
-- pattern: core/security/web.py
-  rules:
-  - R5
-  reason: Union type narrowing for thread-safe URL validation
-  expires: null
-  max_hits: 2
 allow_hits:
 - key: core/payload_store.py:R6:FilesystemPayloadStore:store:fp=7ffad90e4cb20922
-  owner: architecture
-  reason: TOCTOU race guard — FileNotFoundError means file was purged between read attempt and write fallback
-  safety: Falls through to atomic write path, restoring the blob. No data loss.
-  expires: null
+  owner: john
+  reason: |-
+    In FilesystemPayloadStore.store (line 116) the EAFP block tries path.read_bytes() to verify an already-stored file, and the except FileNotFoundError simply falls through (pass) to the write path. The filesystem is an external resource (Tier-3-style boundary): a concurrent retention purger can delete the file between any LBYL exists() check and the read, so try/read-except-FileNotFoundError is the policy-correct way to dodge that TOCTOU race rather than a defensive swallow. The catch is narrowed to exactly FileNotFoundError; integrity failures (hash mismatch) still raise IntegrityError, and the fall-through is the method's correct behaviour — write the content we were asked to store via an atomic temp-file replace. No data is lost or fabricated and no bug in our own code is hidden; the existing rationale still accurately describes the code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:42:47.496917+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The R6 rule fires on shape (except + pass), but this is not silent error swallowing — it is the EAFP idiom at a filesystem (Tier-3) boundary. The catch is narrowly scoped to FileNotFoundError; hash mismatches still raise IntegrityError; and 'file not present' is not an error condition for a store() operation but the expected branch that triggers the write path. The rationale plainly states the TOCTOU motivation (a concurrent purger between exists() and read_bytes()), and the visible code confirms it: the fall-through goes to an atomic temp-file replace, not to a fabricated default or a swallowed integrity failure. No data is fabricated; no bug in code we control is hidden. The decorator nudge does not apply (R6 is not in the {R1, R5} suppression set).
+  judge_signature_version: 2
+  scope_fingerprint: ba498000ebb36e6438747e398ee7ead994dfe68a33a52ddde8b282d9aae648e6
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[11]/body[3]/body[3]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:7a90966856125663034b71d95674f15530cd588224fdb167d557f1371b5708a2'
 - key: core/payload_store.py:R6:FilesystemPayloadStore:delete:fp=5e6dea501dc28457
-  owner: architecture
-  reason: Idempotent delete — FileNotFoundError means content already deleted (retention purge or duplicate call)
-  safety: Returns False on missing file — caller informed, no silent data loss
-  expires: null
-- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
-  owner: architecture
-  reason: PayloadNotFoundError from PayloadStore when payload purged by retention policy — expected, not corruption
-  safety: Logs debug message and continues with source_data=None; payload_available flag set to False
+  owner: john
+  reason: |-
+    FilesystemPayloadStore.delete (line 181) calls path.unlink() and catches FileNotFoundError to return False, while a successful unlink returns True. This implements the method's documented idempotent contract (True on deletion, False if not found) over a real I/O boundary where a retention purge or a duplicate delete call can have already removed the file — the canonical EAFP idiom that avoids an exists()-then-unlink TOCTOU race. The except is narrowly scoped to one exception type on one operation and translated into an explicit, meaningful return value, not silently discarded; any other OSError still propagates. This is offensive handling at a filesystem boundary, not suppression of a code bug, and the existing rationale matches the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:42:56.275491+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. R6 fires on the except block at line 181, but the filesystem is a Tier-3 external boundary (the file may have been removed by a concurrent retention purge, another deleter, or out-of-band cleanup) — not first-party state under an ELSPETH contract. The narrowly-scoped FileNotFoundError catch is the canonical EAFP idiom that fulfills the method's documented idempotent contract (True on deletion, False if not found), translating absence into an explicit, meaningful return value rather than silently swallowing it; any other OSError still propagates. The rationale plainly identifies the boundary, the contract, and the scope, and the visible code corroborates each point.
+  judge_signature_version: 2
+  scope_fingerprint: e3b05e1372a12e97ac66938e76b285e6f4157f0f640c19fe0d5e1f8256f02dbd
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[11]/body[6]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:987652acd0b22d57388949014ae48d74535a61467f56f9729381617d9aa7a6de'
 - key: core/canonical.py:R6:_normalize_value:fp=b26d50562c16f852
-  owner: architecture
-  reason: TypeError from np.isnan/isinf on non-numeric dtypes is expected — non-numeric arrays can't contain NaN
-  safety: Only catches TypeError from np.isnan/isinf, lets all other exceptions propagate
-  expires: '2026-07-02'
-- key: core/rate_limit/limiter.py:R6:RateLimiter:try_acquire:fp=3e1bc5e9e76ba71f
-  owner: architecture
-  reason: Silent recovery with explicit error handling path — returns False when bucket full
-  safety: Caller checks return value; no silent data loss
-  expires: '2026-07-02'
-- key: core/rate_limit/limiter.py:R6:RateLimiter:close:fp=3aef03c2689d8024
-  owner: architecture
-  reason: Framework boundary — pyrate-limiter _leaker attribute may not exist across library versions
-  safety: Graceful degradation to no cleanup if attribute missing; thread dies naturally
-  expires: '2026-07-02'
+  owner: john
+  reason: |-
+    In _normalize_value (line 98) the np.any(np.isnan/isinf) check on a non-empty ndarray is wrapped, and except TypeError: pass handles the case where numpy raises TypeError because the array's dtype is non-numeric (e.g. strings). This is narrow EAFP type-dispatch: numpy offers no clean LBYL way to ask 'could this dtype hold NaN/Inf' without invoking the check, and a non-numeric array definitionally cannot contain NaN/Infinity, so there is nothing to reject — the pass is the correct fall-through, not a swallowed data error. No value is coerced, defaulted, or fabricated; the function continues to normalize the array element-wise, and any genuine non-finite numeric value still raises ValueError. The catch is scoped to TypeError only (the specific exception numpy raises for the dtype mismatch), so it cannot mask other failures.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:33:14.497673+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM. The wrapped block is an offensive check (raise ValueError on NaN/Inf in numeric arrays) and the narrow `except TypeError: pass` is EAFP type-dispatch for numpy's behaviour on non-numeric dtypes — np.isnan/isinf raise TypeError on string/object arrays, which definitionally cannot contain NaN/Inf so there is nothing to reject. No value is coerced, defaulted, or fabricated; the function falls through to element-wise normalization in both branches, and a real non-finite numeric value still raises. The except is scoped tightly to TypeError so other failures still surface, and the in-source comment at lines 99-100 documents the intent. A cleaner LBYL via `np.issubdtype(obj.dtype, np.number)` exists, but that is a style refinement, not a policy violation — R6 targets silent suppression of real errors, and the swallowed signal here is dispatch, not data corruption.
+  judge_signature_version: 2
+  scope_fingerprint: a719d77c0367e52af9034c4a9dacccebe73ef0dae48acba7065176dbabde404d
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[17]/body[6]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:51cad0c337bc17ac9c93153c7427c6213f25eb6c51196f360ddb7f76792bfe82'
 - key: core/security/secret_loader.py:R6:CompositeSecretLoader:get_secret:fp=cb4d8fc57f9917d4
-  owner: bugfix
-  reason: Intentional fallback pattern - CompositeSecretLoader tries loaders in priority order
-  safety: SecretNotFoundError from one loader triggers fallback to next; raises if all fail
-  expires: null
-- key: core/events.py:R1:EventBus:emit:fp=6f513a170f117689
-  owner: architecture
-  reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
-- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
-  owner: architecture
-  reason: Silent except in schema lookup — DIVERT edge may target non-existent node (forward reference or optional path)
-  safety: Continues to next coalesce point; warning about potential data loss is best-effort
-  expires: '2026-05-12'
-- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
-  owner: bugfix
-  reason: Tier-3 boundary - PayloadStore.delete() is external I/O (filesystem/blob storage)
-  safety: Exception caught and logged, ref added to failed_refs, loop continues
+  owner: john
+  reason: |-
+    CompositeSecretLoader.get_secret (line 302) iterates backends in priority order and catches SecretNotFoundError to continue to the next backend; if every backend lacks the secret it re-raises SecretNotFoundError with context. 'Not found in this backend' is a normal control-flow signal for a fallback chain (e.g. env var, else Key Vault), not an error to surface, so a narrow except used as a documented EAFP signal is the legitimate pattern. The catch is scoped to exactly SecretNotFoundError; unrelated failures (auth errors, network errors, vault permission errors) propagate uncaught, and the not-found condition is never swallowed — it is either satisfied by a later backend or re-raised. No secret value is logged, defaulted, or fabricated. The existing rationale accurately describes the code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:43:03.663171+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 fires on the `except SecretNotFoundError: continue`, but the visible code shows the exception is not swallowed: it is caught narrowly (only SecretNotFoundError, not bare Exception), used as a control-flow signal for fallback-chain iteration, and if no backend supplies the secret the loop re-raises `SecretNotFoundError(f"Secret '{name}' not found in any backend")` at line 305. Unrelated failures (auth, network, permission) propagate uncaught. This is the documented EAFP fallback-chain pattern, not silent suppression — the not-found condition is either satisfied by a later backend or surfaces to the caller. The rationale correctly names the pattern and is consistent with the excerpt.
+  judge_signature_version: 2
+  scope_fingerprint: c07f47358ca80f7a97d89d73e6c2b01db0f8a03ae7747cfce5a756737ebf3fde
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[14]/body[2]/body[1]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:4b5117a3717542bc31bf7bd892d8872a2aea3afb35ad60fe6a62e75556f9d2c2'
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=1707b0fbd6672873
+  owner: john
+  reason: |-
+    In get_unprocessed_row_data (line 359) the isinstance check tests that json.loads of the persisted payload produced a dict, raising AuditIntegrityError otherwise. The check guards the STRUCTURAL integrity of our own authored serialization container — we wrote the rule that this payload is a JSON object, so a non-dict on read-back is corruption of our serialization layer (Tier-1), and crashing is the policy-prescribed response. (The external-origin row VALUES inside that container remain Tier-3 and get their own boundary validation at line 370 via source_schema_class.model_validate — this isinstance is not the value check.) The isinstance is the detector with no recovery branch, no .get() fallback, and no coercion; malformed envelopes propagate as integrity errors. This is R5's legitimate use of isinstance as an invariant assertion on our authored container shape, not a silencer of a contract violation. I refined the existing rationale, which imprecisely called the row data itself 'Tier-1'; the Tier-1 claim correctly attaches to the JSON container structure, not the source-authored values.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:44:21.916954+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The flagged isinstance is the offensive-programming detector for a structural invariant on a container WE authored: the writer at core/landscape/data_flow_repository.py:506-509 always serializes row payloads as canonical_json(dict).encode('utf-8'), so a non-dict on read-back can only mean our own serialization envelope was tampered with at rest — a Tier-1 audit-integrity failure under the custody doctrine ('checkpoint WE authored, re-read from the same DB, stays Tier-1'). The check has no .get() fallback, no coercion, no recovery branch — it raises AuditIntegrityError, the typed exception that bubbles to abort the run (correct routing for Tier-1 corruption). The external-origin row VALUES inside the dict are correctly treated as Tier-3 and get their own boundary validation at line 370 via source_schema_class.model_validate, so this isinstance does not laundered any value-level trust. The rationale also honestly refines a prior imprecise framing (Tier-1 attaches to the envelope, not the contents), which matches what the code does.
+  judge_signature_version: 2
+  scope_fingerprint: c2939133bac38bc2686ca3bdfd980a0dd107d2b4f93248bc66f2860f94fc9a9d
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[26]/body[4]/body[6]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:a2dbcd0e000e98a7a7c0627d646db86a158a090a541fe26020eb5781efcc47c7'
 - key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
-  owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=455e3f20c68fa667
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1ef96f8297c0018e
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2fbf8ece4fc84429
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=5a4bcca49c9562cc
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=0d39d40f3b603a68
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1e4573ff84803165
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=aa4d3aa685d51b84
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=fe6db82976e6fa39
-  owner: P2-2026-02-02-76r
-  reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=60affc486e53170e
-  owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7d0809b197d9ab44
-  owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=5d39923434a1b710
-  owner: architecture
-  reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=ec4658370df974ec
-  owner: bugfix
-  reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity that canonical_json rejects
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=f234b4284f04a49d
-  owner: bugfix
-  reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
-  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
-- key: core/security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
-  owner: bugfix
-  reason: DNS resolver worker catches BaseException to relay ALL errors through the queue to the caller thread
-  safety: Every caught exception is put on the queue and re-raised by the caller; nothing is suppressed
-  expires: '2026-05-12'
-- key: core/security/secret_loader.py:R6:KeyVaultSecretLoader:get_secret:fp=e77b2a357f43e9a2
-  owner: bugfix
-  reason: Sentinel class definition in except ImportError — not a runtime error handler
-  safety: _get_client() raises ImportError before any Azure API call; sentinel class is never caught
-- key: core/retention/purge.py:R4:PurgeManager:purge_payloads:fp=ed928398c920ef43
-  owner: bugfix
-  reason: Post-point-of-no-return recovery — payloads are already irreversibly deleted, so ANY failure in grade updates must not abort the loop for remaining runs
-  safety: Exception caught and logged via structlog, run_id added to grade_update_failures in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=b640bacb8966c304
-  owner: core
-  reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
-  safety: Raises TypeError if not dict; no silent coercion
-  expires: null
+  owner: john
+  reason: |-
+    In begin_node_state (line 173) the except (ValueError, TypeError) is reachable ONLY inside the quarantined=True branch: it wraps stable_hash(input_data) and falls back to repr_hash(input_data). The quarantined flag explicitly marks input_data as Tier-3 external row data that may contain non-canonical values (NaN/Infinity, or unserializable types) which stable_hash legitimately rejects — and stable_hash/canonical_json genuinely raise both ValueError (non-finite floats/Decimals) and TypeError (types rfc8785 cannot serialize), so the catch tuple is accurate and complete, not over-broad. The non-quarantined branch (line 176) calls stable_hash uncaught, so this fallback cannot mask a canonicalization bug on our own normal data — only Tier-3 quarantined input degrades to repr_hash. repr_hash is a deterministic alternate hash of the SAME input (the node state still records a real input_hash for that exact data), not a default or fabricated value and not data loss. This is legitimate Tier-3 boundary handling; the existing rationale matches the code and I confirmed its exception-type claims against canonical.py.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:45:32.391769+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM at a Tier-3 quarantine boundary. The try/except is reachable only when caller-supplied quarantined=True, which the docstring (lines 159-160) declares as Tier-3 external data that may carry non-canonical values. Verified at canonical.py:66/69/76/95/148 that stable_hash legitimately raises ValueError on non-finite floats/Decimals and TypeError on unserializable types — the catch tuple is narrow and accurate, not a bare except. The fallback repr_hash (contracts/hashing.py:117, documented for exactly this Tier-3 boundary) is a deterministic alternate hash of the SAME input_data — not a default, not fabrication; the audit row still records a real hash of what we got. The non-quarantined branch (line 176) lets stable_hash crash uncaught, so canonicalization bugs on our own Tier-1/Tier-2 data still surface. Matches the policy's quarantine-on-upgrade pattern and the 'record what we got' clause.
+  judge_signature_version: 2
+  scope_fingerprint: 74cf9456077e5e4476f61cc819d598784dbadc3ef99c29f05eb6e300435b437d
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[28]/body[2]/body[2]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1316a4b94882ac39a1b0c040b5ded0068e515efb30975df07439e377a138ef2b'
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=b8840fd73f01302a
+  owner: john
+  reason: |-
+    In reconstruct_token_row (line 684) the isinstance/key check validates that the payload read back from tokens.token_data_ref is a dict carrying both 'data' and 'contract' keys, raising AuditIntegrityError otherwise. This {data, contract} envelope is a structure WE authored and persisted to our own payload store (Tier-1 by authorship and custody), so an anomalous shape on read-back is corruption of our own audit evidence — the policy-prescribed response is to crash loudly, which the code does. The isinstance is purely a detector: no .get() fallback, no coercion, no silent recovery branch; malformed envelopes propagate as integrity errors and the contract hash is independently re-verified via SchemaContract.from_checkpoint. This is the canonical legitimate use of isinstance under R5 (assert an invariant on our authored data, then raise), and the existing rationale accurately describes it.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:47:04.299290+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The {data, contract} envelope is authored by ELSPETH itself (core/landscape/data_flow_repository.py:807 and :932) and persisted to our own PayloadStore, making the read-back a Tier-1 audit-integrity check under unbroken custody. The flagged isinstance is the offensive isinstance→raise pattern: it detects an invariant violation and raises AuditIntegrityError — a typed exception engineered to bubble up and abort the run on audit corruption, with token_id, run_id, and observed type baked into the message. There is no .get() fallback, no coercion, no try/except swallow, and no synthesized default — the specifically-forbidden Tier-1 defensive patterns are absent. The contract is independently re-validated via SchemaContract.from_checkpoint immediately after, so the guard is detector-only, not a substitute for downstream verification. Rationale is site-specific and accurate against the visible code.
+  judge_signature_version: 2
+  scope_fingerprint: f8344e6d31bc0502bb4c8de8eaf9012d2f5669b7dce8855a6f6d4ccf2c012298
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[26]/body[7]/body[4]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:6b589b44b3a90d3e386741eeabe6685cdbd09a2e4f1b0eec4847fc1e08b797f4'
+- key: core/checkpoint/recovery.py:R5:IncompleteTokenSpec:__post_init__:fp=427a1fed4efd849c
+  owner: john
+  reason: |-
+    In IncompleteTokenSpec.__post_init__ (line 110) the isinstance(_value, str) check covers the required identity fields token_id and row_id, raising TypeError on a non-str value (and ValueError on empty). IncompleteTokenSpec is constructed exclusively from rows read out of our own tokens table (a SQLAlchemy fetchall we authored and persist), so these are Tier-1 audit-identity values whose integrity must be asserted offensively — token_id/row_id are dereferenced by every downstream audit record and token_data_ref is used as a payload-store key before any later guard exists. The isinstance raises with no recovery path, no coercion, and no default substitution, which is exactly the detect-and-crash pattern Tier-1 requires; serialization through the DB does not change the tier because we authored the values. R5's concern (isinstance branching into a fallback that masks a contract break) does not apply here. The existing rationale matches the code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:48:05.984082+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. Construction site at core/checkpoint/recovery.py:625 confirms IncompleteTokenSpec is built from rows fetched from our own tokens_table — values WE authored and persisted, so re-read is a Tier-1 chain-of-custody boundary per the custody doctrine (our statement, broken seal → crash). The isinstance→raise (TypeError/ValueError) carries no fallback, no coercion, no default substitution, and is paired in __post_init__ with the documented reason that token_data_ref is dereferenced as a payload-store key before any TokenInfo guard exists, so catching wrong type here produces an identity-contextual error rather than a far-away string-op crash. R5's concern (isinstance branching into a fallback that masks a contract break) is not present — there is no fallback. Rationale and code together establish the prescribed offensive Tier-1 form.
+  judge_signature_version: 2
+  scope_fingerprint: e2281df8eb7a420b92622d3dc32608319d31fdd70edcdbc55dd74db6cab96209
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[24]/body[10]/body[1]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:f5da5bfbcb4adca2349f782bdb6da21cd0cf4d8f9b2fc5d98eb194a42e75fb59'
+- key: core/checkpoint/recovery.py:R5:IncompleteTokenSpec:__post_init__:fp=0b8d412d4c743e6e
+  owner: john
+  reason: |-
+    This is the optional-lineage-field branch of IncompleteTokenSpec.__post_init__ (line 117): for branch_name, fork_group_id, join_group_id, expand_group_id and token_data_ref, the isinstance check is gated on `is not None` and raises TypeError if a present value is not a str (and ValueError if it is an empty string). These fields are read from our own tokens table (Tier-1 authored data) and are either legitimately NULL or a non-empty str; an empty or wrong-typed value indicates a corrupt or tampered audit row, and token_data_ref in particular is later dereferenced as a payload-store key. The is-not-None-gated isinstance raises rather than branching into recovery — the offensive Tier-1 invariant-assertion pattern, with no coercion, default, or silent fallback. R5's masking concern does not apply, and the existing rationale accurately describes the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:49:05.528748+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The candidate sits in IncompleteTokenSpec.__post_init__ (recovery.py:98-120), a frozen dataclass whose fields are populated from rows read out of our own tokens_table (recovery.py:625-635). Per the custody doctrine, our-authored checkpoint/audit reads stay Tier-1: a wrong shape there is tampering/corruption that must crash. The is-not-None-gated isinstance does not branch into recovery, coerce, or default — it raises TypeError immediately, the offensive Tier-1 invariant-assertion pattern that makes the crash maximally informative at the typed-dataclass boundary BEFORE token_data_ref is later dereferenced as a payload-store key (docstring at recovery.py:77-83 and the field-typing rationale at recovery.py:99-107). R5's masking concern does not apply: nothing is hidden, the typed exception is the audit signal. Tier and prescribed-form claims are supported by both the visible code and a site-specific rationale.
+  judge_signature_version: 2
+  scope_fingerprint: e2281df8eb7a420b92622d3dc32608319d31fdd70edcdbc55dd74db6cab96209
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[24]/body[10]/body[2]/body[1]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:09096384b5fa4d200b46499ba927ae544de7ae51fc80454cea32dc3136a6fcab'
+- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=052ffa76f74531c2
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — Tier-3 I/O fault returned as an explicit error result, not swallowed. In PurgeManager.purge_payloads (core/retention/purge.py:385), `except OSError as e` catches a filesystem fault from self._payload_store.delete(ref) — deleting a payload file is a Tier-3 I/O boundary (the filesystem is external to our authored values; the file may be missing, the disk may error, permissions may deny). This is not a silent swallow: it appends ref to failed_refs, which is RETURNED in PurgeResult (the method docstring documents failed_refs as "refs whose delete operation raised"), and `continue`s so one failed deletion does not abort purging the remaining refs. The returned failed_refs IS the explicit error result R6 asks for; the logger.warning is supplementary operational visibility, not the record of record. The catch is narrow (OSError only); a bug in our own purge code would raise a different exception and crash. Affected-run grade downgrades (Step 2) deliberately use ONLY successfully-deleted refs, so a ref that failed here is not treated as deleted. R6 is a syntactic detector that does not recognise append-to-returned-list + continue as an explicit error result. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:25.209503+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The except OSError catches a Tier-3 filesystem I/O fault at the payload-store boundary (external storage, not first-party data), narrowly typed to OSError so bugs in our code raise something else and crash. The handler is not a silent swallow: the ref is appended to failed_refs which is returned in PurgeResult and documented as the explicit failure record, and Step 2 correctly uses only deleted_refs so failed deletions don't trigger grade downgrades. R6 is a syntactic detector that doesn't recognise append-to-returned-list+continue as an explicit error result; the rationale shows the structural error-return path the rule asks for.
+  judge_signature_version: 2
+  scope_fingerprint: b79b0744f078d304d85ec3361bd62035cdcf04ff56fbac2f4969446968284a1a
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[8]/body[6]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f61cf09619f53e86fafa69776c79bfe18a785906ce60a3422c5b8467a65e75cb'
+- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=c9f0e93436c24030
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — narrow Tier-1-DB I/O fault returned as an explicit error result; Tier-1 semantic corruption deliberately propagates. In PurgeManager.purge_payloads (core/retention/purge.py:427), `except SQLAlchemyError as exc` catches a transient database I/O fault from update_grade_after_purge(...). The in-code comment states the doctrine exactly: update_grade_after_purge operates on our own Tier-1 audit DB, so the ONLY recoverable failure mode is database I/O (lock contention, connection loss); every SEMANTIC anomaly it can detect is raised as AuditIntegrityError — a Tier-1 error that is NOT a SQLAlchemyError — which therefore propagates uncaught and crashes the purge, because corruption of our audit trail must never be recorded as a recoverable "grade update failure". Any other exception (TypeError, AttributeError, RuntimeError) is a bug in our own code and likewise crashes. This is not a silent swallow: the failure is appended to grade_update_failures (returned in PurgeResult) and the loop continues, because the payloads are already irreversibly deleted so a transient DB failure for one run must not prevent grade updates for the remaining runs. The catch is narrow (SQLAlchemyError); the returned grade_update_failures is the explicit error result; the logger.warning is supplementary. R6 cannot distinguish a narrow recoverable-I/O catch (with Tier-1 corruption excluded and re-raising) from a silent swallow. Per-line allowlist is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T23:36:32.701021+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The except is narrowly scoped to SQLAlchemyError (transient DB I/O), Tier-1 semantic corruption is raised as AuditIntegrityError which is not a SQLAlchemyError and therefore propagates uncaught, and any non-SQLAlchemy exception (TypeError/AttributeError/RuntimeError) likewise crashes. The handler is not a silent swallow: failures are appended to grade_update_failures and surfaced in the returned PurgeResult as an explicit error result, with logger.warning supplementary. The comment justifies why the loop must continue (payloads already irreversibly deleted; remaining runs must still have their grades updated). This is exactly the recoverable-Tier-3-style peel-off pattern that R6 cannot syntactically distinguish from a silent swallow.
+  judge_signature_version: 2
+  scope_fingerprint: b79b0744f078d304d85ec3361bd62035cdcf04ff56fbac2f4969446968284a1a
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[8]/body[9]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:106237b1a5dc9b1f5177556347f78cc89bb448e37e7aabe52684246bdf71e418'

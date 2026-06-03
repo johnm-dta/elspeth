@@ -4,7 +4,7 @@
 from collections.abc import Iterator, Mapping
 from typing import Any, ClassVar
 
-from elspeth.contracts import PipelineRow, SourceRow
+from elspeth.contracts import Determinism, PipelineRow, SourceRow
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.testing import make_contract, make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -21,7 +21,7 @@ class TestSourceProtocol:
         assert hasattr(SourceProtocol, "__protocol_attrs__")
 
     def test_source_implementation(self) -> None:
-        from elspeth.contracts import Determinism, PluginSchema, SourceProtocol
+        from elspeth.contracts import PluginSchema, SourceProtocol
         from elspeth.contracts.plugin_context import PluginContext
 
         class OutputSchema(PluginSchema):
@@ -100,7 +100,7 @@ class TestSourceProtocol:
         from collections.abc import Iterator
         from typing import Any
 
-        from elspeth.contracts import Determinism, PluginSchema, SourceProtocol
+        from elspeth.contracts import PluginSchema, SourceProtocol
         from elspeth.contracts.plugin_context import PluginContext
 
         class OutputSchema(PluginSchema):
@@ -148,7 +148,11 @@ class TestTransformProtocol:
     """Transform plugin protocol (stateless row processing)."""
 
     def test_transform_implementation(self) -> None:
-        from elspeth.contracts import Determinism, PluginSchema, TransformProtocol
+        from elspeth.contracts import (
+            DeclaredAuditCharacteristics,
+            PluginSchema,
+            TransformProtocol,
+        )
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.plugins.infrastructure.results import TransformResult
 
@@ -171,6 +175,7 @@ class TestTransformProtocol:
             source_file_hash: str | None = None
             is_batch_aware = False  # Batch support (structural aggregation)
             supports_row_mode_when_batch_aware = False  # Batch-aware transforms only
+            requires_runtime_preflight = False  # Optional engine-time readiness check
             creates_tokens = False  # Deaggregation (multi-row output)
             passes_through_input = False  # ADR-007: pass-through contract flag
             can_drop_rows = False  # ADR-012: empty-emission governance flag
@@ -179,6 +184,15 @@ class TestTransformProtocol:
             _output_schema_config: SchemaConfig | None = None  # Set by BaseTransform
             on_error: str | None = None  # Error routing (WP-11.99b)
             on_success: str | None = None  # Success routing
+            # Reference-content fields (Phase 7A) — declared on TransformProtocol
+            # for the catalog/audit_readiness surfaces. The hand-rolled fake
+            # mirrors BaseTransform's defaults so @runtime_checkable conformance
+            # holds without inheriting BaseTransform.
+            usage_when_to_use: str | None = None
+            usage_when_not_to_use: str | None = None
+            example_use: str | None = None
+            capability_tags: tuple[str, ...] = ()
+            audit_characteristics: DeclaredAuditCharacteristics = frozenset()
             # Lifecycle guards managed by BaseTransform; declared here for the
             # hand-rolled structural fake to satisfy TransformProtocol's
             # @runtime_checkable structural typing.
@@ -212,6 +226,9 @@ class TestTransformProtocol:
             def on_complete(self, ctx: PluginContext) -> None:
                 pass
 
+            def runtime_preflight(self, ctx: PluginContext) -> None:
+                pass
+
             @classmethod
             def get_config_model(cls, config: dict[str, Any] | None = None) -> None:
                 return None
@@ -219,6 +236,14 @@ class TestTransformProtocol:
             @classmethod
             def get_config_schema(cls) -> dict[str, Any]:
                 return {}
+
+            @classmethod
+            def get_agent_assistance(cls, *, issue_code: str | None = None) -> Any:
+                return None
+
+            @classmethod
+            def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+                return ()
 
         transform = DoubleTransform({})
 
@@ -240,7 +265,7 @@ class TestTransformBatchSupport:
 
     def test_transform_process_single_row(self) -> None:
         """Transform.process() accepts single row dict."""
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import PluginSchema
         from elspeth.contracts.contexts import TransformContext
         from elspeth.plugins.infrastructure.base import BaseTransform
         from elspeth.plugins.infrastructure.results import TransformResult
@@ -267,7 +292,7 @@ class TestTransformBatchSupport:
 
     def test_transform_process_batch_rows(self) -> None:
         """Transform.process() accepts list of row dicts when is_batch_aware=True."""
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import PluginSchema
         from elspeth.contracts.contexts import TransformContext
         from elspeth.plugins.infrastructure.base import BaseTransform
         from elspeth.plugins.infrastructure.results import TransformResult
@@ -304,7 +329,7 @@ class TestTransformBatchSupport:
 
     def test_transform_is_batch_aware_default_false(self) -> None:
         """Transforms have is_batch_aware=False by default."""
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import PluginSchema
         from elspeth.contracts.contexts import TransformContext
         from elspeth.plugins.infrastructure.base import BaseTransform
         from elspeth.plugins.infrastructure.results import TransformResult
@@ -327,7 +352,7 @@ class TestTransformBatchSupport:
 
     def test_transform_is_batch_aware_can_be_set_true(self) -> None:
         """Transforms can declare is_batch_aware=True for batch support."""
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import PluginSchema
         from elspeth.contracts.contexts import TransformContext
         from elspeth.plugins.infrastructure.base import BaseTransform
         from elspeth.plugins.infrastructure.results import TransformResult
@@ -435,7 +460,7 @@ class TestSinkProtocol:
 
     def test_batch_sink_implementation(self) -> None:
         """Test sink with batch write returning SinkWriteResult."""
-        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SinkProtocol
+        from elspeth.contracts import ArtifactDescriptor, PluginSchema, SinkProtocol
         from elspeth.contracts.diversion import SinkWriteResult
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.contracts.sink import OutputValidationResult
@@ -513,7 +538,7 @@ class TestSinkProtocol:
     def test_sink_implementation(self) -> None:
         """Test sink conforming to updated batch protocol."""
 
-        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SinkProtocol
+        from elspeth.contracts import ArtifactDescriptor, PluginSchema, SinkProtocol
         from elspeth.contracts.diversion import SinkWriteResult
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.contracts.sink import OutputValidationResult
@@ -617,7 +642,6 @@ class TestProtocolMetadata:
         assert "plugin_version" in TransformProtocol.__protocol_attrs__  # type: ignore[attr-defined]
 
     def test_deterministic_transform(self) -> None:
-        from elspeth.contracts import Determinism
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.plugins.infrastructure.results import TransformResult
 
@@ -633,7 +657,6 @@ class TestProtocolMetadata:
         assert t.determinism == Determinism.DETERMINISTIC
 
     def test_nondeterministic_transform(self) -> None:
-        from elspeth.contracts import Determinism
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.plugins.infrastructure.results import TransformResult
 

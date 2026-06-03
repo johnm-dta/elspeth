@@ -28,6 +28,8 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
 
@@ -94,6 +96,10 @@ def _progress_data(
     )
 
 
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
 def _cancelled_data(
     *,
     source_rows_processed: int = 10,
@@ -137,15 +143,96 @@ class TestDiscardSummary:
 
 
 class TestValidationResult:
+    def test_validation_result_requires_readiness(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+
+    def test_validation_readiness_accepts_pending_interpretation_blocker(self) -> None:
+        result = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="rate_coolness",
+                    component_type="transform",
+                    message="Interpretation review is pending for 'coolness'.",
+                    suggestion="Resolve the pending interpretation review before running.",
+                    error_code="interpretation_review_pending",
+                )
+            ],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=False,
+                completion_ready=True,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="interpretation_review_pending",
+                        component_id="rate_coolness",
+                        component_type="transform",
+                        detail="coolness",
+                    )
+                ],
+            ),
+            semantic_contracts=[],
+        )
+
+        assert result.readiness.authoring_valid is True
+        assert result.readiness.execution_ready is False
+        assert result.readiness.blockers[0].code == "interpretation_review_pending"
+
+    def test_secret_refs_check_requires_structured_outcome_code(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="secret_refs checks must carry"):
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="No secret references found",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+
+    def test_secret_refs_check_accepts_no_refs_outcome_code(self) -> None:
+        check = ValidationCheck(
+            name="secret_refs",
+            passed=True,
+            detail="No secret references found",
+            affected_nodes=(),
+            outcome_code="secret_refs.no_refs",
+        )
+
+        assert check.outcome_code == "secret_refs.no_refs"
+
+    def test_non_secret_check_may_have_null_outcome_code(self) -> None:
+        check = ValidationCheck(
+            name="settings_load",
+            passed=True,
+            detail="OK",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+
+        assert check.outcome_code is None
+
+    def test_unknown_check_outcome_code_is_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="No secret references found",
+                affected_nodes=(),
+                outcome_code="secret_refs.maybe",  # type: ignore[arg-type]
+            )
+
     def test_invalid_result_with_attributed_error(self) -> None:
         result = ValidationResult(
             is_valid=False,
             checks=[
-                ValidationCheck(name="settings_load", passed=True, detail="OK"),
+                ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=(), outcome_code=None),
                 ValidationCheck(
                     name="graph_structure",
                     passed=False,
                     detail="Graph validation failed",
+                    affected_nodes=(),
+                    outcome_code=None,
                 ),
             ],
             errors=[
@@ -154,8 +241,22 @@ class TestValidationResult:
                     component_type="gate",
                     message="Route destination 'nonexistent_sink' not found",
                     suggestion="Check sink names in gate configuration",
+                    error_code=None,
                 ),
             ],
+            readiness=ValidationReadiness(
+                authoring_valid=False,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="graph_structure",
+                        component_id="gate_1",
+                        component_type="gate",
+                        detail="Route destination not found.",
+                    )
+                ],
+            ),
         )
         assert result.is_valid is False
         assert result.errors[0].component_id == "gate_1"
@@ -167,6 +268,7 @@ class TestValidationResult:
             component_type=None,
             message="Graph contains a cycle",
             suggestion=None,
+            error_code=None,
         )
         assert err.component_id is None
         assert err.component_type is None
@@ -180,21 +282,29 @@ class TestValidationResult:
                     name="settings_load",
                     passed=False,
                     detail="Invalid YAML syntax",
+                    affected_nodes=(),
+                    outcome_code=None,
                 ),
                 ValidationCheck(
                     name="plugin_instantiation",
                     passed=False,
                     detail="Skipped: settings_load failed",
+                    affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
                 ValidationCheck(
                     name="graph_structure",
                     passed=False,
                     detail="Skipped: settings_load failed",
+                    affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
                 ValidationCheck(
                     name="schema_compatibility",
                     passed=False,
                     detail="Skipped: settings_load failed",
+                    affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
             ],
             errors=[
@@ -203,8 +313,22 @@ class TestValidationResult:
                     component_type=None,
                     message="Invalid YAML syntax",
                     suggestion=None,
+                    error_code=None,
                 ),
             ],
+            readiness=ValidationReadiness(
+                authoring_valid=False,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="settings_load",
+                        component_id=None,
+                        component_type=None,
+                        detail="Invalid YAML syntax.",
+                    )
+                ],
+            ),
         )
         assert result.is_valid is False
         skipped = [c for c in result.checks if "Skipped" in c.detail]
@@ -568,11 +692,11 @@ class TestStrictCoercionRejected:
 
     def test_validation_check_rejects_string_bool(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ValidationCheck(name="test", passed="true", detail="ok")  # type: ignore[arg-type]
+            ValidationCheck(name="test", passed="true", detail="ok", affected_nodes=(), outcome_code=None)  # type: ignore[arg-type]
 
     def test_validation_result_rejects_string_bool(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ValidationResult(is_valid="false", checks=[], errors=[])  # type: ignore[arg-type]
+            ValidationResult(is_valid="false", checks=[], errors=[], readiness=_ready_readiness())  # type: ignore[arg-type]
 
     def test_run_status_response_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -705,7 +829,7 @@ class TestExtraFieldsRejected:
 
     def test_validation_check_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationCheck(name="test", passed=True, detail="ok", severity="high")  # type: ignore[call-arg]
+            ValidationCheck(name="test", passed=True, detail="ok", affected_nodes=(), outcome_code=None, severity="high")  # type: ignore[call-arg]
 
     def test_validation_error_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -714,12 +838,13 @@ class TestExtraFieldsRejected:
                 component_type=None,
                 message="bad",
                 suggestion=None,
+                error_code=None,
                 stack_trace="...",  # type: ignore[call-arg]
             )
 
     def test_validation_result_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationResult(is_valid=True, checks=[], errors=[], warnings=[])  # type: ignore[call-arg]
+            ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), warnings=[])  # type: ignore[call-arg]
 
     def test_run_status_response_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -1279,6 +1404,7 @@ def test_validation_result_accepts_semantic_contracts():
     from elspeth.web.execution.schemas import (
         SemanticEdgeContractResponse,
         ValidationCheck,
+        ValidationReadiness,
         ValidationResult,
     )
 
@@ -1294,8 +1420,9 @@ def test_validation_result_accepts_semantic_contracts():
     )
     result = ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="semantic_contracts", passed=False, detail="failed")],
+        checks=[ValidationCheck(name="semantic_contracts", passed=False, detail="failed", affected_nodes=(), outcome_code=None)],
         errors=[],
+        readiness=ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[]),
         semantic_contracts=[contract],
     )
     payload = result.model_dump()
@@ -1315,6 +1442,7 @@ def test_validation_result_rejects_unknown_field():
             is_valid=True,
             checks=[],
             errors=[],
+            readiness=_ready_readiness(),
             invented_extra_field="nope",  # type: ignore[call-arg]
         )
 

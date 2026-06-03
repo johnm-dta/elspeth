@@ -1,3 +1,15 @@
 version: 1
 defaults:
   fail_on_stale: true
+  # Permissive ceilings — this rule has never enforced budget limits.
+  # Promoting AllowlistBudgetViolation into core/allowlist.py (Plan A Task 4)
+  # makes the budget machinery available to every rule using the core loader;
+  # explicit nulls keep this rule's behaviour unchanged while documenting that
+  # decision for future maintainers. Tighten only after a deliberate ratchet.
+  allowlist_budget:
+    max_allow_hits: null
+    max_per_file_rules: null
+    max_total_entries: null
+    max_permanent_allow_hits: null
+    max_permanent_per_file_rules: null
+    max_permanent_total_entries: null

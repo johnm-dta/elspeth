@@ -25,6 +25,13 @@ from elspeth.contracts.schema import SchemaConfig
 OutputCollisionPolicy = Literal["fail_if_exists", "auto_increment", "append_or_create"]
 
 
+def _plugin_config_field_title(field_name: str, _field_info: Any) -> str:
+    """Generate stable human-facing titles for plugin configuration fields."""
+    words = field_name.removesuffix("_config").replace("_", " ").split()
+    acronyms = {"api", "csv", "http", "id", "json", "jsonl", "llm", "rag", "sql", "ssl", "url", "xml"}
+    return " ".join(word.upper() if word in acronyms else word.capitalize() for word in words)
+
+
 class PluginConfigError(Exception):
     """Raised when plugin configuration is invalid.
 
@@ -105,7 +112,7 @@ def _format_validation_error_cause(exc: ValidationError) -> str:
         loc = tuple(error["loc"])
         location = _format_validation_error_location(loc)
         message = error["msg"]
-        if loc == ("schema",) and error.get("type") == "missing":
+        if loc == ("schema",) and error["type"] == "missing":
             message = _SCHEMA_REQUIRED_GUIDANCE
         lines.append(f"{location}: {message}")
     return "\n".join(lines)
@@ -157,6 +164,7 @@ class PluginConfig(BaseModel):
         "extra": "forbid",
         "frozen": True,
         "populate_by_name": True,  # Allow both "schema" (alias) and "schema_config" (field name)
+        "field_title_generator": _plugin_config_field_title,
     }
 
     schema_config: SchemaConfig | None = Field(
@@ -280,7 +288,12 @@ class DataPluginConfig(PluginConfig):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "_component_type_exempt" in cls.__dict__:
+        # Own-namespace check only (NOT inherited): the exemption must be
+        # re-declared per intermediate base and does not propagate to children.
+        # Membership-then-subscript on cls.__dict__ keeps that own-class scoping
+        # without a defensive default — the key is legitimately absent on most
+        # subclasses, so absence is the normal path, not an anomaly.
+        if "_component_type_exempt" in cls.__dict__ and cls.__dict__["_component_type_exempt"] is True:
             return
         if cls._plugin_component_type is None:
             raise TypeError(
@@ -316,7 +329,7 @@ class PathConfig(DataPluginConfig):
 
     _component_type_exempt: ClassVar[bool] = True
 
-    path: str
+    path: str = Field(description="Filesystem path for the source input or sink output, resolved relative to the run data directory.")
 
     @field_validator("path")
     @classmethod
@@ -381,8 +394,14 @@ class TabularSourceDataConfig(SourceDataConfig):
     provides clean names for headerless files (mutually exclusive path).
     """
 
-    columns: list[str] | None = None
-    field_mapping: dict[str, str] | None = None
+    columns: list[str] | None = Field(
+        default=None,
+        description="Explicit normalized column names for headerless tabular input.",
+    )
+    field_mapping: dict[str, str] | None = Field(
+        default=None,
+        description="Optional mapping from observed source field names to normalized pipeline field names.",
+    )
 
     @model_validator(mode="after")
     def _validate_normalization_options(self) -> Self:
@@ -531,10 +550,12 @@ class TransformDataConfig(DataPluginConfig):
         if len(v) == 0:
             return []
 
+        # Element type (str) is already guaranteed by the field annotation
+        # (list[str]); Pydantic rejects non-str elements before this after-mode
+        # validator runs, so we only enforce the semantic rules (non-empty,
+        # valid identifier, no duplicates) here.
         result: list[str] = []
         for i, name in enumerate(v):
-            if not isinstance(name, str):
-                raise ValueError(f"required_input_fields[{i}] must be a string, got {type(name).__name__}")
             name = name.strip()
             if not name:
                 raise ValueError(f"required_input_fields[{i}] cannot be empty")

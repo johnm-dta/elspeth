@@ -1,0 +1,61 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Field whose most frequent values should be summarized",
+        "kind": "text",
+        "label": "Field",
+        "name": "field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": 10,
+        "description": "Number of values to include",
+        "kind": "number-int",
+        "label": "K",
+        "name": "k",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional field that partitions the batch",
+        "kind": "text",
+        "label": "Group By",
+        "name": "group_by",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": false,
+        "description": "Whether None values are counted as a top-k value",
+        "kind": "checkbox",
+        "label": "Include Missing",
+        "name": "include_missing",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_top_k"
+}

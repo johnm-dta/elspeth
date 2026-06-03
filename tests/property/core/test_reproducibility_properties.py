@@ -108,6 +108,8 @@ def _create_run(db: LandscapeDB) -> str:
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.RUNNING,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
     return run_id

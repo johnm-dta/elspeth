@@ -1,0 +1,164 @@
+/* settings.css — Settings panel (secrets management).
+   Owners: .secrets-*. */
+
+/* ---------------------------------------------------------------------------
+   Secrets Panel
+   --------------------------------------------------------------------------- */
+.secrets-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.secrets-panel-title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.secrets-panel-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xl);
+  line-height: 1;
+  padding: 2px var(--space-xs);
+  border-radius: var(--radius-sm);
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.secrets-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg);
+}
+
+.secrets-section-heading {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+}
+
+.secrets-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.secrets-form-label {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.secrets-form-input {
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface-input);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  box-sizing: border-box;
+}
+
+.secrets-submit-btn {
+  align-self: flex-start;
+  padding: var(--space-xs) var(--space-lg);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+.secrets-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.secrets-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface-raised);
+}
+
+.secrets-list-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secrets-list-name {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  word-break: break-all;
+  color: var(--color-text);
+}
+
+.secrets-unavailable-reason {
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+  line-height: 1.35;
+}
+
+.secrets-scope-badge {
+  display: inline-block;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px var(--space-xs);
+  border-radius: var(--radius-sm);
+  margin-left: var(--space-xs);
+}
+
+.secrets-delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-error);
+  font-size: var(--font-size-base);
+  padding: 2px var(--space-xs);
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.secrets-loading,
+.secrets-empty {
+  padding: var(--space-md) 0;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.secrets-footnote {
+  margin-top: var(--space-lg);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: var(--line-height-normal);
+}

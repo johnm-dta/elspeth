@@ -1,12 +1,12 @@
 """Unit tests for Anthropic prompt-cache marker wiring (elspeth-4e79436719 §Phase 3).
 
-The transform helpers in ``service.py``:
+The transform helpers in ``llm_response_parsing.py``:
 
-- ``_supports_anthropic_prompt_cache_markers`` — provider-detection
+- ``supports_anthropic_prompt_cache_markers`` — provider-detection
   predicate. Returns True for Anthropic-family routes that honor
   ``cache_control`` markers; False for OpenAI/Azure/Gemini and
   unrecognized strings.
-- ``_apply_anthropic_cache_markers`` — applies
+- ``apply_anthropic_cache_markers`` — applies
   ``cache_control: {"type": "ephemeral"}`` to the first system message
   and the trailing tool, returning new lists without mutating the
   inputs. Composer message construction keeps dynamic state in a later
@@ -23,9 +23,9 @@ from typing import Any
 
 import pytest
 
-from elspeth.web.composer.service import (
-    _apply_anthropic_cache_markers,
-    _supports_anthropic_prompt_cache_markers,
+from elspeth.web.composer.llm_response_parsing import (
+    apply_anthropic_cache_markers,
+    supports_anthropic_prompt_cache_markers,
 )
 
 
@@ -43,7 +43,7 @@ class TestSupportsAnthropicPromptCacheMarkers:
         ],
     )
     def test_anthropic_family_models_supported(self, model: str) -> None:
-        assert _supports_anthropic_prompt_cache_markers(model) is True, (
+        assert supports_anthropic_prompt_cache_markers(model) is True, (
             f"Anthropic-family model {model!r} must opt into cache_control markers."
         )
 
@@ -59,15 +59,15 @@ class TestSupportsAnthropicPromptCacheMarkers:
         ],
     )
     def test_non_anthropic_models_not_supported(self, model: str) -> None:
-        assert _supports_anthropic_prompt_cache_markers(model) is False, (
+        assert supports_anthropic_prompt_cache_markers(model) is False, (
             f"Non-Anthropic model {model!r} must NOT carry cache_control markers."
         )
 
     def test_none_input_returns_false(self) -> None:
-        assert _supports_anthropic_prompt_cache_markers(None) is False
+        assert supports_anthropic_prompt_cache_markers(None) is False
 
     def test_non_string_input_returns_false(self) -> None:
-        assert _supports_anthropic_prompt_cache_markers(42) is False  # type: ignore[arg-type]
+        assert supports_anthropic_prompt_cache_markers(42) is False  # type: ignore[arg-type]
 
 
 class TestApplyAnthropicCacheMarkers:
@@ -76,7 +76,7 @@ class TestApplyAnthropicCacheMarkers:
             {"role": "system", "content": "You are a pipeline composer."},
             {"role": "user", "content": "Build me a CSV pipeline."},
         ]
-        new_messages, _ = _apply_anthropic_cache_markers(messages, None)
+        new_messages, _ = apply_anthropic_cache_markers(messages, None)
         assert new_messages[0]["cache_control"] == {"type": "ephemeral"}
         assert new_messages[1] == messages[1], "User message must be untouched"
 
@@ -86,7 +86,7 @@ class TestApplyAnthropicCacheMarkers:
             {"type": "function", "function": {"name": "set_source"}},
             {"type": "function", "function": {"name": "set_pipeline"}},
         ]
-        _apply_anthropic_cache_markers(messages, tools)
+        apply_anthropic_cache_markers(messages, tools)
         assert "cache_control" not in messages[0]
         assert "cache_control" not in tools[-1]
 
@@ -102,14 +102,14 @@ class TestApplyAnthropicCacheMarkers:
             {"role": "system", "content": "Skill prompt."},
             {"role": "system", "content": "Current pipeline state and available plugins:\n{}"},
         ]
-        new_messages, _ = _apply_anthropic_cache_markers(messages, None)
+        new_messages, _ = apply_anthropic_cache_markers(messages, None)
         assert "cache_control" in new_messages[0]
         assert "cache_control" not in new_messages[1]
 
     def test_no_system_message_means_no_marker_added(self) -> None:
         """If there is no system message, leave messages alone."""
         messages = [{"role": "user", "content": "hi"}]
-        new_messages, _ = _apply_anthropic_cache_markers(messages, None)
+        new_messages, _ = apply_anthropic_cache_markers(messages, None)
         assert new_messages == messages
 
     def test_tools_last_entry_receives_cache_control(self) -> None:
@@ -118,7 +118,7 @@ class TestApplyAnthropicCacheMarkers:
             {"type": "function", "function": {"name": "set_pipeline"}},
             {"type": "function", "function": {"name": "preview_pipeline"}},
         ]
-        _, new_tools = _apply_anthropic_cache_markers([], tools)
+        _, new_tools = apply_anthropic_cache_markers([], tools)
         assert new_tools is not None
         assert new_tools[0] == tools[0]
         assert new_tools[1] == tools[1]
@@ -127,17 +127,17 @@ class TestApplyAnthropicCacheMarkers:
         assert new_tools[-1]["function"] == tools[-1]["function"]
 
     def test_empty_tools_list_returns_none(self) -> None:
-        _, new_tools = _apply_anthropic_cache_markers([], [])
+        _, new_tools = apply_anthropic_cache_markers([], [])
         assert new_tools is None
 
     def test_none_tools_returns_none(self) -> None:
-        _, new_tools = _apply_anthropic_cache_markers([], None)
+        _, new_tools = apply_anthropic_cache_markers([], None)
         assert new_tools is None
 
     def test_returns_new_lists_not_aliases(self) -> None:
         messages = [{"role": "system", "content": "..."}]
         tools: list[dict[str, Any]] = [{"type": "function", "function": {"name": "x"}}]
-        new_messages, new_tools = _apply_anthropic_cache_markers(messages, tools)
+        new_messages, new_tools = apply_anthropic_cache_markers(messages, tools)
         assert new_messages is not messages
         assert new_tools is not tools
 
@@ -162,12 +162,12 @@ class TestApplyAnthropicCacheMarkers:
             {"type": "function", "function": {"name": "set_source"}},
             {"type": "function", "function": original_function},
         ]
-        _, new_tools = _apply_anthropic_cache_markers(messages, tools)
+        _, new_tools = apply_anthropic_cache_markers(messages, tools)
         # Original entries unchanged.
         assert "cache_control" not in messages[0]
         assert "cache_control" not in tools[-1]
         # Identity preservation: marker output shares nested function dict
-        # with the input (the contract documented on _apply_anthropic_cache_markers).
+        # with the input (the contract documented on apply_anthropic_cache_markers).
         assert new_tools is not None
         assert new_tools[-1]["function"] is original_function, (
             "The marker transform must not deep-copy the inner function dict. "
@@ -177,7 +177,7 @@ class TestApplyAnthropicCacheMarkers:
 
 
 class TestToolListOrderIsCacheKeyContract:
-    """Lock down the order contract that ``_apply_anthropic_cache_markers``
+    """Lock down the order contract that ``apply_anthropic_cache_markers``
     depends on (post-review concern #2).
 
     Anthropic prompt caching uses ``cache_control`` markers as cache
@@ -216,7 +216,7 @@ class TestToolListOrderIsCacheKeyContract:
         """
         from elspeth.web.composer.service import ComposerServiceImpl
         from elspeth.web.composer.tools import get_tool_definitions
-        from tests.unit.web.composer.test_service import _make_settings, _mock_catalog
+        from tests.unit.web.composer._helpers import _make_settings, _mock_catalog
 
         catalog = _mock_catalog()
         settings = _make_settings()
@@ -243,7 +243,7 @@ class TestToolListOrderIsCacheKeyContract:
         breaks this test rather than silently invalidating Anthropic's prompt cache.
 
         If you intentionally need to change the trailing tool, update both this
-        test AND the call-site comment in ``_apply_anthropic_cache_markers`` —
+        test AND the call-site comment in ``apply_anthropic_cache_markers`` —
         and consider the cache-miss cost on the next deploy.
         """
         from elspeth.web.composer.tools import get_tool_definitions
@@ -275,7 +275,7 @@ class TestCacheMarkersWiredAtCallSite:
             ComposerAvailability,
             ComposerServiceImpl,
         )
-        from tests.unit.web.composer.test_service import (
+        from tests.unit.web.composer._helpers import (
             FakeChoice,
             _empty_state,
             _make_llm_response,
@@ -343,7 +343,7 @@ class TestCacheMarkersWiredAtCallSite:
             ComposerAvailability,
             ComposerServiceImpl,
         )
-        from tests.unit.web.composer.test_service import (
+        from tests.unit.web.composer._helpers import (
             FakeChoice,
             _empty_state,
             _make_llm_response,

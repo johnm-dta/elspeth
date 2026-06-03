@@ -2,3 +2,408 @@ version: 1
 defaults:
   fail_on_stale: true
   fail_on_expired: true
+  allowlist_budget:
+    # Bumped from 392 → 393 on 2026-05-19 (second bump same day) to
+    # accommodate the Phase 8 PR-review S4 entry for
+    # ``web/app.py:_prometheus_metrics`` (R4 — public /metrics scrape
+    # endpoint hardened against ``generate_latest()`` collector failures
+    # to avoid leaking tracebacks into the response body). Bounded
+    # 90-day expiry (2026-08-19); reviewer must renew or reify after
+    # production traffic confirms the handler is unreachable.
+    #
+    # Bumped from 393 → 411 on 2026-05-20 (net +18) to accommodate the
+    # session-routes resource split (commit 064a026dd "Refactor session
+    # routes by resource"). The refactor decomposed the 7791-line
+    # ``web/sessions/routes.py`` into a package
+    # (``routes/{__init__,_helpers,composer,interpretation,messages,runs,sessions}.py``)
+    # and named extracted helpers (``_dispatch_guided_respond_impl``,
+    # ``_state_data_from_composer_state_impl``, ``_patched_routes_attr``,
+    # ``_composer_persisted_validation``, ``_extract_runtime_model_snapshot``).
+    # Same HTTP/session-route trust boundary; AST shape changes increased
+    # the fingerprinted-entry count from 30 (consolidated under the old
+    # ``create_session_router`` factory) to 47 (distributed across
+    # registrar wrappers and helpers). All 18 net new entries are bounded
+    # 2026-08-20 to force re-evaluation; the 12 R5 isinstance() guards
+    # inside ``_dispatch_guided_respond_impl`` are the highest-value
+    # remediation target — consolidating that validation behind a single
+    # Pydantic validator at the boundary would retire that whole block.
+    #
+    # Bumped from 411 → 414 on 2026-05-20 (net +3) to accommodate the
+    # ``_declared_field_name`` helper introduced by commit 5cab72f3b
+    # ("fix(composer): handle structured schema fields in preview"). The
+    # helper discriminates between the two arms of
+    # ``DeclaredFieldSpec = str | Mapping[str, Any]`` and validates the
+    # optional ``"name"`` key on the structured arm — three legitimate
+    # Tier-3 boundary patterns (R5 union-arm, R1 mapping probe, R5 value
+    # validation). All three entries bounded 2026-08-20 to force
+    # re-evaluation; if the structured schema-field shape stabilises into
+    # a Pydantic model at the boundary, the whole block retires.
+    #
+    # Bumped from 414 → 415 on 2026-05-20 (net +1) to accommodate the
+    # ``WebScrapeTransform.get_post_call_hints`` Tier-3 isinstance guard
+    # introduced by the composer-jit-hints Phase 1 work. The override
+    # narrows the LLM-supplied ``text_separator`` config value before
+    # the substring check that decides whether to emit the
+    # newline-collapse coaching hint. Same trust boundary semantics as
+    # the existing ``WebScrapeHTTPConfig._validate_allowed_hosts`` R5
+    # entry — config_snapshot is unvalidated LLM-supplied options.
+    #
+    # Bumped from 415 → 416 on 2026-05-20 (net +1) to accommodate
+    # ``_validate_web_scrape_http_identity_not_placeholder`` from commit
+    # 02592514c ("Reject web scrape identity placeholders"). The helper
+    # inspects raw composer node options for two wire-visible HTTP identity
+    # fields (``abuse_contact`` and ``scraping_reason``) before runtime
+    # config coercion so placeholder values cannot ship as outbound headers.
+    # Entries are bounded to 2026-08-20; if web_scrape HTTP options become
+    # a typed composer-side model, this block should retire.
+    #
+    # Bumped from 416 → 470 on 2026-05-23 (net +54) for the composer/service.py
+    # decomposition refactor (`refactor/composer-service-rc5.2`). The refactor
+    # extracts three modules from the 5,262-line service.py:
+    # - llm_response_parsing.py (Tier-3 LiteLLM response parsers; ~37 entries
+    #   for the same R1/R2/R5 patterns previously allowlisted in service.py).
+    # - _required_paths_validator.py (Tier-3 JSON-Schema walker; 1 R5 entry).
+    # - progress.py (no new Tier-3 entries; UI-status factories only).
+    # The 36 remaining TODO entries in pre-existing files
+    # (`web/sessions/service.py:_patch_structured_interpretation_prompt`,
+    # `web/interpretation_state.py:*`, `web/execution/service.py:_execute_locked`,
+    # `web/sessions/routes/messages.py:send_message`) are pre-existing AST-shift
+    # rotation drift unrelated to this refactor and should be triaged
+    # separately by the file owners. All 54 new entries are bounded to
+    # 2026-08-23 (90 days) to force re-evaluation.
+    #
+    # Bumped from 470 → 537 on 2026-05-23 (net +67) when rebasing
+    # refactor/composer-service-rc5.2 atop the parallel refactor/composer-tools-split
+    # merge that landed on RC5.2 (commits 0b7c87dc1..9432346f2). The tools-split
+    # decomposed the 7,389-line web/composer/tools.py into a `tools/` subpackage
+    # with 12 plane modules (_dispatch, _common, blobs, generation, outputs,
+    # recipes, secrets, sessions, sinks, sources, transforms, __init__). Each
+    # plane module re-acquired AST-shifted fingerprints for the same R1/R5/R9
+    # Tier-3 LLM-tool-argument-handling boundaries previously allowlisted under
+    # the single tools.py path. Net +67 entries reflect the per-plane
+    # redistribution; the underlying boundary semantics are unchanged. All new
+    # entries bounded 2026-08-23 (same review window as the composer/service.py
+    # bump above) so the upstream tools/ owners and this branch's review can
+    # converge in a single quarterly pass.
+    #
+    # Bumped from 537 → 542 on 2026-05-23 (net +5) to restore allowlist
+    # coverage for legitimate Tier-3 boundary patterns that the recent
+    # refactor commits orphaned:
+    #
+    #   * R6 archive_session::_sync and R7 archive_session::_sync (the
+    #     contextlib.suppress(OSError) on best-effort quarantine-parent
+    #     rmdir) were keyed at `SessionServiceImpl:_sync` by the rotation
+    #     script in commit 5f4c503f0 — a truncated symbol path that does
+    #     not match the lint's full `archive_session::_sync` context. R7
+    #     was additionally dropped entirely (no replacement emitted).
+    #   * R1 prune_state_versions::_sync (parent-link walk over derived
+    #     state versions) was keyed at the same truncated `_sync` path.
+    #   * R6 register_message_routes::send_message (bounded await of the
+    #     auto-title task) and R7 register_message_routes::send_message
+    #     (two contextlib.suppress(asyncio.CancelledError) around shielded
+    #     audit-persistence) lost their full symbol paths when commit
+    #     064a026dd ("Refactor session routes by resource") split
+    #     `web/sessions/routes.py` into the `routes/` package; the R7
+    #     entries were dropped entirely.
+    #   * R9 ExecutionServiceImpl::_execute_locked (idempotent shutdown-event
+    #     cleanup) was dropped by the same 5f4c503f0 rotation script.
+    #   * R9 _apply_merge_patch (JSON-Merge-Patch RFC 7396 delete semantics)
+    #     lost coverage when commit d456f1b4a moved `_apply_merge_patch`
+    #     from `web/composer/tools.py` (covered by a per_file_rules
+    #     umbrella) into `web/composer/tools/_common.py` (uncovered).
+    #
+    # All restored entries carry TODO metadata matching the 5f4c503f0
+    # pattern; owner/reason/safety fill-in remains the operator's quarterly
+    # allowlist-review pass (tracked under elspeth-297b8f5c5d).
+    #
+    # Five of the six rotated entries replace stale entries already
+    # accounted for in the budget (only the symbol path changed). One
+    # entry (R7 archive_session) is a true restoration. The R7
+    # register_message_routes entries (x2), the R9 _execute_locked entry,
+    # and the R9 _apply_merge_patch entry are also true restorations.
+    # Net new count is therefore +5 (one R7 archive_session + two R7
+    # send_message + one R9 _execute_locked + one R9 _apply_merge_patch);
+    # the four key-rewrites consume no new budget.
+    #
+    # Ratcheted from 542 → 535 on 2026-05-23 (net −7) at the close of the
+    # TODO-corpus cleanup pass (cluster-1 telemetry + cluster-2 web-mid +
+    # cluster-3 composer-tools + overflow composer/service.py). The cleanup
+    # resolved 117 placeholder ``owner: TODO`` entries authored by the
+    # buggy rotation script (commit 5f4c503f0); after FIX+REVIEW pairs the
+    # net allowlist count fell by 7. Five source-code fixes (telemetry
+    # ``defaultdict`` switch, generation.py provider counter, two redundant
+    # isinstance removals in sessions.py, two internal-dict patterns in
+    # composer/service.py) eliminated the violations entirely; the
+    # remaining TODO entries were re-authored with fresh, source-line-
+    # specific justifications and bounded ``expires: '2026-08-23'``.
+    #
+    # Bumped from 536 → 547 on 2026-05-24 after the PR39 static-analysis
+    # failure exposed trust-tier drift below the contract gate. The
+    # rotator now handles R7-R9 and preserves full nested symbol context;
+    # this removed 176 stale fingerprint entries and added current
+    # exact-fingerprint entries for the same boundary corpus plus bounded
+    # ALLOWLIST-FRESH follow-ups for previously uncovered findings. Existing
+    # headroom absorbed most of the +35 web.yaml delta; this ratchet bump is
+    # the remaining +11 needed for the current corpus.
+    #
+    # Bumped from 536 → 555 on 2026-05-24 for the
+    # tutorial-assumption-surfacing branch allowlist rotation/additions:
+    # removed 107 stale allow_hits and added 150 current findings (net +43
+    # allow_hits; existing headroom absorbed 24, requiring a +19 budget bump).
+    # The batch is a mix of same-symbol fingerprint rotations and reviewed
+    # branch additions for interpretation-review Tier-3 validation, guided-route
+    # audit unwind fallbacks, archive rollback/idempotent cleanup, and
+    # proposal/blob optional-shape probes. New branch-specific additions are
+    # bounded to 2026-08-24; same-site rotations preserve their existing
+    # owner/reason/safety/expiry metadata.
+    #
+    # Rebaselined to 580 on 2026-05-25 after replaying tutorial-assumption-
+    # surfacing onto RC5.2 and pruning stale fingerprints from the temporary
+    # PR39+tutorial allowlist union. Verified by trust_tier.tier_model on the
+    # combined tree.
+    #
+    # Bumped to 643 on 2026-05-25 (net +63) for the model-catalog-snapshot
+    # branch. Four commits on RC5.2 (685c4cdb7..0fcc7b8bb) plus the current
+    # working tree introduced AST-shifted fingerprints across web/app.py,
+    # web/sessions/service.py, web/execution/{service,validation}.py,
+    # web/composer/{tools/*,redaction,source_inspection,interpretation_state}.py
+    # without paired allowlist updates. scripts/cicd/rotate_tier_model_fingerprints.py
+    # pruned 184 stale entries and emitted 247 current fingerprints (148 same-symbol
+    # rotations preserving prior metadata, 99 ALLOWLIST-FRESH placeholders bounded
+    # 2026-08-24 for owner review). Two of the fresh entries (web/app.py:R1
+    # _probe_get / R6 lifespan) were upgraded to expires: null with proper
+    # rationale (httpx false-positive + documented graceful-degradation boundary
+    # for the OpenRouter catalog boot probe).
+    # Bumped to 645 on 2026-05-25 (net +2) for the
+    # ``_prompt_shield_artifact_hash`` and ``_raw_html_cleanup_artifact_hash``
+    # type-narrowing isinstance checks introduced when the pipeline-decision
+    # hash domain was narrowed by user_term (fixes spurious drift when an
+    # unrelated field like ``model`` is edited after a shield-recommendation
+    # review resolves).
+    #
+    # Bumped to 652 on 2026-05-25 (net +7) for the llm_model_choice
+    # algorithmic-surfacing addition: parallel to the existing
+    # llm_prompt_template auto-stager, the new auto-stager fires whenever
+    # an LLM node's options.model is set, and the new missing-site
+    # enumerator surfaces a pending review for any unreviewed model
+    # choice loaded from existing sessions. 9 net-new fingerprinted
+    # allowlist entries land here (model branch of _materialize_node_for_execution
+    # R1+R5, _missing_model_choice_review_sites R1+R5, _assert_affected_component
+    # R1+R5 for the resolution-time draft check, _options_with_default_model_choice_review
+    # R5 isinstance, 2 R1 entries on _requirement_matches_field_value
+    # carried forward from the pre-rename _requirement_matches_prompt_template
+    # function). Two stale entries dropped: _requirement_matches_prompt_template
+    # R1×2 (function renamed in this commit). Net 9 − 2 = +7.
+    max_allow_hits: 652
+    # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
+    # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
+    # — W5 load-bearing telemetry-only exemption per
+    # docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md).
+    # The single per_file_rules entry covers all 11 ``record_*`` helpers
+    # via max_hits=12 instead of 11 individual fingerprinted entries —
+    # avoids AST-shift fingerprint rotation and concentrates the W5
+    # rationale at one site.
+    #
+    # Ratcheted from 93 → 92 on 2026-05-23 (net −1) at the close of the
+    # TODO-corpus cleanup; one per-file-rule entry no longer needed after
+    # the cleanup absorbed its coverage into individual fingerprinted
+    # entries with source-line-specific justifications.
+    #
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) to collapse the R1/R5
+    # fingerprint corpus of two high-edit-cadence Tier-3 files —
+    # ``web/interpretation_state.py`` (max_hits=71) and
+    # ``web/sessions/service.py`` (max_hits=41) — into one bounded per-file
+    # rule each. These files churn ~6 commits/month; every AST shift rotated
+    # all their fingerprints, so the prior individual entries re-broke CI on
+    # each edit. The two rules REMOVED 112 individual allow_hits entries
+    # (net allow_hits −112, far under the 652 ceiling), so this is a net
+    # tightening of the suppression surface, not new debt; max_hits caps each
+    # rule so a NEW R1/R5 in either file still trips review. R6/R7 in
+    # sessions/service.py remain individually fingerprinted for per-site
+    # scrutiny and are NOT covered by the rule.
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor into RC5.2: the orchestrator
+    # god-class decomposition extracted ``_cleanup_plugins`` into
+    # ``engine/orchestrator/cleanup.py``, relocating the Tier-1 re-raise R5
+    # guard out of the ``core.py`` R5 pattern into a new per-file pattern
+    # entry for ``cleanup.py`` (the ``core.py`` R5 ``max_hits`` was
+    # decremented 3 → 2 to compensate on the hit axis). Splitting one file
+    # into two costs exactly one new per_file_rules entry; this +1 lands on
+    # top of the web-rotation bump above (RC5.2 took it 92 → 94; this merge
+    # takes it 94 → 95). Honest accounting of the file split, not new
+    # defensive surface.
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp
+    # into RC5.2. The decomposition extracted ComposerServiceImpl._dispatch_tool_batch
+    # into the module-level run_tool_batch in web/composer/tool_batch.py. The three
+    # R6 Tier-3 LLM-tool-argument sites (json.JSONDecodeError parse, redaction-time
+    # PydanticValidationError fallback, ToolArgumentError after audit-write) were
+    # previously covered by the existing web/composer/service.py R6 per_file_rule;
+    # the file split relocated them to a new web/composer/tool_batch.py R6
+    # per_file_rule (max_hits=3). Same boundary semantics, one extra per-file rule
+    # for the one extra file — honest accounting of the split, not new defensive
+    # surface. The 10 in-place fingerprint rotations and 2 R4 + 1 R5 fingerprinted
+    # entries this merge also rotated/added stay within the allow_hits ceilings.
+    max_per_file_rules: 99
+    # Bumped from 95 → 98 on 2026-05-30: collapsed 17 fragile per-fingerprint
+    # allow_hits entries for web/composer/tools/_common.py into 3 durable
+    # per_file_rules (R1/R5/R9) after an import addition rotated every one of
+    # the file's fingerprints. Net allowlist change is −14 entries (allow_hits
+    # −17, well under its 652 ceiling); the per_file_rules count rises +3. This
+    # is the high-churn-file collapse recommended over fingerprint rotation
+    # (feedback_rotate_tier_model_dup_key_dataloss): _common.py is the composer's
+    # Tier-3 prevalidation boundary and its defensive reads are inherent, not debt.
+    # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
+    # S4 entry as ``max_allow_hits`` above.
+    #
+    # Bumped from 486 → 504 on 2026-05-20 for the same session-routes
+    # resource split bump as ``max_allow_hits`` above (net +18).
+    #
+    # Bumped from 504 → 507 on 2026-05-20 for the
+    # ``_declared_field_name`` helper bump as ``max_allow_hits`` above
+    # (net +3).
+    #
+    # Bumped from 507 → 508 on 2026-05-20 for the same composer-jit-hints
+    # Phase 1 ``WebScrapeTransform.get_post_call_hints`` bump as
+    # ``max_allow_hits`` above (net +1).
+    #
+    # Bumped from 508 → 509 on 2026-05-20 for the same wire-visible
+    # web_scrape identity placeholder validation bump as ``max_allow_hits``
+    # above (net +1).
+    #
+    # Bumped from 509 → 563 on 2026-05-23 for the same composer/service.py
+    # decomposition refactor as ``max_allow_hits`` above (net +54).
+    #
+    # Bumped from 563 → 629 on 2026-05-23 (net +66) for the same rebase-atop-
+    # tools-split as ``max_allow_hits`` above. One per_file_rules entry removed
+    # (the now-stale ``web/composer/tools.py`` pattern; the file was deleted
+    # and replaced with the ``tools/`` subpackage whose plane modules carry
+    # their own per-file rules and fingerprinted entries).
+    #
+    # Bumped from 629 → 634 on 2026-05-23 (net +5) for the same 5 restored
+    # boundary entries as ``max_allow_hits`` above.
+    #
+    # Ratcheted from 634 → 627 on 2026-05-23 (net −7) at the close of the
+    # TODO-corpus cleanup: ``max_allow_hits`` −7 and ``max_per_file_rules``
+    # −1 sum to −8, offset by +1 to land at 627; the +1 reconciles the
+    # cluster-3 originally-uncovered entries (13 added) and cluster-2
+    # net-new entries (4 added) against the cluster-3 stale-deletions (12)
+    # and code-fix-cascade deletions (5).
+    #
+    # Bumped from 628 → 639 on 2026-05-24 for the same PR39 trust-tier
+    # rotation as ``max_allow_hits`` above. No permanent budget bump is
+    # paired with this: fresh unmatched entries are bounded to 2026-08-24.
+    #
+    # Bumped from 628 → 647 on 2026-05-24 for the same
+    # tutorial-assumption-surfacing branch allowlist rotation/additions as
+    # ``max_allow_hits`` above (max_allow_hits +19, max_per_file_rules unchanged).
+    #
+    # Rebaselined to 672 on 2026-05-25 after replaying tutorial-assumption-
+    # surfacing onto RC5.2 and pruning stale fingerprints from the temporary
+    # PR39+tutorial allowlist union. Verified by trust_tier.tier_model on the
+    # combined tree.
+    #
+    # Bumped to 735 on 2026-05-25 (net +63) for the same model-catalog-snapshot
+    # rotation as ``max_allow_hits`` above.
+    # Bumped to 737 on 2026-05-25 (net +2) for the same two new R5 entries
+    # accounted for in ``max_allow_hits`` above.
+    #
+    # Bumped to 744 on 2026-05-25 (net +7) for the same llm_model_choice
+    # algorithmic-surfacing addition accounted for in ``max_allow_hits``
+    # above.
+    #
+    # Bumped to 745 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as ``max_per_file_rules``
+    # above. ``max_allow_hits`` is NOT paired: the R4 ``run_hook`` allow_hit
+    # key was relocated core.py → cleanup.py (net-zero on hits), so only the
+    # new R5 pattern entry adds to the total-entry count. The pre-existing
+    # total_entries overage (RC5.2's DECAYING cicd-allowlist-audit track) is
+    # left visible, NOT absorbed by this bump.
+    max_total_entries: 745
+    # Permanent exemptions must be renewed or deliberately re-ratcheted during
+    # quarterly allowlist review. New suggested entries default to a bounded
+    # three-month expiry window instead of expires: null.
+    #
+    # Bumped 2026-05-23: max_permanent_allow_hits 324 → 387 (net +63),
+    # max_permanent_total_entries 417 → 479 (net +62). Same rebase-atop-
+    # tools-split rationale as ``max_allow_hits`` / ``max_total_entries``
+    # above. Permanent counts represent the subset of expires:null entries —
+    # the upstream tools-split's plane modules brought their own permanent
+    # allowlist coverage which now lands in this composer-service refactor's
+    # commit since both refactors share the same web.yaml.
+    # Bumped 2026-05-23 (net +5 each): max_permanent_allow_hits 387 → 392 and
+    # max_permanent_total_entries 479 → 484 for the same 5 restored boundary
+    # entries as ``max_allow_hits`` / ``max_total_entries`` above (all 5
+    # have expires: null and so count in the permanent subset).
+    #
+    # Ratcheted 2026-05-23 (net −118 each, headline savings of the cleanup):
+    # max_permanent_allow_hits 392 → 274 and max_permanent_total_entries
+    # 484 → 366. The 117 TODO entries committed by the buggy rotator all had
+    # ``expires: null`` (permanent). After the cleanup pass converted each
+    # to either a code fix (deleted), a stale deletion, or an ALLOWLIST-FRESH
+    # entry with bounded ``expires: '2026-08-23'``, the permanent subset
+    # collapsed by ~118 entries. This is the structural improvement: 118
+    # entries that were silently permanent are now on a 90-day review clock.
+    # Quarterly review must re-justify or fix each before 2026-08-23.
+    #
+    # Ratcheted 2026-05-23: max_permanent_per_file_rules 93 → 92 matching
+    # the ``max_per_file_rules`` ratchet above.
+    #
+    # Bumped 2026-05-29: max_permanent_total_entries 412 → 413 for the
+    # orchestrator decomposition cleanup.py R5 file-split entry (expires:
+    # null, so it counts in the permanent subset). Same +1 accounting as the
+    # ``max_total_entries`` bump above. The matching
+    # max_permanent_per_file_rules +1 is recorded at that ceiling below,
+    # where it stacks onto RC5.2's web-rotation bump (92 → 94 → 95).
+    #
+    # Bumped on merge of refactor/composer-tools-rearchitect into RC5.2
+    # (commits 7114e78cc + 1e7e42d7a, plus this merge commit):
+    # max_permanent_allow_hits 275 → 330 (+55) and
+    # max_permanent_total_entries 367 → 425 (+58) to absorb the post-merge
+    # AST-shift allowlist additions for the ToolContext refactor. The
+    # net entry delta is +50 composer/tools-rearchitect entries minus the
+    # 55 stale entries pruned, plus 5 service.py rotation entries the
+    # compose-loop refactor (P1-P4 + Steps 6-7) rotated under us. Headroom
+    # leaves space for one quarterly cycle of audit work without re-bumping.
+    # Ratcheted to 318 on 2026-05-25 after stale-fingerprint pruning in the
+    # tutorial-assumption-surfacing rebase reduced the permanent exact-hit
+    # corpus below the prior ceiling.
+    #
+    # Bumped to 320 on 2026-05-25 (net +2) for the model-catalog-snapshot
+    # boot probe — web/app.py:R1 _probe_get (httpx false-positive) and R6
+    # lifespan (documented graceful-degradation for the OpenRouter catalog
+    # probe) are permanent (expires: null) with full rationale.
+    max_permanent_allow_hits: 320
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) for the two permanent
+    # (expires: null) per-file rules collapsing R1/R5 in
+    # web/interpretation_state.py and web/sessions/service.py — same change as
+    # the ``max_per_file_rules`` bump above. The 112 removed allow_hits were
+    # likewise permanent, so the permanent exact-hit and total subsets both
+    # fall well below their ceilings; only the per-file-rule subset rises.
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor: the permanent cleanup.py R5
+    # file-split entry (expires: null) lands on top of the web-rotation bump
+    # above. Same +1 accounting as the ``max_per_file_rules`` merge bump.
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp:
+    # the new web/composer/tool_batch.py R6 per_file_rule (expires: null) is
+    # permanent, so it lands on this ceiling too. Same +1 file-split accounting
+    # as the ``max_per_file_rules`` merge bump above.
+    max_permanent_per_file_rules: 99
+    # Bumped from 95 → 98 on 2026-05-30: the 3 new web/composer/tools/_common.py
+    # per_file_rules are permanent (expires: null, matching the Tier-3-boundary
+    # convention used by core/secrets.py et al.), so they also land on the
+    # permanent ceiling. Same collapse rationale as max_per_file_rules above.
+    # Ratcheted to 410 on 2026-05-25 after stale-fingerprint pruning in the
+    # tutorial-assumption-surfacing rebase reduced the permanent total corpus
+    # below the prior ceiling.
+    #
+    # Bumped to 412 on 2026-05-25 (net +2) for the same model-catalog-snapshot
+    # permanent entries as ``max_permanent_allow_hits`` above.
+    #
+    # Bumped to 413 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as
+    # ``max_permanent_per_file_rules`` above.
+    max_permanent_total_entries: 413

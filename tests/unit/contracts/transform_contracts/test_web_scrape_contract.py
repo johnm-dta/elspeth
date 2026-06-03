@@ -21,6 +21,7 @@ from elspeth.contracts.audit import Call
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.transforms.web_scrape import WebScrapeTransform
+from elspeth.plugins.transforms.web_scrape_errors import ForbiddenError, NotFoundError, UnauthorizedError
 from elspeth.testing import make_pipeline_row
 
 from .test_transform_protocol import TransformContractPropertyTestBase
@@ -342,3 +343,140 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
             transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)
 
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("row_data", "error_type"),
+        [
+            ({}, "KeyError"),
+            ({"url": 123}, "TypeError"),
+            ({"url": ["https://example.com"]}, "TypeError"),
+        ],
+        ids=["missing-url", "integer-url", "list-url"],
+    )
+    def test_invalid_url_field_values_fail_before_external_call(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+        row_data: dict[str, Any],
+        error_type: str,
+    ) -> None:
+        """Missing or malformed URL field values are row validation failures."""
+        result = transform.process(make_pipeline_row(row_data), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["error_type"] == error_type
+        assert result.retryable is False
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+        _context_mock(ctx.rate_limit_registry, "rate limit registry").get_limiter.assert_not_called()
+        mock_httpx.return_value.get.assert_not_called()
+
+    def test_response_request_without_host_crashes_before_payload_storage(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Audited clients must return a response request URL with a host."""
+
+        def fake_fetch_url(safe_request: Any, process_ctx: PluginContext) -> tuple[Any, str, Call]:
+            assert process_ctx is ctx
+            response = Mock(spec_set=httpx.Response)
+            response.request.url.host = None
+            return response, safe_request.original_url, _create_audit_call()
+
+        monkeypatch.setattr(transform, "_fetch_url", fake_fetch_url)
+
+        with pytest.raises(
+            FrameworkBugError,
+            match=r"SSRF-safe HTTP response request URL has no host; cannot record final resolved IP\.",
+        ):
+            transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)
+
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+
+    def test_response_request_with_non_ip_host_crashes_before_payload_storage(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Audited clients must return the IP-pinned request, not the logical hostname."""
+
+        def fake_fetch_url(safe_request: Any, process_ctx: PluginContext) -> tuple[httpx.Response, str, Call]:
+            assert process_ctx is ctx
+            return (
+                httpx.Response(
+                    200,
+                    content=b"<html><body>hostname request</body></html>",
+                    request=httpx.Request("GET", "https://example.com/contract-test"),
+                ),
+                safe_request.original_url,
+                _create_audit_call(),
+            )
+
+        monkeypatch.setattr(transform, "_fetch_url", fake_fetch_url)
+
+        with pytest.raises(
+            FrameworkBugError,
+            match=(
+                r"SSRF-safe HTTP response request host 'example\.com' is not an IP address; "
+                r"AuditedHTTPClient must return the IP-pinned final request\."
+            ),
+        ):
+            transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)
+
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("status_code", "error_type"),
+        [
+            (401, UnauthorizedError.__name__),
+            (403, ForbiddenError.__name__),
+            (404, NotFoundError.__name__),
+        ],
+    )
+    def test_non_retryable_http_status_returns_api_error_without_processed_payload(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        mock_httpx: Mock,
+        status_code: int,
+        error_type: str,
+    ) -> None:
+        """Non-retryable HTTP failures are audited fetches, not successful rows."""
+        mock_httpx.return_value.get.return_value = httpx.Response(
+            status_code,
+            content=b"<html><body>not ok</body></html>",
+            request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+        )
+
+        result = transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error_type"] == error_type
+        assert result.retryable is False
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_called_once()
+        _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
+
+    def test_processed_payload_store_failure_propagates_after_fetch_audit(
+        self,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+    ) -> None:
+        """Processed-content storage failures must not be hidden as success."""
+        payload_store = _context_mock(ctx.payload_store, "payload_store")
+        payload_store.store.side_effect = RuntimeError("processed payload store failed")
+
+        with pytest.raises(RuntimeError, match="processed payload store failed"):
+            transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)
+
+        _context_mock(ctx.landscape, "landscape").record_call.assert_called_once()
+        payload_store.store.assert_called_once()

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import Connection
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import (
     CallStatus,
@@ -62,6 +63,8 @@ def _create_run(
             reproducibility_grade=(
                 reproducibility_grade.value if isinstance(reproducibility_grade, ReproducibilityGrade) else reproducibility_grade
             ),
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
 
@@ -1016,10 +1019,12 @@ class TestPurgeGradeUpdateFailureResilience:
         assert result.grade_update_failures == ()
 
     def test_grade_update_failure_does_not_abort_remaining_updates(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """If update_grade_after_purge raises a transient error for one run, other runs still get updated.
+        """If update_grade_after_purge raises a transient DB error for one run, other runs still get updated.
 
-        Uses RuntimeError to simulate a transient DB failure.
-        AuditIntegrityError must NOT be swallowed — see separate test below.
+        Uses OperationalError (a SQLAlchemyError) to simulate a transient DB
+        failure — the only recoverable failure mode, since update_grade_after_purge
+        operates on our own Tier-1 audit DB. AuditIntegrityError must NOT be
+        swallowed — see separate test below.
         """
         store = _ControlledStore()
         ref = store.store(b"payload")
@@ -1038,7 +1043,7 @@ class TestPurgeGradeUpdateFailureResilience:
             del db_obj
             assert deleted_refs == [ref]
             if run_id == "run-bad":
-                raise RuntimeError(f"Transient DB failure for run '{run_id}'")
+                raise OperationalError(f"Transient DB failure for run '{run_id}'", {}, Exception("locked"))
             grade_updates.append(run_id)
 
         monkeypatch.setattr(
@@ -1086,7 +1091,7 @@ class TestPurgeGradeUpdateFailureResilience:
             manager.purge_payloads([ref])
 
     def test_grade_update_failures_logged(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Grade update failures (transient, non-integrity) must be logged with structlog."""
+        """Grade update failures (transient DB errors, non-integrity) must be logged with structlog."""
         import structlog.testing
 
         store = _ControlledStore()
@@ -1101,7 +1106,7 @@ class TestPurgeGradeUpdateFailureResilience:
 
         def _transient_fail(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
             assert deleted_refs == [ref]
-            raise RuntimeError(f"Transient failure for run '{run_id}'")
+            raise OperationalError(f"Transient failure for run '{run_id}'", {}, Exception("locked"))
 
         monkeypatch.setattr(
             "elspeth.core.retention.purge.update_grade_after_purge",
@@ -1116,6 +1121,37 @@ class TestPurgeGradeUpdateFailureResilience:
         assert "grade_update_failed" in log_events
         failed_log = next(e for e in cap_logs if e["event"] == "grade_update_failed")
         assert failed_log["run_id"] == "run-fail"
+
+    def test_grade_update_programming_bug_propagates(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-DB, non-integrity exception (a bug in our own code) must crash, not be swallowed.
+
+        update_grade_after_purge operates on our own Tier-1 audit DB. The only
+        recoverable failure mode is a SQLAlchemyError (transient DB I/O). A
+        TypeError / AttributeError / RuntimeError there is a bug in our code:
+        recording it as a recoverable grade_update_failure would hide the bug
+        and ship known-broken results. Offensive programming — let it crash.
+        """
+        store = _ControlledStore()
+        ref = store.store(b"payload")
+        manager = PurgeManager(db, store)
+
+        monkeypatch.setattr(
+            manager,
+            "_find_affected_run_ids",
+            lambda refs: {"run-buggy"} if refs else set(),
+        )
+
+        def _buggy_grade_update(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
+            del db_obj, run_id, deleted_refs
+            raise TypeError("bug in our own grade-update code")
+
+        monkeypatch.setattr(
+            "elspeth.core.retention.purge.update_grade_after_purge",
+            _buggy_grade_update,
+        )
+
+        with pytest.raises(TypeError, match="bug in our own grade-update code"):
+            manager.purge_payloads([ref])
 
 
 class TestPurgeUnboundedIN:

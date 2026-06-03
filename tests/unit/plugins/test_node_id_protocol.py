@@ -4,6 +4,12 @@ node_id is set by the Orchestrator after plugin registration with Landscape.
 This test verifies it's part of the plugin contract (protocols and base classes).
 """
 
+from pathlib import Path
+
+from elspeth.contracts import Determinism
+
+_OBSERVED_SCHEMA = {"mode": "observed"}
+
 
 class TestNodeIdProtocol:
     """Verify node_id is part of plugin contract."""
@@ -32,6 +38,7 @@ class TestNodeIdProtocol:
 
         class TestSource(BaseSource):
             name = "test"
+            determinism = Determinism.IO_READ
             output_schema = TestSchema
 
             def load(self, ctx: SourceContext) -> Iterator[dict[str, Any]]:  # type: ignore[override]
@@ -67,6 +74,7 @@ class TestNodeIdProtocol:
 
         class TestTransform(BaseTransform):
             name = "test"
+            determinism = Determinism.DETERMINISTIC
             input_schema = TestSchema
             output_schema = TestSchema
 
@@ -118,6 +126,7 @@ class TestNodeIdProtocol:
 
         class TestSink(BaseSink):
             name = "test"
+            determinism = Determinism.IO_WRITE
             input_schema = TestSchema
             _on_write_failure: str | None = "discard"
 
@@ -135,3 +144,40 @@ class TestNodeIdProtocol:
 
         sink.node_id = "sink-202"
         assert sink.node_id == "sink-202"
+
+    def test_builtin_plugin_instances_round_trip_node_id(self, tmp_path: Path) -> None:
+        """Built-in source, transform, and sink instances expose mutable node_id."""
+        from elspeth.plugins.infrastructure.manager import PluginManager
+
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        source_cls = manager.get_source_by_name("csv")
+        source = source_cls(
+            {
+                "path": str(tmp_path / "input.csv"),
+                "schema": _OBSERVED_SCHEMA,
+                "on_validation_failure": "discard",
+            }
+        )
+        assert source.node_id is None
+        source.node_id = "source-001"
+        assert source.node_id == "source-001"
+
+        transform_cls = manager.get_transform_by_name("passthrough")
+        transform = transform_cls({"schema": _OBSERVED_SCHEMA})
+        assert transform.node_id is None
+        transform.node_id = "transform-001"
+        assert transform.node_id == "transform-001"
+
+        sink_cls = manager.get_sink_by_name("json")
+        sink = sink_cls(
+            {
+                "path": str(tmp_path / "output.jsonl"),
+                "schema": _OBSERVED_SCHEMA,
+                "format": "jsonl",
+            }
+        )
+        assert sink.node_id is None
+        sink.node_id = "sink-001"
+        assert sink.node_id == "sink-001"

@@ -1,7 +1,11 @@
 // src/hooks/useComposer.ts
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
-import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
+import {
+  COMPOSE_TIMEOUT_ABORT_REASON,
+  COMPOSE_TIMEOUT_MS,
+  COMPOSE_USER_CANCEL_ABORT_REASON,
+} from "@/config/composer";
 
 /**
  * Hook for composing messages. Wraps sessionStore.sendMessage()
@@ -18,32 +22,54 @@ export function useComposer() {
   const isComposing = useSessionStore((s) => s.isComposing);
   const compositionState = useSessionStore((s) => s.compositionState);
   const error = useSessionStore((s) => s.error);
+  const errorDetails = useSessionStore((s) => s.errorDetails);
+  const activeControllerRef = useRef<AbortController | null>(null);
+
+  const runWithTimeout = useCallback(
+    async (runner: (signal: AbortSignal) => Promise<void>) => {
+      const controller = new AbortController();
+      activeControllerRef.current = controller;
+      const timer = setTimeout(
+        () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+        COMPOSE_TIMEOUT_MS,
+      );
+      try {
+        await runner(controller.signal);
+      } finally {
+        clearTimeout(timer);
+        if (activeControllerRef.current === controller) {
+          activeControllerRef.current = null;
+        }
+      }
+    },
+    [],
+  );
 
   const sendMessage = useCallback(
     async (content: string) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), COMPOSE_TIMEOUT_MS);
-      try {
-        await storeSendMessage(content, controller.signal);
-      } finally {
-        clearTimeout(timer);
-      }
+      await runWithTimeout((signal) => storeSendMessage(content, signal));
     },
-    [storeSendMessage],
+    [runWithTimeout, storeSendMessage],
   );
 
   const retryMessage = useCallback(
     async (messageId: string) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), COMPOSE_TIMEOUT_MS);
-      try {
-        await storeRetryMessage(messageId, controller.signal);
-      } finally {
-        clearTimeout(timer);
-      }
+      await runWithTimeout((signal) => storeRetryMessage(messageId, signal));
     },
-    [storeRetryMessage],
+    [runWithTimeout, storeRetryMessage],
   );
 
-  return { sendMessage, retryMessage, isComposing, compositionState, error };
+  const cancelComposition = useCallback(() => {
+    activeControllerRef.current?.abort(COMPOSE_USER_CANCEL_ABORT_REASON);
+  }, []);
+
+  return {
+    sendMessage,
+    retryMessage,
+    cancelComposition,
+    isComposing,
+    compositionState,
+    error,
+    errorDetails,
+  };
 }

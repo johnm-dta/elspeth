@@ -1,0 +1,96 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Dataverse environment URL (e.g., https://myorg.crm.dynamics.com)",
+        "kind": "text",
+        "label": "Environment URL",
+        "name": "environment_url",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Authentication configuration",
+        "kind": "json-object",
+        "label": "Auth",
+        "name": "auth",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "v9.2",
+        "description": "Dataverse Web API version",
+        "kind": "text",
+        "label": "API Version",
+        "name": "api_version",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Target entity logical name",
+        "kind": "text",
+        "label": "Entity",
+        "name": "entity",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "upsert",
+        "description": "Write mode (day-one: upsert only)",
+        "enum": [
+          "upsert"
+        ],
+        "kind": "enum",
+        "label": "Mode",
+        "name": "mode",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Pipeline field \u2192 Dataverse column mapping",
+        "kind": "json-object",
+        "label": "Field Mapping",
+        "name": "field_mapping",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Business key field for upsert (PATCH with alternate key)",
+        "kind": "text",
+        "label": "Alternate Key",
+        "name": "alternate_key",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Lookup field bindings for navigation properties",
+        "kind": "json-object",
+        "label": "Lookups",
+        "name": "lookups",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Additional Dataverse domain patterns for SSRF allowlist",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Additional Domains",
+        "name": "additional_domains",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "dataverse"
+}

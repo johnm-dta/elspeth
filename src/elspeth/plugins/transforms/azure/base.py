@@ -16,7 +16,6 @@ import time
 from collections.abc import Callable
 from threading import Event, Lock
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 import structlog
@@ -32,6 +31,8 @@ from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputP
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.telemetry import make_warn_telemetry_before_start
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.azure.errors import MalformedResponseError
 from elspeth.plugins.transforms.safety_utils import get_fields_to_scan
 from elspeth.plugins.transforms.safety_utils import validate_fields_not_empty as _validate_fields
@@ -43,12 +44,7 @@ _CAPACITY_RETRY_MAX_DELAY_SECONDS = 1.0
 _AZURE_HTTP_TIMEOUT_SECONDS = 30.0
 
 
-def _warn_telemetry_before_start(event: Any) -> None:
-    """Default telemetry callback before on_start() — warns instead of silently dropping."""
-    logger.warning(
-        "telemetry_emit called before on_start() — event dropped",
-        event_type=type(event).__name__,
-    )
+_warn_telemetry_before_start = make_warn_telemetry_before_start(logger)
 
 
 class BaseAzureSafetyConfig(TransformDataConfig):
@@ -69,17 +65,7 @@ class BaseAzureSafetyConfig(TransformDataConfig):
     @field_validator("endpoint")
     @classmethod
     def _validate_endpoint_url(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("endpoint must not be empty")
-        parsed = urlparse(v)
-        if parsed.scheme != "https":
-            raise ValueError(f"endpoint must use HTTPS, got scheme '{parsed.scheme}'")
-        if not parsed.hostname:
-            raise ValueError("endpoint must include a hostname")
-        if parsed.username or parsed.password:
-            raise ValueError("endpoint must not contain embedded credentials")
-        return v
+        return validate_credential_safe_https_url(v, field_name="endpoint")
 
     @field_validator("api_key")
     @classmethod

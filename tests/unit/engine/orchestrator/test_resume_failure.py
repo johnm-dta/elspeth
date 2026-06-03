@@ -9,18 +9,25 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import NodeID, RunStatus
+from elspeth.contracts import Checkpoint, NodeID, ResumePoint, RunStatus
+from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
+from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import prepare_for_run
+from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.types import ExecutionCounters, ResumeState
 from tests.fixtures.landscape import make_landscape_db
+from tests.fixtures.stores import MockPayloadStore
 
 
 def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
@@ -28,6 +35,37 @@ def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
     if db is None:
         db = make_landscape_db()
     return Orchestrator(db)
+
+
+def _make_token_outcome(
+    *,
+    run_id: str,
+    token_id: str,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+    completed: bool = True,
+    sink_name: str | None = None,
+    batch_id: str | None = None,
+    fork_group_id: str | None = None,
+    join_group_id: str | None = None,
+    expand_group_id: str | None = None,
+    error_hash: str | None = None,
+) -> TokenOutcome:
+    return TokenOutcome(
+        outcome_id=f"outcome-{token_id}-{path.value}",
+        run_id=run_id,
+        token_id=token_id,
+        outcome=outcome,
+        path=path,
+        completed=completed,
+        recorded_at=datetime.now(UTC),
+        sink_name=sink_name,
+        batch_id=batch_id,
+        fork_group_id=fork_group_id,
+        join_group_id=join_group_id,
+        expand_group_id=expand_group_id,
+        error_hash=error_hash,
+    )
 
 
 class TestResumeFinalizesAsFailed:
@@ -105,6 +143,189 @@ class TestResumeFinalizesAsFailed:
             f"Run should be finalized as FAILED when resume fails with non-shutdown exception. finalize_run calls: {finalize_calls}"
         )
 
+    def test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed(self) -> None:
+        """Empty restored coalesce state must not force a resume processing pass."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-empty-coalesce-state"
+        empty_coalesce_state = CoalesceCheckpointState(version="4.0", pending=(), completed_keys=())
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=object)
+        mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-empty-coalesce-state",
+            run_id=run_id,
+            token_id="tok-empty-coalesce-state",
+            node_id="node-empty-coalesce-state",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+            coalesce_state=empty_coalesce_state,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            restored_aggregation_state={},
+            restored_coalesce_state=empty_coalesce_state,
+            unprocessed_rows=(),
+            schema_contract=MagicMock(spec=object),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
+        )
+
+        with (
+            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")),
+            patch(
+                "elspeth.engine.orchestrator.core.derive_resume_terminal_status_from_audit",
+                return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
+            ),
+            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch, "_delete_checkpoints"),
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(spec=object),
+                MagicMock(spec=object),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 3
+        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED)
+
+    def test_all_rows_processed_resume_replays_structural_counters_from_audit(self) -> None:
+        """All-terminal resume must not fabricate structural counters as zero."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-structural-counter-resume"
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
+        mock_factory.run_lifecycle.finalize_run = MagicMock()
+        # F2 (resume-fork-reemit): rows_processed is now sourced from a dedicated
+        # distinct-source-row query, not a per-leaf tally over the outcome list.
+        # This synthetic scenario represents 3 source rows reaching a terminal
+        # outcome (the success / coalesced / sink-discarded predicate rows); the
+        # buffered/batch-consumed/fork-parent/expand-parent records are structural
+        # and do not add new source rows.  Mock the query to return that count —
+        # the real QueryRepository computes it via COUNT(DISTINCT row_id) over a
+        # tokens-table JOIN, which a pure-outcome-list mock cannot reproduce.
+        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 3
+        mock_factory.query.get_all_token_outcomes_for_run.return_value = [
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-buffered",
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                completed=False,
+                batch_id="batch-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-buffered",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.BATCH_CONSUMED,
+                batch_id="batch-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-fork-parent",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
+                fork_group_id="fork-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-expand-parent",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
+                expand_group_id="expand-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-success",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="default",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-coalesced",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
+                join_group_id="join-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-discarded",
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                sink_name=DISCARD_SINK_NAME,
+                error_hash="sinkdiscard0001",
+            ),
+        ]
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-structural-counter-resume",
+            run_id=run_id,
+            token_id="tok-structural-counter-resume",
+            node_id="node-structural-counter-resume",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            restored_aggregation_state={},
+            restored_coalesce_state=None,
+            unprocessed_rows=(),
+            schema_contract=MagicMock(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
+        )
+
+        with (
+            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
+            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch, "_delete_checkpoints"),
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(),
+                MagicMock(),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+        assert result.rows_processed == 3
+        assert result.rows_succeeded == 2
+        assert result.rows_failed == 1
+        assert result.rows_forked == 1
+        assert result.rows_expanded == 1
+        assert result.rows_buffered == 1
+        assert result.rows_coalesced == 1
+        assert result.rows_diverted == 1
+
 
 class TestBuildProcessorCallsCleanupOnFailure:
     """Regression test for Phase 0 fix #7: Plugin cleanup skipped.
@@ -123,8 +344,6 @@ class TestBuildProcessorCallsCleanupOnFailure:
         """
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         config = MagicMock()
@@ -134,7 +353,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         config.sinks = {}
         config.source = MagicMock()
 
-        orch._cleanup_plugins(config, ctx)
+        cleanup_plugins(config, ctx)
 
         tracked_transform.on_complete.assert_called_once()
         tracked_transform.close.assert_called_once()
@@ -185,7 +404,9 @@ class TestBuildProcessorCallsCleanupOnFailure:
         # _build_processor fails after on_start has been called on all plugins
         with (
             patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
-            patch.object(orch, "_cleanup_plugins", wraps=orch._cleanup_plugins) as spy_cleanup,
+            # cleanup_plugins is now a module function; patch it where core.py looks
+            # it up (the imported name in core's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
             orch._initialize_run_context(
@@ -205,7 +426,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         spy_cleanup.assert_called_once()
         call_kwargs = spy_cleanup.call_args
         assert call_kwargs.kwargs.get("include_source") is True, (
-            f"_cleanup_plugins must be called with include_source=True when source was started. Got: {call_kwargs}"
+            f"cleanup_plugins must be called with include_source=True when source was started. Got: {call_kwargs}"
         )
         # The config passed must be the same config object
         assert call_kwargs.args[0] is config
@@ -219,49 +440,49 @@ class TestCleanupPluginsReRaisesSystemExceptions:
     AuditIntegrityError indicate system-level corruption (Tier 1 violations)
     and must crash immediately, not be silently downgraded.
 
-    Fix: record_cleanup_error() checks isinstance before logging and re-raises
-    system-level exceptions.
+    Fix: run_hook() catches TIER_1_ERRORS in a dedicated except clause that
+    re-raises before the broad-catch clause can downgrade them — the canonical
+    ``except TIER_1_ERRORS: raise`` form documented in contracts/errors.py.
     """
 
     def test_source_code_has_reraise_guard(self) -> None:
-        """Verify record_cleanup_error re-raises Tier 1 errors via TIER_1_ERRORS.
+        """Verify cleanup re-raises Tier 1 errors via a TIER_1_ERRORS except clause.
 
-        Structural test: inspect the source to confirm the isinstance check
-        with TIER_1_ERRORS exists inside record_cleanup_error.
+        Structural test: inspect the source to confirm a dedicated
+        ``except ...TIER_1_ERRORS:`` handler whose body is a bare ``raise``
+        precedes the broad-catch clause, so system-level corruption crashes
+        immediately instead of being collected as a cleanup warning.
         """
         import ast
         import inspect
         import textwrap
 
-        source = inspect.getsource(Orchestrator._cleanup_plugins)
-        # Dedent because getsource preserves indentation from the class
+        source = inspect.getsource(cleanup_plugins)
+        # Dedent for consistency (module-level function is already unindented).
         source = textwrap.dedent(source)
         tree = ast.parse(source)
 
         # Look for TIER_1_ERRORS usage in the function
-        assert "TIER_1_ERRORS" in source, "_cleanup_plugins must use TIER_1_ERRORS guard in record_cleanup_error"
+        assert "TIER_1_ERRORS" in source, "cleanup_plugins must guard on TIER_1_ERRORS"
 
-        # Find a Raise inside an If that checks isinstance with TIER_1_ERRORS
+        # Find an `except ...TIER_1_ERRORS:` handler whose body re-raises.
         found_reraise = False
         for node in ast.walk(tree):
-            if isinstance(node, ast.If):
-                if_source = ast.dump(node)
-                if "isinstance" in if_source and "TIER_1_ERRORS" in if_source:
-                    # Check that the if body contains a raise
-                    for child in ast.walk(node):
-                        if isinstance(child, ast.Raise):
-                            found_reraise = True
-                            break
+            if isinstance(node, ast.ExceptHandler):
+                handler_type_src = ast.dump(node.type) if node.type is not None else ""
+                if "TIER_1_ERRORS" not in handler_type_src:
+                    continue
+                if any(isinstance(stmt, ast.Raise) for stmt in node.body):
+                    found_reraise = True
+                    break
 
-        assert found_reraise, "Expected isinstance(error, TIER_1_ERRORS) guard with raise inside record_cleanup_error"
+        assert found_reraise, "Expected `except TIER_1_ERRORS: raise` handler in cleanup_plugins"
 
     def test_framework_bug_error_propagates_through_cleanup(self) -> None:
         """FrameworkBugError from plugin.on_complete() must propagate, not be swallowed."""
         from elspeth.contracts import FrameworkBugError
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a transform that raises FrameworkBugError
@@ -274,15 +495,13 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(FrameworkBugError, match="internal corruption"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)
 
     def test_audit_integrity_error_propagates_through_cleanup(self) -> None:
         """AuditIntegrityError from sink.close() must propagate, not be swallowed."""
         from elspeth.contracts.errors import AuditIntegrityError
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a sink that raises AuditIntegrityError on close
@@ -295,14 +514,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(AuditIntegrityError, match="audit DB corrupted"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)
 
     def test_regular_exceptions_still_collected_as_cleanup_errors(self) -> None:
         """Non-system exceptions are still collected and reported as RuntimeError."""
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a transform that raises a regular error
@@ -315,4 +532,4 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)

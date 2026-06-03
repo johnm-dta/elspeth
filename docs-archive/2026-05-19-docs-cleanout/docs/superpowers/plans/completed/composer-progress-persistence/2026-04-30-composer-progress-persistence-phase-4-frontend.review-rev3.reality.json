@@ -1,0 +1,436 @@
+{
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "review_revision": "rev-3",
+  "reviewed_plan": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
+  "updated_at": "2026-05-14",
+  "reviewer": "plan-review-reality",
+
+  "symbols": [
+    {
+      "symbol": "ComposerServiceImpl._run_one_turn_for_test (module-tail assignment)",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4158 — `ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test`"
+    },
+    {
+      "symbol": "ComposerServiceImpl._serialize_response_via_walker (module-tail assignment)",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4222 — `ComposerServiceImpl._serialize_response_via_walker = _phase3_serialize_response_via_walker`"
+    },
+    {
+      "symbol": "ComposerServiceImpl._state_payload_for_compose_turn_for_test (module-tail assignment)",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4223 — `ComposerServiceImpl._state_payload_for_compose_turn_for_test = _phase3_state_payload_for_compose_turn_for_test`"
+    },
+    {
+      "symbol": "ComposerServiceImpl.__init__ (module-tail replacement)",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4247 — `ComposerServiceImpl.__init__ = _phase3_composer_init`"
+    },
+    {
+      "symbol": "_PHASE3_ORIGINAL_COMPOSER_INIT",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4225 — `_PHASE3_ORIGINAL_COMPOSER_INIT = ComposerServiceImpl.__init__`"
+    },
+    {
+      "symbol": "_max_tool_calls_per_turn with fallback 16",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4235-4237 — try/except AttributeError with fallback to 16"
+    },
+    {
+      "symbol": "composer_max_tool_calls_per_turn setting access",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4235 — `self._settings.composer_max_tool_calls_per_turn`"
+    },
+    {
+      "symbol": "OtelRedactionTelemetry",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/redaction_telemetry.py:60 — `class OtelRedactionTelemetry`; imported inside _phase3_composer_init at service.py:4232"
+    },
+    {
+      "symbol": "_phase3_last_tool_outcomes initialization",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4240 — `self._phase3_last_tool_outcomes = ()`"
+    },
+    {
+      "symbol": "_phase3_last_expected_current_state_id initialization",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4241 — `self._phase3_last_expected_current_state_id = None`"
+    },
+    {
+      "symbol": "_phase3_last_redacted_assistant_tool_calls initialization",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4242 — `self._phase3_last_redacted_assistant_tool_calls = ()`"
+    },
+    {
+      "symbol": "_phase3_last_redacted_tool_rows initialization",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4243 — `self._phase3_last_redacted_tool_rows = ()`"
+    },
+    {
+      "symbol": "_phase3_last_audit_outcome initialization",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/composer/service.py:4244 — `self._phase3_last_audit_outcome = None`"
+    },
+    {
+      "symbol": "_failed_turn_response_body() emitting transcript_url: None",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:1297 — `\"transcript_url\": None` inside `_failed_turn_response_body` at line 1280"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages with include_tool_rows",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4160 — `include_tool_rows: bool = Query(False)`"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages with limit",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4156 — `limit: int = Query(100, ge=1, le=500)`"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages with offset",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4157 — `offset: int = Query(0, ge=0)`"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages with include_llm_audit",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4158 — `include_llm_audit: bool = Query(False)`"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages with include_raw_content",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4159 — `include_raw_content: bool = Query(False)`"
+    },
+    {
+      "symbol": "GET /api/sessions/{sid}/messages does NOT accept 'since'",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:4152-4196 — no `since` parameter present in the handler signature or query params"
+    },
+    {
+      "symbol": "partial_state in error response body",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:1398 — `response_body[\"partial_state\"] = ...` at convergence path; also at plugin-crash path (line 1563) and runtime-preflight path (line 1745)"
+    },
+    {
+      "symbol": "failed_turn in error response body",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:1367 — `response_body[\"failed_turn\"] = ...`"
+    },
+    {
+      "symbol": "partial_state_save_failed in error response body",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:1413 — `response_body[\"partial_state_save_failed\"] = True`"
+    },
+    {
+      "symbol": "partial_state_save_error in error response body",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/routes.py:1421 — `response_body[\"partial_state_save_error\"] = type(save_err).__name__`"
+    },
+    {
+      "symbol": "ChatMessageResponse.composition_state_id",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/schemas.py:119 — `composition_state_id: str | None = None`"
+    },
+    {
+      "symbol": "ChatMessageResponse.tool_call_id",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/schemas.py:120 — `tool_call_id: str | None = None`"
+    },
+    {
+      "symbol": "ChatMessageResponse.parent_assistant_id",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/schemas.py:121 — `parent_assistant_id: str | None = None`"
+    },
+    {
+      "symbol": "ChatMessageResponse.sequence_no",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/sessions/schemas.py:122 — `sequence_no: int | None = None`"
+    },
+    {
+      "symbol": "api/client.ts::parseResponse()",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/api/client.ts:80 — `async function parseResponse<T>(response: Response): Promise<T>`"
+    },
+    {
+      "symbol": "parseResponse() preserves only selected error fields (not recovery fields)",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/api/client.ts:145-152 — ApiError constructed with error_type, fanout_guard, provider_detail, provider_status_code, validation_errors; no partial_state, failed_turn, or partial_state_save_failed fields"
+    },
+    {
+      "symbol": "api/client.ts::authHeaders()",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/api/client.ts:54 — `function authHeaders(contentType?: string): HeadersInit`"
+    },
+    {
+      "symbol": "hooks/useComposer.ts wraps sessionStore with AbortController",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/hooks/useComposer.ts:24-37 — sendMessage and retryMessage both create `new AbortController()`"
+    },
+    {
+      "symbol": "hooks/useComposer.ts has no onError callback",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/hooks/useComposer.ts — no onError parameter or callback path; returns {sendMessage, retryMessage, isComposing, compositionState, error}"
+    },
+    {
+      "symbol": "sessionStore owns error dispatch / optimistic-message-failed state",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/stores/sessionStore.ts:336-370 — catch block sets error string and marks optimistic message as local_status: 'failed'"
+    },
+    {
+      "symbol": "hooks/useFocusTrap.ts",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/hooks/useFocusTrap.ts — confirmed present"
+    },
+    {
+      "symbol": "components/common/ConfirmDialog.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/common/ConfirmDialog.tsx — confirmed present"
+    },
+    {
+      "symbol": "components/common/ShortcutsHelp.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/common/ShortcutsHelp.tsx — confirmed present"
+    },
+    {
+      "symbol": "components/common/CommandPalette.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/common/CommandPalette.tsx — confirmed present"
+    },
+    {
+      "symbol": "components/settings/SecretsPanel.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/settings/SecretsPanel.tsx — confirmed present"
+    },
+    {
+      "symbol": "components/catalog/CatalogDrawer.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx — confirmed present"
+    },
+    {
+      "symbol": "components/shared/Modal (must NOT exist)",
+      "status": "EXISTS",
+      "evidence": "Confirmed absent — no Modal file or shared/ directory anywhere under src/elspeth/web/frontend/src/components/. Plan's instruction to avoid importing it is sound."
+    },
+    {
+      "symbol": "CompositionState type in frontend types",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/types/index.ts:157 — `export interface CompositionState`; re-exported via src/elspeth/web/frontend/src/types/api.ts:13"
+    },
+    {
+      "symbol": "App.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/App.tsx — confirmed present"
+    },
+    {
+      "symbol": "App.test.tsx",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/App.test.tsx — confirmed present"
+    },
+    {
+      "symbol": "App.css",
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/App.css — confirmed present"
+    },
+    {
+      "symbol": "tests/unit/web/composer/test_compose_loop_test_driver.py",
+      "status": "EXISTS",
+      "evidence": "tests/unit/web/composer/test_compose_loop_test_driver.py — confirmed present"
+    },
+    {
+      "symbol": "tests/unit/web/composer/test_compose_loop_persistence.py",
+      "status": "EXISTS",
+      "evidence": "tests/unit/web/composer/test_compose_loop_persistence.py — confirmed present"
+    },
+    {
+      "symbol": "tests/unit/web/composer/test_compose_loop_tool_call_cap.py",
+      "status": "EXISTS",
+      "evidence": "tests/unit/web/composer/test_compose_loop_tool_call_cap.py — confirmed present"
+    },
+    {
+      "symbol": "tests/unit/web/composer/test_audit_failure_primacy.py",
+      "status": "EXISTS",
+      "evidence": "tests/unit/web/composer/test_audit_failure_primacy.py — confirmed present"
+    },
+    {
+      "symbol": "tests/property/web/composer/test_compose_loop_invariants.py",
+      "status": "EXISTS",
+      "evidence": "tests/property/web/composer/test_compose_loop_invariants.py — confirmed present"
+    },
+    {
+      "symbol": "MANIFEST in src/elspeth/web/composer/redaction.py — count 39",
+      "status": "EXISTS",
+      "evidence": "Imported at runtime: len(MANIFEST) == 39. Phase 3 plan appendix still claims 38. Plan Task 0 Step 4 instruction to fix this is correct."
+    }
+  ],
+
+  "paths": [
+    {
+      "path": "src/elspeth/web/composer/service.py",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/sessions/routes.py",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/sessions/schemas.py",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/api/client.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/types/index.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/types/api.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/hooks/useComposer.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/hooks/useFocusTrap.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/stores/sessionStore.ts",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/common/ConfirmDialog.tsx",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/App.tsx",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/App.test.tsx",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/App.css",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "tests/unit/web/composer/ (directory)",
+      "status": "EXISTS",
+      "issue": null
+    },
+    {
+      "path": "tests/unit/web/composer/test_compose_service_structure.py (TO CREATE)",
+      "status": "MARKED NEW",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/types/recovery.ts (TO CREATE)",
+      "status": "MARKED NEW",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/hooks/useRecoveryPanel.ts (TO CREATE)",
+      "status": "MARKED NEW",
+      "issue": null
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/recovery/ (new directory, TO CREATE)",
+      "status": "MARKED NEW",
+      "issue": null
+    },
+    {
+      "path": "docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+      "status": "EXISTS",
+      "issue": "Plan's Task 0 Step 4 correctly identifies this file still says '38 manifest entries'. Live MANIFEST count is 39 (verified by import). Fix is required."
+    }
+  ],
+
+  "conventions": [
+    {
+      "rule": "pytest invocation: CLAUDE.md prescribes .venv/bin/python -m pytest",
+      "compliance": "VIOLATION",
+      "evidence": "Task 0 Step 5 uses `PYTHONPATH=src uv run pytest -q ...`. CLAUDE.md Development section shows `.venv/bin/python -m pytest` exclusively (5 examples). The Phase 3 plan in the same series uses `.venv/bin/python -m pytest` 25 times (0 uses of uv run pytest). This is the only occurrence of the uv run form in this plan series."
+    },
+    {
+      "rule": "Commit message conventions: feat()/refactor() prefix",
+      "compliance": "OK",
+      "evidence": "Recent commits use docs(plan):, test(property):, test(integration):, feat(composer): patterns. Plan commits use refactor(composer):, feat(frontend): which align with that style."
+    },
+    {
+      "rule": "Co-located frontend tests (.test.tsx adjacent, not __tests__/)",
+      "compliance": "OK",
+      "evidence": "Plan baseline note confirmed: tests/unit/web/composer/ files are adjacent, frontend test files (ChatPanel.test.tsx, etc.) are co-located. Plan's new test files follow same pattern."
+    },
+    {
+      "rule": "Frequent commits, one per task",
+      "compliance": "OK",
+      "evidence": "Each task ends with a dedicated `git commit` step. Consistent with plan series conventions."
+    }
+  ],
+
+  "blocking_issues": [],
+
+  "warnings": [
+    {
+      "id": "W-NEW-1",
+      "source": "reality/conventions",
+      "issue": "Task 0 Step 5 uses `PYTHONPATH=src uv run pytest -q ...` while CLAUDE.md and the Phase 3 plan series consistently use `.venv/bin/python -m pytest`. A subtle risk: `uv run` resolves its own interpreter and may pick up a different Python version than the activated venv, especially in worktree contexts (see project memory: tier-model FPs are Python-version sensitive). This is the sole occurrence of the uv-run form in the persistence plan series.",
+      "resolution": "Change Task 0 Step 5 to `.venv/bin/python -m pytest -q ...` (no PYTHONPATH= prefix needed — the dev install wires src/ into the path). Or, if the uv run form is intentional, add a note explaining why it diverges from the series convention."
+    },
+    {
+      "id": "W1",
+      "source": "reality",
+      "issue": "The design spec still describes an existing Modal pattern and URL-style transcript access, while the live frontend uses local dialog markup/useFocusTrap and the live backend returns failed_turn.transcript_url as null.",
+      "resolution": "Carried forward from rev-2. The Phase 4 plan carries explicit current-code baseline notes and tells implementers to use useFocusTrap plus active-session transcript fetching."
+    },
+    {
+      "id": "W2",
+      "source": "systems",
+      "issue": "Recovery validation remains VER-only until a real failed compose flow is exercised end to end.",
+      "resolution": "Carried forward from rev-2. The plan keeps VAL assigned to elspeth-90b4542b63 and requires manual smoke plus later feature-level validation."
+    },
+    {
+      "id": "W3",
+      "source": "architecture",
+      "issue": "Phase 3 is behaviorally landed but structurally scruffy because ComposerServiceImpl helper methods and __init__ are attached at module tail.",
+      "resolution": "Resolved in rev-3: Task 0 now makes removing those assignments a required Phase 4A prerequisite, with an AST guard and focused Phase 3 behaviour tests. W3 is scheduled work, not an open defect."
+    }
+  ],
+
+  "filigree_ids": {
+    "elspeth-599ecf69fa": "UNVERIFIABLE — local filigree CLI schema v8 cannot read DB schema v14. Plan says this is closed (staging replay). Non-blocking.",
+    "elspeth-90b4542b63": "UNVERIFIABLE — same CLI version mismatch. Plan treats this as the live VAL owner. Non-blocking."
+  },
+
+  "manifest_count": {
+    "live_count": 39,
+    "phase3_plan_appendix_claims": 38,
+    "discrepancy": "Phase 3 plan appendix line 38 and line 2558 both say '38 entries'. Live MANIFEST has 39. Task 0 Step 4 correctly schedules fixing this."
+  },
+
+  "summary": {
+    "hallucinations_found": 0,
+    "path_issues": 0,
+    "version_mismatches": 0,
+    "convention_violations": 1,
+    "blocking_issues_count": 0,
+    "warnings_count": 3,
+    "new_warnings_this_revision": 1
+  }
+}

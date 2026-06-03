@@ -17,6 +17,14 @@ function makeBlob(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
     created_by: "user",
     source_description: null,
     status: "ready",
+    // Inline-blob provenance defaults (Phase 5a Task 2.5).
+    creation_modality: "verbatim",
+    created_from_message_id: null,
+    creating_model_identifier: null,
+    creating_model_version: null,
+    creating_provider: null,
+    creating_composer_skill_hash: null,
+    creating_arguments_hash: null,
     ...overrides,
   };
 }

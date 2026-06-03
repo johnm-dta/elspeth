@@ -36,7 +36,7 @@ def _make_azure_config() -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Test: {{ row.text }}",
+        "prompt_template": "Test: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": ["text"],
     }
@@ -48,7 +48,7 @@ def _make_openrouter_config() -> dict[str, Any]:
         "provider": "openrouter",
         "model": "openai/gpt-4o",
         "api_key": "test-key",
-        "template": "Test: {{ row.text }}",
+        "prompt_template": "Test: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": ["text"],
     }

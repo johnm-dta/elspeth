@@ -17,6 +17,7 @@ import pytest
 
 from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
@@ -757,6 +758,30 @@ class TestHandleCoalesceTimeouts:
             coalesce_name=CoalesceName("merge_1"),
         )
 
+    def test_merged_timeout_missing_node_map_entry_crashes_before_continuation(self) -> None:
+        """Merged timeout with graph-map drift raises a typed invariant error."""
+        merged_token = make_token_info()
+        outcome = Mock()
+        outcome.merged_token = merged_token
+        outcome.failure_reason = None
+
+        executor, processor, counters, pending, _node_map = self._setup(timed_out_outcomes=[outcome])
+
+        with pytest.raises(OrchestrationInvariantError, match="merge_1"):
+            handle_coalesce_timeouts(
+                coalesce_executor=executor,
+                coalesce_node_map={},
+                processor=processor,
+                ctx=Mock(),
+                counters=counters,
+                pending_tokens=pending,
+            )
+
+        processor.process_token.assert_not_called()
+        assert counters.rows_succeeded == 0
+        assert counters.rows_coalesced == 0
+        assert pending == _make_pending()
+
     def test_terminal_coalesce_counts_coalesced_and_succeeded(self) -> None:
         """Terminal coalesce: no downstream transforms, processor returns COALESCED."""
         merged_token = make_token_info()
@@ -947,6 +972,39 @@ class TestFlushCoalescePending:
             coalesce_node_id=NodeID("coalesce::merge_1"),
             coalesce_name=CoalesceName("merge_1"),
         )
+
+    def test_merged_flush_missing_node_map_entry_crashes_before_continuation(self) -> None:
+        """Merged flush with graph-map drift raises a typed invariant error."""
+        merged_token = make_token_info()
+        outcome = Mock()
+        outcome.merged_token = merged_token
+        outcome.failure_reason = None
+        outcome.coalesce_name = "merge_1"
+
+        coalesce_executor = Mock()
+        coalesce_executor.flush_pending.return_value = [outcome]
+
+        processor = Mock()
+        processor.process_token.return_value = [
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
+        ]
+        counters = _make_counters()
+        pending = _make_pending()
+
+        with pytest.raises(OrchestrationInvariantError, match="merge_1"):
+            flush_coalesce_pending(
+                coalesce_executor=coalesce_executor,
+                coalesce_node_map={},
+                processor=processor,
+                ctx=Mock(),
+                counters=counters,
+                pending_tokens=pending,
+            )
+
+        processor.process_token.assert_not_called()
+        assert counters.rows_succeeded == 0
+        assert counters.rows_coalesced == 0
+        assert pending == _make_pending()
 
     def test_failure_increments_coalesce_failed(self) -> None:
         """Failed flush outcomes increment coalesce_failed and rows_failed counters.

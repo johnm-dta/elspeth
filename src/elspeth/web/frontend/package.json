@@ -6,12 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit",
+    "lint": "eslint src vite.config.ts",
+    "lint:css": "stylelint 'src/**/*.css'",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:install": "playwright install --with-deps chromium",
+    "staging:tutorial-harness": "node scripts/staging-tutorial-harness.mjs",
     "generate-types": "openapi-typescript http://localhost:8000/openapi.json -o src/types/api.generated.ts"
   },
   "dependencies": {
@@ -27,18 +31,28 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.59.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/dompurify": "^3.0.5",
+    "@types/jest-axe": "^3.5.9",
     "@types/node": "^22.19.17",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "axe-core": "^4.11.4",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
+    "jest-axe": "^10.0.0",
     "jsdom": "^29.0.1",
     "openapi-typescript": "^7.6.1",
+    "stylelint": "^17.11.1",
+    "stylelint-config-standard": "^40.0.0",
     "typescript": "~5.7.2",
+    "typescript-eslint": "^8.59.3",
     "vite": "^6.2.0",
     "vitest": "^4.1.2"
   }

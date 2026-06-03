@@ -104,9 +104,19 @@ class TestAzureBlobSinkConfig:
         with pytest.raises(PluginConfigError, match="container"):
             AzureBlobSink(_base_config(container="   "))
 
+    @pytest.mark.parametrize("container", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_container_raises(self, container: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            AzureBlobSink(_base_config(container=container))
+
     def test_empty_blob_path_raises(self) -> None:
         with pytest.raises(PluginConfigError, match="blob_path"):
             AzureBlobSink(_base_config(blob_path=""))
+
+    @pytest.mark.parametrize("blob_path", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_blob_path_raises(self, blob_path: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            AzureBlobSink(_base_config(blob_path=blob_path))
 
     def test_invalid_template_syntax_raises_value_error(self) -> None:
         with pytest.raises(PluginConfigError, match="Invalid blob_path template"):
@@ -208,6 +218,38 @@ class TestAzureBlobSinkWrite:
         lines = uploaded.decode("utf-8").strip().split("\n")
         assert len(lines) == 2
         assert json.loads(lines[0]) == {"id": "1"}
+
+    def test_write_json_diverts_non_serializable_row_not_batch(self) -> None:
+        """A non-finite value in one row is a per-row Tier-2 fault: that row is diverted
+        (recorded + routed per on_write_failure) and the rest are uploaded — the batch
+        is not aborted. The blob upload stays all-or-nothing, but over the GOOD rows."""
+        sink = inject_write_failure(AzureBlobSink(_base_config(format="json")))
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write([{"id": "1"}, {"id": "2", "v": float("nan")}, {"id": "3"}], ctx)
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        uploaded = mock_blob.upload_blob.call_args[0][0]
+        parsed = json.loads(uploaded)
+        assert {r["id"] for r in parsed} == {"1", "3"}
+
+    def test_write_jsonl_diverts_non_serializable_row_not_batch(self) -> None:
+        """JSONL format: the non-finite row is diverted; the good rows are uploaded."""
+        sink = inject_write_failure(AzureBlobSink(_base_config(format="jsonl")))
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write([{"id": "1"}, {"id": "2", "v": float("inf")}, {"id": "3"}], ctx)
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        uploaded = mock_blob.upload_blob.call_args[0][0]
+        ids = {json.loads(line)["id"] for line in uploaded.decode("utf-8").strip().split("\n")}
+        assert ids == {"1", "3"}
 
     def test_write_returns_artifact_descriptor(self) -> None:
         sink = inject_write_failure(AzureBlobSink(_base_config(format="csv", schema=FIXED_SCHEMA)))

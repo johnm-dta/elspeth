@@ -663,3 +663,54 @@ class TestDivertCoalesceExclusiveFields:
         assert "only_a1" in w.message
         assert "only_a2" in w.message
         assert "only_a3" in w.message
+
+    def test_untraceable_branch_chain_propagates_graph_error(self) -> None:
+        """An untraceable branch chain is a graph-construction bug and must crash.
+
+        Offensive-programming contract: when ``_trace_branch_endpoints`` cannot
+        reconcile a branch (present in ``_branch_info`` / branch schemas) with the
+        actual edge topology, it raises ``GraphValidationError`` — an explicit
+        "graph construction bug" signal on first-party state. The exclusive-fields
+        matching loop must let that surface, not swallow it (which would silently
+        skip a branch match and suppress a real audit-loss warning).
+
+        Here we corrupt ``path_a``'s ``gate_node_id`` so it no longer matches the
+        gate that actually produces the ``path_a`` MOVE edge; the backward walk can
+        never confirm the branch entry and raises.
+        """
+        from elspeth.contracts.schema import FieldDefinition, SchemaConfig
+        from elspeth.core.dag.models import GraphValidationError
+
+        graph, configs = self._build_graph_with_schemas(
+            branch_a_fields=("shared", "only_a"),
+            branch_b_fields=("shared",),
+            divert_on="t_a",
+            policy="best_effort",
+        )
+        # Inject a graph-construction inconsistency: path_a's recorded fork gate
+        # ("source") is not the node that emits the "path_a" MOVE edge ("gate").
+        graph.set_branch_info(
+            {
+                BranchName("path_a"): BranchInfo(
+                    coalesce_name=CoalesceName("merge"),
+                    gate_node_id=NodeID("source"),
+                    schema=SchemaConfig(
+                        mode="flexible",
+                        fields=(FieldDefinition(name="shared", field_type="str", required=True),),
+                        guaranteed_fields=("shared", "only_a"),
+                    ),
+                ),
+                BranchName("path_b"): BranchInfo(
+                    coalesce_name=CoalesceName("merge"),
+                    gate_node_id=NodeID("gate"),
+                    schema=SchemaConfig(
+                        mode="flexible",
+                        fields=(FieldDefinition(name="shared", field_type="str", required=True),),
+                        guaranteed_fields=("shared",),
+                    ),
+                ),
+            }
+        )
+
+        with pytest.raises(GraphValidationError, match="Cannot trace first transform"):
+            graph.warn_divert_coalesce_interactions(configs)

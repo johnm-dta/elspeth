@@ -27,7 +27,7 @@ from elspeth.contracts.type_normalization import (
     ALLOWED_CONTRACT_TYPES,
     CONTRACT_TYPE_MAP,
     classify_runtime_type,
-    normalize_type_for_contract,
+    require_supported_contract_type,
 )
 
 
@@ -229,7 +229,7 @@ class SchemaContract:
         new_field = FieldContract(
             normalized_name=normalized,
             original_name=original,
-            python_type=normalize_type_for_contract(value),
+            python_type=require_supported_contract_type(value),
             required=False,  # Inferred fields are never required
             source="inferred",
         )

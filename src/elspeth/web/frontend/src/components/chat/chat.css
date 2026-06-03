@@ -1,0 +1,1698 @@
+/* chat.css — Chat panel, bubbles, composing indicator, and template cards.
+   Owners: .bubble*, .bubble-copy-btn, .bubble-edit-btn, .scroll-to-bottom-btn,
+   .chat-input*, .chat-panel*, .message-row*,
+   .message-bubble-content*, .bubble-action-overlay*, .message-edit-*,
+   .message-failed-*, .message-retry-btn, .message-pending, .message-tools*,
+   .message-sources-created*, .inline-source-created-turn*,
+   .message-group-separator, .tool-call-*, .pending-proposals-banner*,
+   .inline-source-fallback-prompt*, .pending-overlay-pill, .spec-pending-proposal,
+   .yaml-pending-summary, .runs-pending-proposal, .composing-*, .template-cards*,
+   .template-card*.
+   Tenants (execution-named but chat-mounted — they render inside the chat
+   panel via inline run results):
+     .inline-run-results*, .run-outputs-panel*, .run-output-artifact*. */
+
+/* ---------------------------------------------------------------------------
+   Chat Bubble Base Styles
+   --------------------------------------------------------------------------- */
+.bubble {
+  /* Fallback measure cap for any bubble that does NOT compose
+     .message-bubble-content (currently only .bubble-system, which then
+     overrides to 100%). The runtime cap for user and assistant bubbles
+     lives on .message-bubble-content below — placed there because that
+     selector has equal specificity to .bubble but appears later in
+     source order and would otherwise silently win. */
+  max-width: min(85%, 68ch);
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--radius-lg);
+  word-break: break-word;
+  white-space: pre-wrap;
+  line-height: var(--line-height-snug);
+}
+
+.bubble .markdown-body {
+  line-height: inherit;
+  /* The bubble uses white-space: pre-wrap so plain-text content (e.g. user
+     messages, system notices) preserves authored newlines. Markdown-rendered
+     content already structures its breaks via block elements, and the
+     pre-wrap leak rendered the HTML whitespace between sibling <li>s as
+     visible blank lines — bullets sat ~2x line-height apart for no reason.
+     Reset to normal whitespace handling inside markdown blocks. */
+  white-space: normal;
+}
+
+.bubble .markdown-body p,
+.bubble .markdown-body ul,
+.bubble .markdown-body ol {
+  /* Traditional paragraph break: 12px is the chat-density compromise between
+     Slack's ~6-8px (feels cramped on prose) and GitHub's 16px (feels loose
+     in a chat panel). Adjacent block margins collapse to max(top, bottom)
+     = 12px, which sits clearly above the ~7px line-gap inside a paragraph
+     and reads as a genuine "new paragraph" break. */
+  margin-top: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+/* Re-assert the loose-list mitigation from common.css at bubble-context
+   specificity. Commit 5dc0e7c89 raised .bubble .markdown-body p margins to
+   var(--space-md) for paragraph-break legibility; that rule wins the cascade
+   over common.css's `.markdown-body li > p { margin: 0 }` (equal specificity,
+   later source order), which silently restored loose-list compounding inside
+   bubbles. By scoping the mitigation to .bubble and placing it AFTER the
+   paragraph-margin rule, we keep both fixes: prose paragraphs get a 12px
+   break, but loose-list <li><p>...</p></li> items render tight. */
+.bubble .markdown-body li > p {
+  margin: 0;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background-color: var(--color-bubble-user);
+  border: 1px solid var(--color-bubble-user-border);
+}
+
+.bubble-assistant {
+  align-self: flex-start;
+  background-color: var(--color-bubble-assistant);
+  border: 1px solid var(--color-bubble-assistant-border);
+  /* Left-edge accent: lifts the assistant bubble's visual containment without
+     touching its background saturation or the user-bubble visual weight. The
+     2px accent reads as "system attestation" against the workspace canvas
+     where the 18%-alpha border alone fell to ~2:1 and was barely visible. */
+  border-left: 2px solid var(--color-border-strong);
+}
+
+.bubble-system {
+  align-self: center;
+  width: 100%;
+  max-width: 100%;   /* belt-and-braces: keep system notices full-width regardless of any future change to the .bubble fallback cap */
+  text-align: center;
+  background-color: var(--color-bubble-system);
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-size: var(--font-size-sm);
+}
+
+/* Action buttons on message bubbles — hidden until hover, always visible on touch */
+.bubble-copy-btn,
+.bubble-edit-btn {
+  /* Base sizing: previously only opacity was declared and intrinsic content
+     height drove the hit-target — risked falling below the WCAG 2.5.8 AA
+     floor (24×24). Compact control floor (36×36) gives an AA-safe target. */
+  min-width: var(--size-control-compact);
+  min-height: var(--size-control-compact);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.bubble:hover .bubble-copy-btn,
+.bubble:hover .bubble-edit-btn,
+.bubble-copy-btn:focus-visible,
+.bubble-edit-btn:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .bubble-copy-btn,
+  .bubble-edit-btn {
+    opacity: 0.6;
+  }
+}
+
+/* Scroll-to-bottom floating button */
+.scroll-to-bottom-btn {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-panel-controls);
+  border-radius: var(--radius-pill);
+  padding: 6px var(--space-lg);
+  min-height: var(--size-control-compact);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+}
+.scroll-to-bottom-btn:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.chat-panel:has(.inline-run-results) .scroll-to-bottom-btn {
+  bottom: calc(120px + min(260px, 32vh));
+}
+
+/* ---------------------------------------------------------------------------
+   Chat Input
+   --------------------------------------------------------------------------- */
+.inline-run-results {
+  flex: 0 0 auto;
+  margin: 0 var(--space-lg) var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent),
+    rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  max-height: min(260px, 32vh);
+  overflow: auto;
+}
+
+.inline-run-results--collapsed {
+  max-height: none;
+  overflow: visible;
+}
+
+.inline-run-results-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.inline-run-results--collapsed .inline-run-results-toolbar {
+  margin-bottom: 0;
+}
+
+.inline-run-results-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.inline-run-results-title {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: var(--line-height-tight);
+}
+
+.inline-run-results-summary {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-run-results-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 0 0 auto;
+}
+
+.inline-run-results-collapse-btn {
+  width: var(--size-control-compact);
+  padding-inline: 0;
+}
+
+.inline-run-results-history-btn {
+  flex: 0 0 auto;
+}
+
+.discard-summary-warning {
+  display: grid;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.discard-summary-warning strong {
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.run-outputs-panel {
+  min-width: 0;
+  font-size: var(--font-size-xs);
+}
+
+.run-outputs-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+}
+
+.run-outputs-panel-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+}
+
+.run-outputs-panel-error {
+  color: var(--color-error);
+  margin-bottom: var(--space-sm);
+}
+
+.run-outputs-panel-muted {
+  color: var(--color-text-muted);
+}
+
+.run-output-artifact-list {
+  display: grid;
+  gap: var(--space-xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-output-artifact-item {
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+.run-output-artifact-row {
+  display: grid;
+  grid-template-columns: auto minmax(10rem, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.run-output-artifact-kind {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.run-output-artifact-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-output-artifact-meta {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.run-output-artifact-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.run-output-artifact-hash {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-3xs);
+  white-space: nowrap;
+}
+
+.run-output-artifact-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  justify-self: end;
+}
+
+.run-output-artifact-actions .btn-compact,
+.run-outputs-panel-header .btn-compact {
+  min-height: 32px;
+}
+
+.run-output-artifact-unavailable {
+  color: var(--color-text-muted);
+  font-style: italic;
+  justify-self: end;
+}
+
+@media (max-width: 760px) {
+  .chat-panel:has(.inline-run-results) .scroll-to-bottom-btn {
+    bottom: calc(128px + min(300px, 36vh));
+  }
+
+  .inline-run-results {
+    margin-inline: var(--space-sm);
+    max-height: min(300px, 36vh);
+  }
+
+  .run-output-artifact-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .run-output-artifact-meta,
+  .run-output-artifact-hash,
+  .run-output-artifact-actions,
+  .run-output-artifact-unavailable {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .run-output-artifact-actions {
+    flex-wrap: wrap;
+  }
+}
+
+.chat-input {
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--color-border);
+}
+
+.chat-input-upload-alert {
+  padding: 6px 10px;
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--color-error-border);
+}
+
+.chat-input-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-end;
+}
+
+.chat-input-textarea {
+  flex: 1;
+  resize: vertical;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  line-height: 1.4;
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.chat-input-icon-btn {
+  padding: var(--space-sm) 10px;
+  background-color: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: var(--size-control);
+}
+
+.chat-input-icon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-input-icon-btn:disabled {
+  cursor: not-allowed;
+}
+
+.chat-input-icon-btn--active {
+  background-color: var(--color-surface-hover);
+}
+
+.chat-input-cancel-btn {
+  padding: var(--space-sm) var(--space-md);
+  min-width: 56px;
+  min-height: var(--size-control);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.chat-input-cancel-btn:hover,
+.chat-input-cancel-btn:focus-visible {
+  border-color: var(--color-warning);
+}
+
+.chat-input-cancel-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-input-send-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: not-allowed;
+  font-size: var(--font-size-base);
+  min-width: 44px;
+  min-height: var(--size-control);
+}
+
+.chat-input-send-btn:not(:disabled) {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  cursor: pointer;
+}
+
+.chat-input-hint {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  padding: 2px 0 var(--space-xs);
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .chat-input-row {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .chat-input-textarea {
+    flex: 1 0 100%;
+    min-height: 68px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Chat Panel
+   --------------------------------------------------------------------------- */
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Composing-state cursors. While the agent is thinking, the cursor over the
+   chat input area reflects that the system is working on the previous
+   message. The ComposingIndicator (with its three-dot pulse and "Working
+   on..." block) is the primary visible affordance; these cursor rules are
+   reinforcement for users whose pointer is hovering the textarea or
+   send-button at the moment they hit Send. `progress` is the standard cursor
+   for "operation in progress but UI still interactive" — distinct from
+   `wait` (UI blocked) and from disabled cursors (action unavailable). */
+.chat-panel[data-composing="true"] .chat-input-textarea,
+.chat-panel[data-composing="true"] .chat-input-send-btn:disabled {
+  cursor: progress;
+}
+
+.chat-panel--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-base);
+  padding: var(--space-2xl);
+  text-align: center;
+}
+
+.chat-panel-header {
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.chat-panel-header-title {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* "Switch to guided" affordance in the freeform body header.  Visual weight
+   mirrors .guided-exit-button (the symmetric inverse) — quiet outline, hover
+   lift, WCAG 2.5.8 target height — so the two mode-switch controls read as
+   members of the same family. */
+.chat-panel-switch-to-guided {
+  padding: var(--space-sm) var(--space-md);
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  min-height: var(--size-control);
+  flex-shrink: 0;
+  transition: background-color 0.1s ease, border-color 0.1s ease,
+    color 0.1s ease;
+}
+
+.chat-panel-switch-to-guided:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.chat-panel-switch-to-guided:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-panel-error {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+.chat-panel-error-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-panel-error-message {
+  margin: 0;
+}
+
+.chat-panel-error-details {
+  margin: var(--space-sm) 0 0;
+  padding-left: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.chat-panel-error-details li {
+  margin: 0;
+  word-break: break-word;
+}
+
+.chat-panel-error-dismiss {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-lg);
+  color: var(--color-error);
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-panel-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg) 0;
+}
+
+
+/* =============================================================================
+   Component-Specific Classes — Migrated from Inline Styles
+   =============================================================================
+   These classes replace inline style={{}} blocks in component TSX files.
+   Organized by component for easy lookup.
+   ============================================================================= */
+
+/* ---------------------------------------------------------------------------
+   MessageBubble
+   --------------------------------------------------------------------------- */
+.message-row {
+  display: flex;
+  padding: var(--space-xs) var(--space-lg);
+}
+
+.message-row--user {
+  justify-content: flex-end;
+}
+
+.message-row--assistant {
+  justify-content: flex-start;
+}
+
+.message-row--system {
+  justify-content: center;
+}
+
+.message-bubble-content {
+  /* Cap measure at ~68ch (Bringhurst's upper range) so wide windows do
+     not stretch the bubble to a 120-char measure that hurts eye-return
+     on long assistant summaries. Small windows keep the 80% behaviour
+     via min(). This is the LIVE cap — .bubble has the same cap as a
+     defense-in-depth fallback, but .message-bubble-content has equal
+     specificity to .bubble and appears later in source order, so this
+     rule wins for every user and assistant bubble. */
+  max-width: min(80%, 68ch);
+  font-size: var(--font-size-base);
+  /* Was --line-height-normal (1.5). .message-bubble-content has the same
+     specificity as .bubble but appears later in source, so it overrides
+     the .bubble line-height. Aligning both to --line-height-snug (1.35)
+     gives the tighter chat-bubble leading the operator asked for and
+     prevents a silent two-class override conflict. */
+  line-height: var(--line-height-snug);
+  word-break: break-word;
+  position: relative;
+}
+
+.message-bubble-content--user {
+  white-space: pre-wrap;
+}
+
+/* Action overlay buttons (copy, edit) — positioned inside the bubble */
+.bubble-action-overlay {
+  position: absolute;
+  top: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bubble-action-overlay--copy {
+  right: 0;
+}
+
+.bubble-action-overlay--edit {
+  right: 44px;
+}
+
+.message-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.message-edit-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+  font-family: inherit;
+  resize: vertical;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+}
+
+.message-edit-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
+
+.message-edit-cancel {
+  border: 1px solid var(--color-border-strong);
+  background-color: transparent;
+  color: var(--color-text);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-md);
+  min-height: var(--size-control-compact);
+}
+
+.message-edit-fork {
+  border: none;
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-md);
+  min-height: var(--size-control-compact);
+}
+
+.message-edit-fork:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.message-failed-row {
+  margin-top: var(--space-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.message-failed-text {
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+.message-retry-btn {
+  border: 1px solid var(--color-border-strong);
+  background-color: transparent;
+  color: var(--color-text);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control-compact);
+}
+
+.message-pending {
+  margin-top: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.message-tools {
+  margin-top: var(--space-sm);
+  border-top: 1px solid var(--color-border-strong);
+  padding-top: 6px;
+}
+
+.message-tools-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control);
+  display: inline-flex;
+  align-items: center;
+}
+
+.message-tools-list {
+  margin: var(--space-xs) 0 0;
+  padding-left: 0;
+  font-size: var(--font-size-xs);
+}
+
+.message-tools-item {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-xs);
+}
+
+.message-tools-details {
+  margin-top: 2px;
+}
+
+.message-tools-summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}
+
+.message-tools-pre {
+  margin: 2px 0 0;
+  padding: 4px;
+  background-color: var(--color-surface-elevated);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-2xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Sources-created group inside the assistant bubble — visually parallel to
+   .message-tools (same border-top, same toggle styling via shared
+   .message-tools-toggle class) so the two groups read as siblings in the
+   bubble. The horizontal ruler (.message-group-separator) is only painted
+   when both groups are present; see MessageBubble.tsx for the guard. */
+.message-sources-created {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+/* Static section heading — shares the visual weight of .message-tools-toggle
+   so the two groups read as siblings, but it is NOT a button: no hover
+   state, no pointer cursor. The label exists to name what follows, not to
+   invite a click. The min-height inherited from .message-tools-toggle is
+   appropriate (44px aligns with the toggle above for vertical rhythm). */
+.message-sources-created-heading {
+  cursor: default;
+}
+
+.message-sources-created-list {
+  margin: 4px 0 0;
+  padding-left: 0;
+  font-size: var(--font-size-xs);
+}
+
+.inline-source-created-turn {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.inline-source-created-turn-title,
+.inline-source-created-turn-content-title {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+
+.inline-source-created-turn-facts,
+.inline-source-created-turn-audit-facts {
+  display: grid;
+  gap: var(--space-xs);
+  margin: var(--space-xs) 0 0;
+}
+
+.inline-source-created-turn-facts div,
+.inline-source-created-turn-audit-facts div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: var(--space-xs);
+}
+
+.inline-source-created-turn-facts dt,
+.inline-source-created-turn-audit-facts dt {
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.inline-source-created-turn-facts dd,
+.inline-source-created-turn-audit-facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text-muted);
+  word-break: break-word;
+}
+
+.inline-source-created-turn-content {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.inline-source-created-turn-preview {
+  margin: 0;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: rgba(0, 0, 0, 0.1);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-source-created-turn-actions {
+  display: flex;
+}
+
+.inline-source-created-turn-audit summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.message-group-separator {
+  margin: 6px 0 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  opacity: 0.6;
+}
+
+.tool-call-ribbon {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-top: var(--space-sm);
+  padding: 6px var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+/* Tool-call info trigger + tooltip.
+   The trigger replaces the previous decorative .tool-call-ribbon-icon span:
+   it's a real <button> so keyboard users can focus it. Tooltip body shows
+   on hover or focus-visible via CSS only (no JS state). */
+.tool-call-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.tool-call-info-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  cursor: help;
+  /* The trigger is a button so it gets the global :focus-visible ring. */
+}
+
+.tool-call-info-trigger:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.tool-call-info-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: var(--z-popover);
+  min-width: 220px;
+  max-width: 320px;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-snug);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  /* Hidden until the trigger is hovered or focused. visibility +
+     opacity transition together so the bubble can fade in but still be
+     pointer-event-inert until visible. */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+}
+
+/* Hover-bridge: invisible 6px hit-zone that fills the visual gap between
+   the trigger button and the bubble. Without it, the cursor briefly leaves
+   .tool-call-info while crossing the 6px gap and the bubble flickers off
+   mid-traversal, making its content unreachable for mouse users. The
+   pseudo-element is part of the bubble's DOM subtree, so :hover on the
+   bubble (and therefore on .tool-call-info) stays true during the cross.
+   Visual gap unchanged — bubble's `bottom: calc(100% + 6px)` still leaves
+   6px of empty space; the pseudo just extends the hit area into it. */
+.tool-call-info-bubble::before {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 6px;
+}
+
+.tool-call-info-bubble-name {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+}
+
+.tool-call-info-bubble-body {
+  display: block;
+}
+
+.tool-call-info:hover .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible ~ .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible + .tool-call-info-bubble {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.12s ease, visibility 0s linear 0s;
+}
+
+.tool-call-card {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-left: 4px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.tool-call-card--committed {
+  border-left-color: var(--color-success);
+}
+
+.tool-call-card--rejected {
+  border-left-color: var(--color-error);
+}
+
+.tool-call-card-header,
+.tool-call-actions {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tool-call-card-header {
+  flex-wrap: wrap;
+}
+
+.tool-call-audit-id {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}
+
+.tool-call-summary,
+.tool-call-rationale,
+.tool-call-affects,
+.tool-call-stale {
+  margin: var(--space-sm) 0 0;
+}
+
+.tool-call-details {
+  margin-top: var(--space-sm);
+}
+
+.tool-call-details summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.tool-call-details pre {
+  margin: var(--space-xs) 0 0;
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Bound the response body so the Accept/Reject actions below the card
+     stay visible. Long set_pipeline / propose-chain responses can exceed
+     several hundred lines; without a cap they push the action row off the
+     viewport. */
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* The scrollable <pre> needs to be keyboard-reachable (tabIndex=0 in TSX)
+   so users can scroll it. Provide an explicit focus indicator since the
+   global :focus-visible reset assumes a normal page-background context. */
+.tool-call-details pre:focus-visible {
+  outline: 2px solid var(--color-focus-ring, var(--color-link));
+  outline-offset: 2px;
+}
+
+.tool-call-actions {
+  justify-content: flex-start;
+  margin-top: var(--space-sm);
+}
+
+.tool-call-actions .btn {
+  min-height: var(--size-control-compact);
+}
+
+.tool-call-stale {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+/* Pending-proposal banner. Co-locates Accept/Reject controls with the
+   chat input so the operator does not have to scroll up to find the
+   action on the originating tool-call message. */
+.pending-proposals-banner {
+  margin: 0 var(--space-md) var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-left: 4px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.pending-proposals-banner-header {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-xs);
+}
+
+.pending-proposals-banner-help {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.pending-proposals-banner-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.pending-proposals-banner-item {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) 0;
+}
+
+.pending-proposals-banner-item + .pending-proposals-banner-item {
+  border-top: 1px solid var(--color-border);
+}
+
+.pending-proposals-banner-item-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pending-proposals-banner-summary {
+  margin: 0;
+  font-weight: 600;
+}
+
+.pending-proposals-banner-affects {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.pending-proposals-banner-actions {
+  display: flex;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+.pending-proposals-banner-actions .btn {
+  min-height: var(--size-control-compact);
+}
+
+/* Inline-source fallback prompt. This sits beside the chat input rather than
+   inside the message log, so it owns its own input-aligned margins. */
+.inline-source-fallback-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin: 0 var(--space-lg) var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-left: 4px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.inline-source-fallback-prompt-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.inline-source-fallback-prompt-title,
+.inline-source-fallback-prompt-detail {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.inline-source-fallback-prompt-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.inline-source-fallback-prompt-detail {
+  margin-top: var(--space-2xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.inline-source-fallback-prompt-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.inline-source-fallback-prompt-dismiss {
+  background: transparent;
+}
+
+@media (max-width: 760px) {
+  .inline-source-fallback-prompt {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inline-source-fallback-prompt-actions {
+    flex-wrap: wrap;
+  }
+}
+
+.pending-overlay-pill {
+  position: absolute;
+  z-index: 5;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px dashed var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.spec-pending-proposal,
+.yaml-pending-summary,
+.runs-pending-proposal {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-bottom: var(--space-sm);
+  padding: var(--space-sm) 10px;
+  border-left: 4px dashed var(--color-warning);
+  background: color-mix(
+    in srgb,
+    var(--color-warning) 12%,
+    var(--color-surface)
+  );
+}
+
+.spec-pending-proposal,
+.runs-pending-proposal {
+  flex-wrap: wrap;
+}
+
+
+/* ---------------------------------------------------------------------------
+   ComposingIndicator
+   --------------------------------------------------------------------------- */
+.composing-row {
+  display: flex;
+  justify-content: flex-start;
+  padding: var(--space-xs) var(--space-lg);
+}
+
+.composing-bubble {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bubble-assistant);
+  border: 1px solid var(--color-bubble-assistant-border);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  max-width: min(640px, calc(100vw - 48px));
+}
+
+.composing-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 34px;
+  padding-top: 5px;
+}
+
+.composing-indicator--terminal .composing-bubble {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-border-strong);
+}
+
+.composing-terminal-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 24px;
+  margin-top: 1px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.composing-working-view {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composing-section {
+  display: grid;
+  gap: 3px;
+}
+
+.composing-label {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  font-weight: 600;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+.composing-title {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.composing-evidence {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+}
+
+.composing-text {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+
+/* ---------------------------------------------------------------------------
+   TemplateCards (onboarding empty state)
+   --------------------------------------------------------------------------- */
+.template-cards-container {
+  padding: var(--space-xl) var(--space-2xl);
+  width: min(100%, 1120px);
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.template-cards-heading {
+  text-align: center;
+  margin-bottom: var(--space-xl);
+}
+
+.template-cards-title {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.template-cards-subtitle {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--color-text-muted);
+}
+
+.template-cards-grid {
+  display: grid;
+  /* The empty-state gallery is deliberately a 4 x 3 desktop field: these
+     are static exemplars, not a responsive picker of clickable actions. */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-md);
+}
+
+.template-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+  aspect-ratio: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  /* Passive exemplar tiles: keep the gallery visible, but fade the chrome so
+     these do not compete with real controls or imply clickability. */
+  background-color: color-mix(
+    in srgb,
+    var(--color-surface-elevated) 72%,
+    var(--color-bg)
+  );
+  border: 1px solid
+    color-mix(in srgb, var(--color-border) 68%, transparent);
+  border-radius: var(--radius-lg);
+  text-align: left;
+}
+
+.template-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.template-card-icon {
+  font-size: var(--font-size-lg);
+  opacity: 0.76;
+}
+
+.template-card-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.15;
+  opacity: 0.9;
+}
+
+.template-card-description {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.3;
+  opacity: 0.82;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.template-card-sda {
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  line-height: 1.2;
+  opacity: 0.76;
+}
+
+.template-card-sda div {
+  min-width: 0;
+}
+
+.template-card-sda dt {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.template-card-sda dd {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+@media (max-width: 760px) {
+  .template-cards-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .template-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Freeform interpretation-review cards ────────────────────────────────
+   Inline (freeform-mode) counterpart to the guided InterpretationReviewTurn.
+   Execution is gated until these are resolved, so they read as distinct
+   action cards — an elevated surface with an amber left-accent — rather than
+   ordinary assistant prose bubbles. The chat-message / chat-message--assistant
+   classes the component carries have no CSS of their own (the chat bubbles use
+   .bubble*), so before this every element rendered as unstyled, full-width,
+   default-browser content with no card or separation between stacked reviews.
+   The flex column + gap gives uniform internal rhythm; align-self: stretch lets
+   the card use the full message column (these are tasks, not chat prose). */
+.interpretation-review-inline-message {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0;
+  padding: var(--space-lg);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-lg);
+}
+
+.interpretation-review-inline-message-heading {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  color: var(--color-text);
+}
+
+.interpretation-review-inline-message-body {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--color-text-secondary);
+}
+
+/* Inline emphasis (user term, model name, node id) reads as a value, not
+   italic prose. */
+.interpretation-review-inline-message-body em,
+.interpretation-review-inline-message-user-term,
+.interpretation-review-inline-message-llm-draft {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.interpretation-review-inline-message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-2xs);
+}
+
+.interpretation-review-inline-message-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.interpretation-review-inline-message-error-heading {
+  color: var(--color-error);
+}
+
+/* "Change it: I meant…" amend form */
+.interpretation-review-inline-message-amend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.interpretation-review-inline-message-amend-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.interpretation-review-inline-message-amend-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  resize: vertical;
+}
+
+.interpretation-review-inline-message-amend-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.interpretation-review-inline-message-amend-cap-warning {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* Session opt-out: de-emphasised and divided from the card body so it no
+   longer butts straight against the next card's heading. */
+.interpretation-review-inline-message-opt-out {
+  margin-top: var(--space-2xs);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.interpretation-review-inline-message-opt-out-link {
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.interpretation-review-inline-message-opt-out-link:hover:not(:disabled) {
+  color: var(--color-text-secondary);
+}
+
+.interpretation-review-inline-message-spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: var(--space-2xs);
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: var(--radius-pill);
+  vertical-align: -0.1em;
+  animation: spin 0.6s linear infinite;
+}
+
+/* Mirror the per-selector reduced-motion guards in animations.css — the
+   global guard there is not a universal `*` reset. */
+@media (prefers-reduced-motion: reduce) {
+  .interpretation-review-inline-message-spinner {
+    animation: none;
+    opacity: 0.6;
+  }
+}

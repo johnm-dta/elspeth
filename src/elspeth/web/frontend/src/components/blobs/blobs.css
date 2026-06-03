@@ -1,0 +1,166 @@
+/* blobs.css — Blob row and blob manager.
+   Owners: .blob-row*, .blob-manager*, .blob-action-btn.
+   (.blob-action-btn was previously co-located with chat bubble action buttons
+   in App.css; it is applied only in BlobRow.tsx, so it lives here now.) */
+
+.blob-action-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: 2px 6px;
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+}
+.blob-action-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+/* ---------------------------------------------------------------------------
+   BlobRow
+   --------------------------------------------------------------------------- */
+.blob-row-container {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.blob-row-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.blob-row-creator {
+  flex-shrink: 0;
+}
+
+.blob-row-filename {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blob-row-size {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  flex-shrink: 0;
+}
+
+.blob-row-actions {
+  display: flex;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+.blob-row-preview {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface-elevated);
+}
+
+.blob-row-preview-loading {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.blob-row-preview-error {
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
+.blob-row-preview-pre {
+  margin: 0;
+  padding: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+}
+
+.blob-row-preview-truncated {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------------
+   BlobManager
+   --------------------------------------------------------------------------- */
+.blob-manager-container {
+  border-top: 1px solid var(--color-border);
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-size-sm);
+}
+
+.blob-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.blob-manager-title {
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.blob-manager-upload-btn {
+  font-size: var(--font-size-xs);
+  padding: 2px var(--space-sm);
+  cursor: pointer;
+  min-height: var(--size-control-compact);
+  min-width: 44px;
+}
+
+.blob-manager-error {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+  background-color: var(--color-error-bg);
+}
+
+.blob-manager-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.blob-manager-loading,
+.blob-manager-empty {
+  padding: var(--space-md);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.blob-manager-category-header {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background-color: var(--color-surface-elevated);
+  border-bottom: 1px solid var(--color-border);
+}

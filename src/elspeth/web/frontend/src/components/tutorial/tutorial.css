@@ -1,0 +1,503 @@
+/* tutorial.css — First-run tutorial chrome and progress UI.
+   Owners: .tutorial-shell, .tutorial-turn, .tutorial-kicker, .tutorial-layer,
+   .tutorial-prompt, .tutorial-error, .tutorial-graph*, .tutorial-graph-node,
+   .tutorial-running, .tutorial-draft-progress, .tutorial-progress-bar,
+   .tutorial-result-table, .tutorial-cancelled-note, .tutorial-mode-fieldset,
+   .tutorial-progress-dot, @keyframes tutorial-progress-slide + responsive media. */
+
+/* ---------------------------------------------------------------------------
+   First-run tutorial
+   --------------------------------------------------------------------------- */
+.tutorial-shell {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 220px),
+    var(--color-bg);
+}
+
+.tutorial-turn {
+  width: min(920px, 100%);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-2xl);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+}
+
+.tutorial-turn h2 {
+  margin: 0 0 var(--space-md);
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-tight);
+  letter-spacing: 0;
+}
+
+.tutorial-turn h3 {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tutorial-turn p {
+  max-width: 760px;
+}
+
+.tutorial-kicker {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-info);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tutorial-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-top: var(--space-xl);
+  align-items: center;
+}
+
+.tutorial-link-button {
+  border: 0;
+  background: transparent;
+  color: var(--color-link);
+  cursor: pointer;
+  font: inherit;
+  min-height: var(--size-control);
+  padding: var(--space-sm) 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.tutorial-layer-grid,
+.tutorial-summary-grid {
+  /* Rendered as <ol> so assistive tech reports the layer/stage sequence
+     with explicit ordering. Reset list defaults to keep the existing
+     grid layout. */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+  padding: 0;
+  list-style: none;
+}
+
+.tutorial-layer,
+.tutorial-summary-grid > li {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  background: var(--color-surface-elevated);
+}
+
+.tutorial-layer strong {
+  /* Neutral emphasis (uppercase + body text colour). The prior
+     --color-success green read as "completed" semantics on a welcome
+     screen where nothing has happened yet. */
+  display: block;
+  color: var(--color-text);
+  margin-bottom: var(--space-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tutorial-muted {
+  color: var(--color-text-muted);
+}
+
+.tutorial-preamble {
+  /* Small subdued line under the welcome cards and above the Turn 4 run
+     indicator. Signals "here is what happens next" before the LLM call. */
+  margin-top: var(--space-md);
+  font-size: var(--font-size-sm);
+}
+
+.tutorial-textarea-label {
+  display: block;
+  margin: var(--space-lg) 0 var(--space-sm);
+  font-weight: 600;
+}
+
+.tutorial-prompt-input {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-input);
+  color: var(--color-text);
+  padding: var(--space-md);
+  font: inherit;
+}
+
+.tutorial-error {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.tutorial-interpretation {
+  margin-top: var(--space-lg);
+}
+
+.tutorial-graph {
+  /* Rendered as <ol> with <li> stages and aria-hidden chevrons between
+     them. Flexbox so the chevron items can be narrow auto-width siblings
+     of the flex:1 stage items. Under 760px the layout switches to
+     column-direction (see media query below) and chevrons rotate. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: var(--space-md);
+  margin: var(--space-xl) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tutorial-graph > li {
+  flex: 1 1 130px;
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tutorial-graph-chevron {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xl);
+  line-height: 1;
+}
+
+.tutorial-graph-stage {
+  min-width: 0;
+  position: relative;
+}
+
+.tutorial-graph-node {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-badge-source-border);
+  background: var(--color-badge-source-bg);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.tutorial-graph-stage span {
+  display: block;
+  margin-top: var(--space-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+  font-size: var(--font-size-sm);
+}
+
+.tutorial-running {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+}
+
+.tutorial-draft-progress {
+  align-items: flex-start;
+  max-width: 720px;
+}
+
+.tutorial-draft-progress-copy {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.tutorial-draft-progress-headline {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.tutorial-draft-progress-evidence {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.tutorial-draft-progress-next {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.tutorial-progress-bar {
+  /* Indeterminate progress affordance. The prior implementation was a
+     static 60% gradient that reads as "stuck at 60%". A sliding shimmer
+     gives the user a continuous "still working" signal without claiming
+     a specific completion percentage. Under prefers-reduced-motion the
+     animation is suppressed and the bar falls back to a flat,
+     non-misleading "Working…" chip rendered alongside (handled by the
+     consumer; see Turn 4's status text region). */
+  width: 160px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+  position: relative;
+}
+
+.tutorial-progress-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-state-positive) 50%,
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tutorial-progress-bar::after {
+    animation: tutorial-progress-slide 1.4s ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tutorial-progress-bar::after {
+    /* Static centred chunk so the affordance still says "something is
+       happening" without motion. */
+    left: 30%;
+    background: var(--color-state-positive);
+  }
+}
+
+@keyframes tutorial-progress-slide {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+.tutorial-run-summary {
+  color: var(--color-state-positive);
+  font-weight: 600;
+}
+
+.tutorial-result-table-wrap {
+  overflow-x: auto;
+  margin-top: var(--space-lg);
+}
+
+.tutorial-result-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+}
+
+.tutorial-result-table th,
+.tutorial-result-table td {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-sm);
+  text-align: left;
+  vertical-align: top;
+}
+
+.tutorial-cell-note {
+  display: block;
+  margin-top: var(--space-xs);
+  color: var(--color-warning);
+  font-size: var(--font-size-xs);
+}
+
+.tutorial-audit-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+  margin: var(--space-lg) 0;
+}
+
+.tutorial-audit-list div {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  background: var(--color-surface-elevated);
+}
+
+.tutorial-audit-list dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.tutorial-audit-list dd {
+  margin: var(--space-xs) 0 0;
+  overflow-wrap: anywhere;
+}
+
+.tutorial-hash {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.tutorial-hash-value {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  overflow-wrap: anywhere;
+}
+
+.tutorial-hash-copy {
+  /* Compact button — does not require .btn's 44px hit area because it sits
+     in a dense audit panel; instead inherit min-height from the row's
+     wrap height. Still focusable via :focus-visible. */
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: var(--space-xs) var(--space-sm);
+}
+
+.tutorial-hash-copy:hover {
+  background: var(--color-surface-hover);
+}
+
+.tutorial-cancelled-note {
+  /* Rendered on Turn 6 when the user arrived via cancelRun. role="status"
+     so AT users hear the acknowledgement when the turn mounts. Visually
+     subdued (uses the warning-bg tint, not warning-fg) so it reads as an
+     informational note, not an error. */
+  margin: 0 0 var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-text);
+}
+
+.tutorial-mode-fieldset {
+  display: grid;
+  gap: var(--space-md);
+  border: 0;
+  padding: 0;
+  margin: var(--space-lg) 0 0;
+}
+
+.tutorial-mode-fieldset legend {
+  font-weight: 700;
+  margin-bottom: var(--space-sm);
+}
+
+.tutorial-mode-fieldset label {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-start;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  background: var(--color-surface-elevated);
+}
+
+.tutorial-mode-fieldset input {
+  margin-top: 5px;
+}
+
+.tutorial-mode-fieldset strong {
+  display: block;
+  margin-bottom: var(--space-xs);
+}
+
+.tutorial-graduation-list {
+  display: grid;
+  gap: var(--space-md);
+  margin: var(--space-lg) 0 0;
+  padding-left: 1.25rem;
+}
+
+.tutorial-graduation-list li {
+  max-width: 760px;
+  padding-left: var(--space-xs);
+}
+
+.tutorial-graduation-list strong {
+  display: block;
+  margin-bottom: var(--space-xs);
+  color: var(--color-text);
+}
+
+.tutorial-graduation-list span {
+  color: var(--color-text-secondary);
+}
+
+.tutorial-progress {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.tutorial-progress-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-border-strong);
+}
+
+.tutorial-progress-dot--active {
+  background: var(--color-state-positive);
+}
+
+@media (max-width: 760px) {
+  .tutorial-shell {
+    padding: var(--space-md);
+  }
+
+  .tutorial-turn {
+    padding: var(--space-lg);
+  }
+
+  .tutorial-layer-grid,
+  .tutorial-summary-grid,
+  .tutorial-audit-list {
+    grid-template-columns: 1fr;
+  }
+
+  .tutorial-graph {
+    /* Stack stages vertically; chevrons rotate 90deg so the down-arrow
+       direction still reads as flow. */
+    flex-direction: column;
+  }
+
+  .tutorial-graph-chevron {
+    transform: rotate(90deg);
+  }
+}

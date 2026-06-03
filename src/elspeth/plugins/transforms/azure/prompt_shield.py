@@ -16,6 +16,8 @@ from typing import Any, TypedDict
 
 from pydantic import Field
 
+from elspeth.contracts import Determinism
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -94,10 +96,28 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     """
 
     name = "azure_prompt_shield"
+    determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:19f08887d6f0065d"
+    source_file_hash: str | None = "sha256:8353fb154041529a"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Uses Azure Prompt Shield to detect jailbreak and prompt-injection attacks.",
+                composer_hints=(
+                    "Choose analysis_type deliberately: both checks user_prompt and document paths and costs two analyses.",
+                    "Use user_prompt for direct user text; use document for retrieved context or untrusted documents.",
+                    "Set fields to the string fields to inspect, or 'all' only when every string field should be scanned.",
+                    "Detected attacks return errors; route on_error to quarantine or security review.",
+                    "Malformed Azure responses fail closed instead of passing suspicious content through.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

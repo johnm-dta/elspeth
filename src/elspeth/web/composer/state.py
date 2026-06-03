@@ -29,14 +29,19 @@ from elspeth.contracts.schema import (
     get_raw_sink_required_fields,
     raw_options_have_schema,
 )
+from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import TriggerConfig
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.engine.orchestrator.validation import (
     _ALLOWED_FAILSINK_PLUGINS,
 )
+from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
 EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"]
+CoalesceBranches = tuple[str, ...] | Mapping[str, str]
+
+COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gate", "transform"))
 
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
@@ -132,7 +137,7 @@ class NodeSpec:
     condition: str | None
     routes: Mapping[str, str] | None
     fork_to: tuple[str, ...] | None
-    branches: tuple[str, ...] | None
+    branches: CoalesceBranches | None
     policy: str | None
     merge: str | None
     trigger: Mapping[str, Any] | None = None
@@ -141,10 +146,12 @@ class NodeSpec:
 
     def __post_init__(self) -> None:
         # Mapping fields must be deep-frozen. Scalar, enum, and tuple fields
-        # (fork_to, branches) are already immutable and need no guard.
+        # are already immutable and need no guard.
         freeze_fields(self, "options")
         if self.routes is not None:
             freeze_fields(self, "routes")
+        if self.branches is not None:
+            freeze_fields(self, "branches")
         if self.trigger is not None:
             freeze_fields(self, "trigger")
 
@@ -154,8 +161,9 @@ class NodeSpec:
 
         Optional fields (condition, routes, fork_to, branches, policy, merge,
         trigger, output_mode, expected_output_count) default to None when
-        absent from the dict. fork_to and branches are converted from list to
-        tuple since to_dict() serialises tuples as lists.
+        absent from the dict. fork_to is converted from list to tuple since
+        to_dict() serialises tuples as lists. branches preserves mapping form
+        for transformed coalesce branches and converts list form to tuple.
         """
         fork_to = d["fork_to"] if "fork_to" in d else None
         branches = d["branches"] if "branches" in d else None
@@ -170,13 +178,38 @@ class NodeSpec:
             condition=d["condition"] if "condition" in d else None,
             routes=d["routes"] if "routes" in d else None,
             fork_to=tuple(fork_to) if fork_to is not None else None,
-            branches=tuple(branches) if branches is not None else None,
+            branches=dict(branches) if isinstance(branches, Mapping) else tuple(branches) if branches is not None else None,
             policy=d["policy"] if "policy" in d else None,
             merge=d["merge"] if "merge" in d else None,
             trigger=d["trigger"] if "trigger" in d else None,
             output_mode=d["output_mode"] if "output_mode" in d else None,
             expected_output_count=d["expected_output_count"] if "expected_output_count" in d else None,
         )
+
+
+def _coalesce_branch_names(branches: CoalesceBranches | None) -> tuple[str, ...]:
+    """Return branch identities declared by a coalesce node."""
+    if branches is None:
+        return ()
+    if isinstance(branches, Mapping):
+        return tuple(branches.keys())
+    return branches
+
+
+def _coalesce_branch_connections(branches: CoalesceBranches | None) -> tuple[str, ...]:
+    """Return input connections consumed by a coalesce node."""
+    if branches is None:
+        return ()
+    if isinstance(branches, Mapping):
+        return tuple(branches.values())
+    return branches
+
+
+def _serialize_branches(branches: CoalesceBranches) -> list[str] | dict[str, str]:
+    """Serialize coalesce branches preserving list-vs-mapping semantics."""
+    if isinstance(branches, Mapping):
+        return dict(deep_thaw(branches))
+    return list(branches)
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,7 +634,7 @@ def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
     consumers = {node.input for node in nodes if node.node_type != "coalesce"}
     for node in nodes:
         if node.node_type == "coalesce" and node.branches is not None:
-            consumers.update(node.branches)
+            consumers.update(_coalesce_branch_connections(node.branches))
     return consumers
 
 
@@ -712,9 +745,7 @@ def _validate_gate_expression(condition: str) -> str | None:
 # to scraped third parties — a Tier-1 audit-integrity defect — regardless of
 # any prose rationale ("placeholder", "internal default") the composer LLM
 # attached to them. Mechanical backstop for the skill-prompt rule in
-# pipeline_composer.md (web_scrape.http section); pairs with the future
-# angle-bracket placeholder rule tracked in elspeth-f1efeed9c2 for layered
-# defence.
+# pipeline_composer.md (web_scrape.http section).
 _RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
     "example.com",
     "example.org",
@@ -766,6 +797,57 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
                 ),
                 severity="high",
             )
+    return None
+
+
+def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[ValidationEntry, ...]:
+    """Reject placeholder values in web_scrape's wire-visible HTTP identity fields."""
+    if node.plugin != "web_scrape":
+        return ()
+    http = node.options.get("http")
+    if not isinstance(http, Mapping):
+        return ()
+
+    errors: list[ValidationEntry] = []
+    for field_name in ("abuse_contact", "scraping_reason"):
+        value = http.get(field_name)
+        if not isinstance(value, str):
+            continue
+        if not is_wire_visible_placeholder(value):
+            continue
+        errors.append(
+            ValidationEntry(
+                component=f"node:{node.id}",
+                message=(
+                    f"web_scrape.http.{field_name} is a placeholder value. This field ships as an HTTP "
+                    "header to the scraped host, so it must be supplied by the operator or deployment "
+                    "identity before the pipeline can be considered valid."
+                ),
+                severity="high",
+            )
+        )
+    return tuple(errors)
+
+
+def _validate_aggregation_trigger(node_id: str, trigger: Mapping[str, Any]) -> ValidationEntry | None:
+    """Validate a composer-authored aggregation trigger at the Tier-3 boundary.
+
+    ``node.trigger`` is composer/LLM/user-authored config read back from session
+    state, so a malformed ``trigger`` is recoverable external input, not an
+    invariant break. We run it through the same ``TriggerConfig`` parser the
+    runtime settings load uses and convert a parse failure into an explicit
+    blocking ``ValidationEntry`` — rejecting the bad trigger before runtime
+    settings load rather than crashing the composer.
+    """
+    try:
+        TriggerConfig.model_validate(deep_thaw(trigger))
+    except PydanticValidationError as exc:
+        detail = "; ".join(str(error["msg"]) for error in exc.errors())
+        return ValidationEntry(
+            component=f"node:{node_id}",
+            message=f"Aggregation '{node_id}' trigger is invalid: {detail}",
+            severity="high",
+        )
     return None
 
 
@@ -1239,11 +1321,15 @@ def _check_schema_contracts(
                 return False, frozenset()
 
             branch_schemas: dict[str, SchemaConfig] = {}
-            for branch_connection in producer_node.branches:
+            for branch_name, branch_connection in zip(
+                _coalesce_branch_names(producer_node.branches),
+                _coalesce_branch_connections(producer_node.branches),
+                strict=True,
+            ):
                 branch_participates, branch_guarantees = _connection_propagation_vote(branch_connection)
                 if not branch_participates:
                     continue
-                branch_schemas[branch_connection] = SchemaConfig(
+                branch_schemas[branch_name] = SchemaConfig(
                     mode="observed",
                     fields=None,
                     guaranteed_fields=tuple(sorted(branch_guarantees)),
@@ -1308,8 +1394,13 @@ def _check_schema_contracts(
         if producer.producer_id == "source":
             return _effective_producer_guarantees(producer)
 
-        producer_node = node_by_id.get(producer.producer_id)
-        if producer_node is None or producer_node.plugin is None:
+        if producer.producer_id not in node_by_id:
+            # Sources have producer_id == "source" and are not members of the
+            # locally-built node_by_id map; this is expected internal control
+            # flow, not a missing-key anomaly, so fall back to the declared set.
+            return _effective_producer_guarantees(producer)
+        producer_node = node_by_id[producer.producer_id]
+        if producer_node.plugin is None:
             return _effective_producer_guarantees(producer)
         if producer_node.node_type not in {"transform", "aggregation"}:
             return _effective_producer_guarantees(producer)
@@ -1332,21 +1423,72 @@ def _check_schema_contracts(
             return _effective_producer_guarantees(producer)
         return frozenset(output_config.guaranteed_fields)
 
-    for node in nodes:
+    # Tier-3 contract-config parse boundary. node.options / output.options are
+    # composer/LLM/user-authored config read back from session state, so a
+    # malformed schema declaration is recoverable external input, not an
+    # invariant break. These helpers convert the parser's ValueError into an
+    # explicit (value, ValidationEntry) result the caller aggregates into the
+    # validation report — the boundary surfaces the defect as a blocking entry
+    # rather than crashing /validate on the first bad node.
+    def _parse_node_required_fields(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
         try:
-            consumer_required = get_raw_node_required_fields(
-                node.options,
-                owner=f"node:{node.id}",
-                node_type=node.node_type,
+            return (
+                get_raw_node_required_fields(
+                    node.options,
+                    owner=f"node:{node.id}",
+                    node_type=node.node_type,
+                ),
+                None,
             )
         except ValueError as exc:
-            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_consumer_locked_input(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _consumer_locked_input_set(node), None
+        except ValueError as exc:
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_sink_required_fields(
+        output: OutputSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return (
+                get_raw_sink_required_fields(output.options, owner=f"output:{output.name}"),
+                None,
+            )
+        except ValueError as exc:
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_sink_locked_input(
+        output: OutputSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _sink_locked_input_set(output), None
+        except ValueError as exc:
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+
+    def _parse_producer_guarantees(
+        producer: ProducerEntry,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _effective_producer_guarantees(producer), None
+        except ValueError as exc:
+            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
+
+    for node in nodes:
+        consumer_required, consumer_required_error = _parse_node_required_fields(node)
+        if consumer_required_error is not None:
+            errors.append(consumer_required_error)
             continue
 
-        try:
-            consumer_locked_input = _consumer_locked_input_set(node)
-        except ValueError as exc:
-            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+        consumer_locked_input, consumer_locked_error = _parse_consumer_locked_input(node)
+        if consumer_locked_error is not None:
+            errors.append(consumer_locked_error)
             continue
 
         if not consumer_required and consumer_locked_input is None:
@@ -1359,12 +1501,12 @@ def _check_schema_contracts(
         if actual_producer is None or actual_producer.producer_id in parse_failed_producers:
             continue
 
-        try:
-            producer_guaranteed = _effective_producer_guarantees(actual_producer)
-        except ValueError as exc:
-            errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+        producer_guaranteed, producer_error = _parse_producer_guarantees(actual_producer)
+        if producer_error is not None:
+            errors.append(producer_error)
             parse_failed_producers.add(actual_producer.producer_id)
             continue
+        assert producer_guaranteed is not None  # No error => guarantees resolved.
 
         if consumer_required:
             missing_fields = consumer_required - producer_guaranteed
@@ -1396,11 +1538,14 @@ def _check_schema_contracts(
         # composer-time we mirror the same predicate against the producer's
         # *predicted emit set* (not its declared set — see _producer_emit_set).
         if consumer_locked_input is not None:
-            try:
-                producer_emit = _producer_emit_set(actual_producer)
-            except ValueError:
-                # Already surfaced above via _effective_producer_guarantees.
-                continue
+            # _effective_producer_guarantees(actual_producer) already succeeded
+            # above (else we continued via parse_failed_producers), so this
+            # producer's contract config parsed cleanly. _producer_emit_set walks
+            # the same parse paths (create_transform / _effective_producer_guarantees)
+            # on the same options, deterministically — any ValueError here would be
+            # a non-determinism bug in our own code, not a fresh Tier-3 parse fault,
+            # so it is left to crash rather than silently swallowed.
+            producer_emit = _producer_emit_set(actual_producer)
             extras = producer_emit - consumer_locked_input
             if extras:
                 # When consumer is itself a field_mapper, suggesting "insert a
@@ -1434,19 +1579,14 @@ def _check_schema_contracts(
                 )
 
     for output in outputs:
-        try:
-            sink_required = get_raw_sink_required_fields(
-                output.options,
-                owner=f"output:{output.name}",
-            )
-        except ValueError as exc:
-            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+        sink_required, sink_required_error = _parse_sink_required_fields(output)
+        if sink_required_error is not None:
+            errors.append(sink_required_error)
             continue
 
-        try:
-            sink_locked_input = _sink_locked_input_set(output)
-        except ValueError as exc:
-            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+        sink_locked_input, sink_locked_error = _parse_sink_locked_input(output)
+        if sink_locked_error is not None:
+            errors.append(sink_locked_error)
             continue
 
         if not sink_required and sink_locked_input is None:
@@ -1479,12 +1619,12 @@ def _check_schema_contracts(
             if actual_producer.producer_id in parse_failed_producers:
                 continue
 
-            try:
-                producer_guaranteed = _effective_producer_guarantees(actual_producer)
-            except ValueError as exc:
-                errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+            producer_guaranteed, producer_error = _parse_producer_guarantees(actual_producer)
+            if producer_error is not None:
+                errors.append(producer_error)
                 parse_failed_producers.add(actual_producer.producer_id)
                 continue
+            assert producer_guaranteed is not None  # No error => guarantees resolved.
 
             if sink_required:
                 missing_fields = sink_required - producer_guaranteed
@@ -1515,10 +1655,13 @@ def _check_schema_contracts(
             # surface is the auto-generated sink Pydantic model with
             # ``extra="forbid"`` triggered by ``mode: fixed`` on the sink schema.
             if sink_locked_input is not None:
-                try:
-                    producer_emit = _producer_emit_set(actual_producer)
-                except ValueError:
-                    continue
+                # See Rule A above: _effective_producer_guarantees(actual_producer)
+                # already succeeded for this producer in this iteration, so its
+                # contract config parsed cleanly. _producer_emit_set walks the same
+                # deterministic parse paths on the same options — a ValueError here
+                # would be a non-determinism bug in our own code, not a fresh Tier-3
+                # fault, so it is left to crash rather than silently swallowed.
+                producer_emit = _producer_emit_set(actual_producer)
                 extras = producer_emit - sink_locked_input
                 if extras:
                     errors.append(
@@ -1628,6 +1771,9 @@ class CompositionState:
         outputs: Sink configurations.
         metadata: Pipeline name and description.
         version: Monotonically increasing per session, starting at 1.
+        guided_session: Optional guided-mode session pointer. None for freeform
+            sessions; set to GuidedSession.initial() at session-create time for
+            guided sessions (spec §5.2).
     """
 
     source: SourceSpec | None
@@ -1636,6 +1782,7 @@ class CompositionState:
     outputs: tuple[OutputSpec, ...]
     metadata: PipelineMetadata
     version: int
+    guided_session: GuidedSession | None = None
 
     def __post_init__(self) -> None:
         if self.version < 1:
@@ -1769,7 +1916,7 @@ class CompositionState:
             if node.fork_to is not None:
                 node_dict["fork_to"] = list(node.fork_to)
             if node.branches is not None:
-                node_dict["branches"] = list(node.branches)
+                node_dict["branches"] = _serialize_branches(node.branches)
             if node.policy is not None:
                 node_dict["policy"] = node.policy
             if node.merge is not None:
@@ -1877,6 +2024,17 @@ class CompositionState:
 
         # 7. Node type field consistency
         for node in self.nodes:
+            if node.node_type not in COMPOSER_NODE_TYPES:
+                expected = ", ".join(sorted(COMPOSER_NODE_TYPES))
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Node '{node.id}' has unknown node_type '{node.node_type}'. Expected one of: {expected}.",
+                        "high",
+                    )
+                )
+                continue
+
             batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
             if batch_placement_error is not None:
                 errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))
@@ -1888,6 +2046,7 @@ class CompositionState:
             abuse_contact_error = _validate_web_scrape_abuse_contact_not_reserved(node)
             if abuse_contact_error is not None:
                 errors.append(abuse_contact_error)
+            errors.extend(_validate_web_scrape_http_identity_not_placeholder(node))
 
             if node.node_type == "gate":
                 if node.condition is None:
@@ -1932,11 +2091,9 @@ class CompositionState:
                 # If early triggers are present, validate them through the same
                 # TriggerConfig parser used by settings load.
                 if node.trigger is not None:
-                    try:
-                        TriggerConfig.model_validate(deep_thaw(node.trigger))
-                    except PydanticValidationError as exc:
-                        detail = "; ".join(str(error["msg"]) for error in exc.errors())
-                        errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' trigger is invalid: {detail}", "high"))
+                    trigger_error = _validate_aggregation_trigger(node.id, node.trigger)
+                    if trigger_error is not None:
+                        errors.append(trigger_error)
                 # output_mode must be a valid OutputMode value when present
                 if node.output_mode is not None and node.output_mode not in ("passthrough", "transform"):
                     errors.append(
@@ -1954,7 +2111,9 @@ class CompositionState:
         runtime_connections = _runtime_connection_targets(self.source, self.nodes)
         for node in self.nodes:
             if node.node_type == "coalesce":
-                missing_branches = sorted(branch for branch in node.branches or () if branch not in runtime_connections)
+                missing_branches = sorted(
+                    branch for branch in _coalesce_branch_connections(node.branches) if branch not in runtime_connections
+                )
                 if missing_branches:
                     errors.append(
                         _err(
@@ -1988,6 +2147,10 @@ class CompositionState:
         warnings: list[ValidationEntry] = []
         _warn = ValidationEntry
         warnings.extend(numeric_contract_warnings)
+        from elspeth.web.interpretation_state import prompt_shield_recommendation_warning_pairs
+
+        for component, message in prompt_shield_recommendation_warning_pairs(self):
+            warnings.append(_warn(component, message, "medium"))
 
         # Build connection-field targets (wiring that doesn't require edges)
         connection_targets = _runtime_connection_targets(self.source, self.nodes)
@@ -2075,7 +2238,7 @@ class CompositionState:
         _plugins_requiring_config: dict[str, tuple[str, str]] = {
             "value_transform": ("operations", "no operations defined — nothing will be computed"),
             "type_coerce": ("conversions", "no conversions defined — no types will be changed"),
-            "llm": ("template", "no template defined — nothing will be sent to the model"),
+            "llm": ("prompt_template", "no prompt_template defined — nothing will be sent to the model"),
             "field_mapper": ("mapping", "no mapping defined — no fields will be renamed"),
             "truncate": ("fields", "no fields specified — nothing will be truncated"),
             "keyword_filter": ("keywords", "no keywords defined — all rows will pass through"),

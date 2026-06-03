@@ -67,18 +67,44 @@ _agg_token_checkpoints = st.builds(
     contract=st.just({"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []}),
 )
 
-_agg_node_checkpoints = st.builds(
-    AggregationNodeCheckpoint,
-    tokens=st.lists(_agg_token_checkpoints, min_size=0, max_size=3).map(tuple),
-    batch_id=_safe_ids.map(lambda s: f"batch-{s}"),
-    elapsed_age_seconds=st.floats(min_value=0.0, max_value=3600.0, allow_nan=False, allow_infinity=False),
-    count_fire_offset=st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
-    condition_fire_offset=st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
-)
+
+@st.composite
+def _agg_node_checkpoint_strategy(draw: st.DrawFn) -> AggregationNodeCheckpoint:
+    """Build an AggregationNodeCheckpoint that respects the counter-only invariant.
+
+    When tokens is empty, trigger fire-state fields must all be in their reset
+    state (None / 0.0) since there is no active batch to preserve. When tokens
+    is non-empty, all the in-flight trigger metadata may be populated.
+    """
+    tokens = tuple(draw(st.lists(_agg_token_checkpoints, min_size=0, max_size=3)))
+    accepted = draw(st.integers(min_value=0, max_value=1_000_000))
+    completed = draw(st.integers(min_value=0, max_value=1_000_000))
+    if tokens:
+        batch_id: str | None = draw(_safe_ids.map(lambda s: f"batch-{s}"))
+        elapsed = draw(st.floats(min_value=0.0, max_value=3600.0, allow_nan=False, allow_infinity=False))
+        count_off = draw(st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
+        cond_off = draw(st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
+    else:
+        batch_id = None
+        elapsed = 0.0
+        count_off = None
+        cond_off = None
+    return AggregationNodeCheckpoint(
+        tokens=tokens,
+        batch_id=batch_id,
+        elapsed_age_seconds=elapsed,
+        count_fire_offset=count_off,
+        condition_fire_offset=cond_off,
+        accepted_count_total=accepted,
+        completed_flush_count=completed,
+    )
+
+
+_agg_node_checkpoints = _agg_node_checkpoint_strategy()
 
 aggregation_states = st.builds(
     AggregationCheckpointState,
-    version=st.just("4.0"),
+    version=st.just("5.0"),
     nodes=st.dictionaries(_node_names, _agg_node_checkpoints, min_size=0, max_size=3),
 )
 
@@ -157,6 +183,8 @@ def setup_checkpoint_prerequisites(
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.RUNNING,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
 
@@ -329,7 +357,7 @@ class TestAggregationStateRoundTripProperties:
             setup_checkpoint_prerequisites(db, "test-nan", token_id="token-nan")
 
             nan_state = AggregationCheckpointState(
-                version="4.0",
+                version="5.0",
                 nodes={
                     "test_node": AggregationNodeCheckpoint(
                         tokens=(
@@ -349,6 +377,8 @@ class TestAggregationStateRoundTripProperties:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
+                        accepted_count_total=0,
+                        completed_flush_count=0,
                     ),
                 },
             )
@@ -380,7 +410,7 @@ class TestAggregationStateRoundTripProperties:
             setup_checkpoint_prerequisites(db, "test-inf", token_id="token-inf")
 
             inf_state = AggregationCheckpointState(
-                version="4.0",
+                version="5.0",
                 nodes={
                     "test_node": AggregationNodeCheckpoint(
                         tokens=(
@@ -400,6 +430,8 @@ class TestAggregationStateRoundTripProperties:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
+                        accepted_count_total=0,
+                        completed_flush_count=0,
                     ),
                 },
             )

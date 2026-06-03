@@ -229,6 +229,39 @@ class TestEntraGroupClaims:
         assert profile.groups == ()
 
     @pytest.mark.asyncio
+    async def test_hasgroups_overage_marker_raises(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Implicit-flow group overage must not become empty membership."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        claims = _valid_entra_claims({"hasgroups": True})
+        token = make_rs256_token(private_key, claims)
+        with mock_httpx_discovery, pytest.raises(AuthenticationError, match="group overage"):
+            await provider.get_user_info(token)
+
+    @pytest.mark.asyncio
+    async def test_claim_names_groups_overage_marker_raises(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Distributed group overage claims require explicit resolution."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        claims = _valid_entra_claims(
+            {
+                "_claim_names": {"groups": "src1"},
+                "_claim_sources": {"src1": {"endpoint": "https://graph.windows.net/overage"}},
+            }
+        )
+        token = make_rs256_token(private_key, claims)
+        with mock_httpx_discovery, pytest.raises(AuthenticationError, match="group overage"):
+            await provider.get_user_info(token)
+
+    @pytest.mark.asyncio
     async def test_no_name_claims_returns_none_display_name(
         self,
         rsa_keypair,
@@ -392,6 +425,25 @@ class TestEntraGetUserInfoTenantValidation:
         with mock_httpx_discovery:
             profile = await provider.get_user_info(token)
         assert profile.username == "entra-user-456"
+
+    @pytest.mark.asyncio
+    async def test_non_string_optional_profile_claims_are_dropped(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Cosmetic Entra metadata must not crash profile construction when it has the wrong type."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        token = make_rs256_token(private_key, _valid_entra_claims({"name": 42, "email": 123}))
+
+        with mock_httpx_discovery:
+            profile = await provider.get_user_info(token)
+
+        assert profile.user_id == "entra-user-456"
+        assert profile.username == "alice@contoso.com"
+        assert profile.display_name == "alice@contoso.com"
+        assert profile.email is None
 
 
 class TestEntraProtocolConformance:

@@ -1,0 +1,509 @@
+/* common.css — Cross-component widgets and modals.
+   Owners: .yaml-view* (YAML viewer used across panels), .command-palette*
+   (Ctrl-K palette), .error-boundary*, .markdown-body* (MarkdownRenderer),
+   .graph-modal-* and .yaml-modal-* (modals shared by sidebar/inspector/audit).
+   IMPORTANT: command-palette rules appear here BEFORE catalog.css in the
+   barrel because catalog has .command-palette-footer descendant selectors
+   that depend on the palette having already loaded. */
+
+/* ---------------------------------------------------------------------------
+   YAML View (Syntax-Highlighted)
+   --------------------------------------------------------------------------- */
+.yaml-view {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.yaml-view-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.yaml-view-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.yaml-view-pre {
+  margin: 0;
+  padding: var(--space-sm) 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  background-color: var(--color-surface) !important;
+}
+
+.yaml-view-line {
+  display: flex;
+  padding: 0 var(--space-md);
+}
+
+.yaml-view-line:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.yaml-view-line-number {
+  display: inline-block;
+  width: 3ch;
+  margin-right: var(--space-md);
+  text-align: right;
+  color: var(--color-text-muted);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.yaml-view-line-content {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Dark theme is the :root default — no [data-theme="dark"] override needed */
+
+/* ── Markdown rendering (A2) ─────────────────────────────────────────────── */
+
+.markdown-body {
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.markdown-body h1 { font-size: var(--font-size-lg); }
+.markdown-body h2 { font-size: var(--font-size-base); }
+.markdown-body h3 { font-size: var(--font-size-md); }
+.markdown-body h4 { font-size: var(--font-size-sm); }
+
+.markdown-body p {
+  margin: 4px 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.markdown-body li {
+  margin-bottom: 2px;
+}
+
+/* Loose-list mitigation: CommonMark wraps list-item text in <p> when the
+   source has blank lines between items. Without this override the
+   .markdown-body p { margin: 4px 0 } rule above compounds with the
+   <li> margin, giving each bullet ~1× line-height of dead air. Strip the
+   inner-<p> margin so list items render tight regardless of whether the
+   LLM emits a loose or tight markdown list. Standard idiom — GitHub,
+   Slack, Discord all do the same. */
+.markdown-body li > p {
+  margin: 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: var(--font-size-sm);
+  width: 100%;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--color-border-strong);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background-color: var(--color-surface-elevated);
+  font-weight: 600;
+}
+
+.markdown-body .inline-code {
+  background-color: var(--color-surface-elevated);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.markdown-body .code-block {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.markdown-body .code-block code {
+  background: none;
+  padding: 0;
+}
+
+.markdown-body .code-block-wrapper {
+  position: relative;
+}
+
+.markdown-body .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.markdown-body .code-block-wrapper:hover .code-block-copy,
+.markdown-body .code-block-copy:focus-visible {
+  opacity: 1;
+}
+
+.markdown-body .mermaid-container {
+  margin: 8px 0;
+  padding: 12px;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  text-align: center;
+}
+
+.markdown-body .mermaid-container svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-body .mermaid-fallback {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  white-space: pre-wrap;
+  text-align: left;
+  color: var(--color-text-muted);
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Command Palette (Ctrl+K)
+   --------------------------------------------------------------------------- */
+.command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: var(--z-palette-backdrop);
+}
+
+.command-palette {
+  position: fixed;
+  top: 15%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: 70vh;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+  z-index: var(--z-palette);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.command-palette-input-wrapper {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.command-palette-input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+}
+
+.command-palette-input:focus {
+  outline: none;
+  border-color: var(--color-focus-ring);
+}
+
+.command-palette-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.command-palette-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-sm) 0;
+}
+
+.command-palette-empty {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.command-palette-group {
+  margin-bottom: var(--space-sm);
+}
+
+.command-palette-group-header {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-muted);
+}
+
+.command-palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.command-palette-item:hover,
+.command-palette-item-selected {
+  background-color: var(--color-surface-hover);
+}
+
+.command-palette-item-selected {
+  background-color: var(--color-highlight);
+}
+
+.command-palette-item-title {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.command-palette-kbd {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.command-palette-footer {
+  display: flex;
+  gap: var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+
+.command-palette-footer kbd {
+  padding: 1px var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  margin-right: var(--space-xs);
+}
+
+/* ---------------------------------------------------------------------------
+   Error Boundary Fallback
+   --------------------------------------------------------------------------- */
+.error-boundary-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 120px;
+  padding: var(--space-2xl);
+  text-align: center;
+  color: var(--color-text-muted);
+  gap: var(--space-sm);
+}
+
+.error-boundary-icon {
+  font-size: var(--font-size-2xl);
+  color: var(--color-warning);
+  line-height: 1;
+}
+
+.error-boundary-title {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.error-boundary-detail {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  max-width: 400px;
+  word-break: break-word;
+}
+
+.error-boundary-retry {
+  margin-top: var(--space-sm);
+}
+
+
+/* ---------------------------------------------------------------------------
+   YamlView — extra classes
+   --------------------------------------------------------------------------- */
+.yaml-loading {
+  padding: var(--space-xl);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.yaml-toolbar-btn {
+  padding: var(--space-xs) 10px;
+  font-size: var(--font-size-xs);
+}
+
+.yaml-toolbar-btn[data-copied="true"] {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+
+.graph-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
+
+.graph-modal {
+  position: fixed;
+  inset: 32px;
+  z-index: var(--z-dialog);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.graph-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.graph-modal-header h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.graph-modal-close {
+  min-width: 36px;
+  min-height: var(--size-control-compact);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.graph-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.yaml-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
+
+.yaml-modal {
+  position: fixed;
+  inset: 32px;
+  z-index: var(--z-dialog);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.yaml-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.yaml-modal-header h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.yaml-modal-close {
+  min-width: 36px;
+  min-height: var(--size-control-compact);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+
+.yaml-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}

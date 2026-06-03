@@ -17,7 +17,7 @@ class TestPoolConfigDefaults:
             {
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
@@ -31,7 +31,7 @@ class TestPoolConfigDefaults:
             {
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "pool_size": 1,
@@ -51,7 +51,7 @@ class TestPoolConfigExplicit:
             {
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "pool_size": 10,
@@ -74,7 +74,7 @@ class TestPoolConfigExplicit:
             {
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "pool_size": 5,
@@ -136,7 +136,7 @@ class TestPoolConfigValidation:
                 {
                     "provider": "azure",
                     "model": "gpt-4",
-                    "template": "{{ row.text }}",
+                    "prompt_template": "{{ row.text }}",
                     "schema": {"mode": "observed"},
                     "required_input_fields": [],  # Explicit opt-out for this test
                     "pool_size": 0,
@@ -150,7 +150,7 @@ class TestPoolConfigValidation:
                 {
                     "provider": "azure",
                     "model": "gpt-4",
-                    "template": "{{ row.text }}",
+                    "prompt_template": "{{ row.text }}",
                     "schema": {"mode": "observed"},
                     "required_input_fields": [],  # Explicit opt-out for this test
                     "pool_size": 10,
@@ -165,7 +165,7 @@ class TestPoolConfigValidation:
                 {
                     "provider": "azure",
                     "model": "gpt-4",
-                    "template": "{{ row.text }}",
+                    "prompt_template": "{{ row.text }}",
                     "schema": {"mode": "observed"},
                     "required_input_fields": [],  # Explicit opt-out for this test
                     "pool_size": 10,

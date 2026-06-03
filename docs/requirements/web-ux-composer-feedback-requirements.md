@@ -2,7 +2,9 @@
 
 **Date:** 2026-04-08
 **Source:** User direct feedback + composer agent operational feedback
-**Status:** Draft — needs prioritization review
+**Status:** Historical feedback capture — superseded for planning by
+[Composer UX specification](../design/composer-ux-spec.md) and
+[Composer UX redesign 2026-05](../composer/ux-redesign-2026-05/)
 
 ---
 
@@ -19,6 +21,11 @@ Requirements are grouped into five areas:
 - [C] Skill Pack Knowledge
 - [D] Communication & Language
 - [E] Architectural / Cross-Cutting
+
+Use this file as raw source material showing where the RC5 composer UX work
+came from. Do not use it as the current backlog or implementation plan; the
+current planning sources are the composer UX specification, the RC5.2 redesign
+document set, and Filigree.
 
 ---
 

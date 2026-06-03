@@ -1,70 +1,100 @@
 # Token Outcome Gap Investigation Playbook
 
-Use this playbook when tokens are missing terminal outcomes or outcomes
-are incorrect. The goal is fast isolation, reproducible failures, and
-permanent fixes.
+Current as of 2026-05-20.
 
-## Inputs to collect
+Use this playbook when token outcomes are missing, illegal, duplicated, or
+inconsistent with node/batch/artifact evidence.
 
-- run_id
-- pipeline config used in the run
-- any error logs or stack traces
-- whether the run completed or failed
+## Inputs
 
-## Step 1: Run the audit sweep
+- Landscape database path.
+- Run ID.
+- Settings file or exported run settings when available.
+- `token_id` or `row_id` for at least one affected token.
+- Output from the relevant [audit sweep](02-audit-sweep.md) query.
 
-Run all queries in `docs/contracts/token-outcomes/02-audit-sweep.md`.
-Save results grouped by outcome type.
+## Step 1: Confirm Run State
 
-## Step 2: Classify the gap
+```sql
+SELECT run_id, status, started_at, completed_at
+FROM runs
+WHERE run_id = :run_id;
+```
 
-For each failing token group, classify by symptom:
-- Missing terminal outcome
-- Missing required fields
-- Sink node_state mismatch
-- Parent link missing
+Only enforce terminal-outcome completeness after the run is no longer actively
+processing.
 
-## Step 3: Map to path
+## Step 2: Classify By Pair
 
-Use `docs/contracts/token-outcomes/01-outcome-path-map.md` to locate the responsible
-code path. This gives you the exact file and function to inspect.
+Group failures by `completed`, `outcome`, and `path`:
 
-## Step 4: Identify the minimal reproduction
+```sql
+SELECT completed, outcome, path, COUNT(*) AS records
+FROM token_outcomes
+WHERE run_id = :run_id
+GROUP BY completed, outcome, path
+ORDER BY completed, outcome, path;
+```
 
-Create the smallest pipeline that triggers the gap. Examples:
-- Single gate route to sink for ROUTED gaps
-- Fork + coalesce with 2 branches for COALESCED gaps
-- Aggregation passthrough for BUFFERED gaps
+Classify the gap as:
 
-Prefer in-memory LandscapeDB and minimal plugin stubs.
+- missing completed outcome
+- duplicate completed outcome
+- illegal `(outcome, path, completed)` pair
+- missing required discriminator field
+- forbidden discriminator field present
+- sink/node-state mismatch
+- parent/child or batch evidence gap
 
-## Step 5: Add a failing test
+## Step 3: Explain A Representative Token
 
-Write a regression test that:
-- Reproduces the gap
-- Runs the audit sweep on the test run
-- Fails on current behavior
+```bash
+elspeth explain --run <RUN_ID> --token <TOKEN_ID> --database <DB> --json
+```
 
-Place tests in the appropriate tier:
-- Unit for narrow path logic
-- Integration for full pipeline behaviors
+If only a row is known:
 
-## Step 6: Fix and re-verify
+```bash
+elspeth explain --run <RUN_ID> --row <ROW_ID> --database <DB> --json
+```
 
-- Fix the code path (no patches or temporary workarounds)
-- Re-run the regression test
-- Re-run the audit sweep on the failing run_id if possible
+Use [Investigate Routing](../../runbooks/investigate-routing.md) for operator
+lineage queries.
 
-## Escalation rules
+## Step 4: Map To Producer
 
-Escalate immediately if:
-- Terminal outcomes are missing after run completion
-- Sink node_state and COMPLETED outcomes disagree
-- Duplicate terminal outcomes appear
+Use [Outcome Path Map](01-outcome-path-map.md) to locate the producer. Verify the
+current source before editing; do not rely on old line-number references.
 
-## Closure checklist
+## Step 5: Reproduce Minimally
 
-- [ ] Gap reproduced with a test
-- [ ] Fix applied and test passes
-- [ ] Audit sweep passes on the reproduction
-- [ ] Outcome path map updated if behavior changed
+Create the smallest reproduction that exercises the producer path:
+
+- one source row for source quarantine or default sink success
+- one gate for gate-route and gate-discard paths
+- one transform returning failure for `on_error_routed`
+- one filter/drop transform for `filter_dropped`
+- one fork plus coalesce for parent/child lineage
+- one batch-aware transform for `buffered` and `batch_consumed`
+
+Prefer repository-level tests for field-constraint bugs and integration tests
+for config-to-runtime path bugs.
+
+## Step 6: Fix And Re-Verify
+
+1. Add the failing regression first.
+2. Fix the earliest producer or repository boundary that can enforce the
+   invariant mechanically.
+3. Re-run the focused regression.
+4. Re-run the audit sweep query that exposed the gap.
+5. Update this contract set if the legal model changed.
+
+## Escalate Immediately
+
+Escalate when:
+
+- completed runs have tokens without completed outcomes
+- duplicate completed outcomes appear
+- illegal `(outcome, path)` pairs are persisted
+- sink node states and token outcomes disagree
+- audit read paths require coercion to interpret Tier-1 data

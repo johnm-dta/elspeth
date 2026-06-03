@@ -15,7 +15,10 @@ Plugin Types:
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from elspeth.contracts.enums import Determinism
+from elspeth.contracts.enums import (
+    DeclaredAuditCharacteristics,
+    Determinism,
+)
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.schema import SchemaConfig
 
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.contexts import LifecycleContext, SinkContext, SourceContext, TransformContext
     from elspeth.contracts.data import PluginSchema
     from elspeth.contracts.diversion import SinkWriteResult
+    from elspeth.contracts.plugin_assistance import PluginAssistance
     from elspeth.contracts.results import SourceRow, TransformResult
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
@@ -53,7 +57,74 @@ class PluginConfigProtocol(Protocol):
         ...
 
 
-class SourceProtocol(Protocol):
+class _PluginReferenceContent(Protocol):
+    """Reference-content attributes shared by every plugin protocol.
+
+    Mirrors the Phase 7A fields added to ``BaseSource`` /
+    ``BaseTransform`` / ``BaseSink`` in
+    ``src/elspeth/plugins/infrastructure/base.py``. ``SourceProtocol``,
+    ``TransformProtocol``, ``BatchTransformProtocol``, and
+    ``SinkProtocol`` all inherit from this mixin so the attribute set
+    is declared once.
+
+    The single-source-of-truth pattern lets mypy verify that
+    ``PluginClass``-typed variables in ``web/catalog/service.py`` can
+    access these fields uniformly without per-protocol declarations
+    drifting. Adding a Phase-8 reference field means one edit here
+    plus matching additions to the three ``BaseX`` classes — instead
+    of four protocol edits plus three base edits.
+
+    Types are stdlib-only by L0 constraint (``DeclaredAuditCharacteristics``
+    is a stdlib ``frozenset`` alias from ``contracts/enums.py``).
+
+    Not ``@runtime_checkable`` — these are attribute declarations
+    (no methods), and ``TransformProtocol``'s runtime-checkable
+    isinstance() machinery already verifies the concrete plugin class
+    has every needed attribute via the ``BaseTransform`` inheritance.
+    """
+
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
+
+
+class _PluginAssistanceHooks(Protocol):
+    """Discovery-time and postscript-time assistance hooks.
+
+    Mixin shared by ``SourceProtocol`` / ``TransformProtocol`` /
+    ``BatchTransformProtocol`` / ``SinkProtocol``. The implementations
+    live on ``BaseSource`` / ``BaseTransform`` / ``BaseSink`` in
+    ``plugins/infrastructure/base.py``; this protocol declares them so
+    catalog and tool code typed against ``type[XProtocol]`` can call
+    them without per-protocol declarations drifting.
+
+    See ``contracts/plugin_assistance.py`` for the dual-use semantics
+    of ``issue_code`` and the audit-hash discipline.
+    """
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> "PluginAssistance | None":
+        """Return deterministic guidance for this plugin (dual-use; see PluginAssistance)."""
+        ...
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set config."""
+        ...
+
+
+class SourceProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for source plugins — type-checking only, not @runtime_checkable.
 
     Sources load data into the system. There is exactly one source per run.
@@ -92,6 +163,8 @@ class SourceProtocol(Protocol):
     determinism: Determinism
     plugin_version: str
     source_file_hash: str | None
+
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -217,7 +290,7 @@ class SourceProtocol(Protocol):
 
 
 @runtime_checkable
-class TransformProtocol(Protocol):
+class TransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for stateless single-row transforms.
 
     Transforms process individual rows and emit results.
@@ -267,6 +340,8 @@ class TransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
+
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # The TransformExecutor checks _on_start_called before process() to ensure
     # on_start() was called. All transforms must inherit BaseTransform which
@@ -314,6 +389,11 @@ class TransformProtocol(Protocol):
     # Normalized from TransformDataConfig.required_input_fields at construction
     # time. Empty frozenset = no required-input declaration.
     declared_input_fields: frozenset[str]
+
+    # Runtime preflight opt-in. The orchestrator checks this explicit flag
+    # instead of probing for optional methods, preserving a closed lifecycle
+    # surface.
+    requires_runtime_preflight: bool
 
     # DAG contract: output schema for transforms that declare output fields.
     # Set by BaseTransform._build_output_schema_config() after declared_output_fields
@@ -381,6 +461,10 @@ class TransformProtocol(Protocol):
         """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
+    def runtime_preflight(self, ctx: "LifecycleContext") -> None:
+        """Optional engine-time readiness check before source iteration."""
+        ...
+
     @classmethod
     def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
         """Return the Pydantic config model for this plugin type.
@@ -407,7 +491,7 @@ class TransformProtocol(Protocol):
         ...
 
 
-class BatchTransformProtocol(Protocol):
+class BatchTransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for batch-aware transforms — type-checking only, not @runtime_checkable.
 
     Batch transforms receive lists of rows and emit results. Used in aggregation
@@ -463,6 +547,8 @@ class BatchTransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
+
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # Batch transforms inherit BaseTransform which manages these. Contract tests
     # use these flags as falsifiable post-conditions for lifecycle invocation
@@ -491,6 +577,11 @@ class BatchTransformProtocol(Protocol):
 
     # ADR-013 pre-emission declaration surface.
     declared_input_fields: frozenset[str]
+
+    # Runtime preflight opt-in. The orchestrator checks this explicit flag
+    # instead of probing for optional methods, preserving a closed lifecycle
+    # surface.
+    requires_runtime_preflight: bool
 
     # Error routing configuration
     # Injected by cli_helpers.py bridge from AggregationSettings/TransformSettings.
@@ -534,6 +625,10 @@ class BatchTransformProtocol(Protocol):
         """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
+    def runtime_preflight(self, ctx: "LifecycleContext") -> None:
+        """Optional engine-time readiness check before source iteration."""
+        ...
+
     @classmethod
     def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
         """Return the Pydantic config model for this plugin type.
@@ -554,7 +649,7 @@ class BatchTransformProtocol(Protocol):
         ...
 
 
-class SinkProtocol(Protocol):
+class SinkProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for sink plugins — type-checking only, not @runtime_checkable.
 
     Sinks output data to external destinations.
@@ -608,6 +703,8 @@ class SinkProtocol(Protocol):
     determinism: Determinism
     plugin_version: str
     source_file_hash: str | None
+
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?
@@ -740,8 +837,9 @@ class SinkProtocol(Protocol):
                 This is the same format returned by Landscape.get_source_field_resolution().
 
         Note:
-            Default is a no-op. Only sinks configured with headers: original need
-            to override this.
+            BaseSink raises NotImplementedError when
+            needs_resume_field_resolution is True. Only sinks configured with
+            headers: original need to override this.
         """
         ...
 

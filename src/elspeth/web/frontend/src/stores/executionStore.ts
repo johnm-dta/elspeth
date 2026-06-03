@@ -28,10 +28,12 @@ import type {
   ExecutionFanoutAck,
   ExecutionFanoutGuard,
 } from "@/types/index";
+import type { InterpretationEvent } from "@/types/interpretation";
 import * as api from "@/api/client";
 import { connectToRun, type WebSocketConnection } from "@/api/websocket";
 import { useAuthStore } from "./authStore";
 import { useBlobStore } from "./blobStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { useSessionStore } from "./sessionStore";
 
 
@@ -55,7 +57,8 @@ interface ExecutionState {
   wsDisconnected: boolean;
   error: string | null;
 
-  validate: (sessionId: string) => Promise<void>;
+  validate: (sessionId: string, options?: ValidateOptions) => Promise<boolean>;
+  setValidationResult: (result: ValidationResult | null) => void;
   execute: (sessionId: string, fanoutAck?: ExecutionFanoutAck) => Promise<string | null>;
   confirmFanoutExecution: () => Promise<string | null>;
   dismissFanoutGuard: () => void;
@@ -68,9 +71,72 @@ interface ExecutionState {
   reset: () => void;
 }
 
+interface ValidateOptions {
+  expectedVersion?: number;
+}
+
 // The WebSocket connection handle is held outside Zustand state
 // because it's not serialisable and components don't need to read it.
 let wsConnection: WebSocketConnection | null = null;
+let validationRequestSeq = 0;
+
+function currentCompositionVersion(): number | null {
+  return useSessionStore.getState().compositionState?.version ?? null;
+}
+
+function shouldApplyValidationResult(
+  sessionId: string,
+  expectedVersion: number | null,
+): boolean {
+  const sessionState = useSessionStore.getState();
+  if (sessionState.activeSessionId !== sessionId) {
+    return false;
+  }
+  if (
+    expectedVersion !== null &&
+    sessionState.compositionState?.version !== expectedVersion
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled interpretation kind: ${String(value)}`);
+}
+
+function describePendingInterpretation(event: InterpretationEvent): string {
+  const nodeLabel = event.affected_node_id ?? "this transform";
+  switch (event.kind) {
+    case "invented_source":
+      return `Resolve invented source data for ${nodeLabel} before running.`;
+    case "llm_prompt_template":
+      return `Resolve the LLM prompt template for ${nodeLabel} before running.`;
+    case "pipeline_decision":
+      return `Resolve the pipeline decision for ${nodeLabel} before running.`;
+    case "llm_model_choice":
+      return `Set the LLM model choice for ${nodeLabel} before running.`;
+    case "vague_term":
+    case null:
+      return `Resolve the pending interpretation for ${nodeLabel} before running.`;
+    default: {
+      return assertNever(event.kind);
+    }
+  }
+}
+
+function getRunBlockError(sessionId: string): string | null {
+  const interpretationState = useInterpretationEventsStore.getState();
+  if (interpretationState.optedOutBySession[sessionId] === true) {
+    return null;
+  }
+  const pending = interpretationState.pendingBySession[sessionId];
+  if (!pending || Object.keys(pending).length === 0) {
+    return null;
+  }
+  const firstPending = Object.values(pending)[0];
+  return describePendingInterpretation(firstPending);
+}
 
 /**
  * Derive the run status from a RunEvent.
@@ -254,12 +320,25 @@ const initialExecutionState = {
 export const useExecutionStore = create<ExecutionState>((set, get) => ({
   ...initialExecutionState,
 
-  async validate(sessionId: string) {
+  async validate(sessionId: string, options: ValidateOptions = {}) {
+    const requestSeq = ++validationRequestSeq;
+    const expectedVersion = options.expectedVersion ?? currentCompositionVersion();
     set({ isValidating: true, validationResult: null, error: null });
     try {
       const result = await api.validatePipeline(sessionId);
+      if (requestSeq !== validationRequestSeq) return false;
+      if (!shouldApplyValidationResult(sessionId, expectedVersion)) {
+        set({ isValidating: false });
+        return false;
+      }
       set({ validationResult: result, isValidating: false });
+      return true;
     } catch (err) {
+      if (requestSeq !== validationRequestSeq) return false;
+      if (!shouldApplyValidationResult(sessionId, expectedVersion)) {
+        set({ isValidating: false });
+        return false;
+      }
       const apiErr = err as ApiError;
       const message =
         apiErr.status === 500
@@ -269,10 +348,21 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         isValidating: false,
         error: message,
       });
+      // false = caller must not record this version as validated.
+      return false;
     }
   },
 
+  setValidationResult(result: ValidationResult | null) {
+    set({ validationResult: result });
+  },
+
   async execute(sessionId: string, fanoutAck?: ExecutionFanoutAck) {
+    const blockedByInterpretation = getRunBlockError(sessionId);
+    if (blockedByInterpretation !== null) {
+      set({ isExecuting: false, error: blockedByInterpretation });
+      return null;
+    }
     set({ isExecuting: true, error: null });
     try {
       const { run_id } =
@@ -298,7 +388,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         },
       });
 
-      // Refresh runs list so the new run appears in the Runs tab immediately
+      // Refresh runs list so the new run appears in InlineRunResults immediately
       get().loadRuns(sessionId);
 
       // Connect WebSocket for live progress
@@ -323,7 +413,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         apiErr.status === 409
           ? "A run is already in progress for this pipeline."
           : apiErr.detail ??
-            "Pipeline execution failed. Check the Runs tab for error details.";
+            "Pipeline execution failed. Check the run results panel for error details.";
       set({
         isExecuting: false,
         error: message,
@@ -368,26 +458,32 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       },
       onComplete(event: RunEvent, _data: RunEventCompleted) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — pipeline outputs are finalized on completion
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows carry finalized output inventory.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onCancelled(event: RunEvent, _data: RunEventCancelled) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — partial outputs may exist after cancellation
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows may carry partial outputs after cancellation.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onFailed(event: RunEvent, _data: RunEventFailed) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — partial outputs may exist after failure
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows may carry partial outputs after failure.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onAuthFailure() {
@@ -528,6 +624,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   },
 
   reset() {
+    validationRequestSeq += 1;
     wsConnection?.close();
     wsConnection = null;
     set(initialExecutionState);

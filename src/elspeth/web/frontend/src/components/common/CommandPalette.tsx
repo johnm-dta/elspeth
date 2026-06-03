@@ -14,7 +14,13 @@ import {
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { requestValidate } from "@/stores/subscriptions";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { fuzzyMatch } from "@/utils/fuzzyScore";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,9 +33,6 @@ interface Command {
   /** Whether command is currently available */
   enabled?: boolean;
 }
-
-/** Custom event name used to request an inspector tab switch. */
-export const SWITCH_TAB_EVENT = "elspeth-switch-tab";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -44,8 +47,10 @@ export function CommandPalette({
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const paletteRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(paletteRef, isOpen, ".command-palette-input");
 
   // Store hooks
   const sessions = useSessionStore((s) => s.sessions);
@@ -53,8 +58,9 @@ export function CommandPalette({
   const createSession = useSessionStore((s) => s.createSession);
   const selectSession = useSessionStore((s) => s.selectSession);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const guidedSession = useSessionStore((s) => s.guidedSession);
+  const reenterGuided = useSessionStore((s) => s.reenterGuided);
 
-  const validate = useExecutionStore((s) => s.validate);
   const execute = useExecutionStore((s) => s.execute);
   const validationResult = useExecutionStore((s) => s.validationResult);
 
@@ -81,8 +87,8 @@ export function CommandPalette({
       shortcut: "Ctrl+Shift+V",
       enabled: !!compositionState && !!activeSessionId,
       action: () => {
-        if (activeSessionId) {
-          validate(activeSessionId);
+        if (activeSessionId && compositionState) {
+          requestValidate(activeSessionId, compositionState.version);
         }
         onClose();
       },
@@ -116,45 +122,42 @@ export function CommandPalette({
       },
     });
 
-    // Navigation (inspector tabs) — dispatched via custom DOM event so
-    // InspectorPanel can listen without prop threading through Layout.
-    const switchTab = (tab: string) => {
-      window.dispatchEvent(
-        new CustomEvent(SWITCH_TAB_EVENT, { detail: tab }),
-      );
-      onClose();
-    };
+    if (
+      activeSessionId &&
+      guidedSession?.terminal?.kind === "exited_to_freeform" &&
+      guidedSession.terminal.reason === "user_pressed_exit"
+    ) {
+      cmds.push({
+        id: "reenter-guided",
+        title: "Re-enter Guided Mode",
+        category: "action",
+        action: () => {
+          void reenterGuided();
+          onClose();
+        },
+      });
+    }
 
     cmds.push({
-      id: "tab-spec",
-      title: "Switch to Spec Tab",
+      id: "open-graph-modal",
+      title: "Open graph view",
       category: "navigation",
-      shortcut: "Alt+1",
-      action: () => switchTab("spec"),
+      shortcut: "Ctrl+Shift+G",
+      action: () => {
+        window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
+        onClose();
+      },
     });
 
     cmds.push({
-      id: "tab-graph",
-      title: "Switch to Graph Tab",
+      id: "open-yaml-export",
+      title: "Export YAML",
       category: "navigation",
-      shortcut: "Alt+2",
-      action: () => switchTab("graph"),
-    });
-
-    cmds.push({
-      id: "tab-yaml",
-      title: "Switch to YAML Tab",
-      category: "navigation",
-      shortcut: "Alt+3",
-      action: () => switchTab("yaml"),
-    });
-
-    cmds.push({
-      id: "tab-runs",
-      title: "Switch to Runs Tab",
-      category: "navigation",
-      shortcut: "Alt+4",
-      action: () => switchTab("runs"),
+      shortcut: "Ctrl+Shift+Y",
+      action: () => {
+        window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+        onClose();
+      },
     });
 
     // Sessions (up to 10 recent)
@@ -179,10 +182,11 @@ export function CommandPalette({
     sessions,
     activeSessionId,
     compositionState,
+    guidedSession,
     validationResult,
     createSession,
     selectSession,
-    validate,
+    reenterGuided,
     execute,
     onClose,
   ]);
@@ -280,6 +284,7 @@ export function CommandPalette({
 
       {/* Palette */}
       <div
+        ref={paletteRef}
         className="command-palette"
         role="dialog"
         aria-modal="true"

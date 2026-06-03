@@ -117,7 +117,7 @@ export function LoginPage() {
           height: "100vh",
         }}
       >
-        <span className="spinner" aria-label="Loading" role="status" />
+        <span className="spinner" aria-hidden="true" />
       </div>
     );
   }

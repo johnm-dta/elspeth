@@ -14,6 +14,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+OPTIONAL_PLUGIN_IMPORT_MODULES: frozenset[str] = frozenset(
+    {
+        "bs4",
+        "chromadb",
+        "html2text",
+    }
+)
+
 # Files that should never be scanned for plugins
 EXCLUDED_FILES: frozenset[str] = frozenset(
     {
@@ -82,16 +90,29 @@ def discover_plugins_in_directory(
         # is expected when not all extras are installed — skip with a warning.
         try:
             plugins = _discover_in_file(py_file, base_class)
-        except (ImportError, ModuleNotFoundError) as exc:
+        except ModuleNotFoundError as exc:
+            if not _is_optional_plugin_dependency_error(exc):
+                raise
             logger.warning(
                 "Skipping plugin file %s: optional dependency not installed (%s)",
                 py_file.name,
                 exc,
             )
             continue
+        except ImportError:
+            raise
         discovered.extend(plugins)
 
     return discovered
+
+
+def _is_optional_plugin_dependency_error(exc: ModuleNotFoundError) -> bool:
+    """Return whether a missing import is an expected optional plugin extra."""
+    missing_name = exc.name
+    if missing_name is None:
+        return False
+    missing_root = missing_name.split(".", 1)[0]
+    return missing_root in OPTIONAL_PLUGIN_IMPORT_MODULES
 
 
 def _canonical_module_name(py_file: Path) -> str | None:
@@ -149,13 +170,22 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
         module = importlib.util.module_from_spec(spec)
         # Register module in sys.modules BEFORE exec_module
         # Required for Python 3.13+ where dataclass decorator looks up
-        # cls.__module__ in sys.modules during field resolution
-        sys.modules[module.__name__] = module
+        # cls.__module__ in sys.modules during field resolution.
+        # Capture the registration key now: exec_module runs the plugin's
+        # module-level code, which could reassign module.__name__, and we must
+        # roll back the *exact* key we registered, not whatever __name__ became.
+        registered_name = module.__name__
+        sys.modules[registered_name] = module
         try:
             spec.loader.exec_module(module)
         except Exception:
-            # Clean up on failure
-            sys.modules.pop(module.__name__, None)
+            # Roll back only our own registration. Guard on identity (not mere
+            # membership) so we never delete an entry another importer placed
+            # under the same name during exec_module reentrancy, and use del
+            # (not .pop(..., None)) so the rollback can never mask the original
+            # import failure with a spurious KeyError on the re-raise.
+            if registered_name in sys.modules and sys.modules[registered_name] is module:
+                del sys.modules[registered_name]
             raise
 
         # Also register under the canonical name so that future standard

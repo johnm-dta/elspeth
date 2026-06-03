@@ -116,6 +116,8 @@ def run_with_checkpoint_and_payloads(
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.FAILED,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
 

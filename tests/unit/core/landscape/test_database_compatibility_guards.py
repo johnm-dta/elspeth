@@ -14,8 +14,6 @@ import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 
-ADR019_SCHEMA_EPOCH = 7
-
 
 def _make_instance(url: str) -> LandscapeDB:
     """Create a LandscapeDB instance without running constructor side effects."""
@@ -91,6 +89,19 @@ class TestSyncSchemaEpochDirectionalGuard:
 
 class TestSchemaCompatibilityGuards:
     """Coverage for fail-fast schema compatibility checks."""
+
+    def test_phase5b_resolved_prompt_template_hash_is_required_schema_contract(self) -> None:
+        """Phase 5b call-hash anchor must participate in stale-DB detection.
+
+        The Landscape metadata alone is not enough: existing SQLite audit DBs
+        are validated against these required lists before runtime writes begin.
+        """
+        assert ("calls", "resolved_prompt_template_hash") in database_module._REQUIRED_COLUMNS
+        assert ("calls", "ix_calls_resolved_prompt_template_hash") in database_module._REQUIRED_INDEXES
+
+    def test_checkpoint_sequence_uniqueness_is_required_schema_contract(self) -> None:
+        """Per-run checkpoint ordering must be mechanically unique in fresh and stale DBs."""
+        assert ("checkpoints", "ix_checkpoints_run_sequence_unique") in database_module._REQUIRED_INDEXES
 
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
         """Stamped SQLite schema epochs provide an explicit future migration seam."""
@@ -538,6 +549,40 @@ class TestSchemaCompatibilityGuards:
         assert "To fix this, either:" in msg
         instance.close()
 
+    def test_validate_schema_rejects_stale_preflight_results_shape(self, tmp_path: Path) -> None:
+        """Runtime preflight result writes must fail fast on stale physical tables."""
+        db_path = tmp_path / "stale_preflight_results.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE preflight_results"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE preflight_results (
+                        result_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL REFERENCES runs(run_id),
+                        result_type TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        CONSTRAINT ck_preflight_result_type
+                            CHECK (result_type IN ('dependency_run', 'commencement_gate', 'readiness_check'))
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "preflight_results.result_json" in msg
+        assert "preflight_results.ix_preflight_results_run" in msg
+        instance.close()
+
     def test_non_sqlite_require_existing_schema_rejects_empty_database(self, tmp_path: Path) -> None:
         """Non-SQLite path must reject empty databases when _require_existing_schema is set."""
         db_path = tmp_path / "empty_non_sqlite.db"
@@ -665,14 +710,14 @@ class TestRequiredCompositeForeignKeysExhaustive:
 class TestJournalPathGuards:
     """Coverage for from_url journal path derivation failure modes."""
 
-    def test_from_url_creates_missing_tokens_run_id_index_for_existing_adr019_db(self, tmp_path: Path) -> None:
+    def test_from_url_creates_missing_tokens_run_id_index_for_existing_current_db(self, tmp_path: Path) -> None:
         """The run-accounting performance index is additive, not a startup blocker."""
         db_path = tmp_path / "missing_tokens_run_id_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
-            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}")
@@ -694,7 +739,7 @@ class TestJournalPathGuards:
         metadata.create_all(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
-            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
@@ -707,7 +752,95 @@ class TestJournalPathGuards:
         engine.dispose()
 
         assert "ix_tokens_run_id" not in indexes
-        assert epoch == ADR019_SCHEMA_EPOCH
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_creates_missing_auth_events_table_for_existing_db(self, tmp_path: Path) -> None:
+        """The web-auth audit table is additive for existing Landscape databases."""
+        db_path = tmp_path / "missing_auth_events_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE auth_events")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "auth_events" in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_create_tables_false_allows_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
+        """Read-only opens tolerate the additive auth-events table absence."""
+        db_path = tmp_path / "readonly_missing_auth_events_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE auth_events")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "auth_events" not in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_creates_missing_run_attributions_table_for_existing_db(self, tmp_path: Path) -> None:
+        """The web run-attribution audit table is additive for existing Landscape databases."""
+        db_path = tmp_path / "missing_run_attributions_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE run_attributions")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "run_attributions" in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_create_tables_false_allows_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
+        """Read-only opens tolerate the additive run-attributions table absence."""
+        db_path = tmp_path / "readonly_missing_run_attributions_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE run_attributions")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "run_attributions" not in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
 
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
         """Compatible SQLite databases should be stamped for future migrations."""

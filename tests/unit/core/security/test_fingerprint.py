@@ -36,20 +36,20 @@ class TestSecretFingerprint:
         assert fp1 != fp2
 
     def test_fingerprint_length_is_64_chars(self) -> None:
-        """SHA256 hex digest is 64 characters."""
+        """The keyed digest is 64 hex characters."""
         result = secret_fingerprint("test", key=b"key")
         assert len(result) == 64
 
     def test_fingerprint_golden_vector(self) -> None:
-        """Verify HMAC-SHA256 algorithm with known test vector.
+        """Verify the PBKDF2-HMAC-SHA256 algorithm with a known test vector.
 
-        This locks the algorithm to HMAC-SHA256. If the implementation
-        changes to plain SHA256 or another algorithm, this test will fail.
+        This locks the algorithm to PBKDF2-HMAC-SHA256. If the implementation
+        changes to an unkeyed hash or another algorithm, this test will fail.
         """
         result = secret_fingerprint("my-secret", key=b"test-key")
 
-        # Precomputed: hmac.new(b"test-key", b"my-secret", sha256).hexdigest()
-        expected = "2294b9e7a6dcb8be10f155c556b2ca74f419c7bd2ce6e1beec723751498f73c2"
+        # Precomputed with PBKDF2-HMAC-SHA256, 210000 iterations, dklen=32.
+        expected = "e50795d435c7dc95af053d8112410b16ccc7f2b82df4ede8022fc47d5f618d5e"
         assert result == expected
 
     def test_fingerprint_without_key_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,9 +58,8 @@ class TestSecretFingerprint:
 
         result = secret_fingerprint("my-secret")
 
-        # Verify the env key is actually used by checking against expected HMAC
-        # Precomputed: hmac.new(b"env-key-value", b"my-secret", sha256).hexdigest()
-        expected = "9bbccfbb68be10d7a8b2649a63b421167e1c05cd78e52fe2761f1743691c5630"
+        # Verify the env key is actually used by checking against expected PBKDF2.
+        expected = "ff4d30a6dfcf2c96442d555f620dcb7a57fc5f508672b02c11098d467a43c4cf"
         assert result == expected
 
     def test_fingerprint_without_key_raises_if_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -351,6 +351,7 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `batch_stats` | Compute statistics over a batch, optionally one row per `group_by` value |
 | `batch_replicate` | Batch deaggregation; configure as an aggregation with `output_mode: transform` |
 | `batch_distribution_profile` | Numeric-only batch distribution statistics; use `batch_top_k` for categorical counts/frequencies |
+| `report_assemble` | Assemble a batch of text rows into one report/text row with pagination metadata |
 | `web_scrape` | HTML content extraction with SSRF prevention |
 | `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
@@ -473,6 +474,29 @@ aggregations:
 | `output_mode` | string | No | `passthrough` or `transform` (default: `transform`) |
 | `expected_output_count` | int | No | For `transform` mode: validate output row count |
 | `options` | object | No | Plugin-specific configuration |
+
+The `report_assemble` aggregation collates a batch of text rows into a single report row with pagination metadata sourced from the batch context:
+
+```yaml
+aggregations:
+  - name: pages
+    plugin: report_assemble
+    input: lines
+    on_success: output
+    on_error: discard
+    trigger:
+      count: 80
+    output_mode: transform
+    expected_output_count: 1
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      format: markdown
+      title: "Run report"
+```
+
+Omit `trigger` to emit a single report covering all source rows at end-of-source.
 
 ### Trigger Configuration
 

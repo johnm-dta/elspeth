@@ -76,7 +76,7 @@ class AuditedHTTPClient(AuditedClientBase):
     def __init__(
         self,
         execution: CallRecorder,
-        state_id: str,
+        state_id: str | None,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         *,
@@ -85,6 +85,7 @@ class AuditedHTTPClient(AuditedClientBase):
         headers: dict[str, str] | None = None,
         limiter: RateLimiter | NoOpLimiter | None = None,
         token_id: str | None = None,
+        operation_id: str | None = None,
     ) -> None:
         """Initialize audited HTTP client.
 
@@ -98,8 +99,9 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Default headers for all requests
             limiter: Optional rate limiter for throttling requests
             token_id: Optional token identity for telemetry correlation
+            operation_id: Optional operation parent for source/sink/preflight calls
         """
-        super().__init__(execution, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
+        super().__init__(execution, state_id, run_id, telemetry_emit, operation_id=operation_id, limiter=limiter, token_id=token_id)
         self._timeout = timeout
         self._base_url = base_url
         self._default_headers = headers or {}
@@ -160,7 +162,11 @@ class AuditedHTTPClient(AuditedClientBase):
 
         Handles JSON (with NaN/Infinity rejection), text, and binary content.
         """
-        content_type = response.headers.get("content-type", "")
+        # Tier 3 external boundary: the content-type header is authored by the
+        # remote server and may be absent. Absence is recorded as "" (honest: we
+        # were told nothing about the type), which routes to the binary fallback
+        # below — never fabricated into a concrete type.
+        content_type = response.headers["content-type"] if "content-type" in response.headers else ""
 
         if "application/json" in content_type:
             parsed, error = _parse_json_strict(response.text)
@@ -209,8 +215,7 @@ class AuditedHTTPClient(AuditedClientBase):
         Returns:
             Call object from Landscape recording (contains request_ref and response_ref blob hashes).
         """
-        call = self._execution.record_call(
-            state_id=self._state_id,
+        call = self._record_call(
             call_index=call_index,
             call_type=CallType.HTTP,
             status=call_status,
@@ -260,8 +265,8 @@ class AuditedHTTPClient(AuditedClientBase):
                     provider=provider,
                     status=call_status,
                     latency_ms=latency_ms,
-                    state_id=self._state_id,
-                    operation_id=None,
+                    state_id=self._telemetry_state_id(),
+                    operation_id=self._telemetry_operation_id(),
                     token_id=effective_token_id,
                     request_hash=stable_hash(request_data),
                     response_hash=stable_hash(response_data) if response_data else None,
@@ -280,7 +285,8 @@ class AuditedHTTPClient(AuditedClientBase):
                 error=str(tel_err),
                 error_type=type(tel_err).__name__,
                 run_id=self._run_id,
-                state_id=self._state_id,
+                state_id=self._telemetry_state_id(),
+                operation_id=self._telemetry_operation_id(),
                 call_type=call_type_label,
                 exc_info=True,
             )
@@ -520,6 +526,10 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Additional headers for this request
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
+            allowed_ranges: IP networks that may bypass the default SSRF
+                blocklist when validating redirect targets. This must match
+                the ranges used to create the initial SSRFSafeRequest so every
+                redirect hop preserves the same caller-approved boundary.
 
         Returns:
             Tuple of (httpx.Response, final hostname URL as string, Call).
@@ -609,8 +619,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     status_code=response.status_code,
                 )
 
-            call = self._execution.record_call(
-                state_id=self._state_id,
+            call = self._record_call(
                 call_index=call_index,
                 call_type=CallType.HTTP,
                 status=call_status,
@@ -646,8 +655,7 @@ class AuditedHTTPClient(AuditedClientBase):
             if response is not None:
                 response_payload, error_response_data = self._build_response_payload(response, request.original_url)
 
-            _ = self._execution.record_call(
-                state_id=self._state_id,
+            _ = self._record_call(
                 call_index=call_index,
                 call_type=CallType.HTTP,
                 status=CallStatus.ERROR,
@@ -698,6 +706,10 @@ class AuditedHTTPClient(AuditedClientBase):
                 response.url is IP-based (from connection_url rewrite), so relative
                 Location headers must resolve against the original hostname URL to
                 preserve correct Host headers and TLS SNI.
+            allowed_ranges: IP networks that may bypass the default SSRF
+                blocklist when validating each redirect target. These ranges do
+                not bypass the unconditional blocks enforced by
+                validate_url_for_ssrf().
 
         Returns:
             Tuple of (final non-redirect response, number of redirects followed,
@@ -716,7 +728,11 @@ class AuditedHTTPClient(AuditedClientBase):
         hostname_url = httpx.URL(original_url)
 
         while response.is_redirect and redirects_followed < max_redirects:
-            location = response.headers.get("location")
+            # Tier 3 external boundary: the redirect Location header is authored
+            # by the remote server and may be absent on a malformed redirect.
+            # Absence is recorded as None and stops redirect following — never
+            # fabricated into a target URL.
+            location = response.headers["location"] if "location" in response.headers else None
             if not location:
                 break
 
@@ -752,8 +768,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 raise
             except Exception as redirect_err:
                 hop_latency_ms = (time.perf_counter() - hop_start) * 1000
-                self._execution.record_call(
-                    state_id=self._state_id,
+                self._record_call(
                     call_index=hop_call_index,
                     call_type=CallType.HTTP_REDIRECT,
                     status=CallStatus.ERROR,
@@ -812,8 +827,7 @@ class AuditedHTTPClient(AuditedClientBase):
             except Exception as hop_err:
                 hop_latency_ms = (time.perf_counter() - hop_start) * 1000
                 # Record the failed hop in the audit trail so lineage is complete
-                self._execution.record_call(
-                    state_id=self._state_id,
+                self._record_call(
                     call_index=hop_call_index,
                     call_type=CallType.HTTP_REDIRECT,
                     status=CallStatus.ERROR,
@@ -835,8 +849,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 headers=self._filter_response_headers(dict(response.headers)),
             )
 
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=hop_call_index,
                 call_type=CallType.HTTP_REDIRECT,
                 status=CallStatus.SUCCESS if response.status_code < 400 else CallStatus.ERROR,

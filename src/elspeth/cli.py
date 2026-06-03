@@ -1023,7 +1023,14 @@ def _execute_pipeline_with_instances(
             output_format=output_format,
         ) as ctx:
             from elspeth.cli_helpers import _make_sink_factory
+            from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 
+            # CLI path: no FastAPI lifespan, so the live OpenRouter probe
+            # never ran. ``read_openrouter_catalog_snapshot_id()`` returns
+            # the bundled fallback ``(sha256, "bundled")`` — recorded into
+            # the run row so an auditor can distinguish CLI runs (always
+            # bundled) from web runs (live when the probe succeeded).
+            catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
             result = ctx.orchestrator.run(
                 ctx.pipeline_config,
                 graph=graph,
@@ -1032,6 +1039,8 @@ def _execute_pipeline_with_instances(
                 secret_resolutions=secret_resolutions,
                 preflight_results=preflight_results,
                 sink_factory=_make_sink_factory(config),
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
             )
 
             return {
@@ -1877,8 +1886,19 @@ def resume(
 
                 factory = RecorderFactory(db)
                 field_resolution = factory.run_lifecycle.get_source_field_resolution(run_id)
-                if field_resolution is not None:
+                if field_resolution is None:
+                    typer.echo(
+                        f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
+                        "This sink uses headers: original but the source field-resolution mapping "
+                        "is missing from the audit trail.",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+                try:
                     sink.set_resume_field_resolution(field_resolution)
+                except (NotImplementedError, ValueError) as e:
+                    typer.echo(f"Error: Cannot resume with sink '{sink_name}': {e}", err=True)
+                    raise typer.Exit(1) from None
 
             # Validate output target schema compatibility
             validation = sink.validate_output_target()

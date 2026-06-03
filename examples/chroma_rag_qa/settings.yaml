@@ -47,7 +47,7 @@ transforms:
     api_key: ${OPENROUTER_API_KEY}
     model: openai/gpt-4.1-mini
     temperature: 0.2
-    template: >
+    prompt_template: >
       You are a knowledgeable science assistant. Answer the question using
       ONLY the reference material provided below. If the reference material
       does not contain enough information, say so honestly.

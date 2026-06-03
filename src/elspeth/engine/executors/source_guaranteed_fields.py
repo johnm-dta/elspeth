@@ -99,6 +99,7 @@ class SourceGuaranteedFieldsContract(DeclarationContract):
 
     name: ClassVar[str] = "source_guaranteed_fields"
     payload_schema: ClassVar[type] = SourceGuaranteedFieldsPayload
+    violation_class: ClassVar[type[SourceGuaranteedFieldsViolation]] = SourceGuaranteedFieldsViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(source_declared_guaranteed_fields(plugin))

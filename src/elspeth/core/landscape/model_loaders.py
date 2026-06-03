@@ -106,6 +106,9 @@ class RunLoader:
             exported_at=row.exported_at,
             export_format=row.export_format,
             export_sink=row.export_sink,
+            llm_call_count=row.llm_call_count,
+            seeded_from_cache=bool(row.seeded_from_cache),
+            cache_key=row.cache_key,
         )
 
 
@@ -205,6 +208,11 @@ class TokenLoader:
             branch_name=row.branch_name,
             step_in_pipeline=row.step_in_pipeline,
             run_id=row.run_id,
+            # Epoch-11 column (tokens.token_data_ref): per-token payload ref for
+            # expand children + post-coalesce merged tokens. Read directly from the
+            # persisted column — omitting it fabricated None for a Tier-1 value the
+            # audit trail actually recorded.
+            token_data_ref=row.token_data_ref,
         )
 
 
@@ -692,7 +700,7 @@ class OperationLoader:
         oid = row.operation_id
 
         # Tier 1: validate constrained literal fields
-        allowed_types = ("source_load", "sink_write")
+        allowed_types = ("runtime_preflight", "source_load", "sink_write")
         if row.operation_type not in allowed_types:
             raise AuditIntegrityError(
                 f"Operation {oid} has invalid operation_type={row.operation_type!r} "

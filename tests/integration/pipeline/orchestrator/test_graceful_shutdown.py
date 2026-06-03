@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.results import SourceRow
@@ -51,6 +51,7 @@ class InterruptAfterN(BaseTransform):
     """Transform that sets a shutdown event after processing N rows."""
 
     name = "interrupt_after_n"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -101,6 +102,7 @@ class InterruptAfterNBufferedBatch(BaseTransform):
     """
 
     name = "interrupt_after_n_buffered_batch"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True
@@ -839,6 +841,8 @@ class TestInterruptAndResume:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -1056,6 +1060,8 @@ class TestInterruptAndResume:
                     schema_contract_json=audit_record.to_json(),
                     schema_contract_hash=contract.version_hash(),
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -1138,7 +1144,7 @@ class TestInterruptAndResume:
             sequence_number=1,
             graph=graph,
             aggregation_state=AggregationCheckpointState(
-                version="4.0",
+                version="5.0",
                 nodes={
                     agg_node_id: AggregationNodeCheckpoint(
                         tokens=(
@@ -1169,6 +1175,8 @@ class TestInterruptAndResume:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
+                        accepted_count_total=2,
+                        completed_flush_count=0,
                     )
                 },
             ),
@@ -1282,7 +1290,13 @@ class TestInterruptAndResume:
         )
 
         remaining_rows = total_rows - processed_count
-        assert result.rows_processed == remaining_rows
+        # F2 (resume-fork-reemit): the resume RunResult now reports CUMULATIVE
+        # rows_processed reconstructed from the audit trail (distinct source rows
+        # reaching a terminal outcome) — the whole run (total_rows), matching an
+        # uninterrupted run. Pre-F2 it reported the resume-only `remaining_rows`.
+        # The resume sink still only collects the rows THIS resume wrote, so its
+        # result count remains `remaining_rows`.
+        assert result.rows_processed == total_rows
         assert result.status == RunStatus.COMPLETED
         assert len(resume_sink.results) == remaining_rows
 

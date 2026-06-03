@@ -100,11 +100,25 @@ class TestDataverseSinkConfig:
         cfg = DataverseSinkConfig.from_dict(_config(entity="  contacts  "))
         assert cfg.entity == "contacts"
 
+    @pytest.mark.parametrize("entity", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_entity_placeholder_rejected(self, entity: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(entity=entity))
+
+    @pytest.mark.parametrize("alternate_key", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_alternate_key_placeholder_rejected(self, alternate_key: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(alternate_key=alternate_key))
+
     def test_field_mapping_required(self) -> None:
         c = _config()
         del c["field_mapping"]
         with pytest.raises(PluginConfigError, match="field_mapping"):
             DataverseSinkConfig.from_dict(c)
+
+    def test_field_mapping_target_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(field_mapping={"email": "operator_required", "name": "fullname"}))
 
     def test_https_enforcement(self) -> None:
         with pytest.raises(PluginConfigError, match="HTTPS"):
@@ -113,6 +127,10 @@ class TestDataverseSinkConfig:
     def test_https_enforcement_no_scheme(self) -> None:
         with pytest.raises(PluginConfigError):
             DataverseSinkConfig.from_dict(_config(environment_url="myorg.crm.dynamics.com"))
+
+    def test_environment_url_rejects_embedded_credentials(self) -> None:
+        with pytest.raises(PluginConfigError, match="embedded credentials"):
+            DataverseSinkConfig.from_dict(_config(environment_url="https://user:pass@myorg.crm.dynamics.com"))
 
     def test_lookup_config_valid(self) -> None:
         cfg = DataverseSinkConfig.from_dict(
@@ -128,6 +146,19 @@ class TestDataverseSinkConfig:
         assert cfg.lookups is not None
         assert "account_id" in cfg.lookups
         assert cfg.lookups["account_id"].target_entity == "accounts"
+
+    def test_lookup_target_entity_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(
+                _config(
+                    lookups={
+                        "account_id": {
+                            "target_entity": "operator_required",
+                            "target_field": "parentcustomerid",
+                        }
+                    }
+                )
+            )
 
     def test_lookup_target_entity_required(self) -> None:
         with pytest.raises(PluginConfigError, match="target_entity"):
@@ -210,6 +241,19 @@ class TestDataverseSinkConfig:
 
         assert cfg.lookups is not None
         assert cfg.lookups["account_id"].target_field == "parentcustomerid"
+
+    def test_lookup_target_field_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(
+                _config(
+                    lookups={
+                        "account_id": {
+                            "target_entity": "accounts",
+                            "target_field": "operator_required",
+                        }
+                    }
+                )
+            )
 
     def test_lookup_config_rejects_extra_fields(self) -> None:
         with pytest.raises(PluginConfigError):
@@ -583,7 +627,15 @@ class TestWriteLifecycle:
             assert call.kwargs["provider"] == "dataverse"
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
-    def test_error_raises_runtime_error(self, _mock_schema: MagicMock) -> None:
+    def test_per_row_attributable_400_diverts_not_raises(self, _mock_schema: MagicMock) -> None:
+        """A non-retryable 400 is per-row-attributable: divert the row, don't abort the batch.
+
+        Previously this asserted a bare raise on 400. The dataverse sink advertises
+        per-row on_write_failure routing in its composer hint; a 400 (bad request,
+        this row's payload is bad and retrying won't help) must be diverted so the
+        remaining rows still process. The ERROR audit record must still fire before
+        diverting.
+        """
         sink = inject_write_failure(DataverseSink(_config()))
 
         mock_client = MagicMock()
@@ -598,16 +650,25 @@ class TestWriteLifecycle:
         ctx = self._make_mock_ctx()
         rows = [{"email": "a@b.com", "name": "Alice"}]
 
-        with pytest.raises(DataverseClientError, match="Bad request"):
-            sink.write(rows, ctx)
+        result = sink.write(rows, ctx)
 
-        # Error call should still be recorded
+        # The row is diverted, not raised.
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert "400" in result.diversions[0].reason
+
+        # The ERROR audit record must still be written before diverting.
         assert ctx.record_call.call_count == 1
         error_call = ctx.record_call.call_args_list[0]
         assert error_call.kwargs["status"].value == "error"
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_error_records_error_details(self, _mock_schema: MagicMock) -> None:
+        """5xx (retryable) is a batch-integrity failure: it must still RAISE, not divert.
+
+        A 500 affects the server, not this row's data; the engine retries the whole
+        batch. Diverting would silently drop a row that a retry could have written.
+        """
         sink = inject_write_failure(DataverseSink(_config()))
 
         mock_client = MagicMock()
@@ -739,6 +800,185 @@ class TestWriteLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Per-row on_write_failure routing (audit finding #4)
+# ---------------------------------------------------------------------------
+
+
+class TestPerRowWriteFailureRouting:
+    """The dataverse sink advertises per-row on_write_failure routing in its
+    composer hint. A per-row-attributable HTTP failure (non-retryable 4xx about
+    the row payload/key) must divert that row and continue the batch; a
+    batch-integrity failure (auth/authz, rate limit, retryable, 5xx) must raise.
+    """
+
+    def _make_mock_ctx(self) -> MagicMock:
+        ctx = MagicMock()
+        ctx.record_call = MagicMock()
+        ctx.run_id = "test-run-123"
+        return ctx
+
+    def _make_sink(self, upsert_side_effect: Any) -> tuple[DataverseSink, MagicMock]:
+        with patch(
+            "elspeth.plugins.sinks.dataverse.create_schema_from_config",
+            return_value=MagicMock(),
+        ):
+            sink = inject_write_failure(DataverseSink(_config()))
+        mock_client = MagicMock()
+        mock_client.upsert.side_effect = upsert_side_effect
+        mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
+        sink._client = mock_client
+        return sink, mock_client
+
+    @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_non_retryable_payload_4xx_diverts(self, _mock_schema: MagicMock, status_code: int) -> None:
+        """Non-retryable 4xx about the row payload/key are diverted."""
+        sink, _client = self._make_sink(
+            DataverseClientError(
+                f"Client error ({status_code})",
+                retryable=False,
+                status_code=status_code,
+            )
+        )
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        result = sink.write(rows, ctx)
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert str(status_code) in result.diversions[0].reason
+        # Diverted row's original data is recorded for routing.
+        assert result.diversions[0].row_data == {"email": "a@b.com", "name": "Alice"}
+        # ERROR audit fired before diverting.
+        assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
+
+    @pytest.mark.parametrize(
+        ("status_code", "retryable"),
+        [
+            (401, True),  # auth — retryable via credential reconstruct
+            (403, False),  # authz — affects all rows, not this row's data
+            (429, True),  # rate limit
+            (500, True),  # server error
+            (503, True),  # server error
+        ],
+    )
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_batch_integrity_errors_raise(self, _mock_schema: MagicMock, status_code: int, retryable: bool) -> None:
+        """Auth/authz, rate limit, retryable and 5xx errors must raise, not divert."""
+        sink, _client = self._make_sink(
+            DataverseClientError(
+                f"Error ({status_code})",
+                retryable=retryable,
+                status_code=status_code,
+            )
+        )
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        with pytest.raises(DataverseClientError):
+            sink.write(rows, ctx)
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_none_status_code_raises_fail_safe(self, _mock_schema: MagicMock) -> None:
+        """A DataverseClientError with no status_code cannot be attributed to a
+        single row — fail safe by raising rather than silently diverting.
+        """
+        sink, _client = self._make_sink(
+            DataverseClientError(
+                "Connection reset",
+                retryable=False,
+                status_code=None,
+            )
+        )
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        with pytest.raises(DataverseClientError):
+            sink.write(rows, ctx)
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_mid_batch_divert_continues_processing(self, _mock_schema: MagicMock) -> None:
+        """Row 0 succeeds, row 1 hits a 400 (diverted), row 2 still succeeds.
+
+        Proves the batch continues past a per-row fault and that row_index points
+        at the correct input-batch position.
+        """
+        good = _make_204_response()
+        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+
+        with patch(
+            "elspeth.plugins.sinks.dataverse.create_schema_from_config",
+            return_value=MagicMock(),
+        ):
+            sink = inject_write_failure(DataverseSink(_config()))
+        mock_client = MagicMock()
+        mock_client.upsert.side_effect = [good, bad, good]
+        mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
+        sink._client = mock_client
+
+        ctx = self._make_mock_ctx()
+        rows = [
+            {"email": "a@b.com", "name": "Alice"},
+            {"email": "c@d.com", "name": "Bob"},
+            {"email": "e@f.com", "name": "Charlie"},
+        ]
+
+        result = sink.write(rows, ctx)
+
+        # All three rows were attempted.
+        assert mock_client.upsert.call_count == 3
+        # Only the middle row was diverted, and its row_index is 1.
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"email": "c@d.com", "name": "Bob"}
+        # Three audit records: SUCCESS, ERROR, SUCCESS.
+        statuses = [c.kwargs["status"].value for c in ctx.record_call.call_args_list]
+        assert statuses == ["success", "error", "success"]
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_content_hash_and_row_count_reflect_written_rows_only(self, _mock_schema: MagicMock) -> None:
+        """Diverted rows were never written to Dataverse, so they must not appear
+        in the content_hash or the row_count metadata — the audit artifact
+        describes only what was actually written.
+        """
+        good = _make_204_response()
+        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+
+        with patch(
+            "elspeth.plugins.sinks.dataverse.create_schema_from_config",
+            return_value=MagicMock(),
+        ):
+            sink = inject_write_failure(DataverseSink(_config()))
+        mock_client = MagicMock()
+        mock_client.upsert.side_effect = [good, bad, good]
+        mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
+        sink._client = mock_client
+
+        ctx = self._make_mock_ctx()
+        rows = [
+            {"email": "a@b.com", "name": "Alice"},
+            {"email": "c@d.com", "name": "Bob"},
+            {"email": "e@f.com", "name": "Charlie"},
+        ]
+
+        result = sink.write(rows, ctx)
+
+        # Hash covers ONLY the two written payloads (Alice, Charlie), not Bob.
+        written_payloads = [
+            {"emailaddress1": "a@b.com", "fullname": "Alice"},
+            {"emailaddress1": "e@f.com", "fullname": "Charlie"},
+        ]
+        expected_canonical = canonical_json(written_payloads).encode("utf-8")
+        expected_hash = hashlib.sha256(expected_canonical).hexdigest()
+
+        assert result.artifact.content_hash == expected_hash
+        assert result.artifact.size_bytes == len(expected_canonical)
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Bug fix: idempotent flag (elspeth-1453d7cfa8)
 # ---------------------------------------------------------------------------
 
@@ -796,7 +1036,11 @@ class TestRequestDataRecordsJsonPayload:
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_error_request_data_also_contains_json(self, _mock_schema: MagicMock) -> None:
-        """Even on error, request_data must contain 'json' with the mapped payload."""
+        """Even on a diverted-row error, the ERROR record_call's request_data has 'json'.
+
+        A 400 is now diverted rather than raised, but the failure is still audited
+        first. This test pins the request_data shape on the ERROR audit record.
+        """
         sink = inject_write_failure(DataverseSink(_config()))
 
         mock_client = MagicMock()
@@ -813,8 +1057,9 @@ class TestRequestDataRecordsJsonPayload:
         ctx.run_id = "test-run-123"
 
         rows = [{"email": "alice@example.com", "name": "Alice"}]
-        with pytest.raises(DataverseClientError):
-            sink.write(rows, ctx)
+        result = sink.write(rows, ctx)
+
+        assert len(result.diversions) == 1
 
         call_kwargs = ctx.record_call.call_args_list[0].kwargs
         request_data = call_kwargs["request_data"]

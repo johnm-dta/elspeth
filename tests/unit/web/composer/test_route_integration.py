@@ -28,7 +28,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.composer.yaml_generator import generate_yaml
-from elspeth.web.execution.schemas import ValidationError, ValidationResult
+from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
@@ -339,7 +339,12 @@ class TestComposerResultPairingInvariant:
 
     @staticmethod
     def _passing_validation() -> ValidationResult:
-        return ValidationResult(is_valid=True, checks=[], errors=[])
+        return ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+        )
 
     @staticmethod
     def _failing_validation() -> ValidationResult:
@@ -352,8 +357,10 @@ class TestComposerResultPairingInvariant:
                     component_type=None,
                     message="boom",
                     suggestion=None,
+                    error_code=None,
                 ),
             ],
+            readiness=ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[]),
         )
 
     def test_no_preflight_no_raw_content_is_valid(self) -> None:

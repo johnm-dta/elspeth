@@ -10,8 +10,10 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -111,10 +113,27 @@ class BatchEffectSize(BaseTransform):
     """Compute Cohen's d and Hedges' g for batch variant comparisons."""
 
     name = "batch_effect_size"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:22ff716dde30a996"
+    source_file_hash: str | None = "sha256:8128ecaabd37153e"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Computes Cohen's d and Hedges' g between baseline and variant score groups.",
+                composer_hints=(
+                    "Use batch_effect_size under aggregations with a trigger; it summarizes complete batch groups.",
+                    "variant_field and score_field must differ; baseline_variant defaults to the first-seen variant.",
+                    "score_field must be finite numeric data; missing and non-finite scores are counted and may make a group invalid.",
+                    "Output is effect-size comparison rows, not pass-through source rows.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

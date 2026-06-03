@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import TransformResult
+from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.identity import TokenInfo
@@ -59,6 +59,7 @@ class SimpleBatchTransform(BaseTransform, BatchTransformMixin):
     """Minimal batch transform for testing BatchTransformMixin behavior."""
 
     name = "simple_batch_transform"
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self) -> None:
         super().__init__({"schema": {"mode": "observed"}})
@@ -98,6 +99,7 @@ class Tier1FailingBatchTransform(SimpleBatchTransform):
     """Batch transform whose worker raises a Tier 1 audit exception."""
 
     name = "tier1_failing_batch_transform"
+    determinism = Determinism.DETERMINISTIC
 
     def _process_row(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         raise AuditIntegrityError("simulated audit integrity failure")
@@ -332,6 +334,7 @@ class BlockingBatchTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "blocking_batch_transform"
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self) -> None:
         super().__init__({"schema": {"mode": "observed"}})
@@ -491,6 +494,7 @@ class SlowBatchTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "slow_batch_transform"
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self, delay: float = 0.2) -> None:
         super().__init__({"schema": {"mode": "observed"}})

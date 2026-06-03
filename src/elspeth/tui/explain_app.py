@@ -71,11 +71,12 @@ class ExplainApp(App[None]):
             self._screen = ExplainScreen(db=self._db, run_id=self._run_id)
 
             # Handle state explicitly - no defensive fallback
-            match self._screen.state:
-                case LoadedState(tree=tree):
+            screen_state = self._screen.state
+            match screen_state:
+                case LoadedState():
                     # Render tree nodes as text for Static widget
                     tree_lines = []
-                    for node in tree.get_tree_nodes():
+                    for node in screen_state.tree.get_tree_nodes():
                         indent = "  " * node["depth"]
                         tree_lines.append(f"{indent}{node['label']}")
                     tree_content = "\n".join(tree_lines) if tree_lines else "No nodes found"

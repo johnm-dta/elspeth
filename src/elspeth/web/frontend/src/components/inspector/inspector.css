@@ -1,0 +1,324 @@
+/* inspector.css — Version selector, graph view, and React Flow theming.
+   Owners: .version-selector*, :root .react-flow.react-flow (token overrides
+   scoped to the react-flow canvas — kept here NOT in tokens.css because
+   they are selector-scoped, not global; src/components/inspector/GraphView.test.tsx
+   reads this file by path), [data-theme="light"] .react-flow.react-flow,
+   .react-flow__controls-button:focus-visible, .graph-view*, .graph-node*,
+   .graph-validation-dot, .graph-config* + responsive media query. */
+
+/* ---------------------------------------------------------------------------
+   Version Selector (Inspector Panel)
+   --------------------------------------------------------------------------- */
+.version-selector {
+  position: relative;
+}
+
+.version-selector-trigger {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: 20px;
+  border-radius: var(--radius-xl);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.version-selector-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: var(--space-xs);
+  min-width: 260px;
+  max-height: 240px;
+  overflow-y: auto;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: var(--z-overlay);
+}
+
+.version-selector-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-xs);
+}
+
+.version-selector-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.version-selector-item--focused {
+  background-color: var(--color-surface-hover);
+}
+
+.version-selector-item--current {
+  cursor: default;
+}
+
+.version-selector-item-info {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.version-selector-item-label {
+  font-weight: 600;
+}
+
+.version-selector-item-tag {
+  font-weight: 400;
+  color: var(--color-text-muted);
+  margin-left: var(--space-xs);
+}
+
+.version-selector-item-meta {
+  color: var(--color-text-muted);
+}
+
+.version-selector-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-xs);
+  border-top: 1px solid var(--color-border);
+}
+
+.version-selector-revert-btn {
+  /* Drop the padding override that previously squeezed the .btn's intrinsic
+     content area to ~22px. The 44px hit-target floor was honoured via
+     min-height but the visual button read as undersized chrome. Letting the
+     base .btn padding stand restores the perceived control size. */
+  font-size: var(--font-size-xs);
+}
+
+.version-selector-loading {
+  padding: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Graph View
+   --------------------------------------------------------------------------- */
+:root .react-flow.react-flow {
+  --xy-background-color-default: var(--color-bg);
+  --xy-background-pattern-dots-color-default: var(--color-border-strong);
+  --xy-background-pattern-lines-color-default: var(--color-border-strong);
+  --xy-background-pattern-cross-color-default: var(--color-border-strong);
+  --xy-controls-button-background-color-default: var(--color-surface-elevated);
+  --xy-controls-button-background-color-hover-default: var(--color-surface-raised);
+  --xy-controls-button-color-default: var(--color-text);
+  --xy-controls-button-color-hover-default: var(--color-text);
+  --xy-controls-button-border-color-default: var(--color-border);
+  --xy-controls-box-shadow-default: 0 0 0 1px var(--color-border), 0 8px 24px rgba(0, 0, 0, 0.18);
+  --xy-minimap-background-color-default: var(--color-surface);
+  --xy-minimap-mask-background-color-default: rgba(15, 45, 53, 0.55);
+  --xy-minimap-mask-stroke-color-default: var(--color-border-strong);
+  --xy-minimap-node-background-color-default: var(--color-text-muted);
+  --xy-minimap-node-stroke-color-default: var(--color-border-strong);
+  --xy-edge-stroke-default: var(--color-text-muted);
+  --xy-edge-stroke-selected-default: var(--color-focus-ring);
+  --xy-edge-label-background-color-default: var(--color-surface);
+  --xy-edge-label-color-default: var(--color-text);
+  --xy-handle-background-color-default: var(--color-accent);
+  --xy-handle-border-color-default: var(--color-surface);
+  --xy-selection-background-color-default: rgba(195, 144, 249, 0.10);
+  --xy-selection-border-default: 1px dashed var(--color-focus-ring);
+  --xy-attribution-background-color-default: transparent;
+}
+
+[data-theme="light"] .react-flow.react-flow {
+  --xy-minimap-mask-background-color-default: rgba(15, 45, 53, 0.12);
+  --xy-selection-background-color-default: rgba(138, 90, 192, 0.10);
+  --xy-controls-box-shadow-default: 0 0 0 1px var(--color-border), 0 8px 24px rgba(15, 45, 53, 0.10);
+}
+
+.react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.graph-view-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-view-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.graph-node-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.graph-node-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.graph-node-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px var(--space-xs);
+  border-radius: var(--radius-sm);
+}
+
+.graph-node-label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.graph-node-subtitle {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.graph-validation-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.graph-config-panel {
+  position: absolute;
+  top: var(--space-md);
+  right: var(--space-md);
+  z-index: 2;
+  display: grid;
+  gap: var(--space-md);
+  width: min(360px, calc(100% - 2 * var(--space-md)));
+  max-height: calc(100% - 2 * var(--space-md));
+  overflow: auto;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-paper);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.graph-config-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.graph-config-panel-header h3 {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-tight);
+}
+
+.graph-config-plugin {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.graph-config-close {
+  flex: 0 0 auto;
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.graph-config-section {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.graph-config-section h4 {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+}
+
+.graph-config-rows,
+.graph-config-nested {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+}
+
+.graph-config-rows > div,
+.graph-config-nested > div {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-xs) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.graph-config-rows dt,
+.graph-config-nested dt {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.graph-config-rows dd,
+.graph-config-nested dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  word-break: break-word;
+}
+
+.graph-config-list {
+  display: grid;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding-left: var(--space-md);
+}
+
+.graph-config-empty-value {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-style: italic;
+}
+
+@media (max-width: 760px) {
+  .graph-config-panel {
+    top: auto;
+    right: var(--space-sm);
+    bottom: var(--space-sm);
+    left: var(--space-sm);
+    width: auto;
+    max-height: min(45%, 360px);
+  }
+
+  .graph-config-rows > div,
+  .graph-config-nested > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2xs);
+  }
+}

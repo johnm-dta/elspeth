@@ -7,6 +7,7 @@ diverted rows to the failsink (or record discard).
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -92,6 +93,38 @@ def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
     return executor, execution, data_flow
 
 
+def _unique_completion_kwargs_by_state(completions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_state: dict[str, dict[str, Any]] = {}
+    for kwargs in completions:
+        state_id = kwargs["state_id"]
+        assert state_id not in by_state, f"duplicate successful completion for {state_id}"
+        by_state[state_id] = kwargs
+    return by_state
+
+
+def _complete_node_state_kwargs_by_state(execution: MagicMock) -> dict[str, dict[str, Any]]:
+    return _unique_completion_kwargs_by_state([call.kwargs for call in execution.complete_node_state.call_args_list])
+
+
+def _assert_single_primary_divert_cleanup(
+    execution: MagicMock,
+    *,
+    phase: str,
+    exception_type: str,
+) -> None:
+    begin_calls = execution.begin_node_state.call_args_list
+    assert len(begin_calls) == 1
+    assert begin_calls[0].kwargs["token_id"] == "t0"
+    assert begin_calls[0].kwargs["node_id"] == "node-primary"
+
+    completion_by_state = _complete_node_state_kwargs_by_state(execution)
+    assert set(completion_by_state) == {"state-1"}
+    failed_kwargs = completion_by_state["state-1"]
+    assert failed_kwargs["status"] == NodeStateStatus.FAILED
+    assert failed_kwargs["error"].phase == phase
+    assert failed_kwargs["error"].exception_type == exception_type
+
+
 class TestNoDiversions:
     """Existing behavior preserved when no diversions occur."""
 
@@ -173,7 +206,7 @@ class TestDiscardMode:
         # t1 (index 1) -> FAILURE / SINK_DISCARDED
         assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.FAILURE
         assert outcomes_by_token["t1"]["path"] == TerminalPath.SINK_DISCARDED
-        assert outcomes_by_token["t1"]["error_hash"] is not None
+        assert outcomes_by_token["t1"]["error_hash"] == hashlib.sha256(b"bad metadata").hexdigest()[:16]
         assert outcomes_by_token["t1"]["sink_name"] == "__discard__"
 
     def test_discard_mode_opens_primary_state_for_diverted_tokens(self) -> None:
@@ -423,6 +456,21 @@ class TestFailsinkMode:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
+        primary_artifact = ArtifactDescriptor.for_file(
+            path="/tmp/primary.csv",
+            content_hash="a" * 64,
+            size_bytes=101,
+        )
+        failsink_artifact = ArtifactDescriptor.for_file(
+            path="/tmp/failsink.csv",
+            content_hash="b" * 64,
+            size_bytes=202,
+        )
+        sink.write.return_value = SinkWriteResult(
+            artifact=primary_artifact,
+            diversions=diversions,
+        )
+        failsink.write.return_value = SinkWriteResult(artifact=failsink_artifact)
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
@@ -435,8 +483,38 @@ class TestFailsinkMode:
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        # Both primary and failsink artifacts should be registered
-        assert execution.register_artifact.call_count == 2
+
+        begin_calls = execution.begin_node_state.call_args_list
+        assert [(call.kwargs["token_id"], call.kwargs["node_id"]) for call in begin_calls] == [
+            ("t0", "node-primary"),
+            ("t1", "node-primary"),
+            ("t1", "node-failsink"),
+        ]
+
+        artifact_calls = [call.kwargs for call in execution.register_artifact.call_args_list]
+        assert artifact_calls == [
+            {
+                "run_id": "run-1",
+                "state_id": "state-1",
+                "sink_node_id": "node-primary",
+                "artifact_type": primary_artifact.artifact_type,
+                "path": primary_artifact.path_or_uri,
+                "content_hash": primary_artifact.content_hash,
+                "size_bytes": primary_artifact.size_bytes,
+            },
+            {
+                "run_id": "run-1",
+                "state_id": "state-3",
+                "sink_node_id": "node-failsink",
+                "artifact_type": failsink_artifact.artifact_type,
+                "path": failsink_artifact.path_or_uri,
+                "content_hash": failsink_artifact.content_hash,
+                "size_bytes": failsink_artifact.size_bytes,
+            },
+        ]
+        assert artifact_calls[0]["state_id"] != artifact_calls[1]["state_id"]
+        assert artifact_calls[0]["path"] != artifact_calls[1]["path"]
+        assert artifact_calls[0]["content_hash"] != artifact_calls[1]["content_hash"]
 
     def test_node_states_opened_at_correct_nodes(self) -> None:
         """Primary tokens get states at primary node, diverted at failsink node."""
@@ -615,11 +693,22 @@ class TestFailsinkCleanupEnvelope:
                 failsink_edge_id="edge-failsink-1",
             )
 
-        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
-        assert len(failed_calls) == 1
+        _assert_single_primary_divert_cleanup(
+            execution,
+            phase="failsink_write",
+            exception_type="RuntimeError",
+        )
 
     def test_invalid_failsink_result_type_cleans_primary_divert_states(self) -> None:
-        """Malformed failsink return values must fail loudly after cleanup."""
+        """Malformed failsink return values must fail loudly after cleanup.
+
+        failsink.write() is a first-party system-owned method annotated
+        -> SinkWriteResult; a wrong return type is a plugin bug. The executor
+        guards the return type and raises PluginContractViolation (an offensive
+        crash with a named error), not an AttributeError. Primary-divert
+        cleanup still runs because PluginContractViolation is not in
+        TIER_1_ERRORS and falls through to the ``except Exception`` cleanup arm.
+        """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
@@ -627,7 +716,7 @@ class TestFailsinkCleanupEnvelope:
         failsink.write.return_value = object()
         tokens = [_make_token("t0")]
 
-        with pytest.raises(PluginContractViolation, match=r"returned object, expected SinkWriteResult"):
+        with pytest.raises(PluginContractViolation, match=r"expected SinkWriteResult"):
             executor.write(
                 sink=sink,
                 tokens=tokens,  # type: ignore[arg-type]
@@ -640,8 +729,11 @@ class TestFailsinkCleanupEnvelope:
                 failsink_edge_id="edge-failsink-1",
             )
 
-        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
-        assert len(failed_calls) == 1
+        _assert_single_primary_divert_cleanup(
+            execution,
+            phase="failsink_write",
+            exception_type="PluginContractViolation",
+        )
 
 
 class TestFailsinkOperationAndSpanRecording:
@@ -940,12 +1032,23 @@ class TestSystemErrorStateCleanup:
                 failsink_edge_id="edge-divert-1",
             )
 
-        # All opened states (2 primary-divert + 1 failsink) must be closed as FAILED.
-        complete_calls = execution.complete_node_state.call_args_list
-        failed_ids = {c.kwargs["state_id"] for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED}
-        assert len(failed_ids) == 3, (
-            f"Expected 3 states closed as FAILED (2 primary-divert + 1 failsink), got {len(failed_ids)}: {failed_ids}"
-        )
+        begin_calls = execution.begin_node_state.call_args_list
+        assert [(call.kwargs["token_id"], call.kwargs["node_id"]) for call in begin_calls] == [
+            ("t0", "node-primary"),
+            ("t1", "node-primary"),
+            ("t0", "node-failsink"),
+            ("t1", "node-failsink"),
+        ]
+
+        # Only the first three begin calls returned a state. The fourth raised
+        # before opening a failsink state for t1, so cleanup must close exactly
+        # state-1/state-2 (primary) and state-3 (failsink).
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2", "state-3"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "begin_node_state_failsink"
+            assert kwargs["error"].exception_type == "AuditIntegrityError", state_id
 
     def test_failsink_mid_loop_system_error_cleans_up_remaining_states(self) -> None:
         """When the failsink completion loop raises AuditIntegrityError, remaining states close.
@@ -970,11 +1073,13 @@ class TestSystemErrorStateCleanup:
         # complete_node_state: let the first call succeed (token 0 primary → FAILED),
         # then raise on the second call (token 0 failsink → AuditIntegrityError).
         complete_count = [0]
+        successful_completions: list[dict[str, Any]] = []
 
         def complete_with_error(**kwargs: Any) -> None:
             complete_count[0] += 1
             if complete_count[0] == 2:
                 raise AuditIntegrityError("DB error completing failsink state")
+            successful_completions.append(dict(kwargs))
 
         execution.complete_node_state.side_effect = complete_with_error
 
@@ -991,13 +1096,36 @@ class TestSystemErrorStateCleanup:
                 failsink_edge_id="edge-divert-1",
             )
 
-        # After the error at call 2, the handler should attempt to close
-        # remaining OPEN states. Total complete_node_state calls should be > 2
-        # (the original 2 + cleanup calls for remaining states).
-        total_complete_calls = len(execution.complete_node_state.call_args_list)
-        assert total_complete_calls > 2, (
-            f"Expected cleanup calls after mid-loop AuditIntegrityError, got only {total_complete_calls} complete_node_state calls"
-        )
+        begin_calls = execution.begin_node_state.call_args_list
+        assert [(call.kwargs["token_id"], call.kwargs["node_id"]) for call in begin_calls] == [
+            ("t0", "node-primary"),
+            ("t1", "node-primary"),
+            ("t0", "node-failsink"),
+            ("t1", "node-failsink"),
+        ]
+
+        attempted_completions = execution.complete_node_state.call_args_list
+        assert [(call.kwargs["state_id"], call.kwargs["status"]) for call in attempted_completions] == [
+            ("state-1", NodeStateStatus.FAILED),
+            ("state-3", NodeStateStatus.COMPLETED),
+            ("state-2", NodeStateStatus.FAILED),
+            ("state-3", NodeStateStatus.FAILED),
+            ("state-4", NodeStateStatus.FAILED),
+        ]
+
+        successful_by_state = _unique_completion_kwargs_by_state(successful_completions)
+        assert set(successful_by_state) == {"state-1", "state-2", "state-3", "state-4"}
+        assert successful_by_state["state-1"]["status"] == NodeStateStatus.FAILED
+        assert successful_by_state["state-1"]["error"].phase == "write"
+        assert successful_by_state["state-1"]["output_data"] == {
+            "diverted_to": "csv_failsink",
+            "reason": "bad-0",
+        }
+        for state_id in ("state-2", "state-3", "state-4"):
+            kwargs = successful_by_state[state_id]
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "failsink_audit_recording"
+            assert kwargs["error"].exception_type == "AuditIntegrityError"
 
 
 class TestDiversionIndexValidation:

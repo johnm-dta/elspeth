@@ -72,7 +72,7 @@ def _build_yaml_with_model(model: str, csv_path: Path, sink_path: Path) -> str:
               provider: openrouter
               model: "{model}"
               api_key: "placeholder"
-              template: "Hello"
+              prompt_template: "Hello"
               schema:
                 mode: observed
         sinks:

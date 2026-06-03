@@ -1,0 +1,338 @@
+# CI gates for the convergent panel findings on the cicd-judge-cli prototype.
+#
+# Three gates run here, all load-bearing per the audit-trail thesis:
+#
+#   C1 (check-judge-coverage): on PRs and protected-branch pushes touching
+#     any 'enforce_*' allowlist directory, every new 'allow_hits' entry MUST
+#     carry signed judge metadata. Pre-judge entries grandfathered. The
+#     grandfathering is rotation-stable: an entry whose fingerprint shifted
+#     because of an upstream AST refactor still matches its baseline
+#     counterpart, so refactors are not penalised by demanding fresh judge
+#     runs.
+#
+#   C3 (check-override-rate): on every configured PR and push to
+#     main/master/RC* branches, the rolling-30d OVERRIDDEN_BY_OPERATOR
+#     rate is checked against the workflow-pinned --max-rate 0.10
+#     threshold. Insufficient-data windows pass with a notice; the gate
+#     produces stable signal only once the denominator grows past
+#     --min-samples (default 10). Converts the override-rate metric from
+#     informational to enforcing.
+#
+#   VAL (check-judge-quality): in trusted contexts only, run the labelled
+#     judge-quality corpus through the live OpenRouter-backed judge and
+#     require exact verdict/decorator accuracy >= 0.90. This is a prompt/model
+#     REGRESSION TRIPWIRE, not a quality guarantee: the corpus is small (10-30
+#     cases) and tolerates ~1 miss, so it catches a gross prompt edit or model
+#     swap that parser/schema tests cannot see — it does NOT prove the judge is
+#     well-calibrated or injection-resistant. Grow the corpus (esp. adversarial
+#     cases) to widen what the tripwire detects.
+#
+# All gates are implemented as elspeth-lints subcommands; the workflow
+# orchestrates checkout (full history, needed for C1's git-show baseline
+# diff) and invocation.
+#
+# BRANCH PROTECTION: the aggregate ``judge-gates-success`` job at the bottom
+# is the single required status check for these gates (mirroring ci.yaml's
+# ``ci-success``). Branch protection MUST require ``judge-gates-success`` —
+# requiring the individual gate jobs is fragile (a renamed job silently drops
+# the requirement) and GitHub keys protection on one named check. The
+# aggregate fails if C1 or C3 is not ``success``; VAL may be ``skipped`` (it is
+# intentionally skipped on untrusted fork PRs, which cannot read the
+# OpenRouter secret).
+#
+# Spec: notes/cicd-judge-cli-prototype-plan.md + the convergent-findings
+# remediation diff that introduced this workflow.
+
+name: enforce-allowlist-judge-gates
+
+on:
+  push:
+    branches: [main, master, "RC*"]
+  pull_request:
+    branches: [main, master, "RC*"]
+
+# Cancel in-progress judge-gate runs when a new commit updates the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every ``run`` step in this workflow is a bash script: the gate steps use
+# ``set -o pipefail`` and the bash-only ``${PIPESTATUS[0]}`` to capture a
+# command's exit status through a ``| tee`` pipe. Inside the
+# ``python:3.13-bookworm`` container jobs, GitHub's shell auto-detection falls
+# back to ``sh -e {0}`` (dash), which rejects ``set -o pipefail`` ("Illegal
+# option") and has no ``PIPESTATUS`` — so the steps crashed before running their
+# real check. Declaring bash explicitly (the image ships it) makes the shell
+# deterministic across the container and host jobs alike.
+defaults:
+  run:
+    shell: bash
+
+# Public-repository guardrail mirrors ci.yaml: fork PRs stay on
+# GitHub-hosted runners; trusted pushes and same-repository PRs use
+# nyx. Both gates are I/O-light (no compilation, no tests); a small
+# hosted runner is sufficient if nyx is busy.
+jobs:
+  check-judge-coverage:
+    name: New-entry judge-coverage gate (C1)
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    # Judge gates should fail fast if checkout/dependency/git plumbing hangs.
+    timeout-minutes: 15
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-judge-coverage
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
+          # Full history so 'git ls-tree' / 'git show' can resolve the
+          # PR merge-base or push before-SHA. Without this the gate would silently
+          # treat every entry as new on shallow clones.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: "0.5"
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (elspeth-lints only — fast)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # The gate imports yaml + the elspeth_lints.core surface; the
+        # full extras matrix is not required. uv sync gives us a
+        # deterministic environment shared with the rest of CI.
+        run: uv sync --frozen --no-install-project
+
+      - name: Mark repo path as safe for git
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # Containerised runners do not inherit the host's safe.directory
+        # list; without this 'git ls-tree' inside the gate's subprocess
+        # rejects the checkout as "dubious ownership".
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH"
+
+      - name: Resolve baseline ref
+        id: baseline
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # The gate accepts any rev-spec git can resolve. For PRs use the
+        # true merge-base against the current base branch, not the PR base
+        # tip SHA captured when GitHub opened/updated the event. For pushes
+        # use github.event.before so direct pushes to main/RC* cannot skip C1.
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_ref="refs/remotes/origin/${{ github.event.pull_request.base.ref }}"
+            git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}:${base_ref}"
+            baseline_ref="$(git merge-base "$base_ref" HEAD)"
+          else
+            baseline_ref="${{ github.event.before }}"
+            zero_sha="0000000000000000000000000000000000000000"
+            if [[ -z "$baseline_ref" || "$baseline_ref" == "$zero_sha" ]]; then
+              echo "Push event has no usable before SHA; refusing to skip C1." >&2
+              exit 1
+            fi
+            git rev-parse --verify "${baseline_ref}^{commit}" >/dev/null
+          fi
+          echo "Using baseline-ref: ${baseline_ref}"
+          echo "ref=${baseline_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Run check-judge-coverage
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          BASELINE_REF: ${{ steps.baseline.outputs.ref }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-judge-coverage \
+            --baseline-ref "$BASELINE_REF" \
+            --allowlist-root config/cicd \
+            --repo-root .
+
+      - name: Run rotation audit manifest gate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          BASELINE_REF: ${{ steps.baseline.outputs.ref }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-rotation-audit \
+            --baseline-ref "$BASELINE_REF" \
+            --allowlist-root config/cicd \
+            --rotation-log .elspeth/rotations.log \
+            --repo-root .
+
+      - name: Summarize trust-boundary decorator additions
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          BASELINE_REF: ${{ steps.baseline.outputs.ref }}
+        run: |
+          set -o pipefail
+          report_file="${RUNNER_TEMP:-/tmp}/trust-boundary-diff.txt"
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-trust-boundary-diff \
+            --baseline-ref "$BASELINE_REF" \
+            --root src/elspeth \
+            --repo-root . 2>&1 | tee "$report_file"
+          status="${PIPESTATUS[0]}"
+          set -e
+          {
+            echo "## Trust-boundary decorator additions"
+            echo
+            echo '```text'
+            cat "$report_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  check-judge-quality:
+    name: Judge-quality validation corpus (VAL)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON('["self-hosted","Linux","X64","nyx-ci","trusted"]') }}
+    # This job makes real OpenRouter calls; keep the corpus bounded and fail
+    # quickly on transport/config drift.
+    timeout-minutes: 20
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-judge-quality
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: "0.5"
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
+      - name: Install judge dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: uv sync --frozen --extra llm --no-install-project
+
+      - name: Verify OpenRouter key is present
+        run: |
+          if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+            echo "OPENROUTER_API_KEY secret is required for the trusted judge-quality gate." >&2
+            exit 2
+          fi
+
+      - name: Run check-judge-quality
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          set -o pipefail
+          report_file="${RUNNER_TEMP:-/tmp}/judge-quality-report.txt"
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-judge-quality \
+            --corpus config/cicd/judge-quality-corpus/v1.jsonl \
+            --min-accuracy 0.90 2>&1 | tee "$report_file"
+          status="${PIPESTATUS[0]}"
+          {
+            echo "## Judge-quality validation corpus"
+            echo
+            echo '```text'
+            cat "$report_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  check-override-rate:
+    name: Override-rate drift gate (C3)
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    # Judge gates should fail fast if checkout/dependency/git plumbing hangs.
+    timeout-minutes: 15
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-override-rate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
+          # Shallow clone is fine; the gate reads HEAD content only.
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: "0.5"
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: uv sync --frozen --no-install-project
+
+      - name: Run check-override-rate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # Defaults: --window-days 30, --min-samples 10. The threshold is
+        # passed explicitly because it is CI policy, not a CLI implementation
+        # detail.
+        # Insufficient-data windows pass with a notice; the gate is
+        # informational until the denominator grows past min-samples.
+        # Threshold changes are policy decisions and must land via ADR,
+        # not by editing this workflow.
+        run: |
+          set -o pipefail
+          report_file="${RUNNER_TEMP:-/tmp}/override-rate-report.txt"
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-override-rate \
+            --allowlist-root config/cicd \
+            --max-rate 0.10 2>&1 | tee "$report_file"
+          status="${PIPESTATUS[0]}"
+          {
+            echo "## Override-rate drift gate"
+            echo
+            echo '```text'
+            cat "$report_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  # ===========================================================================
+  # Aggregate success job - Required for branch protection
+  # ===========================================================================
+  # Branch protection requires THIS job, not the individual gates. Without an
+  # aggregate, a red gate only blocks merge if that specific job name is listed
+  # as required — fragile against renames, and it leaves "are the gates even
+  # gating?" depending on unverifiable repo settings. This job makes the answer
+  # mechanical: it fails unless C1 and C3 succeeded and VAL succeeded-or-skipped.
+  judge-gates-success:
+    name: Judge gates success
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    needs:
+      - check-judge-coverage
+      - check-judge-quality
+      - check-override-rate
+    if: always()
+    steps:
+      - name: Check all judge gates passed
+        run: |
+          if [[ "${{ needs.check-judge-coverage.result }}" != "success" ]]; then
+            echo "C1 new-entry judge-coverage gate did not pass (result: ${{ needs.check-judge-coverage.result }})"
+            exit 1
+          fi
+          if [[ "${{ needs.check-override-rate.result }}" != "success" ]]; then
+            echo "C3 override-rate drift gate did not pass (result: ${{ needs.check-override-rate.result }})"
+            exit 1
+          fi
+          # VAL (judge-quality) is intentionally skipped on untrusted fork PRs:
+          # it needs the OpenRouter secret, which GitHub withholds from forks.
+          # 'skipped' is therefore acceptable here; any other non-success result
+          # (failure / cancelled / timed_out) blocks the merge.
+          val_result="${{ needs.check-judge-quality.result }}"
+          if [[ "$val_result" != "success" && "$val_result" != "skipped" ]]; then
+            echo "VAL judge-quality gate did not pass (result: $val_result)"
+            exit 1
+          fi
+          echo "All judge gates passed (VAL result: $val_result)."

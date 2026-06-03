@@ -1,36 +1,78 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import App from "./App";
 import * as api from "./api/client";
-import type { SystemStatus, UserProfile } from "./types/index";
+import { resetStore } from "@/test/store-helpers";
+import { useSessionStore } from "./stores/sessionStore";
+import { useExecutionStore } from "./stores/executionStore";
+import { useAuthStore } from "./stores/authStore";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "./lib/composer-events";
+import type {
+  ChatMessage,
+  CompositionState,
+  Session,
+  SystemStatus,
+  UserProfile,
+} from "./types/index";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
-// App renders many heavy children (Layout, SessionSidebar, ChatPanel, …).
+// App renders many heavy children (Layout, ChatPanel, …).
 // Stub them out so the test focuses solely on App's own banner DOM.
 
 vi.mock("./components/common/Layout", () => ({
-  Layout: () => <div data-testid="layout-stub" />,
-}));
-
-vi.mock("./components/sessions/SessionSidebar", () => ({
-  SessionSidebar: () => <div data-testid="session-sidebar-stub" />,
+  Layout: ({
+    chat,
+    siderail,
+  }: {
+    chat: React.ReactNode;
+    siderail: React.ReactNode;
+  }) => (
+    <div data-testid="layout-stub">
+      {chat}
+      {siderail}
+    </div>
+  ),
 }));
 
 vi.mock("./components/chat/ChatPanel", () => ({
-  ChatPanel: () => <div data-testid="chat-panel-stub" />,
-}));
-
-vi.mock("./components/inspector/InspectorPanel", () => ({
-  InspectorPanel: () => <div data-testid="inspector-panel-stub" />,
+  ChatPanel: () => {
+    const sendMessage = useSessionStore((state) => state.sendMessage);
+    const error = useSessionStore((state) => state.error);
+    return (
+      <div data-testid="chat-panel-stub">
+        <button type="button" onClick={() => void sendMessage("compose")}>
+          Send compose
+        </button>
+        {error ? <div role="alert">{error}</div> : null}
+      </div>
+    );
+  },
 }));
 
 vi.mock("./components/settings/SecretsPanel", () => ({
   SecretsPanel: () => <div data-testid="secrets-panel-stub" />,
 }));
 
+vi.mock("./components/tutorial", () => ({
+  HelloWorldTutorial: () => <div data-testid="tutorial-stub" />,
+}));
+
+vi.mock("./components/audit/AuditReadinessPanel", () => ({
+  AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
+}));
+
+vi.mock("./components/sidebar/SideRailValidationBanner", () => ({
+  SideRailValidationBanner: () => (
+    <div data-testid="side-rail-validation-banner-stub" />
+  ),
+}));
+
 vi.mock("./components/common/CommandPalette", () => ({
   CommandPalette: () => <div data-testid="command-palette-stub" />,
-  SWITCH_TAB_EVENT: "elspeth-switch-tab",
 }));
 
 vi.mock("./components/common/ShortcutsHelp", () => ({
@@ -75,6 +117,43 @@ vi.mock("./api/client", () => ({
     composer_reason: null,
     composer_missing_keys: [],
   } satisfies SystemStatus),
+  fetchSessions: vi.fn().mockResolvedValue([]),
+  fetchRuns: vi.fn().mockResolvedValue([]),
+  fetchComposerProgress: vi.fn().mockResolvedValue({ phase: "idle" }),
+  fetchRecoveryTranscript: vi.fn().mockResolvedValue([]),
+  listSources: vi.fn().mockResolvedValue([]),
+  listTransforms: vi.fn().mockResolvedValue([]),
+  listSinks: vi.fn().mockResolvedValue([]),
+  sendMessage: vi.fn(),
+  recompose: vi.fn(),
+  fetchMessages: vi.fn(),
+  // refreshAll fans out to refreshInterpretationEventsForSession on session
+  // select, so this is called incidentally during App render. Without the mock
+  // entry the call throws "no export defined on the mock" as an unhandled error
+  // and fails the run even though every assertion passes.
+  listInterpretationEvents: vi.fn().mockResolvedValue([]),
+  // Phase 1B: account-level composer preferences. The real preferencesStore
+  // module imports these from @/api/client and would receive `undefined`
+  // (throwing at first call) without the mock entries.
+  fetchUserComposerPreferences: vi.fn().mockResolvedValue({
+    default_mode: "guided",
+    banner_dismissed_at: null,
+    tutorial_completed_at: "2026-05-19T00:00:00Z",
+    updated_at: "2026-05-15T00:00:00Z",
+  }),
+  updateUserComposerPreferences: vi.fn(),
+}));
+
+// ── Shareable-reviews API stub ───────────────────────────────────────────────
+// SharedInspectView (Phase 6B Task 8) calls fetchSharedInspect on mount. The
+// shared-route test below never resolves the promise — that leaves the view
+// in its "loading" state, which is enough to assert (a) SharedInspectView is
+// mounted, (b) the composer Layout is suppressed.
+
+vi.mock("./api/shareableReviews", () => ({
+  fetchSharedInspect: vi.fn().mockReturnValue(new Promise(() => {})),
+  markReadyForReview: vi.fn(),
+  fetchShareableLink: vi.fn(),
 }));
 
 // ── Store subscriptions ──────────────────────────────────────────────────────
@@ -84,6 +163,26 @@ vi.mock("./api/client", () => ({
 describe("App banner roles", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetStore(useSessionStore);
+    useExecutionStore.getState().reset();
+    // Seed authStore as authenticated. useSessionLifecycle now reads
+    // useAuthStore(selectIsAuthenticated) directly and skips loadSessions
+    // when not authenticated — without this seed, the post-AuthGuard
+    // integration tests below would never trigger session load. The
+    // useAuth() mock above only covers consumers of that hook; the
+    // lifecycle reads the store directly.
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
     // Restore the default (backend up, composer available) after any
     // per-test override.
     vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
@@ -93,6 +192,8 @@ describe("App banner roles", () => {
       composer_reason: null,
       composer_missing_keys: [],
     } satisfies SystemStatus);
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+    vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
   });
 
   it("uses role=alert for the backend-unavailable banner (hard outage)", async () => {
@@ -132,5 +233,497 @@ describe("App banner roles", () => {
     const root = banner.closest(".alert-banner") as HTMLElement | null;
     expect(root).not.toBeNull();
     expect(root!.getAttribute("role")).toBe("status");
+  });
+
+  it("silently canonicalizes stale Runs hashes", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    window.history.replaceState(null, "", "#/session-1/runs");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe("#/session-1");
+    });
+  });
+
+  it("silently canonicalizes stale Spec hashes", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    window.history.replaceState(null, "", "#/session-1/spec");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe("#/session-1");
+    });
+  });
+
+  it("does not mount the retired sessions sidebar", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.queryByLabelText(/sessions sidebar/i)).not.toBeInTheDocument();
+  });
+
+  it("mounts audit readiness and validation through side rail slots", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("audit-readiness-stub")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("side-rail-validation-banner-stub"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("inspector-panel-stub")).toBeNull();
+  });
+
+  it("loads sessions on startup after SessionSidebar removal", async () => {
+    const session: Session = {
+      id: "session-loaded",
+      title: "Loaded session",
+      created_at: "2026-05-17T00:00:00Z",
+      updated_at: "2026-05-17T00:00:00Z",
+    };
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([session]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSessions).toHaveBeenCalledTimes(1);
+    });
+    expect(useSessionStore.getState().sessions).toEqual([session]);
+  });
+
+  it("resets execution state and loads runs for the active session on startup", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    useExecutionStore.setState({
+      activeRunId: "stale-run",
+      runs: [{ id: "stale-run", status: "running" } as never],
+      progress: { status: "running" } as never,
+    } as never);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchRuns).toHaveBeenCalledWith("session-1");
+    });
+    expect(useExecutionStore.getState().activeRunId).toBeNull();
+  });
+
+  it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {
+    const onOpenCatalog = vi.fn();
+    window.addEventListener("open-catalog", onOpenCatalog);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "P",
+      code: "KeyP",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    expect(onOpenCatalog).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "Plugin Catalog" })).toBeInTheDocument();
+    window.removeEventListener("open-catalog", onOpenCatalog);
+  });
+
+  it("dispatches graph and YAML modal events on Ctrl+Shift shortcuts", async () => {
+    const onOpenGraph = vi.fn();
+    const onOpenYaml = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "G",
+      code: "KeyG",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    fireEvent.keyDown(document, {
+      key: "Y",
+      code: "KeyY",
+      metaKey: true,
+      shiftKey: true,
+    });
+
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
+    expect(onOpenYaml).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+  });
+
+  it("does not dispatch retired inspector tab shortcuts on Alt+digit", async () => {
+    const onSwitchTab = vi.fn();
+    window.addEventListener("elspeth-switch-tab", onSwitchTab);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "1",
+      code: "Digit1",
+      altKey: true,
+    });
+
+    expect(onSwitchTab).not.toHaveBeenCalled();
+    window.removeEventListener("elspeth-switch-tab", onSwitchTab);
+  });
+});
+
+function makeState(version: number): CompositionState {
+  return {
+    id: `state-${version}`,
+    version,
+    source: null,
+    nodes: [],
+    edges: [],
+    outputs: [],
+    metadata: { name: null, description: null },
+  };
+}
+
+function makeAssistantMessage(): ChatMessage {
+  return {
+    id: "assistant-1",
+    session_id: "session-1",
+    role: "assistant",
+    content: "done",
+    tool_calls: null,
+    created_at: "2026-05-14T00:00:00Z",
+  };
+}
+
+describe("App composer recovery panel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+    vi.spyOn(api, "fetchRecoveryTranscript").mockResolvedValue([
+      {
+        id: "assistant-failed",
+        session_id: "session-1",
+        role: "assistant",
+        content: "calling tools",
+        raw_content: null,
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+        composition_state_id: null,
+        tool_call_id: null,
+        parent_assistant_id: null,
+        sequence_no: 1,
+      },
+    ]);
+  });
+
+  it("opens the recovery panel for recovery-shaped send failures", async () => {
+    const recovered = makeState(2);
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 500,
+      detail: "compose failed",
+      error_type: "composer_plugin_crash",
+      partial_state: recovered,
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Recover partial composer draft" }),
+    ).toBeInTheDocument();
+  });
+
+  it("applies and discards recovery locally without compose retries", async () => {
+    const user = userEvent.setup();
+    const recovered = makeState(3);
+    const original = makeState(1);
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 500,
+      detail: "compose failed",
+      error_type: "composer_plugin_crash",
+      partial_state: recovered,
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: original,
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Send compose" }));
+    await screen.findByRole("dialog", { name: "Recover partial composer draft" });
+    await user.click(screen.getByRole("button", { name: "Apply partial draft" }));
+
+    expect(useSessionStore.getState().compositionState).toBe(recovered);
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(api.recompose).not.toHaveBeenCalled();
+    expect(api.fetchMessages).not.toHaveBeenCalled();
+
+    vi.mocked(api.sendMessage).mockRejectedValueOnce({
+      status: 500,
+      detail: "compose failed again",
+      error_type: "composer_plugin_crash",
+      partial_state: makeState(4),
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Send compose" }));
+    await screen.findByRole("dialog", { name: "Recover partial composer draft" });
+    await user.click(screen.getByRole("button", { name: "Discard recovery" }));
+
+    expect(useSessionStore.getState().compositionState).toBe(recovered);
+    expect(api.sendMessage).toHaveBeenCalledTimes(2);
+    expect(api.recompose).not.toHaveBeenCalled();
+    expect(api.fetchMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps non-recovery convergence errors on the existing chat error path", async () => {
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 422,
+      error_type: "convergence",
+      detail: "ignored",
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    expect(
+      await screen.findByText(/couldn't complete the composition/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not open recovery for successful sends", async () => {
+    vi.spyOn(api, "sendMessage").mockResolvedValue({
+      message: makeAssistantMessage(),
+      state: makeState(2),
+      proposals: [],
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(useSessionStore.getState().compositionState?.version).toBe(2);
+  });
+});
+
+// ── Phase 1B: preferences bootstrap on auth-success ──────────────────────
+describe("App preferences bootstrap (Phase 1B)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // Reset the preferences store so the bootstrap spy fires on a clean
+    // module-singleton state — without this, an earlier test in the same
+    // worker that touched usePreferencesStore would leak `loaded: true`
+    // and the new bootstrap call would still fire (we assert it does)
+    // but the test intent is fragile to ordering. Mirrors the Phase 1A
+    // finding-7 pattern noted in the plan.
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    resetStore(usePreferencesStore);
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    });
+  });
+
+  it("calls preferencesStore.bootstrap once authenticated", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    const bootstrap = vi
+      .spyOn(usePreferencesStore.getState(), "bootstrap")
+      .mockResolvedValueOnce(undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(bootstrap).toHaveBeenCalled();
+    });
+  });
+
+  it("App still renders when preferences bootstrap fails (Panel test #1)", async () => {
+    // Resilience claim: a failing prefs bootstrap MUST NOT block app
+    // render. The earlier test spied on bootstrap-rejection and asserted
+    // the App.tsx caller's .catch(console.error) was hit — but that
+    // silent-swallow was the I5 bug (CorruptPreferencesError got
+    // logged-and-forgotten, leaving the user with no signal). Bootstrap
+    // is now contracted to NEVER reject; failures are surfaced via the
+    // store's writeError so the role="alert" region (Phase 1B-round-2)
+    // shows the user something is wrong.
+    //
+    // We exercise the failure path through the lower API mock rather
+    // than spying on bootstrap directly, so the test runs through the
+    // real bootstrap() implementation including the catch/writeError
+    // branch — the part that was previously uncovered.
+    const apiClient = await import("@/api/client");
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    (
+      apiClient.fetchUserComposerPreferences as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("network down"));
+
+    render(<App />);
+
+    // Wait for bootstrap to settle into the failure-path state.
+    await waitFor(() => {
+      const state = usePreferencesStore.getState();
+      expect(state.loaded).toBe(true);
+      expect(state.writeError).not.toBeNull();
+    });
+    // No-fabrication shape: defaultMode is still null (we don't guess).
+    expect(usePreferencesStore.getState().defaultMode).toBeNull();
+    // App chrome remains rendered. The Layout/ChatPanel stubs are still
+    // present — proves the bootstrap failure didn't unmount the tree.
+    expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
+    // I5: the failure MUST be surfaced to the user via the always-mounted
+    // alert region in App.tsx. Without this assertion the test would
+    // pass even if writeError were set in the store but never rendered
+    // to the DOM — the silent-failure-one-layer-up regression I5
+    // exists to prevent. The role="alert" region carries the
+    // writeError text from the store.
+    await waitFor(() => {
+      const alerts = screen.getAllByRole("alert");
+      const surfaced = alerts.some(
+        (el) => el.textContent !== null && el.textContent.includes("network down"),
+      );
+      expect(surfaced).toBe(true);
+    });
+  });
+
+  it("renders the tutorial instead of the composer layout before completion", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+
+    render(<App />);
+
+    expect(screen.getByTestId("tutorial-stub")).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-stub")).not.toBeInTheDocument();
+  });
+});
+
+// ── Phase 6B Task 8: shared-route Layout suppression ─────────────────────
+//
+// Plan §Task 8 test case 9 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`):
+// when the URL hash is `#/shared/{token}`, the composer Layout (chat +
+// side rail) MUST NOT be rendered. The SharedInspectView mounts in its
+// place. A future refactor that accidentally drops the App.tsx
+// short-circuit and renders Layout under a shared route would convert
+// every shared link into a full composer session for the reviewer — this
+// test pins the suppression so that regression is caught.
+describe("App shared-route Layout suppression (Phase 6B Task 8)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    useExecutionStore.getState().reset();
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+  });
+
+  it("renders SharedInspectView and does NOT mount the composer Layout for #/shared/{token}", async () => {
+    // Set the hash BEFORE render — App reads it via useSharedToken on first
+    // render. Setting after render would defeat the short-circuit branch
+    // this test exists to pin.
+    window.history.replaceState(null, "", "#/shared/tok-abc");
+
+    render(<App />);
+
+    // SharedInspectView is mounted. fetchSharedInspect is stubbed with a
+    // never-resolving promise (see top-level vi.mock), so the view stays
+    // in the loading state — which is exactly what we want to assert
+    // against. We do NOT depend on the eventual resolution.
+    expect(
+      await screen.findByTestId("shared-inspect-loading"),
+    ).toBeInTheDocument();
+
+    // The composer Layout (mocked above as data-testid="layout-stub") is
+    // NOT rendered under a shared route. If a refactor drops the
+    // short-circuit in App.tsx, this assertion fails and the regression
+    // is caught.
+    expect(screen.queryByTestId("layout-stub")).toBeNull();
+    // The chat panel is part of Layout; pin its absence too, because the
+    // layout-stub testid is one indirection away from the actual chrome.
+    expect(screen.queryByTestId("chat-panel-stub")).toBeNull();
+  });
+
+  it("renders the composer Layout when the hash is NOT a shared route", async () => {
+    // Counterpoint: with no hash, the regular composer flow runs. This
+    // protects the test above from a false-positive caused by the
+    // Layout mock simply never rendering.
+    window.history.replaceState(null, "", "/");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
+    expect(screen.queryByTestId("shared-inspect-loading")).toBeNull();
   });
 });

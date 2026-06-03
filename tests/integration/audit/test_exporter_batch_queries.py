@@ -15,30 +15,56 @@ a real node_state, and record counts match direct DB queries.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import (
+    BatchStatus,
+    CallStatus,
+    CallType,
+    NodeStateStatus,
+    NodeType,
+    RunStatus,
+    TriggerType,
+)
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.core.config import GateSettings
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
+from tests.fixtures.landscape import make_factory, register_test_node
 from tests.fixtures.pipeline import build_fork_pipeline, build_linear_pipeline
 from tests.fixtures.plugins import CollectSink, PassTransform
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _run_linear(
-    tmp_path: Path,
-    source_data: list[dict[str, Any]],
-) -> tuple[str, LandscapeDB]:
-    """Run a linear pipeline and return (run_id, db)."""
-    db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
-    payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+@dataclass(frozen=True)
+class _SeededAuditIds:
+    """IDs inserted by the exporter-isolation regression through real repositories."""
 
+    node_id: str
+    row_id: str
+    token_ids: frozenset[str]
+    state_ids: frozenset[str]
+    operation_id: str
+    call_ids: frozenset[str]
+    batch_id: str
+    artifact_id: str
+
+
+def _run_linear_on_db(
+    db: LandscapeDB,
+    payload_root: Path,
+    source_data: list[dict[str, Any]],
+) -> str:
+    """Run a linear pipeline against an existing LandscapeDB and return run_id."""
+    payload_store = FilesystemPayloadStore(payload_root)
     source, tx_list, sinks, graph = build_linear_pipeline(source_data, transforms=[PassTransform()])
 
     config = PipelineConfig(
@@ -49,17 +75,25 @@ def _run_linear(
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
     assert result.status == RunStatus.COMPLETED
-    return result.run_id, db
+    return result.run_id
 
 
-def _run_fork(
+def _run_linear(
     tmp_path: Path,
     source_data: list[dict[str, Any]],
 ) -> tuple[str, LandscapeDB]:
-    """Run a fork pipeline (gate routes to two sinks) and return (run_id, db)."""
+    """Run a linear pipeline and return (run_id, db)."""
     db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
-    payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+    return _run_linear_on_db(db, tmp_path / "payloads", source_data), db
 
+
+def _run_fork_on_db(
+    db: LandscapeDB,
+    payload_root: Path,
+    source_data: list[dict[str, Any]],
+) -> str:
+    """Run a fork pipeline against an existing LandscapeDB and return run_id."""
+    payload_store = FilesystemPayloadStore(payload_root)
     gate = GateSettings(
         name="router",
         input="list_source_out",
@@ -89,7 +123,16 @@ def _run_fork(
     # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
     # (rows_routed_success). Gate-routed-only run -> COMPLETED.
     assert result.status == RunStatus.COMPLETED
-    return result.run_id, db
+    return result.run_id
+
+
+def _run_fork(
+    tmp_path: Path,
+    source_data: list[dict[str, Any]],
+) -> tuple[str, LandscapeDB]:
+    """Run a fork pipeline (gate routes to two sinks) and return (run_id, db)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+    return _run_fork_on_db(db, tmp_path / "payloads", source_data), db
 
 
 def _group_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -98,6 +141,214 @@ def _group_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, An
     for r in records:
         grouped[r["record_type"]].append(r)
     return grouped
+
+
+def _one_node_id(factory: RecorderFactory, run_id: str, node_type: NodeType) -> str:
+    matches = [node.node_id for node in factory.data_flow.get_nodes(run_id) if node.node_type == node_type]
+    assert matches, f"Run {run_id} should have a {node_type.value} node"
+    return matches[0]
+
+
+def _seed_exporter_isolation_records(db: LandscapeDB, run_id: str, label: str) -> _SeededAuditIds:
+    """Add exporter record families to a completed run without mocking repositories."""
+    factory = make_factory(db)
+
+    source_node_id = _one_node_id(factory, run_id, NodeType.SOURCE)
+    sink_node_id = _one_node_id(factory, run_id, NodeType.SINK)
+    aggregation_node_id = f"audit-extra-aggregation-{label}"
+    register_test_node(
+        factory.data_flow,
+        run_id,
+        aggregation_node_id,
+        node_type=NodeType.AGGREGATION,
+        plugin_name="audit_extra_aggregation",
+    )
+
+    row = factory.data_flow.create_row(
+        run_id,
+        source_node_id,
+        row_index=10_000,
+        data={"seed": label},
+        row_id=f"audit-extra-row-{label}",
+    )
+    parent_token = factory.data_flow.create_token(row.row_id, token_id=f"audit-extra-token-{label}")
+    child_tokens, _fork_group_id = factory.data_flow.fork_token(
+        TokenRef(token_id=parent_token.token_id, run_id=run_id),
+        row.row_id,
+        [f"{label}-left", f"{label}-right"],
+        step_in_pipeline=90,
+    )
+    token_ids = frozenset({parent_token.token_id, *(token.token_id for token in child_tokens)})
+    child_token_id = child_tokens[0].token_id
+
+    aggregation_state = factory.execution.begin_node_state(
+        child_token_id,
+        aggregation_node_id,
+        run_id,
+        91,
+        {"seed": label, "stage": "aggregation"},
+    )
+    factory.execution.complete_node_state(
+        aggregation_state.state_id,
+        NodeStateStatus.COMPLETED,
+        output_data={"seed": label, "stage": "aggregation"},
+        duration_ms=1.0,
+    )
+    sink_state = factory.execution.begin_node_state(
+        child_token_id,
+        sink_node_id,
+        run_id,
+        92,
+        {"seed": label, "stage": "sink"},
+    )
+    state_call = factory.execution.record_call(
+        sink_state.state_id,
+        factory.execution.allocate_call_index(sink_state.state_id),
+        CallType.LLM,
+        CallStatus.SUCCESS,
+        request_data=RawCallPayload({"seed": label, "scope": "state"}),
+        response_data=RawCallPayload({"ok": True}),
+        latency_ms=1.0,
+    )
+    factory.execution.complete_node_state(
+        sink_state.state_id,
+        NodeStateStatus.COMPLETED,
+        output_data={"seed": label, "stage": "sink"},
+        duration_ms=1.0,
+    )
+
+    operation = factory.execution.begin_operation(
+        run_id,
+        source_node_id,
+        "source_load",
+        input_data={"seed": label, "scope": "operation"},
+    )
+    operation_call = factory.execution.record_operation_call(
+        operation.operation_id,
+        CallType.HTTP,
+        CallStatus.SUCCESS,
+        request_data=RawCallPayload({"seed": label, "scope": "operation"}),
+        response_data=RawCallPayload({"ok": True}),
+        latency_ms=1.0,
+    )
+    factory.execution.complete_operation(
+        operation.operation_id,
+        "completed",
+        output_data={"seed": label, "scope": "operation"},
+        duration_ms=1.0,
+    )
+
+    batch = factory.execution.create_batch(run_id, aggregation_node_id, batch_id=f"audit-extra-batch-{label}")
+    factory.execution.add_batch_member(batch.batch_id, child_token_id, ordinal=0)
+    factory.execution.complete_batch(
+        batch.batch_id,
+        BatchStatus.COMPLETED,
+        trigger_type=TriggerType.COUNT,
+        trigger_reason=f"exporter isolation seed {label}",
+        state_id=aggregation_state.state_id,
+    )
+
+    artifact = factory.execution.register_artifact(
+        run_id,
+        sink_state.state_id,
+        sink_node_id,
+        artifact_type="test",
+        path=f"file:///tmp/elspeth-exporter-isolation-{label}.json",
+        content_hash="0" * 64,
+        size_bytes=0,
+        artifact_id=f"audit-extra-artifact-{label}",
+        idempotency_key=f"audit-extra-artifact-{label}",
+    )
+
+    return _SeededAuditIds(
+        node_id=aggregation_node_id,
+        row_id=row.row_id,
+        token_ids=token_ids,
+        state_ids=frozenset({aggregation_state.state_id, sink_state.state_id}),
+        operation_id=operation.operation_id,
+        call_ids=frozenset({state_call.call_id, operation_call.call_id}),
+        batch_id=batch.batch_id,
+        artifact_id=artifact.artifact_id,
+    )
+
+
+def _exported_ids(grouped: dict[str, list[dict[str, Any]]], record_type: str, id_field: str) -> set[str]:
+    return {record[id_field] for record in grouped.get(record_type, [])}
+
+
+def _assert_seed_present(grouped: dict[str, list[dict[str, Any]]], seed: _SeededAuditIds) -> None:
+    assert seed.node_id in _exported_ids(grouped, "node", "node_id")
+    assert seed.row_id in _exported_ids(grouped, "row", "row_id")
+    assert seed.token_ids <= _exported_ids(grouped, "token", "token_id")
+    assert seed.state_ids <= _exported_ids(grouped, "node_state", "state_id")
+    assert seed.operation_id in _exported_ids(grouped, "operation", "operation_id")
+    assert seed.call_ids <= _exported_ids(grouped, "call", "call_id")
+    assert seed.batch_id in _exported_ids(grouped, "batch", "batch_id")
+    assert seed.artifact_id in _exported_ids(grouped, "artifact", "artifact_id")
+
+
+def _assert_seed_absent(grouped: dict[str, list[dict[str, Any]]], seed: _SeededAuditIds) -> None:
+    assert seed.node_id not in _exported_ids(grouped, "node", "node_id")
+    assert seed.row_id not in _exported_ids(grouped, "row", "row_id")
+    assert seed.token_ids.isdisjoint(_exported_ids(grouped, "token", "token_id"))
+    assert seed.state_ids.isdisjoint(_exported_ids(grouped, "node_state", "state_id"))
+    assert seed.operation_id not in _exported_ids(grouped, "operation", "operation_id")
+    assert seed.call_ids.isdisjoint(_exported_ids(grouped, "call", "call_id"))
+    assert seed.batch_id not in _exported_ids(grouped, "batch", "batch_id")
+    assert seed.artifact_id not in _exported_ids(grouped, "artifact", "artifact_id")
+
+
+def _assert_export_relationships_are_closed(grouped: dict[str, list[dict[str, Any]]]) -> None:
+    node_ids = _exported_ids(grouped, "node", "node_id")
+    edge_ids = _exported_ids(grouped, "edge", "edge_id")
+    row_ids = _exported_ids(grouped, "row", "row_id")
+    token_ids = _exported_ids(grouped, "token", "token_id")
+    state_ids = _exported_ids(grouped, "node_state", "state_id")
+    operation_ids = _exported_ids(grouped, "operation", "operation_id")
+    batch_ids = _exported_ids(grouped, "batch", "batch_id")
+
+    for record_type, records in grouped.items():
+        for record in records:
+            assert record["run_id"] == grouped["run"][0]["run_id"], f"{record_type} has sibling run_id: {record}"
+
+    for edge in grouped.get("edge", []):
+        assert edge["from_node_id"] in node_ids
+        assert edge["to_node_id"] in node_ids
+    for operation in grouped.get("operation", []):
+        assert operation["node_id"] in node_ids
+    for row in grouped.get("row", []):
+        assert row["source_node_id"] in node_ids
+    for token in grouped.get("token", []):
+        assert token["row_id"] in row_ids
+    for parent in grouped.get("token_parent", []):
+        assert parent["token_id"] in token_ids
+        assert parent["parent_token_id"] in token_ids
+    for outcome in grouped.get("token_outcome", []):
+        assert outcome["token_id"] in token_ids
+        if outcome["batch_id"] is not None:
+            assert outcome["batch_id"] in batch_ids
+    for state in grouped.get("node_state", []):
+        assert state["token_id"] in token_ids
+        assert state["node_id"] in node_ids
+    for event in grouped.get("routing_event", []):
+        assert event["state_id"] in state_ids
+        assert event["edge_id"] in edge_ids
+    for call in grouped.get("call", []):
+        state_id = call["state_id"]
+        operation_id = call["operation_id"]
+        assert (state_id is None) != (operation_id is None)
+        if state_id is not None:
+            assert state_id in state_ids
+        if operation_id is not None:
+            assert operation_id in operation_ids
+    for batch in grouped.get("batch", []):
+        assert batch["aggregation_node_id"] in node_ids
+    for member in grouped.get("batch_member", []):
+        assert member["batch_id"] in batch_ids
+        assert member["token_id"] in token_ids
+    for artifact in grouped.get("artifact", []):
+        assert artifact["sink_node_id"] in node_ids
+        assert artifact["produced_by_state_id"] in state_ids
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -229,5 +480,59 @@ class TestExporterBatchQueryIntegrity:
             assert len(grouped.get("token_outcome", [])) == len(direct_outcomes), (
                 f"token_outcome count: export={len(grouped.get('token_outcome', []))} vs db={len(direct_outcomes)}"
             )
+        finally:
+            db.close()
+
+    def test_export_run_is_isolated_from_sibling_run_records(self, tmp_path: Path) -> None:
+        """A multi-run export must contain only records owned by the requested run."""
+        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+        try:
+            target_run_id = _run_fork_on_db(
+                db,
+                tmp_path / "payloads-target",
+                [
+                    {"id": "target-high", "value": 80},
+                    {"id": "target-low", "value": 20},
+                ],
+            )
+            sibling_run_id = _run_fork_on_db(
+                db,
+                tmp_path / "payloads-sibling",
+                [
+                    {"id": "sibling-high", "value": 90},
+                    {"id": "sibling-low", "value": 10},
+                ],
+            )
+            assert target_run_id != sibling_run_id
+
+            target_seed = _seed_exporter_isolation_records(db, target_run_id, "target")
+            sibling_seed = _seed_exporter_isolation_records(db, sibling_run_id, "sibling")
+
+            grouped = _group_records(list(LandscapeExporter(db).export_run(target_run_id)))
+
+            expected_record_types = {
+                "artifact",
+                "batch",
+                "batch_member",
+                "call",
+                "edge",
+                "node",
+                "node_state",
+                "operation",
+                "routing_event",
+                "row",
+                "run",
+                "token",
+                "token_outcome",
+                "token_parent",
+            }
+            missing_record_types = sorted(record_type for record_type in expected_record_types if not grouped.get(record_type))
+            assert not missing_record_types, f"Export regression did not exercise record types: {missing_record_types}"
+            assert any(call["operation_id"] is not None for call in grouped["call"])
+            assert any(call["state_id"] is not None for call in grouped["call"])
+
+            _assert_seed_present(grouped, target_seed)
+            _assert_seed_absent(grouped, sibling_seed)
+            _assert_export_relationships_are_closed(grouped)
         finally:
             db.close()

@@ -157,11 +157,11 @@ az keyvault secret set \
 # List all secret names (not values)
 az keyvault secret list --vault-name "$VAULT_NAME" --query "[].name"
 
-# Retrieve a specific secret (for verification only)
+# Verify a specific secret exists without printing its value
 az keyvault secret show \
   --vault-name "$VAULT_NAME" \
   --name "azure-openai-key" \
-  --query value \
+  --query id \
   --output tsv
 ```
 
@@ -491,11 +491,11 @@ sed "s|VAULT_URL_PLACEHOLDER|$VAULT_URL|g" settings.template.yaml > settings.yam
 elspeth run --settings settings.yaml --execute
 ```
 
-### Error: "No secret 'elspeth-fingerprint-key' in vault"
+### Error: "ELSPETH_FINGERPRINT_KEY is required when loading secrets from Key Vault"
 
-**Symptom:** Pipeline fails because fingerprint key is missing.
+**Symptom:** Pipeline fails before loading Key Vault secrets because no fingerprint key is available.
 
-**Note:** This is optional but recommended for audit trail.
+**Why:** Key Vault secret loading records audit fingerprints for every resolved secret. ELSPETH requires `ELSPETH_FINGERPRINT_KEY` either in the environment before startup or in the Key Vault mapping.
 
 **Solution:**
 
@@ -507,7 +507,10 @@ az keyvault secret set \
   --value "$(openssl rand -hex 32)"
 
 # Or skip the fingerprint key (if not using audit fingerprints):
-# Remove from mapping in settings.yaml
+# Set it in the process environment before ELSPETH starts
+export ELSPETH_FINGERPRINT_KEY="$(openssl rand -hex 32)"
+
+# If you use the environment approach, remove it from the Key Vault mapping:
 mapping:
   AZURE_OPENAI_KEY: azure-openai-key
   AZURE_OPENAI_ENDPOINT: openai-endpoint
@@ -527,7 +530,7 @@ If you previously used environment variables for secrets, migrate to Key Vault.
 export AZURE_OPENAI_KEY="sk-..."
 export AZURE_OPENAI_ENDPOINT="https://..."
 
-# .env file (not recommended for secrets - can be committed by mistake)
+# .env file (only for local development, and never committed)
 AZURE_OPENAI_KEY=sk-...
 AZURE_OPENAI_ENDPOINT=https://...
 
@@ -566,7 +569,7 @@ transforms:
 ```
 
 **Benefits of new approach:**
-- Secrets never leave the Key Vault
+- Secret values are fetched at startup and injected into the process environment; plaintext is not stored in ELSPETH's audit records
 - RBAC controls who can access each secret
 - Audit trail shows when/which secrets were accessed
 - Same settings.yaml across all environments (vault URLs differ)
@@ -580,8 +583,10 @@ transforms:
 
 3. **Migrate secrets one by one:**
    ```bash
-   # Get the current value from environment or .env
-   CURRENT_VALUE=$(grep AZURE_OPENAI_KEY .env | cut -d= -f2)
+   # Get the current value through your approved secret handoff path.
+   # Do not print it to the terminal or commit it to a file.
+   read -rsp "Current AZURE_OPENAI_KEY: " CURRENT_VALUE
+   echo
 
    # Store in Key Vault
    az keyvault secret set \
@@ -589,11 +594,11 @@ transforms:
      --name "azure-openai-key" \
      --value "$CURRENT_VALUE"
 
-   # Verify it was stored
+   # Verify it was stored without printing the value
    az keyvault secret show \
      --vault-name "elspeth-prod-vault" \
      --name "azure-openai-key" \
-     --query value --output tsv
+     --query id --output tsv
    ```
 
 4. **Update settings.yaml** to add `secrets:` section (Step 4 above)

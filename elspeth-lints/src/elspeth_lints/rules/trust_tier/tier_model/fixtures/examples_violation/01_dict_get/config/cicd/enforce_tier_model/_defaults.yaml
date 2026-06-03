@@ -1,0 +1,4 @@
+version: 1
+defaults:
+  fail_on_stale: false
+  fail_on_expired: false

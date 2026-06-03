@@ -1,0 +1,67 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Filesystem path for the source input or sink output, resolved relative to the run data directory.",
+        "kind": "text",
+        "label": "Path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Sink name for non-conformant rows, or 'discard' for explicit drop",
+        "kind": "text",
+        "label": "On Validation Failure",
+        "name": "on_validation_failure",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Pipeline field name that receives each emitted text line.",
+        "kind": "text",
+        "label": "Column",
+        "name": "column",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "utf-8",
+        "description": "Text encoding used to decode the input file.",
+        "kind": "text",
+        "label": "Encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to trim leading and trailing whitespace from each line.",
+        "kind": "checkbox",
+        "label": "Strip Whitespace",
+        "name": "strip_whitespace",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to drop blank lines after optional whitespace trimming.",
+        "kind": "checkbox",
+        "label": "Skip Blank Lines",
+        "name": "skip_blank_lines",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "source",
+  "plugin_name": "text"
+}

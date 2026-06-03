@@ -24,6 +24,11 @@ from elspeth.plugins.transforms.llm.langfuse import ActiveLangfuseTracer, NoOpLa
 from elspeth.plugins.transforms.llm.provider import LLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 
+# A valid OpenRouter catalog model id (the retired anthropic/claude-3-opus was
+# dropped from the litellm-derived catalog; OpenRouterConfig now rejects models
+# absent from it). Mirrors test_openrouter.py.
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+
 
 def _make_azure_config(**overrides: Any) -> dict[str, Any]:
     """Create base config for Azure LLM transform."""
@@ -32,7 +37,7 @@ def _make_azure_config(**overrides: Any) -> dict[str, Any]:
         "deployment_name": "gpt-4",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Hello {{ row.name }}",
+        "prompt_template": "Hello {{ row.name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
     }
@@ -44,9 +49,9 @@ def _make_openrouter_config(**overrides: Any) -> dict[str, Any]:
     """Create base config for OpenRouter LLM transform."""
     config: dict[str, Any] = {
         "provider": "openrouter",
-        "model": "anthropic/claude-3-opus",
+        "model": _OPENROUTER_MODEL,
         "api_key": "test-key",
-        "template": "Hello {{ row.name }}",
+        "prompt_template": "Hello {{ row.name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
     }
@@ -58,9 +63,9 @@ def _make_multi_query_config(**overrides: Any) -> dict[str, Any]:
     """Create base config for LLMTransform with multi-query (OpenRouter provider)."""
     config: dict[str, Any] = {
         "provider": "openrouter",
-        "model": "anthropic/claude-3-opus",
+        "model": _OPENROUTER_MODEL,
         "api_key": "test-key",
-        "template": "Case: {{ row.field1 }} Criterion: {{ row.criterion_name }}",
+        "prompt_template": "Case: {{ row.field1 }} Criterion: {{ row.criterion_name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
         "queries": {
@@ -561,7 +566,7 @@ class TestMultiQueryLangfuseTracingViaStrategy:
             query_name="cs1_crit1",
             prompt="Case: data Criterion: criterion_name",
             response_content='{"score": 5}',
-            model="anthropic/claude-3-opus",
+            model=_OPENROUTER_MODEL,
             usage=TokenUsage.known(100, 50),
             latency_ms=500.0,
         )
@@ -574,7 +579,7 @@ class TestMultiQueryLangfuseTracingViaStrategy:
 
         gen_record = captured_observations[1]
         assert gen_record["kwargs"]["as_type"] == "generation"
-        assert gen_record["kwargs"]["model"] == "anthropic/claude-3-opus"
+        assert gen_record["kwargs"]["model"] == _OPENROUTER_MODEL
 
         # Check update() recorded output and usage
         assert len(gen_record["updates"]) == 1
@@ -592,7 +597,7 @@ class TestMultiQueryLangfuseTracingViaStrategy:
             query_name="cs1_crit1",
             prompt="Case: data Criterion: criterion_name",
             error_message="Rate limit exceeded",
-            model="anthropic/claude-3-opus",
+            model=_OPENROUTER_MODEL,
             latency_ms=50.0,
         )
 

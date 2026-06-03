@@ -1,0 +1,41 @@
+{
+  "scenario_id": "gov_pages_rate_cool",
+  "summary": "Authored 2026-05-23 from staging session 47cfbb5e-f269-47c2-9c99-134f494aeba7, the canonical operator test case (project_composer_canonical_test_case memory). The user asked for a 5-row government-pages source rated by an LLM for how 'cool' each page is; the model emitted 13 tool calls without ever landing a successful set_pipeline, did not discover any plugin schema before its first state mutation, and converged to an unconverged build. This scenario captures the failure shape with two new red rules (max_persisted_tool_calls=12, set_pipeline_rejection_without_success=true) plus the discover-first green rule that backstops the schema-blindness pattern. Cost: ~$0.30-$0.60 per run depending on convergence depth.\n\nServes as the verification target for three planned skill/backend changes:\n  Part 1 (skill amendment) — sharpens discover-first guidance.\n  Part 2 (failure schema) — tighter set_pipeline rejection envelope.\n  Part 3 (telemetry) — pre-commit tool-budget signal back to the LLM.\nThe baseline-plan.md in this directory describes the four-run\nattribution methodology.",
+  "opening_prompt": "create a list of 5 government web pages and use an LLM to rate how cool they are",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i ",
+      "let me know if"
+    ],
+    "passivity_phrases_note": "Standard catch-list. The canonical failure session did not surface passivity per se (the model attempted to build), but downstream regressions could revert to that mode; keeping the list ensures the scenario remains useful as a regression detector.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed",
+      "elspeth-system"
+    ],
+    "build_failure_note": "First two are server-injected on completion-claim with failed preflight (service.py:_build_runtime_preflight_message). The third (ELSPETH-SYSTEM case-folded to 'elspeth-system' for the substring match) is a documented sentinel per the harness README at lines 38-50.",
+    "must_be_valid": true,
+    "must_be_valid_note": "Final state must have is_valid=true. The canonical failure session ended is_valid=false.",
+    "max_persisted_tool_calls": 12,
+    "max_persisted_tool_calls_note": "RED if the trajectory exceeded 12 persisted tool calls. The canonical session emitted 13. Target convergence is 8 or fewer (the green_criteria-side max_tool_calls_for_green target — kept separate so an 8-call green is distinguishable from a 9-12 amber-zone outcome).",
+    "set_pipeline_rejection_without_success": true,
+    "set_pipeline_rejection_without_success_note": "RED if the LLM attempted set_pipeline at least once (rejection observed) AND every set_pipeline result row carried success=false. Catches the canonical failure shape: model attempted construction, was rejected, retried, never converged. Distinguishes this from the passivity shape where set_pipeline is never attempted at all."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_outputs_min": 1,
+    "must_have_outputs_min_note": "At least one sink so the rated rows have somewhere to land.",
+    "must_have_node_kinds_substring_any_of": [["llm"]],
+    "must_have_node_kinds_substring_any_of_note": "An LLM transform must be wired between the source and the sink. The 'rate how cool they are' prompt is meaningless without it.",
+    "must_discover_schema_before_first_mutation": true,
+    "must_discover_schema_before_first_mutation_note": "AMBER if the model issued a state-mutating tool call (set_pipeline, set_source, upsert_node, set_output, set_source_from_blob, apply_pipeline_recipe, patch_* options, remove_*, upsert_edge, set_metadata) before any get_plugin_schema discovery. A get_plugin_schema that fires only AFTER a rejection still earns AMBER — discover-first is about preparation, not recovery.",
+    "max_tool_calls_for_green": 8,
+    "_subjective_term_interpretation_review": "The skill's post_call_hint mechanism fires interpretation review on subjective terms; 'cool' is the load-bearing example. A converged run should either (a) have triggered request_interpretation_review with user_term:'cool', or (b) hit the opt-out branch with an explicit comment marker in the LLM transform's prompt template noting the operationalisation choice. Programmatically detecting (a) requires the tool-call message stream (now available with include_tool_rows=true in run_scenario.sh) but the per-trajectory predicate is left for manual review pending Part 2 of the gov-pages-rate-cool hardening program (when the failure schema for missing interpretation review will be made first-class).",
+    "_max_tool_calls_for_green_8": "Green target is 8 or fewer persisted tool calls. The is_valid criterion gates structural completeness; the max_persisted_tool_calls red rule gates the catastrophic-thrash zone; the 9-12 in-between window is AMBER by construction — a valid pipeline built with more than 8 calls is converged-but-inefficient and we want it visible without breaking the build."
+  }
+}

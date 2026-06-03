@@ -50,7 +50,7 @@ where the architectural fix landed:
   adds a single contract-layer biconditional smoke
   (``TestComposerRuntimeSecretInventoryAgreement``) so a future drift on
   the ``available ⟺ reason is None`` invariant fails the agreement gate too.
-* Shape 7 — Phase 2.1 pipeline_done_callback row-decomposition agreement
+* Shape 7 — Phase 2.1 pipeline_done_callback run-accounting agreement
   (eval run 44f52421, csv → batch_stats group_by → json sink wrote output
   but ``/api/runs/{rid}`` lagged because ``CompletedData`` rejected the
   legitimate aggregation row-count shape). Closes ``elspeth-31d53c7493``
@@ -70,6 +70,13 @@ where the architectural fix landed:
   symptom amplifier (gate-routing pipelines need sinks; LLM defaults
   ``collision_policy="fail_if_exists"``; stale eval artifacts collide),
   not the cause.
+* Shape 9 — Phase P4/P3 of ``elspeth-fdebcaa79a`` widened ``blob_ref`` /
+  ``inline_content`` config-content-ref capability. Pinned by
+  ``TestComposerRuntimeBlobInlineAgreement``: validate-time metadata checks
+  surface structured ``ValidationResult`` rows; runtime hash mismatch fails
+  closed before settings/plugin construction; successful runtime resolution
+  records the hash in ``blob_inline_resolutions`` before the resolved bytes
+  enter plugin settings.
 
 Adding a new shape: file the eval-finding issue, land the structural fix,
 then extend this docstring with the shape's number, the originating eval
@@ -92,16 +99,23 @@ structural contract rather than incidentally passing.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
+from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Run
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import (
     SecretInventoryItem,
     SecretUnavailabilityReason,
@@ -123,6 +137,7 @@ from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import (
     CompositionState,
@@ -134,7 +149,10 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.schemas import CompletedData
+from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
 from tests.fixtures.pipeline import build_production_graph
@@ -1406,7 +1424,7 @@ class TestComposerRuntimeAgreement:
     ) -> None:
         """Regression for elspeth-f5f798f797.
 
-        S2 v2 from notes/composer-llm-eval-2026-05-01.md: a ``batch_stats``
+        S2 v2 from docs/composer/evidence/composer-llm-eval-2026-05-01.md: a ``batch_stats``
         aggregation with ``schema: {mode: flexible, fields: [...],
         required_fields: [...]}`` was accepted by composer ``/validate`` but
         rejected at runtime with ``SchemaConfigModeViolation`` because
@@ -1662,7 +1680,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         return out_dir / name
 
     def test_both_reject_aggregation_on_error_dangling_sink(self, tmp_path: Path) -> None:
-        """Original reproducer (S2 v1 from notes/composer-llm-eval-2026-05-01.md):
+        """Original reproducer (S2 v1 from docs/composer/evidence/composer-llm-eval-2026-05-01.md):
         aggregation ``on_error: aggregation_errors`` with no sink of that name."""
         csv_path = self._csv_input(tmp_path)
         output_path = self._csv_output(tmp_path)
@@ -2439,11 +2457,17 @@ class TestComposerRuntimeRunStatusAgreement:
         assert run_result.rows_quarantined == 1
         assert run_result.rows_coalesce_failed == 0
 
-    def test_agreement_runstatus_failed_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """All-rows-failed (S1B msg2 shape) — RunResult and Landscape both report FAILED.
+    def test_agreement_runstatus_all_discarded_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """All-rows-discarded via ``on_error: discard`` — both report
+        COMPLETED_WITH_FAILURES.
 
-        Two rows, both fail via ``on_error: discard`` (quarantine terminal
-        state).  Predicate: rows_processed > 0 AND rows_succeeded == 0.
+        Two rows, both fail via ``on_error: discard`` (the engine's
+        quarantine terminal state).  Per CLAUDE.md Tier-3 data manifesto,
+        quarantine is a deliberate clean determination on every row, not a
+        framework failure. The predicate sees ``terminal_clean_indicator``
+        via ``rows_quarantined > 0`` with no uncaught ``failure_indicator``
+        (rows_failed - rows_quarantined == 0) and lifts the verdict from
+        FAILED to COMPLETED_WITH_FAILURES.
         """
         source = ListSource([{"value": 1, "fail": True}, {"value": 2, "fail": True}])
         transform = ConditionalErrorTransform(on_success="default", on_error="discard")
@@ -2457,7 +2481,7 @@ class TestComposerRuntimeRunStatusAgreement:
 
         run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED_WITH_FAILURES)
         assert run_result.rows_processed == 2
         assert run_result.rows_succeeded == 0
         # ADR-019 records lifecycle failure independently from discard-mode
@@ -2660,34 +2684,26 @@ class TestComposerRuntimeSecretInventoryAgreement:
         assert SecretUnavailabilityReason is not None  # imported for type alias presence
 
 
-# ── Shape 7 — pipeline_done_callback row-decomposition agreement ─────────────
+# ── Shape 7 — pipeline_done_callback run-accounting agreement ────────────────
 # Closes elspeth-31d53c7493 / Phase 2.1 (commit 5e26d0a6).  Origin: 2026-05-01
 # eval, S2 successful run 44f52421-a379-459b-96a8-6f0656086f16 (csv 6 rows →
-# batch_stats group_by → json sink).  Pre-fix, ``CompletedData``'s
-# ``_check_row_decomposition`` enforced equality (rows_processed == sum of
-# four buckets); the equality formulation rejected the legitimate aggregation
-# shape where source rows reach ``CONSUMED_IN_BATCH`` (no terminal-bucket
-# counter) and break the equality.  ``pipeline_done_callback`` then crashed
-# with ``ValueError``/``ValidationError`` while the engine output had already
-# landed on disk.  Post-fix, the validator accepts inequality
-# (rows_processed >= sum of four buckets) so legitimate aggregation runs no
-# longer trip the readback layer.  This single-occurrence regression test
-# pins the agreement contract: an aggregation pipeline run by the orchestrator
-# produces row counts that the API readback layer accepts without raising.
+# batch_stats group_by → json sink). The original bug was a linear
+# row-decomposition equality on ``CompletedData``; the current contract loads
+# explicit Landscape-derived source/token/routing/integrity accounting from
+# the orchestrator-emitted run and verifies the API payload accepts that audit
+# projection without reconstructing row fate from engine counters.
 
 
 class _BatchAggregateTransform(BaseTransform):
     """Batch-aware transform mirroring S2's aggregation shape (csv 6 rows →
     1 aggregated output row).
 
-    Reproduces the structural shape that broke the equality formulation of
-    ``_validate_row_decomposition``: source rows reach
-    ``(TRANSIENT, BATCH_CONSUMED)`` (no terminal-bucket counter) while the
-    aggregated output row reaches ``COMPLETED``.  Net effect:
-    ``rows_processed > rows_succeeded + rows_failed + rows_routed +
-    rows_quarantined`` — pre-fix the readback validator rejected this with
-    ``ValidationError`` and ``pipeline_done_callback`` crashed; post-fix the
-    inequality formulation (``>=``) accepts it.
+    Reproduces the structural shape that broke the old row-decomposition
+    equality: source rows reach ``CONSUMED_IN_BATCH`` while the aggregated
+    output row reaches ``COMPLETED``. Net effect: source-row cardinality and
+    materialized terminal-token cardinality intentionally diverge. The current
+    readback contract must accept the explicit Landscape-derived accounting
+    for that run.
 
     Defined inline so the test is self-contained as the agreement contract
     rather than depending on the BatchStats production plugin's internal
@@ -2695,6 +2711,7 @@ class _BatchAggregateTransform(BaseTransform):
     """
 
     name = "agreement_batch_aggregate"
+    determinism = Determinism.DETERMINISTIC
     is_batch_aware = True
     input_schema = _TestSchema
     output_schema = _TestSchema
@@ -2742,26 +2759,15 @@ class _BatchAggregateTransform(BaseTransform):
 
 
 class TestComposerRuntimeRunCompletionAgreement:
-    """Shape 7 — engine row counts on aggregation pipelines must construct
-    ``CompletedData`` without raising.
+    """Shape 7 — aggregation runs must construct ``CompletedData`` from audit accounting.
 
     Single-occurrence regression coverage.  The unit-level pin lives at
-    ``tests/unit/web/execution/test_schemas.py::test_aggregation_undercount_accepted``
-    (it hand-constructs the row counts).  The agreement-suite contribution
-    here is to drive the row counts from a real orchestrator-emitted
-    aggregation run.  A future aggregation refactor that changes which
-    counter buckets bump for batch-flush emission would slip past the unit
-    test (which hand-constructs the numbers) but fail this test (because
-    the engine's actual emission would no longer match the readback
-    contract).
-
-    Bug verification protocol (executed manually before this test landed):
-    temporarily reverted ``_validate_row_decomposition`` from ``>=`` to
-    ``==`` in ``src/elspeth/web/execution/schemas.py`` and confirmed this
-    test fails with ``pydantic.ValidationError("decomposition mismatch")``
-    on the ``CompletedData`` construction line.  Restored the inequality
-    after verification.  This protocol guards against the "passes pre-fix
-    AND post-fix" failure mode the test exists to prevent.
+    ``tests/unit/web/execution/test_run_accounting_projection.py``. The
+    agreement-suite contribution here is to drive the accounting from a real
+    orchestrator-emitted aggregation run. A future aggregation refactor that
+    changes terminal-token emission would slip past unit tests that
+    hand-construct accounting but fail this test because the engine's actual
+    audit output would no longer match the readback contract.
     """
 
     def test_agreement_aggregation_run_counts_construct_completed_data(self, landscape_db: LandscapeDB, payload_store) -> None:
@@ -2769,9 +2775,9 @@ class TestComposerRuntimeRunCompletionAgreement:
         aggregation that emits 1 output row.  Source rows reach
         ``CONSUMED_IN_BATCH`` (no terminal-bucket counter).  Engine counts
         end up as ``rows_processed=6, rows_succeeded=1, rows_failed=0,
-        rows_routed_success=0, rows_routed_failure=0, rows_quarantined=0`` — pre-fix the readback
-        validator rejected this shape (sum-of-buckets=1 but rows_processed=6
-        violates equality); post-fix the inequality accepts it.
+        rows_routed_success=0, rows_routed_failure=0, rows_quarantined=0``.
+        The public readback payload must be validated from Landscape-derived
+        accounting rather than from a row-counter equality.
         """
         from elspeth.contracts.types import NodeID
 
@@ -2834,17 +2840,16 @@ class TestComposerRuntimeRunCompletionAgreement:
 
         run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
 
-        # Engine emission contract: 6 source rows in, 1 aggregated row out,
-        # source rows reach CONSUMED_IN_BATCH (not counted in the four
-        # terminal buckets).  This produces the inequality the Phase 2.1 fix
-        # legitimised.
+        # Engine emission contract: 6 source rows in, 1 aggregated row out;
+        # source rows reach CONSUMED_IN_BATCH while the output token reaches
+        # COMPLETED.
         assert run_result.rows_processed == 6, (
             f"agreement_batch_aggregate must emit rows_processed=6 to reproduce S2 shape; got {run_result.rows_processed}"
         )
         assert run_result.rows_succeeded == 1, (
             f"the aggregated output row must be the only success terminal; got rows_succeeded={run_result.rows_succeeded}"
         )
-        # The inequality the fix made legitimate:
+        # The old row-counter equality rejected this legitimate shape:
         #   rows_processed (6) > sum-of-four-buckets (1)
         sum_of_buckets = (
             run_result.rows_succeeded
@@ -2854,10 +2859,9 @@ class TestComposerRuntimeRunCompletionAgreement:
             + run_result.rows_quarantined
         )
         assert run_result.rows_processed > sum_of_buckets, (
-            "Pre-fix-shape sanity check: this test exercises the "
-            f"rows_processed > sum-of-buckets inequality (got {run_result.rows_processed} vs {sum_of_buckets}); "
-            "if this assertion fails the test no longer pins the legitimate shape and a future "
-            "regression of the row-decomposition validator from `>=` back to `==` would slip past."
+            "Shape sanity check: this test exercises source rows exceeding "
+            f"terminal success/failure buckets (got {run_result.rows_processed} vs {sum_of_buckets}); "
+            "if this assertion fails the test no longer pins the legitimate aggregation shape."
         )
 
         # Drive the completed-event validator from the engine's actual
@@ -2893,10 +2897,10 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
     ``composer_plugin_error``. Closes ``elspeth-209b7e3a2b`` (Phase 0.b).
 
     Eval session S3 (``98573481-e8bc-4a03-8467-d3a86effcd56``, eval notes
-    ``notes/composer-llm-eval-2026-05-01.md``) reported this as a "gate
+    ``docs/composer/evidence/composer-llm-eval-2026-05-01.md``) reported this as a "gate
     primitive crash" because the failures clustered around gate-routing
     prompts. Phase 0.b investigation
-    (``notes/composer-phase-0b-staging-capture-2026-05-02.md``)
+    (``docs/composer/evidence/composer-phase-0b-staging-capture-2026-05-02.md``)
     re-attributed it: gate routing requires sinks, the LLM defaults sinks
     to ``collision_policy="fail_if_exists"``, and stale eval artifacts in
     ``data/outputs/`` collide. The actual defect was
@@ -2977,20 +2981,13 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
             version=1,
         )
 
-    def test_composer_validate_converts_file_sink_collision_to_structured_error(self, tmp_path: Path) -> None:
-        """Pre-existing sink path + ``fail_if_exists`` policy → structured
-        ``is_valid=False`` (not an uncaught ``FileExistsError``).
-
-        Mirrors the eval session S3 trajectory: an LLM-built file sink
-        whose path collides with a stale on-disk artifact. The composer's
-        ``/validate`` (and the post-compose ``_state_data_from_composer_state``
-        in ``routes.py``) must surface this as a structured 422-class
-        diagnostic, not a 500.
-        """
+    def test_composer_validate_does_not_probe_file_sink_collision_in_preflight(self, tmp_path: Path) -> None:
+        """Preflight validation must not inspect local file-sink collisions."""
         csv_path = self._csv_input(tmp_path)
 
-        # Pre-create the sink target so resolve_output_collision_path's
-        # fail_if_exists branch fires inside json_sink.__init__.
+        # Pre-create the sink target. Runtime execution with fail_if_exists
+        # must still reject this, but composer preflight must not observe
+        # local filesystem collision state during plugin construction.
         sink_path = tmp_path / "outputs" / "all.jsonl"
         sink_path.parent.mkdir(parents=True, exist_ok=True)
         sink_path.write_text("", encoding="utf-8")  # any pre-existing content
@@ -2998,43 +2995,19 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
 
         state = self._build_state(csv_path, sink_path)
 
-        # The fix landing point: this call must NOT raise FileExistsError.
-        # Pre-fix it would have propagated as an uncaught exception out of
-        # validate_pipeline (the bug-verification protocol confirms this).
         result = validate_pipeline(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
         )
 
-        assert result.is_valid is False, (
-            "Composer must reject pipelines whose sink path collides with an existing file under fail_if_exists; got is_valid=True"
-        )
+        assert result.is_valid is True
 
         check_by_name = {check.name: check for check in result.checks}
         assert "plugin_instantiation" in check_by_name, "Missing plugin_instantiation check"
         plugin_check = check_by_name["plugin_instantiation"]
-        assert plugin_check.passed is False, f"plugin_instantiation must fail on fs collision; got detail={plugin_check.detail!r}"
-        assert "already exists" in plugin_check.detail, f"Detail must name the collision; got {plugin_check.detail!r}"
-        assert str(sink_path) in plugin_check.detail, f"Detail must include the colliding path; got {plugin_check.detail!r}"
-
-        # Downstream checks must be marked as skipped (not run) since plugin
-        # instantiation failed — this is the same shape as
-        # PluginNotFoundError / PluginConfigError handling.
-        for downstream in ("graph_structure", "route_target_resolution", "schema_compatibility"):
-            assert check_by_name[downstream].passed is False, f"{downstream} must be skipped after plugin_instantiation fail"
-            assert "Skipped" in check_by_name[downstream].detail, (
-                f"{downstream} should be marked as skipped; got {check_by_name[downstream].detail!r}"
-            )
-
-        # Structured error carries operator-actionable suggestion (auto_increment).
-        assert len(result.errors) >= 1, "Result must carry at least one ValidationError"
-        sink_errors = [e for e in result.errors if e.component_type == "sink"]
-        assert len(sink_errors) == 1, f"Expected one sink-attributed error; got {len(sink_errors)}"
-        err = sink_errors[0]
-        assert "already exists" in err.message
-        assert err.suggestion is not None
-        assert "auto_increment" in err.suggestion, f"Suggestion must mention auto_increment; got {err.suggestion!r}"
+        assert plugin_check.passed is True, f"plugin_instantiation must not probe fs collisions; got {plugin_check.detail!r}"
+        assert result.errors == []
 
     def test_composer_validate_passes_when_sink_path_does_not_collide(self, tmp_path: Path) -> None:
         """Positive control: same state with a non-existing sink path passes
@@ -3058,3 +3031,270 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         assert check_by_name["plugin_instantiation"].passed is True, (
             f"plugin_instantiation must pass when sink path is free; got detail={check_by_name['plugin_instantiation'].detail!r}"
         )
+
+
+class TestComposerRuntimeBlobInlineAgreement:
+    """Shape 9 — widened blob_ref / inline_content agreement.
+
+    Bug verification for sub-pin A was captured before commit ``2aaa4be2e``:
+    without the ``blob_inline_refs`` validate-time metadata bridge,
+    ``validate_pipeline(..., blob_get_metadata=...)`` rejected the new keyword
+    argument and the service path never queried ``BlobService.get_blob``.
+
+    Bug verification for sub-pins B/C was captured in
+    ``tests/unit/web/execution/test_service.py::TestInlineBlobRuntimePreflight``:
+    removing the runtime resolver or audit-write block lets settings/plugin
+    construction proceed without the fail-closed hash/audit invariant.
+    """
+
+    @staticmethod
+    def _validation_settings(data_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(data_dir=data_dir)
+
+    @staticmethod
+    def _state_with_inline_prompt(tmp_path: Path, blob_id: UUID, sha256: str) -> CompositionState:
+        blobs_dir = tmp_path / "blobs"
+        outputs_dir = tmp_path / "outputs"
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        return CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="classify_input",
+                options={
+                    "path": str(blobs_dir / "input.csv"),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="llm",
+                    input="classify_input",
+                    on_success="results",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "model": "openai/gpt-4o",
+                        "prompt_template": {
+                            "blob_ref": str(blob_id),
+                            "mode": "inline_content",
+                            "sha256": sha256,
+                        },
+                        "required_input_fields": [],
+                        "schema": {"mode": "observed"},
+                        # Pre-resolved model-choice review so the
+                        # interpretation gate doesn't short-circuit the
+                        # validator before the blob-inline check runs. The
+                        # auto-stager normally creates a pending requirement
+                        # at mutation time; tests that bypass the composer
+                        # (constructing NodeSpec directly) must stage the
+                        # resolved form themselves.
+                        INTERPRETATION_REQUIREMENTS_KEY: [
+                            {
+                                "id": "model_choice_review:classify",
+                                "kind": "llm_model_choice",
+                                "user_term": "llm_model_choice:classify",
+                                "status": "resolved",
+                                "draft": "openai/gpt-4o",
+                                "event_id": "model-choice-accepted",
+                                "accepted_value": "openai/gpt-4o",
+                                "accepted_artifact_hash": None,
+                                "resolved_prompt_template_hash": stable_hash("openai/gpt-4o"),
+                            }
+                        ],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="results",
+                    plugin="json",
+                    options={
+                        "path": str(outputs_dir / "results.jsonl"),
+                        "format": "jsonl",
+                        "schema": {"mode": "observed"},
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(name="Shape 9 inline blob agreement", description=""),
+            version=1,
+        )
+
+    @staticmethod
+    def _pipeline_yaml(blob_id: UUID, sha256: str) -> str:
+        return f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      prompt_template:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {sha256}
+sinks:
+  results:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+    @staticmethod
+    def _execution_service(tmp_path: Path) -> tuple[ExecutionServiceImpl, MagicMock, asyncio.AbstractEventLoop]:
+        loop = asyncio.new_event_loop()
+        settings = MagicMock(
+            spec=[
+                "get_landscape_url",
+                "get_payload_store_path",
+                "landscape_passphrase",
+                "data_dir",
+            ]
+        )
+        settings.get_landscape_url.return_value = "sqlite:///:memory:"
+        settings.get_payload_store_path.return_value = tmp_path / "payloads"
+        settings.landscape_passphrase = None
+        settings.data_dir = str(tmp_path)
+
+        session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions"])
+        session_service.update_run_status = AsyncMock()
+        session_service.get_run = AsyncMock(return_value=MagicMock(spec=object, status="running"))
+        session_service.record_blob_inline_resolutions = AsyncMock()
+
+        service = ExecutionServiceImpl(
+            loop=MagicMock(spec=object),
+            broadcaster=cast(Any, MagicMock(spec=["broadcast", "cleanup_run"])),
+            settings=settings,
+            session_service=session_service,
+            yaml_generator=MagicMock(spec=object),
+            telemetry=build_sessions_telemetry(),
+        )
+
+        def _call_async(coro: Any) -> Any:
+            return loop.run_until_complete(coro)
+
+        cast(Any, service)._call_async = _call_async
+        return service, session_service, loop
+
+    def test_validate_returns_structured_error_for_missing_inline_blob(self, tmp_path: Path) -> None:
+        blob_id = uuid4()
+        state = self._state_with_inline_prompt(tmp_path, blob_id, "a" * 64)
+
+        result = validate_pipeline(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            blob_get_metadata=lambda _blob_id: None,
+        )
+
+        assert result.is_valid is False
+        check = next(check for check in result.checks if check.name == "blob_inline_refs")
+        assert check.passed is False
+        assert any(error.error_code == "missing_inline_blob_content" for error in result.errors)
+        assert any(error.component_id == "classify" and error.component_type == "transform" for error in result.errors)
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_orch_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls
+        service, _session_service, loop = self._execution_service(tmp_path)
+        content = b"actual prompt bytes"
+        blob_id = uuid4()
+        run_id = uuid4()
+        blob_record = MagicMock(spec=object)
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+        blob_record.content_hash = hashlib.sha256(content).hexdigest()
+        blob_record.status = "ready"
+        blob_service = MagicMock(spec=object)
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        cast(Any, service)._blob_service = blob_service
+
+        try:
+            with pytest.raises(BlobIntegrityError):
+                service._run_pipeline(str(run_id), self._pipeline_yaml(blob_id, "b" * 64), threading.Event())
+        finally:
+            loop.close()
+
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
+
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_runtime_records_audit_hash_before_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls
+        service, session_service, loop = self._execution_service(tmp_path)
+        content = b"You are an audited prompt."
+        sha256 = hashlib.sha256(content).hexdigest()
+        blob_id = uuid4()
+        run_id = uuid4()
+        order: list[str] = []
+
+        blob_record = MagicMock(spec=object)
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+        blob_record.content_hash = sha256
+        blob_record.status = "ready"
+        blob_service = MagicMock(spec=object)
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        cast(Any, service)._blob_service = blob_service
+
+        async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
+            order.append("record")
+
+        session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
+
+        def stop_after_audit(yaml_text: str) -> None:
+            assert "record" in order, "audit row must be recorded before settings/plugin construction"
+            assert "You are an audited prompt." in yaml_text
+            raise RuntimeError("stop after inline audit")
+
+        mock_load.side_effect = stop_after_audit
+
+        try:
+            with pytest.raises(RuntimeError, match="stop after inline audit"):
+                service._run_pipeline(str(run_id), self._pipeline_yaml(blob_id, sha256), threading.Event())
+        finally:
+            loop.close()
+
+        session_service.record_blob_inline_resolutions.assert_awaited_once()
+        resolutions = session_service.record_blob_inline_resolutions.await_args.kwargs["resolutions"]
+        assert len(resolutions) == 1
+        assert resolutions[0].field_path == "node:classify.options.prompt_template"
+        assert resolutions[0].content_hash == sha256

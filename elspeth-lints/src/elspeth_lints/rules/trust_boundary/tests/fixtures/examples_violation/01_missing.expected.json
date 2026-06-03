@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "e7cac6dd47bf6af6",
+    "line": 4,
+    "message": "@trust_boundary has no test_ref; a direct raising-shape test is mandatory for trust-boundary suppressions.",
+    "rule_id": "TBE1",
+    "severity": "error",
+    "suggestion": "Every @trust_boundary must carry a test_ref pointing to a pytest node whose own body contains a raising assertion for malformed-input rejection and calls the decorated function through source_param. Add test_ref='tests/.../test_module.py::test_function' plus the current test_fingerprint."
+  }
+]

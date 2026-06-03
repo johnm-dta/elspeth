@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "plugins/sources/missing_hash.py",
+    "fingerprint": "d7e3328dc8062e3a",
+    "line": 1,
+    "message": "plugins/sources/missing_hash.py (MissingHashSource): no source_file_hash declaration",
+    "rule_id": "PH2",
+    "severity": "error",
+    "suggestion": "Declare source_file_hash on every plugin class and keep it synchronized with the source file."
+  }
+]

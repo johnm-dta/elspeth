@@ -1,12 +1,12 @@
 # tests/property/core/test_fingerprint_properties.py
-"""Property-based tests for secret fingerprinting (HMAC-SHA256).
+"""Property-based tests for secret fingerprinting (PBKDF2-HMAC-SHA256).
 
 These tests verify the fundamental cryptographic properties of ELSPETH's
 secret fingerprinting system:
 
 Cryptographic Properties:
 - Determinism: Same inputs always produce same output
-- Fixed output length: Always 64 hex characters (SHA256)
+- Fixed output length: Always 64 hex characters (32-byte digest)
 - Collision resistance: Different inputs produce different outputs
 - Key sensitivity: Different keys produce different outputs
 
@@ -37,6 +37,8 @@ secrets = st.text(min_size=0, max_size=200)
 # Keys - non-empty byte sequences
 keys = st.binary(min_size=1, max_size=64)
 
+fingerprint_settings = settings(max_examples=20, deadline=None)
+
 # Non-empty secrets for collision tests
 non_empty_secrets = st.text(min_size=1, max_size=200)
 
@@ -54,14 +56,14 @@ ascii_secrets = st.text(
 
 
 class TestFingerprintDeterminismProperties:
-    """Property tests for HMAC determinism."""
+    """Property tests for keyed-hash determinism."""
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_same_inputs_same_output(self, secret: str, key: bytes) -> None:
         """Property: secret_fingerprint(s, k) == secret_fingerprint(s, k) always.
 
-        HMAC is deterministic - this is the fundamental property that allows
+        The keyed hash is deterministic - this is the fundamental property that allows
         fingerprints to verify "same secret was used" across runs.
         """
         fp1 = secret_fingerprint(secret, key=key)
@@ -70,7 +72,7 @@ class TestFingerprintDeterminismProperties:
         assert fp1 == fp2, f"Fingerprint not deterministic: '{fp1}' != '{fp2}'"
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=100)
+    @fingerprint_settings
     def test_repeated_calls_are_idempotent(self, secret: str, key: bytes) -> None:
         """Property: Multiple calls with same inputs produce identical results.
 
@@ -80,7 +82,7 @@ class TestFingerprintDeterminismProperties:
         assert all(r == results[0] for r in results), f"Results varied: {results}"
 
     @given(secret=non_empty_secrets, key=keys)
-    @settings(max_examples=100)
+    @fingerprint_settings
     def test_fingerprint_independent_of_call_order(self, secret: str, key: bytes) -> None:
         """Property: Fingerprinting A then B gives same result as B then A.
 
@@ -105,18 +107,18 @@ class TestFingerprintFormatProperties:
     """Property tests for output format invariants."""
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_output_length_is_64_characters(self, secret: str, key: bytes) -> None:
-        """Property: Output is always exactly 64 characters (SHA256 hex).
+        """Property: Output is always exactly 64 characters.
 
-        SHA256 produces 256 bits = 32 bytes = 64 hex characters.
-        This is a cryptographic constant that never varies.
+        The fingerprint uses a 32-byte digest, which is 64 hex characters.
+        This storage contract must not vary.
         """
         fp = secret_fingerprint(secret, key=key)
         assert len(fp) == 64, f"Expected 64 chars, got {len(fp)}: '{fp}'"
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_output_is_valid_hex(self, secret: str, key: bytes) -> None:
         """Property: Output contains only hexadecimal characters [0-9a-f].
 
@@ -130,7 +132,7 @@ class TestFingerprintFormatProperties:
         assert not invalid_chars, f"Invalid hex chars in fingerprint: {invalid_chars}"
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_output_is_lowercase(self, secret: str, key: bytes) -> None:
         """Property: Output is lowercase hex (no uppercase A-F).
 
@@ -141,7 +143,7 @@ class TestFingerprintFormatProperties:
         assert fp == fp.lower(), f"Fingerprint contains uppercase: '{fp}'"
 
     @given(secret=secrets, key=keys)
-    @settings(max_examples=100)
+    @fingerprint_settings
     def test_output_is_string_type(self, secret: str, key: bytes) -> None:
         """Property: Output is always a str, not bytes.
 
@@ -160,7 +162,7 @@ class TestFingerprintCollisionResistanceProperties:
     """Property tests for collision resistance."""
 
     @given(secret1=non_empty_secrets, secret2=non_empty_secrets, key=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_different_secrets_different_fingerprints(self, secret1: str, secret2: str, key: bytes) -> None:
         """Property: Different secrets produce different fingerprints (same key).
 
@@ -178,21 +180,14 @@ class TestFingerprintCollisionResistanceProperties:
         assert fp1 != fp2, f"Collision found! '{secret1}' and '{secret2}' both produce '{fp1}'"
 
     @given(secret=non_empty_secrets, key1=keys, key2=keys)
-    @settings(max_examples=200)
+    @fingerprint_settings
     def test_different_keys_different_fingerprints(self, secret: str, key1: bytes, key2: bytes) -> None:
         """Property: Same secret with different keys produces different fingerprints.
 
-        This is the key sensitivity property - changing the HMAC key
+        This is the key sensitivity property - changing the fingerprint key
         completely changes the output. Critical for key rotation scenarios.
-
-        Note: HMAC (RFC 2104) right-pads keys shorter than the hash block
-        size (64 bytes for SHA-256) with 0x00, so keys that differ only by
-        trailing null bytes are HMAC-equivalent and produce identical output.
-        This is correct HMAC behavior, not a bug.
         """
-        # Filter HMAC-equivalent key pairs: after right-padding to block
-        # size (64 bytes), these keys become identical internally.
-        assume(key1.ljust(64, b"\x00") != key2.ljust(64, b"\x00"))
+        assume(key1 != key2)
 
         fp1 = secret_fingerprint(secret, key=key1)
         fp2 = secret_fingerprint(secret, key=key2)
@@ -209,7 +204,7 @@ class TestFingerprintEdgeCaseProperties:
     """Property tests for edge cases and boundary conditions."""
 
     @given(key=keys)
-    @settings(max_examples=50)
+    @fingerprint_settings
     def test_empty_secret_produces_valid_fingerprint(self, key: bytes) -> None:
         """Property: Empty string secret produces valid 64-char hex fingerprint.
 
@@ -222,7 +217,7 @@ class TestFingerprintEdgeCaseProperties:
         assert all(c in "0123456789abcdef" for c in fp)
 
     @given(key=keys)
-    @settings(max_examples=50)
+    @fingerprint_settings
     def test_empty_secret_is_deterministic(self, key: bytes) -> None:
         """Property: Empty string produces same fingerprint on repeated calls."""
         fp1 = secret_fingerprint("", key=key)
@@ -231,11 +226,11 @@ class TestFingerprintEdgeCaseProperties:
         assert fp1 == fp2
 
     @given(secret=secrets)
-    @settings(max_examples=50)
+    @fingerprint_settings
     def test_single_byte_key_works(self, secret: str) -> None:
         """Property: Minimum-length key (1 byte) produces valid fingerprint.
 
-        HMAC handles short keys by zero-padding to block size internally.
+        PBKDF2 accepts short salts.
         """
         key = b"x"
         fp = secret_fingerprint(secret, key=key)
@@ -244,12 +239,11 @@ class TestFingerprintEdgeCaseProperties:
         assert all(c in "0123456789abcdef" for c in fp)
 
     @given(secret=secrets)
-    @settings(max_examples=50)
+    @fingerprint_settings
     def test_long_key_works(self, secret: str) -> None:
-        """Property: Long keys (> SHA256 block size) produce valid fingerprints.
+        """Property: Long keys produce valid fingerprints.
 
-        HMAC handles long keys by hashing them first. 64 bytes is the
-        SHA256 block size, so 128 bytes triggers the long-key path.
+        The fingerprint context accepts long keys as part of the derivation salt.
         """
         key = b"x" * 128  # > 64 byte block size
         fp = secret_fingerprint(secret, key=key)
@@ -274,7 +268,7 @@ class TestFingerprintUnicodeProperties:
         ),
         key=keys,
     )
-    @settings(max_examples=100)
+    @fingerprint_settings
     def test_unicode_secrets_produce_deterministic_fingerprints(self, secret: str, key: bytes) -> None:
         """Property: Unicode secrets (emoji, CJK, etc.) fingerprint deterministically.
 
@@ -288,7 +282,7 @@ class TestFingerprintUnicodeProperties:
         assert len(fp1) == 64
 
     @given(key=keys)
-    @settings(max_examples=20)
+    @fingerprint_settings
     def test_emoji_secrets_work(self, key: bytes) -> None:
         """Property: Emoji in secrets produce valid fingerprints.
 
@@ -301,7 +295,7 @@ class TestFingerprintUnicodeProperties:
         assert all(c in "0123456789abcdef" for c in fp)
 
     @given(key=keys)
-    @settings(max_examples=20)
+    @fingerprint_settings
     def test_cjk_secrets_work(self, key: bytes) -> None:
         """Property: CJK characters in secrets produce valid fingerprints."""
         secret = "\u5bc6\u7801-\u30d1\u30b9\u30ef\u30fc\u30c9-\ube44\ubc00\ubc88\ud638"

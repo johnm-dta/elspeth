@@ -867,6 +867,26 @@ class TestCheckpointRestoreStateFidelity:
         assert evaluator.should_trigger() is False
         assert evaluator.which_triggered() is None
 
+    def test_restored_over_threshold_count_without_offset_triggers_immediately(self) -> None:
+        """Old checkpoints without count_fire_offset still fire restored count batches."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=100.0)
+        config = TriggerConfig(count=3, timeout_seconds=3600.0)
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.restore_from_checkpoint(
+            batch_count=5,
+            elapsed_age_seconds=1.0,
+            count_fire_offset=None,
+            condition_fire_offset=None,
+        )
+
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "count"
+
     def test_zero_batch_count_valid(self) -> None:
         """batch_count=0 is valid (empty batch restore after flush).
 

@@ -118,6 +118,14 @@ class QueryBuilder:
             return self._build_field_only(extracted)
 
     def _build_field_only(self, extracted: Any) -> QueryResult:
+        # Offensive isinstance guard — not defensive suppression. The `extracted`
+        # seam is typed Any because row_data is dict[str, Any] and observed-mode
+        # schemas do not enforce value types. Without this guard, a bytes value
+        # would silently PASS _validate_non_empty (bytes.strip() and bool(b"x")
+        # both succeed), producing QueryResult(query=b"...") — wrong type, no
+        # crash, corrupted audit trail. The guard makes the upstream plugin bug
+        # loud rather than letting it persist silently. Do not delete without
+        # verifying that every schema mode guarantees str at this seam.
         if not isinstance(extracted, str):
             raise TypeError(
                 f"query_field '{self._query_field}' expected str, got {type(extracted).__name__} "
@@ -142,11 +150,6 @@ class QueryBuilder:
     def _build_regex(self, extracted: Any) -> QueryResult:
         assert self._compiled_pattern is not None  # guaranteed by build() guard
         assert self._regex_pool is not None  # created when pattern is compiled
-        if not isinstance(extracted, str):
-            raise TypeError(
-                f"query_field '{self._query_field}' expected str, got {type(extracted).__name__} "
-                f"— upstream plugin bug (Tier 2 data must not be coerced)"
-            )
 
         future = self._regex_pool.submit(_regex_worker, self._compiled_pattern, extracted)
         try:
@@ -173,6 +176,17 @@ class QueryBuilder:
                     cause="regex_timeout",
                 )
             )
+        except TypeError as exc:
+            # re.Pattern.search() raises TypeError when handed a non-str value
+            # (int, bytes, list, ...). The field reached us as Tier 2 pipeline
+            # data, so a non-str here is an upstream plugin contract violation,
+            # not a regex-engine bug — crash with a message that names the
+            # actual fault (Tier 2 data must not be coerced).
+            raise TypeError(
+                f"query_field '{self._query_field}' expected str, got "
+                f"{type(extracted).__name__} — upstream plugin bug "
+                f"(Tier 2 data must not be coerced): {exc}"
+            ) from exc
         except Exception as exc:
             # _regex_worker is system-owned code — a crash is a code bug, not a data issue.
             raise RuntimeError(

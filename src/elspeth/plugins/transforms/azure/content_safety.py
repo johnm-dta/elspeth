@@ -16,6 +16,8 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
 
+from elspeth.contracts import Determinism
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -120,8 +122,9 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     """
 
     name = "azure_content_safety"
+    determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6940d98599fd6dcb"
+    source_file_hash: str | None = "sha256:2bd11ff7b54fff17"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 
@@ -326,4 +329,20 @@ class AzureContentSafety(BaseAzureSafetyTransform):
 
         if any(info["exceeded"] for info in categories.values()):
             return categories
+        return None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="azure_content_safety",
+                issue_code=None,
+                summary="Score text against Azure Content Safety categories (hate, violence, sexual, self_harm). 0-6 severity scale; rows flagged when any threshold is exceeded.",
+                composer_hints=(
+                    "Thresholds use OR logic: a row is flagged when ANY category exceeds its threshold. Tighten thresholds individually, not globally.",
+                    "Default thresholds tend to be 4 — set per-category based on the audit policy, not on Azure's recommendation.",
+                    "Always place upstream of any LLM transform when input came from web_scrape or other external sources (Tier 3 → safety check → Tier 2).",
+                    "The transform records the full per-category response in audit, not just the flag — verify this is visible before declaring success.",
+                ),
+            )
         return None

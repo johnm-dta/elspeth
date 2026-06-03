@@ -1,0 +1,918 @@
+schema_version: 1
+last_updated: 2026-05-23
+description: >-
+  Authoritative registry of filigree label values per orthogonal axis.
+  Subsystem values are closed-enumeration and map to real code paths.
+  Other axes are governed-open. See docs/filigree/SCHEMA.md for rules.
+
+axes:
+
+  # ============================================================
+  # subsys:*  —  where in the code (closed enumeration)
+  # ============================================================
+  subsys:
+    rule: closed
+    description: Code location. Every value maps to a real directory or a code-grounded surface.
+    values:
+
+      # ---- Layer 0: Contracts ----
+      - label: subsys:contracts
+        layer: contracts
+        path: src/elspeth/contracts/
+        description: Cross-boundary types, enums, protocols, error hierarchies. L0 leaf.
+
+      # ---- Layer 1: Core ----
+      - label: subsys:core/landscape
+        layer: core
+        path: src/elspeth/core/landscape/
+        description: Audit DB, repositories (RunLifecycle, Execution, DataFlow, Query), lineage, exporter.
+      - label: subsys:core/checkpoint
+        layer: core
+        path: src/elspeth/core/checkpoint/
+        description: Resume points, recovery validation, ResumeCheck semantics.
+      - label: subsys:core/dag
+        layer: core
+        path: src/elspeth/core/dag/
+        description: ExecutionGraph, NodeConfig, WiredTransform, Sense/Decide/Act wiring.
+      - label: subsys:core/config
+        layer: core
+        path: src/elspeth/core/config/
+        description: ElspethSettings, Dynaconf+Pydantic config contracts.
+      - label: subsys:core/canonical
+        layer: core
+        path: src/elspeth/core/canonical/
+        description: Deterministic JSON, stable hashing, CANONICAL_VERSION.
+      - label: subsys:core/payload-store
+        layer: core
+        path: src/elspeth/core/payload_store/
+        description: Content-addressable filesystem storage, retention policies.
+      - label: subsys:core/expression-parser
+        layer: core
+        path: src/elspeth/core/expression_parser/
+        description: Safe AST-based gate condition parsing (no eval).
+
+      # ---- Layer 2: Engine ----
+      - label: subsys:engine/orchestrator
+        layer: engine
+        path: src/elspeth/engine/orchestrator/
+        description: Run lifecycle — begin run, register nodes/edges, process rows, complete run.
+      - label: subsys:engine/processor
+        layer: engine
+        path: src/elspeth/engine/processor.py
+        description: Work-queue DAG traversal, fork/join, row-by-row execution.
+      - label: subsys:engine/executors
+        layer: engine
+        path: src/elspeth/engine/executors/
+        description: Transform, gate, sink, aggregation, coalesce executors.
+      - label: subsys:engine/retry
+        layer: engine
+        path: src/elspeth/engine/retry.py
+        description: Tenacity exponential-backoff retry wiring.
+      - label: subsys:engine/tokens
+        layer: engine
+        path: src/elspeth/engine/tokens.py
+        description: Token identity, fork, coalesce, expand through DAG.
+
+      # ---- Layer 3: Plugins ----
+      - label: subsys:plugins/infrastructure
+        layer: plugins
+        path: src/elspeth/plugins/infrastructure/
+        description: Base classes, PluginManager (pluggy), AuditedHTTPClient, AuditedLLMClient.
+      - label: subsys:plugins/sources
+        layer: plugins
+        path: src/elspeth/plugins/sources/
+        description: CSV, JSON, Azure Blob, Dataverse, Null, etc.
+      - label: subsys:plugins/transforms
+        layer: plugins
+        path: src/elspeth/plugins/transforms/
+        description: FieldMapper, LLMTransform, WebScrape, ContentSafety, etc.
+      - label: subsys:plugins/sinks
+        layer: plugins
+        path: src/elspeth/plugins/sinks/
+        description: CSV, JSON, Database, Azure Blob sinks.
+
+      # ---- Layer 3: Observability & tooling ----
+      - label: subsys:telemetry
+        layer: plugins
+        path: src/elspeth/telemetry/
+        description: TelemetryManager, exporters, granularity filtering.
+      - label: subsys:mcp
+        layer: plugins
+        path: src/elspeth/mcp/
+        description: Read-only MCP analysis server for Landscape queries.
+      - label: subsys:tui
+        layer: plugins
+        path: src/elspeth/tui/
+        description: Textual lineage explorer.
+      - label: subsys:cli
+        layer: plugins
+        path: src/elspeth/cli/
+        description: Typer-based CLI entrypoints.
+      - label: subsys:testing
+        layer: plugins
+        path: src/elspeth/testing/
+        description: elspeth-xdist-auto pytest plugin (shipped inside package).
+
+      # ---- Layer 3: Web pillar ----
+      - label: subsys:web
+        layer: plugins
+        path: src/elspeth/web/
+        description: Web pillar root (whole-web issues, or sub-area not yet decided).
+      - label: subsys:web/auth
+        layer: plugins
+        path: src/elspeth/web/auth/
+        description: Authentication, OIDC, Entra, JWKS provider integration.
+      - label: subsys:web/sessions
+        layer: plugins
+        path: src/elspeth/web/sessions/
+        description: User session lifecycle, state persistence.
+      - label: subsys:web/execution
+        layer: plugins
+        path: src/elspeth/web/execution/
+        description: Run lifecycle in web context, progress streaming.
+      - label: subsys:web/blobs
+        layer: plugins
+        path: src/elspeth/web/blobs/
+        description: Session blob storage (inputs, outputs, state snapshots).
+      - label: subsys:web/secrets
+        layer: plugins
+        path: src/elspeth/web/secrets/
+        description: Secret credential management, Key Vault.
+      - label: subsys:web/catalog
+        layer: plugins
+        path: src/elspeth/web/catalog/
+        description: Plugin discovery, CatalogService.
+      - label: subsys:web/preferences
+        layer: plugins
+        path: src/elspeth/web/preferences/
+        description: User settings, UI preferences.
+      - label: subsys:web/audit-readiness
+        layer: plugins
+        path: src/elspeth/web/audit_readiness/
+        description: Audit-trail compliance checks.
+      - label: subsys:web/shareable-reviews
+        layer: plugins
+        path: src/elspeth/web/shareable_reviews/
+        description: Sharable lineage / explain outputs.
+      - label: subsys:web/middleware
+        layer: plugins
+        path: src/elspeth/web/middleware/
+        description: HTTP middleware, CORS, compression.
+      - label: subsys:web/frontend
+        layer: plugins
+        path: src/elspeth/web/frontend/
+        description: React SPA (TSX, CSS).
+
+      # ---- Layer 3: Composer (cross-cutting product surface) ----
+      - label: subsys:composer
+        layer: plugins
+        path: cross-cutting
+        description: Composer surface root (use when issue spans implementations).
+      - label: subsys:composer/mcp
+        layer: plugins
+        path: src/elspeth/composer_mcp/
+        description: MCP server for pipeline composition.
+      - label: subsys:composer/web
+        layer: plugins
+        path: src/elspeth/web/composer/
+        description: Composer state machine, validation, YAML generation (web API side).
+      - label: subsys:composer/frontend
+        layer: plugins
+        path: src/elspeth/web/frontend/  # composer subset of SPA
+        description: Composer UI inside the React SPA (subset of subsys:web/frontend).
+
+      # ---- Layer 3: Infrastructure ----
+      - label: subsys:cicd
+        layer: plugins
+        path: scripts/cicd/, config/cicd/, .github/workflows/, elspeth-lints/
+        description: CI workflows, hooks, elspeth-lints, allowlists.
+      - label: subsys:docs
+        layer: plugins
+        path: docs/
+        description: In-tree documentation, ADRs, guides.
+      - label: subsys:evals
+        layer: plugins
+        path: evals/
+        description: Evaluation harnesses, persona suites.
+
+  # ============================================================
+  # layer:*  —  architectural layer (closed enumeration)
+  # ============================================================
+  layer:
+    rule: closed
+    description: Architectural layer per the L0–L3 import hierarchy.
+    values:
+      - label: layer:contracts
+        description: L0 — leaf, imports nothing above.
+      - label: layer:core
+        description: L1 — can import L0 only.
+      - label: layer:engine
+        description: L2 — can import L0, L1.
+      - label: layer:plugins
+        description: L3 — can import L0, L1, L2 (covers plugins + application code).
+      - label: layer:application
+        alias_of: layer:plugins
+        description: Deprecated alias of layer:plugins (kept until migration completes).
+
+  # ============================================================
+  # kind:*  —  defect kind / root-cause pattern (semi-closed)
+  # ============================================================
+  kind:
+    rule: governed-open
+    description: >-
+      Defect kind / root-cause pattern. New values allowed via PR adding them
+      to this registry. Values are kebab-case.
+    values:
+      - kind:audit-integrity
+      - kind:silent-failure
+      - kind:fabrication
+      - kind:null-check
+      - kind:broad-except
+      - kind:defensive-access
+      - kind:freeze-gap
+      - kind:mutable-frozen
+      - kind:missing-post-init
+      - kind:dead-code
+      - kind:exception-hygiene
+      - kind:wrong-exception-type
+      - kind:type-design
+      - kind:race-condition
+      - kind:resource-leak
+      - kind:wrong-logger
+      - kind:layer-violation
+      - kind:tier-model
+      - kind:duplication
+      - kind:hashing
+      - kind:asyncio-loop
+      - kind:concurrency
+      - kind:performance
+      - kind:test-coverage
+      - kind:test-gap
+      - kind:observability
+      - kind:recovery
+      - kind:security
+      - kind:accessibility
+      - kind:type-coercion
+      - kind:parallel-arrays
+      - kind:checkpoint
+      - kind:audit-gap
+      - kind:audit-provenance
+      - kind:config-validation
+
+  # ============================================================
+  # tier:*  —  ELSPETH trust-tier methodology (closed)
+  # ============================================================
+  tier:
+    rule: closed
+    description: Trust-tier classification per CLAUDE.md three-tier model.
+    values:
+      - tier:1-integrity      # Tier 1 audit / Landscape data — must crash on anomaly
+      - tier:1-boundary       # Tier 1 read-side guard at trust boundary
+      - tier:2-rc6-structural # Tier 2 pipeline data — structural concern
+      - tier:3-pre-publish    # Tier 3 external input — pre-publish gate
+      - tier:3-boundary       # Tier 3 coercion-at-boundary issue
+      - tier:4-test-gaps      # Test coverage gaps
+      - tier:5-code-health    # General code health
+
+  # ============================================================
+  # source:*  —  provenance (governed-open)
+  # ============================================================
+  source:
+    rule: governed-open
+    description: How the bug was found. Provenance, not subsystem.
+    values:
+      - source:observation       # from filigree observation
+      - source:review            # ad-hoc human review
+      - source:panel-review      # panel cohort review
+      - source:test-audit        # test-audit sweep
+      - source:adversarial-review
+      - source:eval              # found by an eval harness
+      - source:scanner           # static-analysis scanner
+      - source:source-risk-sweep # codex source-risk audit
+      - source:codex             # codex agent
+      - source:report            # downstream report
+      - source:pr-review         # PR-time review
+      - source:landscape-maturation
+      - source:beta-feedback
+      - source:adr               # ADR-driven follow-up
+      - source:staging           # surfaced from staging deploy
+      - source:tracker-hygiene
+      - source:exception-audit
+      - source:agent             # generic agent finding
+
+  # ============================================================
+  # release:*  —  release targeting (lowercase, dot-separated)
+  # ============================================================
+  release:
+    rule: governed-open
+    description: Release targeting. Always lowercase, dot-separated.
+    naming: ^release:rc[0-9]+(\.[0-9]+)?$|^release:future$|^release:deferred$
+    values:
+      - release:rc5.2
+      - release:rc5.3
+      - release:rc6
+      - release:future
+      - release:deferred
+
+  # ============================================================
+  # program:*  —  review programs / sweeps (governed-open)
+  # ============================================================
+  program:
+    rule: governed-open
+    description: Review program or sweep that produced the issue.
+    values:
+      - program:rc4-bugsweep
+      - program:multi-source-token-scheduler-review
+      - program:multi-source-token-scheduler-rc6
+      - program:multi-source-token-scheduler-audit
+      - program:multi-source-token-scheduler-sme-review-2026-05-23
+      - program:test-audit-20-05
+      - program:static-analysis
+      - program:consolidated-2026-05-22
+      - program:rc5-2-review-2026-05-23
+      - program:review-remediation
+      - program:rc3.3-review
+
+  # ============================================================
+  # cluster:*  —  epic grouping (free-form, repurposed)
+  # ============================================================
+  cluster:
+    rule: open
+    description: >-
+      Epic grouping. Value is the slug of a parent umbrella ticket.
+      Repurposed from previous mixed-axis usage. One value per issue.
+    constraint: max_one_per_issue
+
+  # ============================================================
+  # plugin:*  —  specific plugin instance (open)
+  # ============================================================
+  plugin:
+    rule: open
+    description: Specific plugin instance (rag, dataverse, etc.). Not a subsystem.
+
+  # ============================================================
+  # Reserved namespaces (filigree-internal, do not write)
+  # ============================================================
+  reserved:
+    rule: tool-managed
+    namespaces: [area, severity, scanner, pack, age, has, has-findings]
+    description: Managed by filigree itself — virtual labels, not writable.
+
+# ============================================================
+# Migration table — bare/typo/old-namespace → canonical
+# ============================================================
+migrations:
+
+  # component:* → subsys:*
+  - from: component:composer
+    to: subsys:composer
+  - from: component:composer-mcp
+    to: subsys:composer/mcp
+  - from: component:contracts
+    to: subsys:contracts
+  - from: component:engine
+    to: subsys:engine/orchestrator   # default; rebin specific values during migration
+  - from: component:plugins
+    to: subsys:plugins/infrastructure
+  - from: component:transforms
+    to: subsys:plugins/transforms
+  - from: component:sources
+    to: subsys:plugins/sources
+  - from: component:sink
+    to: subsys:plugins/sinks
+  - from: component:telemetry
+    to: subsys:telemetry
+  - from: component:audit
+    to: subsys:core/landscape
+  - from: component:landscape
+    to: subsys:core/landscape
+  - from: component:auth
+    to: subsys:web/auth
+  - from: component:web
+    to: subsys:web
+  - from: component:web-frontend
+    to: subsys:web/frontend
+  - from: component:frontend
+    to: subsys:web/frontend
+  - from: component:web-execution
+    to: subsys:web/execution
+  - from: component:web-secrets
+    to: subsys:web/secrets
+  - from: component:web-sessions
+    to: subsys:web/sessions
+  - from: component:web-ux
+    to: subsys:web/frontend
+  - from: component:sessions
+    to: subsys:web/sessions
+  - from: component:secrets
+    to: subsys:web/secrets
+  - from: component:blobs
+    to: subsys:web/blobs
+  - from: component:blob-manager
+    to: subsys:core/payload-store
+  - from: component:execution
+    to: subsys:engine/orchestrator
+  - from: component:cicd
+    to: subsys:cicd
+  - from: component:examples
+    to: subsys:evals
+  - from: component:azure
+    to: subsys:plugins/infrastructure
+
+  # subsystem:* and subsystem/* → subsys:*
+  - from_prefix: "subsystem:"
+    to_prefix: "subsys:"
+  - from_prefix: "subsystem/"
+    to_prefix: "subsys:"
+  - from: cluster/composer
+    to: cluster:composer-epic    # if rebound to epic slug; otherwise drop
+
+  # web:* → subsys:web/*
+  - from: web:composer
+    to: subsys:composer/web
+  - from: web:execution
+    to: subsys:web/execution
+  - from: web:frontend
+    to: subsys:web/frontend
+  - from: web:api
+    to: subsys:web
+  - from: web:blobs
+    to: subsys:web/blobs
+  - from: web:catalog
+    to: subsys:web/catalog
+  - from: web:sessions
+    to: subsys:web/sessions
+  - from: web:shareable-reviews
+    to: subsys:web/shareable-reviews
+
+  # cluster:* (subsystem-shaped) → subsys:*
+  - from: cluster:composer
+    to: subsys:composer
+  - from: cluster:composer-correctness
+    to: subsys:composer
+    add: kind:audit-integrity
+  - from: cluster:composer-audit
+    to: subsys:composer
+    add: kind:audit-integrity
+  - from: cluster:composer-guided
+    to: subsys:composer
+  - from: cluster:composer-llm-eval
+    to: subsys:composer
+    add: kind:test-coverage
+  - from: cluster:composer-validation
+    to: subsys:composer
+    add: kind:config-validation
+  - from: cluster:composer-progress-persistence
+    to: subsys:composer
+  - from: cluster:composer-one-knob
+    to: subsys:composer
+  - from: cluster:web
+    to: subsys:web
+  - from: cluster:web-auth-hardening
+    to: subsys:web/auth
+  - from: cluster:web-execution
+    to: subsys:web/execution
+  - from: cluster:web-frontend
+    to: subsys:web/frontend
+  - from: cluster:web-security
+    to: subsys:web
+    add: kind:security
+  - from: cluster:web-sessions
+    to: subsys:web/sessions
+  - from: cluster:web-ux
+    to: subsys:web/frontend
+  - from: cluster:engine
+    to: subsys:engine/orchestrator
+  - from: cluster:engine-platform
+    to: subsys:engine/orchestrator
+  - from: cluster:tui
+    to: subsys:tui
+  - from: cluster:plugins
+    to: subsys:plugins/infrastructure
+  - from: cluster:landscape
+    to: subsys:core/landscape
+  - from: cluster:telemetry
+    to: subsys:telemetry
+  - from: cluster:sinks
+    to: subsys:plugins/sinks
+  - from: cluster:llm
+    to: subsys:plugins/transforms
+    add: plugin:llm
+  - from: cluster:llm-safety
+    to: subsys:plugins/transforms
+    add: kind:security
+  - from: cluster:checkpoint
+    to: subsys:core/checkpoint
+  - from: cluster:blob-manager
+    to: subsys:core/payload-store
+  - from: cluster:rag-retrieval
+    to: subsys:plugins/transforms
+    add: plugin:rag
+  - from: cluster:retrieval
+    to: subsys:plugins/transforms
+  - from: cluster:secrets
+    to: subsys:web/secrets
+  - from: cluster:security
+    to: kind:security
+  - from: cluster:ssrf
+    to: kind:security
+  - from: cluster:cicd
+    to: subsys:cicd
+  - from: cluster:skill-pack
+    to: subsys:docs
+  - from: cluster:http-clients
+    to: subsys:plugins/infrastructure
+  - from: cluster:config-contracts
+    to: subsys:core/config
+  - from: cluster:config-validation
+    to: subsys:core/config
+    add: kind:config-validation
+  - from: cluster:plugin-contracts
+    to: subsys:contracts
+  - from: cluster:header-resolution
+    to: subsys:plugins/infrastructure
+
+  # cluster:* (kind-shaped) → kind:*
+  - from: cluster:audit-integrity
+    to: kind:audit-integrity
+  - from: cluster:silent-failure
+    to: kind:silent-failure
+  - from: cluster:contract-invariants
+    to: kind:type-design
+  - from: cluster:null-check
+    to: kind:null-check
+  - from: cluster:mutable-frozen
+    to: kind:mutable-frozen
+  - from: cluster:broad-except
+    to: kind:broad-except
+  - from: cluster:fabrication
+    to: kind:fabrication
+  - from: cluster:freeze-gap
+    to: kind:freeze-gap
+  - from: cluster:defensive-access
+    to: kind:defensive-access
+  - from: cluster:missing-post-init
+    to: kind:missing-post-init
+  - from: cluster:dead-code
+    to: kind:dead-code
+  - from: cluster:type-design
+    to: kind:type-design
+  - from: cluster:audit-gap
+    to: kind:audit-gap
+  - from: cluster:exception-hygiene
+    to: kind:exception-hygiene
+  - from: cluster:race-condition
+    to: kind:race-condition
+  - from: cluster:resource-leak
+    to: kind:resource-leak
+  - from: cluster:wrong-exception-type
+    to: kind:wrong-exception-type
+  - from: cluster:wrong-logger
+    to: kind:wrong-logger
+  - from: cluster:tier-model
+    to: kind:tier-model
+  - from: cluster:coalesce-safety
+    to: kind:type-design
+  - from: cluster:layer-violation
+    to: kind:layer-violation
+  - from: cluster:hashing
+    to: kind:hashing
+  - from: cluster:asyncio-loop
+    to: kind:asyncio-loop
+  - from: cluster:test-coverage
+    to: kind:test-coverage
+  - from: cluster:test-gap
+    to: kind:test-gap
+  - from: cluster:test-debt
+    to: kind:test-coverage
+  - from: cluster:test-gaps
+    to: kind:test-gap
+  - from: cluster:duplication
+    to: kind:duplication
+  - from: cluster:data-integrity
+    to: kind:audit-integrity
+  - from: cluster:error-handling
+    to: kind:exception-hygiene
+  - from: cluster:exception-chain
+    to: kind:exception-hygiene
+  - from: cluster:concurrency
+    to: kind:concurrency
+  - from: cluster:performance
+    to: kind:performance
+  - from: cluster:unbounded-growth
+    to: kind:resource-leak
+  - from: cluster:recovery
+    to: kind:recovery
+  - from: cluster:defensive-programming
+    to: kind:defensive-access
+  - from: cluster:observability
+    to: kind:observability
+  - from: cluster:audit-provenance
+    to: kind:audit-provenance
+  - from: cluster:value-source
+    to: kind:audit-provenance
+  - from: cluster:logging-policy
+    to: kind:wrong-logger
+  - from: cluster:type-coercion
+    to: kind:type-coercion
+
+  # cluster:* (program-shaped) → program:*
+  - from: cluster:rc4-bugsweep
+    to: program:rc4-bugsweep
+  - from: cluster:rc5-ux
+    to: program:rc5-ux
+    add: subsys:web/frontend
+  - from: cluster:track-2
+    to: program:track-2
+  - from: cluster:observation-followup
+    to: program:observation-followup
+  - from: cluster:production-hardening
+    to: program:production-hardening
+  - from: cluster:future-parking
+    to: release:future
+  - from: cluster:interpretation-review
+    to: program:interpretation-review
+  - from: cluster:code-quality
+    to: kind:type-design
+  - from: cluster:tracker-hygiene
+    to: source:tracker-hygiene
+
+  # review:* → program:* (review namespace was misused)
+  - from: review:static
+    to: program:static-analysis
+  - from: review:multi-source-token-scheduler
+    to: program:multi-source-token-scheduler-review
+
+  # audit:source-risk-* → source:source-risk-sweep
+  - from: audit:source-risk-sweep
+    to: source:source-risk-sweep
+  - from: audit:source-risk-recursive
+    to: source:source-risk-sweep
+  - from: audit:source-risk-file
+    to: source:source-risk-sweep
+  - from: audit:evidence
+    to: source:observation
+  - from: audit:classification
+    to: source:observation
+
+  # bare from-* → source:*
+  - from: from-observation
+    to: source:observation
+  - from: from-review
+    to: source:review
+  - from: from-panel-review
+    to: source:panel-review
+  - from: from-test-audit
+    to: source:test-audit
+  - from: from-adr-019
+    to: source:adr
+  - from: from-beta-feedback
+    to: source:beta-feedback
+  - from: from-rollout
+    to: source:beta-feedback
+  - from: from-pr-review
+    to: source:pr-review
+  - from: from-landscape-maturation
+    to: source:landscape-maturation
+  - from: from-panel-cohort
+    to: source:panel-review
+
+  # bare tier-* → tier:*
+  - from: tier-1
+    to: tier:1-integrity
+  - from: tier1
+    to: tier:1-integrity
+  - from: tier-1-integrity
+    to: tier:1-integrity
+  - from: tier-1-boundary
+    to: tier:1-boundary
+  - from: tier-1-must-fix-now
+    to: tier:1-integrity
+  - from: tier-2-rc6-structural
+    to: tier:2-rc6-structural
+  - from: tier-3-pre-publish
+    to: tier:3-pre-publish
+  - from: tier-3-boundary
+    to: tier:3-boundary
+  - from: tier-4-test-gaps
+    to: tier:4-test-gaps
+  - from: tier-5-code-health
+    to: tier:5-code-health
+  - from: tier-model
+    to: kind:tier-model
+  - from: tier-boundary
+    to: tier:3-boundary
+  - from: trust-model
+    to: kind:tier-model
+  - from: trust-boundary
+    to: kind:tier-model
+
+  # bare priority → DROP (use numeric priority field)
+  - from: P0
+    drop: true
+    reason: Use numeric priority field.
+  - from: P1
+    drop: true
+  - from: P2
+    drop: true
+  - from: P3
+    drop: true
+
+  # case-drift releases
+  - from: release:RC5
+    to: release:rc5
+  - from: release:rc5
+    to: release:rc5.0    # disambiguate if needed; otherwise keep as release:rc5
+  - from_pattern: "^RC([0-9]+)(\\.([0-9]+))?$"
+    to_template: "release:rc${1}${2}"
+  - from: rc4
+    to: release:rc4
+  - from: rc3.3
+    to: release:rc3.3
+  - from: rc5.2
+    to: release:rc5.2
+  - from: rc5.3
+    to: release:rc5.3
+
+  # bare subsystem aliases → subsys:*
+  - from: composer
+    to: subsys:composer
+  - from: frontend
+    to: subsys:web/frontend
+  - from: backend
+    to: subsys:web
+  - from: web
+    to: subsys:web
+  - from: engine
+    to: subsys:engine/orchestrator
+  - from: tui
+    to: subsys:tui
+  - from: mcp
+    to: subsys:mcp
+  - from: landscape
+    to: subsys:core/landscape
+  - from: telemetry
+    to: subsys:telemetry
+  - from: catalog
+    to: subsys:web/catalog
+  - from: sessions
+    to: subsys:web/sessions
+  - from: auth
+    to: subsys:web/auth
+  - from: dag
+    to: subsys:core/dag
+  - from: blob
+    to: subsys:core/payload-store
+  - from: blobs
+    to: subsys:web/blobs
+  - from: schema
+    to: subsys:contracts
+  - from: web-secrets
+    to: subsys:web/secrets
+  - from: scheduler
+    to: subsys:engine/orchestrator
+  - from: multi-source
+    to: subsys:plugins/sources
+  - from: graph
+    to: subsys:core/dag
+  - from: accessibility
+    to: subsys:web/frontend
+    add: kind:accessibility
+  - from: ux
+    to: subsys:web/frontend
+  - from: static-analysis
+    to: subsys:cicd
+    add: program:static-analysis
+  - from: elspeth-lints
+    to: subsys:cicd
+  - from: ci
+    to: subsys:cicd
+  - from: cicd
+    to: subsys:cicd
+  - from: docs
+    to: subsys:docs
+  - from: tests
+    to: subsys:testing
+  - from: evals
+    to: subsys:evals
+  - from: runtime-preflight
+    to: subsys:engine/orchestrator
+  - from: persistence
+    to: subsys:core/landscape
+  - from: policy
+    to: kind:tier-model
+  - from: quality
+    to: kind:test-coverage
+  - from: sinks
+    to: subsys:plugins/sinks
+  - from: plugins
+    to: subsys:plugins/infrastructure
+  - from: llm
+    to: subsys:plugins/transforms
+    add: plugin:llm
+
+  # bare program-shaped sweep labels → program:*
+  - from: RC4-bugsweep
+    to: program:rc4-bugsweep
+  - from: sweep
+    to: program:sweep
+  - from: test-audit
+    to: program:test-audit
+  - from: test-audit-20-05
+    to: program:test-audit-20-05
+  - from: test-suite-sweep
+    to: program:test-suite-sweep
+  - from: multi-source-token-scheduler-review
+    to: program:multi-source-token-scheduler-review
+  - from: multi-source-token-scheduler-rc6
+    to: program:multi-source-token-scheduler-rc6
+  - from: multi-source-token-scheduler-audit
+    to: program:multi-source-token-scheduler-audit
+  - from: multi-source-token-scheduler-sme-review-2026-05-23
+    to: program:multi-source-token-scheduler-sme-review-2026-05-23
+  - from: multi-source-token-scheduler
+    to: program:multi-source-token-scheduler-review
+  - from: review-remediation
+    to: program:review-remediation
+  - from: rc5-2-review-2026-05-23
+    to: program:rc5-2-review-2026-05-23
+  - from: rc3.3-review
+    to: program:rc3.3-review
+  - from: consolidated-2026-05-22
+    to: program:consolidated-2026-05-22
+  - from: from-review-fleet-2026-05-23
+    to: source:review
+
+  # bare kind-shaped → kind:*
+  - from: audit-integrity
+    to: kind:audit-integrity
+  - from: silent-failure
+    to: kind:silent-failure
+  - from: fabrication
+    to: kind:fabrication
+  - from: dead-code
+    to: kind:dead-code
+  - from: immutability
+    to: kind:mutable-frozen
+  - from: tech-debt
+    to: kind:dead-code   # ambiguous; rebin during migration if possible
+  - from: technical-debt
+    to: kind:dead-code
+  - from: refactor
+    to: kind:type-design
+  - from: type-safety
+    to: kind:type-design
+  - from: type-design
+    to: kind:type-design
+  - from: parallel-arrays
+    to: kind:parallel-arrays
+  - from: schema-drift
+    to: kind:audit-integrity
+  - from: thread-safety
+    to: kind:concurrency
+  - from: determinism
+    to: kind:audit-integrity
+  - from: untyped-dict
+    to: kind:type-design
+  - from: protocol-shape
+    to: kind:type-design
+  - from: mutation-testing
+    to: kind:test-coverage
+  - from: test-coverage
+    to: kind:test-coverage
+  - from: test-gap
+    to: kind:test-gap
+  - from: test-quality
+    to: kind:test-coverage
+  - from: framework-gap
+    to: kind:test-coverage
+  - from: security
+    to: kind:security
+  - from: observability
+    to: kind:observability
+  - from: auditability
+    to: kind:audit-integrity
+  - from: correctness
+    to: kind:type-design
+  - from: validation
+    to: kind:config-validation
+  - from: drift
+    to: kind:audit-integrity
+  - from: replay
+    to: kind:recovery
+  - from: review-finding
+    to: source:review
+  - from: eval-finding
+    to: source:eval
+
+# ============================================================
+# Constraints enforced at close-time
+# ============================================================
+constraints:
+  - rule: subsys-required-at-close
+    description: An issue cannot transition to a done category without at least one subsys:* label.
+    exception: Issues with kind:cicd-only or type=meta.
+  - rule: cluster-max-one
+    description: An issue may have at most one cluster:* label (epic grouping).
+  - rule: layer-derives-from-subsys
+    description: layer:* is auto-derivable from the subsys:* value. If both present, must agree.

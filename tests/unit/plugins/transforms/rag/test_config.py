@@ -40,6 +40,17 @@ class TestOutputPrefix:
             RAGRetrievalConfig(**_valid_config(output_prefix="has spaces"))
 
 
+class TestQueryField:
+    def test_valid_identifier_is_stripped(self):
+        config = RAGRetrievalConfig(**_valid_config(query_field=" question "))
+        assert config.query_field == "question"
+
+    @pytest.mark.parametrize("query_field", ["", "   ", "has spaces", "question.text", "class"])
+    def test_rejects_invalid_query_field(self, query_field):
+        with pytest.raises(ValueError, match="query_field"):
+            RAGRetrievalConfig(**_valid_config(query_field=query_field))
+
+
 class TestQueryModes:
     def test_template_and_pattern_mutually_exclusive(self):
         with pytest.raises(ValueError, match="mutually exclusive"):

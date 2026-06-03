@@ -9,8 +9,6 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coalesce_checkpoint import (
@@ -32,7 +30,6 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
-from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -42,8 +39,6 @@ from elspeth.engine.spans import SpanFactory
 if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.tokens import TokenManager
-
-slog = structlog.get_logger(__name__)
 
 COALESCE_CHECKPOINT_VERSION = "1.0"
 
@@ -296,11 +291,6 @@ class CoalesceExecutor:
             completed_keys=(),
         )
 
-        serialized = checkpoint_dumps(checkpoint.to_dict())
-        size_mb = len(serialized) / 1_000_000
-        if size_mb > 10:
-            raise RuntimeError(f"Coalesce checkpoint size {size_mb:.1f}MB exceeds 10MB limit. Pending joins: {len(pending_entries)}.")
-
         return checkpoint
 
     def restore_from_checkpoint(self, state: CoalesceCheckpointState) -> None:
@@ -466,8 +456,17 @@ class CoalesceExecutor:
         Step position is resolved internally via the injected StepResolver
         from the coalesce point's registered node_id.
 
+        Resume state (attempt offset and checkpoint provenance) is read from the
+        token itself (token.resume_attempt_offset, token.resume_checkpoint_id).
+        The node_state for the arriving branch token is written under the arriving
+        token's token_id — the offset must come from that token, not from a
+        WorkItem-level scalar, so that each token in a multi-branch resume carries
+        its own (possibly distinct) offset.
+
         Args:
-            token: Token arriving at coalesce point (must have branch_name)
+            token: Token arriving at coalesce point (must have branch_name);
+                token.resume_attempt_offset and token.resume_checkpoint_id carry
+                the resume state for this specific arriving token.
             coalesce_name: Name of the coalesce configuration
 
         Returns:
@@ -513,6 +512,8 @@ class CoalesceExecutor:
                 run_id=self._run_id,
                 step_index=step,
                 input_data=token.row_data.to_dict(),  # Recorder expects dict
+                attempt=token.resume_attempt_offset,
+                resume_checkpoint_id=token.resume_checkpoint_id,
             )
             error = CoalesceFailureReason(
                 failure_reason=failure_reason,
@@ -576,6 +577,8 @@ class CoalesceExecutor:
             run_id=self._run_id,
             step_index=step,
             input_data=token.row_data.to_dict(),  # Recorder expects dict
+            attempt=token.resume_attempt_offset,
+            resume_checkpoint_id=token.resume_checkpoint_id,
         )
         pending.branches[token.branch_name] = _BranchEntry(
             token=token,
@@ -1020,8 +1023,15 @@ class CoalesceExecutor:
 
             # NOTE: The merged token does NOT get COALESCED recorded here.
             # - Consumed tokens: COALESCED (terminal) - they've been absorbed into the merge
-            # - Merged token: Will get COMPLETED when it reaches a sink, or COALESCED if
-            #   consumed by an outer coalesce (nested coalesce scenario)
+            # - Merged token: its node_state status here is COMPLETED (set above at
+            #   complete_node_state); its TERMINAL token_outcome is recorded later by
+            #   the sink path, with path=COALESCED and sink_name SET (the merged token
+            #   that reaches a sink), or path=COALESCED again if it is consumed by an
+            #   outer coalesce (nested scenario, recorded by that outer executor here
+            #   with sink_name=None). So a non-nested coalesce yields exactly ONE
+            #   (SUCCESS, COALESCED) record with sink_name set — the discriminator
+            #   derive_resume_terminal_status_from_audit uses to count rows_coalesced
+            #   without double-counting the sink_name=None consumed inputs.
             # Recording COALESCED for merged token here would break nested coalesces where
             # the inner merge result becomes a consumed token in the outer merge.
 
@@ -1036,13 +1046,13 @@ class CoalesceExecutor:
                 coalesce_metadata=coalesce_metadata,
                 coalesce_name=coalesce_name,
             )
-        except Exception as merge_exc:
+        except AuditIntegrityError:
             # If the audit database is already compromised, don't write more
             # records to it — leaving node states as pending is more honest
-            # than writing FAILED to an untrustworthy database.
-            if isinstance(merge_exc, AuditIntegrityError):
-                raise
-
+            # than writing FAILED to an untrustworthy database. Re-raise without
+            # recording any further FAILED states to the untrustworthy DB.
+            raise
+        except Exception as merge_exc:
             # Generate error_hash once for all branches (consistent audit trail).
             error_hash = hashlib.sha256(str(merge_exc).encode()).hexdigest()[:16]
 
@@ -1052,45 +1062,37 @@ class CoalesceExecutor:
                 # (Happy path already recorded COALESCED outcome for these.)
                 if entry.state_id in completed_state_ids:
                     continue
-                try:
-                    # Pass metadata_for_audit so union_collision_policy=fail's full
-                    # collision record (field_origins + collision_values) reaches the
-                    # Landscape audit trail via context_after. None is acceptable for
-                    # early failures (e.g., contract merge) where no metadata exists.
-                    self._execution.complete_node_state(
-                        state_id=entry.state_id,
-                        status=NodeStateStatus.FAILED,
-                        output_data={},
-                        duration_ms=0.0,
-                        error=ExecutionError(
-                            exception=str(merge_exc),
-                            exception_type=type(merge_exc).__name__,
-                            phase="coalesce_merge_cleanup",
-                        ),
-                        context_after=metadata_for_audit,
-                    )
-                    # Record terminal FAILED outcome for consumed token.
-                    # Without this, recovery treats the row as incomplete and
-                    # lineage resolution can't find a terminal token.
-                    if self._data_flow is None:
-                        raise OrchestrationInvariantError(
-                            "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
-                        )
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.UNROUTED,
-                        error_hash=error_hash,
-                    )
-                except Exception as cleanup_exc:
-                    slog.error(
-                        "coalesce_merge_cleanup_failed",
-                        state_id=entry.state_id,
-                        error=str(cleanup_exc),
-                        exc_info=True,
-                    )
+                # Pass metadata_for_audit so union_collision_policy=fail's full
+                # collision record (field_origins + collision_values) reaches the
+                # Landscape audit trail via context_after. None is acceptable for
+                # early failures (e.g., contract merge) where no metadata exists.
+                self._execution.complete_node_state(
+                    state_id=entry.state_id,
+                    status=NodeStateStatus.FAILED,
+                    output_data={},
+                    duration_ms=0.0,
+                    error=ExecutionError(
+                        exception=str(merge_exc),
+                        exception_type=type(merge_exc).__name__,
+                        phase="coalesce_merge_cleanup",
+                    ),
+                    context_after=metadata_for_audit,
+                )
+                # Record terminal FAILED outcome for consumed token.
+                # Without this, recovery treats the row as incomplete and
+                # lineage resolution can't find a terminal token.
+                if self._data_flow is None:
+                    raise OrchestrationInvariantError(
+                        "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
+                    ) from merge_exc
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error_hash=error_hash,
+                )
 
-            # Clean up pending state so recovery doesn't treat this as incomplete.
+            # Clean up pending state only after every cleanup audit write succeeds.
             del self._pending[key]
             self._mark_completed(key)
 

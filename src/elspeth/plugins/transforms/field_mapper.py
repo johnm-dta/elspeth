@@ -13,8 +13,10 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -31,9 +33,12 @@ class FieldMapperConfig(TransformDataConfig):
     Use 'schema: {mode: observed}' for dynamic field handling.
     """
 
-    mapping: dict[str, str] = Field(default_factory=dict)
-    select_only: bool = False
-    strict: bool = False
+    mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping from existing input field names to output field names.",
+    )
+    select_only: bool = Field(default=False, description="When true, emit only fields named in the mapping.")
+    strict: bool = Field(default=False, description="When true, fail if any mapped source field is missing from an input row.")
 
     @model_validator(mode="after")
     def _reject_duplicate_targets(self) -> FieldMapperConfig:
@@ -110,8 +115,9 @@ class FieldMapper(BaseTransform):
     """
 
     name = "field_mapper"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9b8ff6b4d0c4c3e9"
+    source_file_hash: str | None = "sha256:e3ae346ffc76d394"
     config_model = FieldMapperConfig
 
     @classmethod
@@ -269,7 +275,26 @@ class FieldMapper(BaseTransform):
         applied_mappings: dict[str, str] = {}
         for source, target in self._mapping.items():
             if "." in source:
-                value = get_nested_field(row_data, source)
+                # Dotted-path navigation is an operation on Tier-2 row values, not a
+                # type-contract check. Contracts are flat (no nested-shape guarantee),
+                # so a PRESENT non-dict intermediate (e.g. ``user`` is a str when the
+                # mapping expects ``user.name``) is operation-unsafe data, not an
+                # upstream type-contract violation. Route the offending row to on_error
+                # — recorded and attributable — rather than raising and crashing the
+                # whole run on a single malformed nested value. A genuinely absent
+                # intermediate still returns MISSING (handled below), preserving the
+                # strict/non-strict distinction for true absence.
+                try:
+                    value = get_nested_field(row_data, source)
+                except TypeError as exc:
+                    return TransformResult.error(
+                        {
+                            "reason": "type_mismatch",
+                            "field": source,
+                            "error": str(exc),
+                            "message": f"Dotted-path field '{source}' is not navigable on this row: {exc}",
+                        }
+                    )
             elif source in row:
                 value = row[source]
             else:
@@ -323,3 +348,34 @@ class FieldMapper(BaseTransform):
     def close(self) -> None:
         """No resources to release."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="field_mapper",
+                issue_code=None,
+                summary="Rename, drop, or reorder row fields. Stateless and shape-changing — declares new field names in output_schema.",
+                composer_hints=(
+                    "Use 'mapping' to rename; 'drop' to discard; 'include' to whitelist; 'rename_only' to skip drop semantics.",
+                    "Use select_only: true when cleanup means 'save only these fields'; with select_only true, mapping should whitelist exactly the saved output fields.",
+                    "For scraped-content cleanup before a user-facing sink, field_mapper is the only utility transform that actually removes raw fields. Place it immediately before the sink and omit raw content and fingerprint fields from mapping.",
+                    "For web_scrape content enriched by an LLM and saved without raw page bodies, the final topology is source -> web_scrape -> llm -> field_mapper(cleanup) -> sink. A JSON sink named cleanup is not a cleanup transform.",
+                    "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore this field_mapper immediately before the sink.",
+                    "A cleanup stream name is not a cleanup node; if an upstream producer points to a cleanup stream, create a field_mapper that consumes it before stopping, and do not offer to repair it later.",
+                    "For final cleanup routing, set the upstream LLM or scraper on_success to the cleanup mapper, and set the cleanup mapper on_success to the sink.",
+                    "If an LLM routes directly to a JSON sink whose name sounds like cleanup, cleanup is still missing; the LLM passes through raw scrape fields until this field_mapper whitelists them.",
+                    "If a final cleanup field_mapper points to an intermediate stream with no downstream node, route the mapper directly to the existing sink by setting on_success to the sink name or by using an on_success edge.",
+                    "When a final cleanup field_mapper points to an intermediate stream with no downstream node, do not remove the cleanup mapper or output to clear the validation error.",
+                    "A field_mapper before web_scrape or before raw scraped fields exist cannot satisfy scraped-content cleanup; source-shaping mappers are separate from final cleanup.",
+                    "Final cleanup should preserve requested enrichment, extraction, scoring, or LLM response fields unless the user explicitly asked to drop them.",
+                    "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields, that request is the authorization and requirement to add the cleanup field_mapper; do not ask whether to add cleanup later.",
+                    "For scraped-content cleanup review, use user_term 'drop_raw_html_fields' even when the configured raw body field is named content, html, raw_html, or another page-body field.",
+                    "When field_mapper implements a cleanup, retention, drop, or output-shaping choice that the user did not spell out mechanically, stage a pipeline_decision interpretation requirement on that field_mapper node before set_pipeline and request its review after mutation succeeds.",
+                    "The pipeline_decision review records the row-shaping decision for audit; it is not permission to omit the cleanup node.",
+                    "naming a sink or output like cleanup, filtered, or final does not clean data; only a field_mapper row-shaping transform changes which fields reach the sink.",
+                    "Renames are pure transformations — no coercion happens here. Use type_coerce for type changes.",
+                    "If the downstream consumer expects a specific field name not in the source, field_mapper is the right tool.",
+                ),
+            )
+        return None

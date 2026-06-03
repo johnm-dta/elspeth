@@ -13,7 +13,8 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_yaml
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
 def _make_linear_pipeline() -> CompositionState:
@@ -178,6 +179,113 @@ def _make_fork_coalesce_pipeline() -> CompositionState:
 
 
 class TestGenerateYaml:
+    def test_generate_pipeline_dict_matches_generate_yaml_shape(self) -> None:
+        state = _make_fork_coalesce_pipeline()
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert pipeline_dict == yaml.safe_load(generate_yaml(state))
+        assert set(pipeline_dict) == {"source", "gates", "coalesce", "sinks"}
+
+    def test_generate_pipeline_dict_strips_web_metadata(self) -> None:
+        state = _make_linear_pipeline().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="transform_1",
+                options={"path": "/data/input.csv", "blob_ref": "web-only"},
+                on_validation_failure="quarantine",
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert "blob_ref" not in pipeline_dict["source"]["options"]
+        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+    def test_generate_pipeline_dict_strips_source_authoring_metadata(self) -> None:
+        state = _make_linear_pipeline().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="transform_1",
+                options={
+                    "path": "/data/input.csv",
+                    "blob_ref": "web-only",
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": "llm_generated",
+                        "content_hash": "abc123",
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        yaml_options = yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+        assert SOURCE_AUTHORING_KEY not in pipeline_dict["source"]["options"]
+        assert SOURCE_AUTHORING_KEY not in yaml_options
+        assert yaml_options["schema"] == {"mode": "observed"}
+
+    def test_generate_pipeline_dict_strips_interpretation_authoring_metadata_from_transforms(self) -> None:
+        state = _make_linear_pipeline().with_node(
+            NodeSpec(
+                id="transform_1",
+                node_type="transform",
+                plugin="llm",
+                input="source_out",
+                on_success="main_output",
+                on_error="discard",
+                options={
+                    "prompt_template": "Rate resolved meaning: {{ row.text }}",
+                    PROMPT_TEMPLATE_PARTS_KEY: [{"kind": "text", "text": "ignored"}],
+                    INTERPRETATION_REQUIREMENTS_KEY: [],
+                    "resolved_prompt_template_hash": "sha256-rfc8785-v1:abc123",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        options = pipeline_dict["transforms"][0]["options"]
+
+        assert PROMPT_TEMPLATE_PARTS_KEY not in options
+        assert INTERPRETATION_REQUIREMENTS_KEY not in options
+        assert options["prompt_template"] == "Rate resolved meaning: {{ row.text }}"
+        assert options["resolved_prompt_template_hash"] == "sha256-rfc8785-v1:abc123"
+
+    def test_generate_pipeline_dict_rejects_unknown_node_type(self) -> None:
+        """YAML export must not silently drop nodes outside the closed set."""
+        state = _make_linear_pipeline().with_node(
+            NodeSpec.from_dict(
+                {
+                    "id": "mystery",
+                    "node_type": "bogus",
+                    "plugin": "passthrough",
+                    "input": "source_out",
+                    "on_success": "main_output",
+                    "on_error": "discard",
+                    "options": {},
+                    "condition": None,
+                    "routes": None,
+                    "fork_to": None,
+                    "branches": None,
+                    "policy": None,
+                    "merge": None,
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="Unknown node_type 'bogus' for node 'mystery'"):
+            generate_pipeline_dict(state)
+
     def test_linear_pipeline(self) -> None:
         state = _make_linear_pipeline()
         yaml_str = generate_yaml(state)
@@ -323,6 +431,61 @@ class TestGenerateYaml:
         # Other options should still be present
         assert parsed["source"]["options"]["path"] == "/data/input.txt"
         assert parsed["source"]["options"]["column"] == "line"
+
+    def test_bind_source_mode_stripped_with_blob_ref(self) -> None:
+        """A blob-bound source carries a ``mode: bind_source`` marker alongside
+        ``blob_ref``; both are web-only and must be stripped from engine YAML.
+
+        ``blob_ref`` is dropped by the _WEB_ONLY_OPTION_KEYS filter; ``mode`` is
+        not in that set, so the generator pops it explicitly only when the
+        blob-bind marker is present.
+        """
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="out",
+                options={
+                    "path": "/data/input.txt",
+                    "blob_ref": "20b944e3-fd46-434f-b9a2-4fb508db30f0",
+                    "mode": "bind_source",
+                    "column": "line",
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "blob_ref" not in parsed["source"]["options"]
+        assert "mode" not in parsed["source"]["options"]
+        assert parsed["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["source"]["options"]["column"] == "line"
+
+    def test_mode_retained_when_not_bind_source_marker(self) -> None:
+        """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
+        config and must survive into the YAML — the strip only fires for the
+        blob_ref + ``mode == 'bind_source'`` pair.
+        """
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="out",
+                options={"path": "/data/input.txt", "mode": "observed"},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["source"]["options"]["mode"] == "observed"
 
     def test_on_error_emitted_when_set(self) -> None:
         state = CompositionState(

@@ -6,10 +6,10 @@ infrastructure.
 
 Usage:
     # Direct execution
-    python -m elspeth.mcp.server --database sqlite:///./state/audit.db
+    python -m elspeth.mcp.server --database sqlite:////home/john/elspeth/data/runs/audit.db
 
     # Or as an MCP server
-    elspeth-mcp --database sqlite:///./state/audit.db
+    elspeth-mcp --database sqlite:////home/john/elspeth/data/runs/audit.db
 
 The analyzer logic lives in ``mcp.analyzer`` (facade) and
 ``mcp.analyzers.*`` (domain submodules). This file contains only
@@ -32,7 +32,9 @@ from mcp.types import CallToolResult as CallToolResult
 from mcp.types import TextContent, Tool
 
 from elspeth.contracts.enums import RunStatus
+from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.mcp.analyzer import LandscapeAnalyzer
+from elspeth.mcp.types import OPERATION_STATUS_VALUES, OPERATION_TYPE_VALUES
 
 __all__ = [
     "CallToolResult",
@@ -42,6 +44,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_MCP_STATUS_TOOL_NAME = "get_mcp_status"
+_MCP_SCHEMA_FAILURE_PREFIX = "Landscape MCP server cannot open the configured audit database."
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,12 +189,12 @@ _TOOLS: dict[str, _ToolDef] = {
             "operation_type": {
                 "type": ["string", "null"],
                 "description": "Filter by type",
-                "enum": ["source_load", "sink_write"],
+                "enum": list(OPERATION_TYPE_VALUES),
             },
             "status": {
                 "type": ["string", "null"],
                 "description": "Filter by status",
-                "enum": ["open", "completed", "failed", "pending"],
+                "enum": list(OPERATION_STATUS_VALUES),
             },
             "limit": {"type": "integer", "description": "Max operations (default 100)", "default": 100},
         },
@@ -501,6 +506,73 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return validated
 
 
+def _safe_database_descriptor(database_url: str) -> str:
+    """Return a database URL descriptor safe enough for MCP-visible errors."""
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        parsed = make_url(database_url)
+    except ArgumentError:
+        return "<invalid database URL>"
+
+    if parsed.drivername.startswith("sqlite"):
+        return parsed.render_as_string(hide_password=True)
+
+    user = parsed.username or "<user>"
+    host = parsed.host or "<host>"
+    database = parsed.database or "<database>"
+    return f"{parsed.drivername}://{user}@{host}/{database}"
+
+
+def _redact_database_line(message: str, *, database_url: str) -> str:
+    safe_database = _safe_database_descriptor(database_url)
+    return "\n".join(f"Database: {safe_database}" if line.startswith("Database: ") else line for line in message.splitlines())
+
+
+def _format_schema_startup_failure(exc: SchemaCompatibilityError, *, database_url: str) -> str:
+    details = _redact_database_line(str(exc), database_url=database_url)
+    return (
+        f"{_MCP_SCHEMA_FAILURE_PREFIX}\n\n"
+        f"{details}\n\n"
+        "The MCP transport is still running so this schema/configuration problem can be reported. "
+        f"Call {_MCP_STATUS_TOOL_NAME} and report its text to the user."
+    )
+
+
+def _status_tool() -> Tool:
+    return Tool(
+        name=_MCP_STATUS_TOOL_NAME,
+        description="Report Landscape MCP startup and database schema compatibility status",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    )
+
+
+def _status_result(startup_failure: str | None) -> CallToolResult:
+    if startup_failure is not None:
+        return CallToolResult(
+            content=[TextContent(type="text", text=startup_failure)],
+            isError=True,
+        )
+    return CallToolResult(
+        content=[TextContent(type="text", text="Landscape MCP server is ready; database schema compatibility check passed.")],
+    )
+
+
+def _create_analyzer_or_startup_failure(
+    database_url: str,
+    *,
+    passphrase: str | None,
+) -> tuple[LandscapeAnalyzer | None, str | None]:
+    try:
+        return LandscapeAnalyzer(database_url, passphrase=passphrase), None
+    except SchemaCompatibilityError as exc:
+        return None, _format_schema_startup_failure(exc, database_url=database_url)
+
+
 def create_server(database_url: str, *, passphrase: str | None = None) -> Server:
     """Create MCP server with Landscape analysis tools.
 
@@ -511,8 +583,9 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
     Returns:
         Configured MCP Server
     """
-    server = Server("elspeth-landscape")
-    analyzer = LandscapeAnalyzer(database_url, passphrase=passphrase)
+    analyzer, startup_failure = _create_analyzer_or_startup_failure(database_url, passphrase=passphrase)
+
+    server = Server("elspeth-landscape", instructions=startup_failure)
 
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def list_tools() -> list[Tool]:
@@ -521,18 +594,23 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
         Generated from _TOOLS registry — each tool's description, schema
         properties, and required fields are derived from its _ToolDef entry.
         """
-        return [
+        if startup_failure is not None:
+            return [_status_tool()]
+
+        tools = [_status_tool()]
+        tools.extend(
             Tool(
                 name=name,
                 description=defn.description,
                 inputSchema={
                     "type": "object",
-                    "properties": defn.schema_properties,
+                    "properties": dict(defn.schema_properties),
                     **({"required": list(defn.args.required_str)} if defn.args.required_str else {}),
                 },
             )
             for name, defn in _TOOLS.items()
-        ]
+        )
+        return tools
 
     @server.call_tool()  # type: ignore[untyped-decorator]
     async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult | list[TextContent]:
@@ -542,6 +620,21 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
         ``_validate_tool_args`` checks required fields, types, and defaults.
         The handler is looked up from the ``_TOOLS`` registry.
         """
+        if name == _MCP_STATUS_TOOL_NAME:
+            return _status_result(startup_failure)
+
+        if startup_failure is not None:
+            return CallToolResult(
+                content=[TextContent(type="text", text=startup_failure)],
+                isError=True,
+            )
+
+        if analyzer is None:
+            return CallToolResult(
+                content=[TextContent(type="text", text="Landscape MCP analyzer is unavailable after startup.")],
+                isError=True,
+            )
+
         # Validate arguments at the Tier 3 boundary — immediately,
         # before any of the external data travels into analyzer methods.
         # ValueError/TypeError from validation are the caller's fault.
@@ -693,10 +786,10 @@ Examples:
     elspeth-mcp --database sqlite:///./state/audit.db
 
     # Run with PostgreSQL
-    elspeth-mcp --database postgresql://user:pass@host/dbname
+    elspeth-mcp --database postgresql://user@host/dbname
 
     # Run with SQLCipher-encrypted database
-    export ELSPETH_AUDIT_KEY="my-passphrase"
+    export ELSPETH_AUDIT_KEY="<set-out-of-band>"
     elspeth-mcp --database sqlite:///./state/audit.db --passphrase-env ELSPETH_AUDIT_KEY
 
     # Interactive mode - finds and prompts for databases
@@ -772,8 +865,7 @@ Environment Variables:
         passphrase = os.environ.get(args.passphrase_env)
         if passphrase is None or not passphrase.strip():
             sys.stderr.write(
-                f"Error: environment variable {args.passphrase_env} is not set or is empty.\n"
-                f'Set it with: export {args.passphrase_env}="your-passphrase"\n'
+                "Error: required SQLCipher environment variable is not set or is empty.\nSet that environment variable before retrying.\n"
             )
             sys.exit(1)
 

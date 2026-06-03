@@ -50,7 +50,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 # ---------------------------------------------------------------------------
 # Test doubles — mirror the shapes used by tests/unit/web/composer/test_service.py
@@ -97,6 +97,15 @@ def _empty_state() -> CompositionState:
     )
 
 
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
+
+
 def _mock_catalog() -> MagicMock:
     catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
@@ -114,6 +123,7 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV source",
         json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
     )
     return catalog
 
@@ -125,6 +135,7 @@ def _make_settings(**overrides: Any) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
@@ -243,7 +254,7 @@ async def test_compose_loop_records_success_arg_error_plugin_crash_sequence() ->
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=[
                 success_result,
                 ToolArgumentError(
@@ -350,7 +361,7 @@ async def test_compose_loop_records_assertion_error_before_reraise() -> None:
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=AssertionError("Tier-1 invariant breach"),
         ),
         patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
@@ -370,28 +381,33 @@ async def test_compose_loop_records_assertion_error_before_reraise() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
-    """B1 fix: a non-finite float in a tool result must NOT bypass audit.
+async def test_compose_loop_crashes_when_success_canonical_json_fails() -> None:
+    """Un-canonicalizable SUCCESS-path output is OUR bug — crash, don't launder.
 
-    Prior to the sentinel-canonical fallback inside ``finish_success``,
-    a ToolResult whose ``to_dict()`` produced a non-finite float (or
-    other non-JSON-serializable type) would raise ``ValueError`` from
-    inside the recorder construction, and the success-side
-    ``recorder.record(...)`` call would never fire. The state had
-    already advanced (the loop rebound ``state = result.updated_state``
-    BEFORE the recorder call), so the audit trail lost the dispatch
-    that produced the new state — the worst-case audit-hole shape.
+    ``finish_success`` canonicalizes ``result_payload`` — the output of
+    a composer tool handler (``ToolResult.to_dict()``), which is
+    first-party authored code building structured catalog/state data.
+    The composer-LLM authors tool *arguments* (handled on the ARG_ERROR
+    path), never the handler's *result*. So a non-finite float or other
+    non-JSON-serializable value in that payload means one of *our*
+    handlers produced un-canonicalizable output — a bug in our code, not
+    malformed external data.
 
-    With the helper, ``finish_success`` catches ``(ValueError,
-    TypeError)`` from canonicalization and substitutes a sentinel
-    payload (``{"_canonicalization_error": "<exc class>"}``). The
-    audit row still lands; an auditor can detect the sentinel by
-    parsing ``result_canonical``.
+    Per the trust model, ``canonical_json`` on our own dispatch output is
+    a Tier-1-equivalent act: it must crash on anomaly. The earlier
+    "sentinel-canonical fallback" substituted a degraded sentinel and
+    reported ``status=SUCCESS``, laundering our bug into a clean-looking
+    audit row — a confident wrong answer to an auditor. That fallback was
+    removed; the ``ValueError`` from ``rfc8785.dumps`` (non-finite float,
+    RFC 8785 §3.1) now escapes ``finish_success``. The dispatch
+    plugin-crash machinery captures it (with the full partial-state /
+    tool-invocation story, so no audit hole) and surfaces it as a
+    ``ComposerPluginCrashError`` whose ``__cause__`` is the ``ValueError`` —
+    a loud, auditable crash rather than a fabricated SUCCESS row.
 
     This test substitutes a ToolResult subclass whose ``to_dict()``
-    returns a float ``inf`` (which ``rfc8785.dumps`` rejects per RFC
-    8785 §3.1) and confirms the recorder still captured a SUCCESS
-    invocation.
+    returns a float ``inf`` and confirms the loop crashes rather than
+    recording a sentinel SUCCESS row.
     """
     catalog = _mock_catalog()
     settings = _make_settings()
@@ -408,8 +424,8 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
             return {
                 "success": True,
                 "version": self.updated_state.version,
-                # rfc8785 raises on non-finite floats; this triggers the
-                # sentinel-canonical fallback inside finish_success.
+                # rfc8785 raises on non-finite floats; canonical_json on
+                # our own dispatch output crashes rather than laundering.
                 "non_finite": float("inf"),
             }
 
@@ -437,44 +453,24 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
     )
     turn2 = _make_llm_response(content="Done.")
 
-    # The empty test state has no source/sinks so the post-loop runtime
-    # preflight would fail and replace the assistant text with a
-    # synthetic preflight-failure message. That is correct production
-    # behaviour but orthogonal to the audit invariant we're pinning
-    # here. Stub _runtime_preflight to return a passing ValidationResult
-    # so result.message reflects the LLM's text-only turn unchanged —
-    # matches the discipline already used in TestComposerSingleToolCall.
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             return_value=bad_result,
         ),
+        pytest.raises(ComposerPluginCrashError) as exc_info,
     ):
         mock_llm.side_effect = [turn1, turn2]
-        result = await service.compose("Trigger non-finite payload", [], state)
+        await service.compose("Trigger non-finite payload", [], state)
 
-    # The compose call completed normally — the audit row lands with
-    # a sentinel canonical, the success path returns the mutation,
-    # the LLM gets to produce its text reply.
-    assert result.message == "Done."
-    invocations = result.tool_invocations
-    assert len(invocations) == 1
-    inv = invocations[0]
-    assert inv.status == ComposerToolStatus.SUCCESS
-    assert inv.tool_call_id == "call_with_non_finite"
-    # Sentinel canonical: parsable JSON object carrying the error class
-    # under a reserved key. An auditor reading this back recognises
-    # the sentinel and can correlate with operational logs.
-    assert inv.result_canonical is not None
-    payload = json.loads(inv.result_canonical)
-    assert "_canonicalization_error" in payload
-    # Pin the version-after capture: the success path completed; the
-    # state advanced; the audit row carries the post-mutation version.
-    assert inv.version_after == 2
+    # The canonicalization failure on our own dispatch output surfaces as
+    # a loud crash whose root cause is the rfc8785 ``ValueError`` — never
+    # a laundered SUCCESS row.
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 @pytest.mark.asyncio
@@ -527,7 +523,7 @@ async def test_timeout_after_successful_tool_carries_audit_invocations() -> None
     with (
         patch.object(service, "_call_llm", new=first_tool_then_timeout_llm),
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             return_value=success_result,
         ) as mock_execute_tool,
         pytest.raises(ComposerConvergenceError) as exc_info,
@@ -572,7 +568,7 @@ async def test_preview_runtime_preflight_failure_records_tool_invocation() -> No
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch.object(service, "_runtime_preflight", side_effect=RuntimeError("synthetic runtime preflight bug")),
-        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+        patch("elspeth.web.composer.tool_batch.execute_tool") as mock_execute_tool,
         pytest.raises(ComposerRuntimePreflightError) as exc_info,
     ):
         mock_llm.return_value = turn
@@ -655,7 +651,7 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=asyncio.CancelledError(),
         ),
         patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
@@ -702,12 +698,12 @@ async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() 
         ],
     )
     turn2 = _make_llm_response(content="Recovered.")
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch.object(service, "_runtime_preflight", return_value=passing_preflight),
-        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+        patch("elspeth.web.composer.tool_batch.execute_tool") as mock_execute_tool,
     ):
         mock_llm.side_effect = [turn1, turn2]
         result = await service.compose("Trigger non-finite object arguments", [], state)
@@ -745,12 +741,12 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
         ],
     )
     turn2 = _make_llm_response(content="Recovered.")
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch.object(service, "_runtime_preflight", return_value=passing_preflight),
-        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+        patch("elspeth.web.composer.tool_batch.execute_tool") as mock_execute_tool,
     ):
         mock_llm.side_effect = [turn1, turn2]
         result = await service.compose("Trigger non-finite scalar arguments", [], state)
@@ -924,13 +920,13 @@ class TestComposerDiscoveryAuditPreservesResult:
         # Empty state has no source/sinks; bypass the post-loop runtime
         # preflight as in the existing B1 test (orthogonal to the audit
         # invariant we're pinning).
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 return_value=discovery_result,
             ),
         ):
@@ -1004,13 +1000,13 @@ class TestComposerDiscoveryAuditPreservesResult:
         )
         turn3 = _make_llm_response(content="Cached discovery complete.")
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 return_value=discovery_result,
             ) as mock_execute_tool,
         ):
@@ -1059,153 +1055,6 @@ class TestComposerDiscoveryAuditPreservesResult:
         elif tool_name == "get_plugin_schema":
             assert hit_payload["data"]["name"] == "csv"
             assert hit_payload["data"]["json_schema"] == {"title": "Config", "properties": {}}
-
-
-@pytest.mark.asyncio
-async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> None:
-    """elspeth-281f259235 diagnostic upgrade: sentinel records payload top-level keys.
-
-    On the genuinely-non-canonicalizable fallback path (non-finite
-    floats, future unsupported types), the sentinel now includes
-    ``_payload_keys`` — a sorted list of the failed payload's
-    top-level keys. This is bounded, leak-safe schema metadata that
-    lets an auditor identify the failure shape (discovery-tool
-    result vs compose-state mutation vs malformed args) without
-    correlating with operational logs.
-
-    The companion test
-    ``test_compose_loop_records_success_when_canonical_json_fails``
-    above pins that the sentinel still fires for non-finite floats;
-    this test pins the new diagnostic shape on top of that.
-    """
-    catalog = _mock_catalog()
-    settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
-    state = _empty_state()
-
-    mutated_state = replace(state, version=2)
-
-    class _NonCanonicalizableResult(ToolResult):
-        def to_dict(self) -> dict[str, Any]:
-            return {
-                "success": True,
-                "version": self.updated_state.version,
-                "non_finite": float("inf"),
-            }
-
-    bad_result = _NonCanonicalizableResult(
-        success=True,
-        updated_state=mutated_state,
-        validation=ValidationSummary(
-            is_valid=True,
-            errors=(),
-            warnings=(),
-            suggestions=(),
-            semantic_contracts=(),
-        ),
-        affected_nodes=(),
-    )
-
-    turn1 = _make_llm_response(
-        tool_calls=[
-            {
-                "id": "call_with_non_finite",
-                "name": "set_metadata",
-                "arguments": {"patch": {"name": "Sentinel diagnostic"}},
-            }
-        ],
-    )
-    turn2 = _make_llm_response(content="Done.")
-
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
-
-    with (
-        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
-        patch.object(service, "_runtime_preflight", return_value=passing_preflight),
-        patch(
-            "elspeth.web.composer.service.execute_tool",
-            return_value=bad_result,
-        ),
-    ):
-        mock_llm.side_effect = [turn1, turn2]
-        await service.compose("Trigger diagnostic", [], state)
-
-    # No-arg gating to keep the structural assertions self-contained;
-    # the recorder is reachable via the result's tool_invocations
-    # attribute on the success path.
-    # (The compose() returned normally; sentinel landed in audit row.)
-    # Read the recorder buffer indirectly by re-running the flow with
-    # a SpyRecorder if needed; the simpler path is to read the
-    # ComposerResult.tool_invocations on success — which the
-    # async-with above didn't capture. Use the same SpyRecorder
-    # pattern as test_compose_loop_records_assertion_error_before_reraise.
-
-    # Re-run with recorder spy to read the buffered invocation directly
-    # (simpler than re-wiring the success-path return value).
-    captured_recorder: dict[str, Any] = {}
-    real_buffering_recorder = __import__("elspeth.web.composer.audit", fromlist=["BufferingRecorder"]).BufferingRecorder
-
-    class _SpyRecorder(real_buffering_recorder):  # type: ignore[misc, valid-type]
-        def __init__(self) -> None:
-            super().__init__()
-            captured_recorder["instance"] = self
-
-    service2 = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
-    state2 = _empty_state()
-
-    with (
-        patch.object(service2, "_call_llm", new_callable=AsyncMock) as mock_llm2,
-        patch.object(service2, "_runtime_preflight", return_value=passing_preflight),
-        patch(
-            "elspeth.web.composer.service.execute_tool",
-            return_value=bad_result,
-        ),
-        patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
-    ):
-        mock_llm2.side_effect = [turn1, turn2]
-        await service2.compose("Trigger diagnostic", [], state2)
-
-    spy = captured_recorder["instance"]
-    invocations = spy.invocations
-    assert len(invocations) == 1
-    inv = invocations[0]
-    assert inv.status == ComposerToolStatus.SUCCESS
-    assert inv.result_canonical is not None
-    payload = json.loads(inv.result_canonical)
-
-    # Sentinel still fires for genuine canonicalization failures.
-    assert "_canonicalization_error" in payload
-
-    # New diagnostic: top-level keys of the failed payload, sorted.
-    # Pinned exactly so a future regression that drops the diagnostic
-    # or echoes raw values fails this test loudly.
-    assert payload["_payload_keys"] == sorted(["success", "version", "non_finite"])
-
-    # Leak-prevention: the non-finite-float fail-closed path is caught
-    # *inside* :func:`elspeth.core.canonical._normalize_value` (the
-    # Tier-3 normalization stage that runs before rfc8785), which
-    # raises a plain ``ValueError`` whose message *interpolates the
-    # offending float value* (``f"Cannot canonicalize non-finite
-    # float: {obj}. Use None…"``). For arbitrary payloads ``{obj}``
-    # could be a Tier-3 row value (e.g. a Decimal carrying a
-    # user-controlled number), so the allowlist in
-    # :func:`build_canonicalization_sentinel` MUST exclude the detail
-    # field for non-rfc8785 ``ValueError``. This test pins that
-    # exclusion: ``_canonicalization_detail`` must be absent here.
-    #
-    # If a future change reclassifies non-finite-float detection
-    # downstream of ``_normalize_value`` (so rfc8785 sees the value
-    # and raises ``FloatDomainError`` — a ``CanonicalizationError``
-    # subclass), this assertion would correctly start to fail and
-    # signal the policy reconsideration.
-    assert payload["_canonicalization_error"] == "ValueError"
-    assert "_canonicalization_detail" not in payload, (
-        "Non-rfc8785 ValueError captured exception message — "
-        "potential Tier-3 leak into Tier-1 audit row. The float "
-        "non-finite ValueError from core/canonical.py interpolates "
-        "the offending value into its message; the audit sentinel "
-        "must NOT echo it."
-    )
 
 
 @pytest.mark.asyncio

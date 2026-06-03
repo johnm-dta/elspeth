@@ -30,6 +30,15 @@ if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
 
 
+@dataclass(frozen=True, slots=True)
+class FailedTurnMetadata:
+    """Route-visible metadata for a compose turn whose audit path failed."""
+
+    assistant_message_id: str | None
+    tool_calls_attempted: int
+    tool_responses_persisted: int | None = None
+
+
 # TIER-2: Frozen audit DTO (not a raiseable exception) — records structured error payloads to the Landscape audit trail.
 @dataclass(frozen=True, slots=True)
 class ExecutionError:
@@ -697,7 +706,13 @@ class AuditIntegrityError(Exception):
     and the database must be investigated for corruption or tampering.
     """
 
-    pass
+    def __init__(
+        self,
+        *args: object,
+        failed_turn: FailedTurnMetadata | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.failed_turn = failed_turn
 
 
 # TIER-2: Config-elected enforcement failure (union collision policy = fail). Not a system corruption; pipeline author chose fail-fast on merge conflicts.
@@ -928,6 +943,39 @@ class PluginRetryableError(Exception):
         self.status_code = status_code
 
 
+# TIER-2: Runtime provider readiness failed before row processing; the failure is auditable plugin/runtime evidence, not Tier-1 framework corruption.
+class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
+    """Provider/runtime readiness check failed before row processing."""
+
+    error_class = "pre_flight_failed"
+
+    def __init__(
+        self,
+        *,
+        plugin_name: str,
+        provider: str,
+        cause: BaseException,
+    ) -> None:
+        self.plugin_name = plugin_name
+        self.provider = provider
+        self.cause_type = type(cause).__name__
+        message = (
+            f"{self.error_class}: {plugin_name} provider {provider} failed runtime preflight "
+            f"before row processing: {self.cause_type}: {cause}"
+        )
+        super().__init__(message)
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        """Canonical structured payload for audit/event consumers."""
+        return {
+            "error_class": self.error_class,
+            "plugin_name": self.plugin_name,
+            "provider": self.provider,
+            "cause_type": self.cause_type,
+            "message": str(self),
+        }
+
+
 # TIER-2: Plugin contract violation — plugin bug (row-level failure). Recording FAILED state is accurate; not system corruption. Base class excluded from TIER_1_ERRORS (ADR-008).
 class PluginContractViolation(AuditEvidenceBase, RuntimeError):
     """Raised when a plugin violates its contract with the framework.
@@ -944,9 +992,8 @@ class PluginContractViolation(AuditEvidenceBase, RuntimeError):
     Recovery: Fix the plugin. These errors indicate bugs in plugin code.
 
     Base class accepts a positional message, matching RuntimeError. Subclasses
-    (e.g., PassThroughContractViolation) add structured fields and override
-    to_audit_dict() to contribute them to the audit trail via
-    ExecutionError.context.
+    add structured fields and override to_audit_dict() to contribute them to
+    the audit trail via ExecutionError.context.
     """
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -1049,11 +1096,19 @@ class SinkTransactionalInvariantError(PluginContractViolation):
     """
 
 
+class PassThroughPayload(TypedDict):
+    """Audit payload for pass-through declaration mismatches."""
+
+    static_contract: Required[list[str]]
+    runtime_observed: Required[list[str]]
+    divergence_set: Required[list[str]]
+
+
 @tier_1_error(
     reason="ADR-008: pass-through annotation lie corrupts batch audit fields",
     caller_module=__name__,
 )
-class PassThroughContractViolation(PluginContractViolation):
+class PassThroughContractViolation(DeclarationContractViolation):
     """Raised by TransformExecutor when a passes_through_input=True transform
     drops input fields from its emitted row(s).
 
@@ -1079,6 +1134,16 @@ class PassThroughContractViolation(PluginContractViolation):
         divergence_set: ``input_fields - runtime_observed`` (the dropped fields).
     """
 
+    __slots__ = (
+        "divergence_set",
+        "runtime_observed",
+        "static_contract",
+        "transform",
+        "transform_node_id",
+    )
+
+    payload_schema: ClassVar[type] = PassThroughPayload
+
     def __init__(
         self,
         *,
@@ -1092,12 +1157,21 @@ class PassThroughContractViolation(PluginContractViolation):
         divergence_set: frozenset[str],
         message: str,
     ) -> None:
-        super().__init__(message)
+        super().__init__(
+            plugin=transform,
+            node_id=transform_node_id,
+            run_id=run_id,
+            row_id=row_id,
+            token_id=token_id,
+            payload={
+                "static_contract": sorted(static_contract),
+                "runtime_observed": sorted(runtime_observed),
+                "divergence_set": sorted(divergence_set),
+            },
+            message=message,
+        )
         self.transform = transform
         self.transform_node_id = transform_node_id
-        self.run_id = run_id
-        self.row_id = row_id
-        self.token_id = token_id
         self.static_contract = static_contract
         self.runtime_observed = runtime_observed
         self.divergence_set = divergence_set
@@ -1555,7 +1629,8 @@ class TelemetryExporterError(Exception):
     """Raised when an exporter encounters a configuration or initialization error.
 
     This is raised during exporter setup (configure/initialization), NOT during
-    export operations. Export operations must not raise — they log errors instead.
+    handled export transport failures. Export operations report handled
+    transport failures to TelemetryManager with a False return value.
 
     Attributes:
         exporter_name: Name of the exporter that failed

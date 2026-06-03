@@ -1,6 +1,6 @@
 # ELSPETH Composer Evals — 2026-05-03
 
-This folder contains the raw evidence files for two composer evals run on the same day. Both eval reports live one level up at `notes/composer-*-2026-05-03.md`; this folder is what backs the claims in those reports.
+This folder contains the raw evidence files for two composer evals run on the same day. Both eval reports live one level up at `docs/composer/evidence/composer-*-2026-05-03.md`; this folder is what backs the claims in those reports.
 
 ## Contents
 
@@ -8,7 +8,7 @@ This folder contains the raw evidence files for two composer evals run on the sa
 2026-05-03-composer/
 ├── README.md                 (this file — index)
 ├── basic/                    Basic-mode eval evidence (LLM-driver, well-formed prompts)
-│   ├── REPORT.md             working copy of the basic-mode eval (mirror of notes/composer-eval-basic-2026-05-03.md)
+│   ├── REPORT.md             working copy of the basic-mode eval (mirror of docs/composer/evidence/composer-eval-basic-2026-05-03.md)
 │   ├── tickets.csv           the test CSV used across S2/S3/S3'/S4
 │   ├── openapi.json          OpenAPI snapshot at run time
 │   ├── catalog/              snapshot of GET /api/catalog/{sources,transforms,sinks} and per-plugin /schema
@@ -30,13 +30,13 @@ This folder contains the raw evidence files for two composer evals run on the sa
     └── aggregate.json        cross-scenario summary table
 ```
 
-## Companion documents (one level up in `notes/`)
+## Companion documents
 
 | Document | Purpose |
 |---|---|
-| `composer-fieldreport-2026-05-03.md` | Boss-facing field report ("the brief") |
-| `composer-eval-hardmode-2026-05-03.md` | Technical eval report for the hard-mode (persona-driven) eval |
-| `composer-eval-basic-2026-05-03.md` | Technical eval report for the basic-mode (LLM-driver) eval |
+| `docs/composer/evidence/composer-fieldreport-2026-05-03.md` | Boss-facing field report ("the brief") |
+| `docs/composer/evidence/composer-eval-hardmode-2026-05-03.md` | Technical eval report for the hard-mode (persona-driven) eval |
+| `docs/composer/evidence/composer-eval-basic-2026-05-03.md` | Technical eval report for the basic-mode (LLM-driver) eval |
 
 The brief is the document the CTO reads. Both technical reports back specific claims in the brief and reference files in this evidence tree.
 

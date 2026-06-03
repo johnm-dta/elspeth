@@ -46,8 +46,11 @@ def _make_chat_completion(content: str = '{"score": 85, "rationale": "test"}') -
 class _FakeCompletions:
     def __init__(self) -> None:
         self.content = '{"score": 85, "rationale": "test"}'
+        self.error: Exception | None = None
 
     def create(self, **_: Any) -> ChatCompletion:
+        if self.error is not None:
+            raise self.error
         return _make_chat_completion(self.content)
 
 
@@ -73,7 +76,7 @@ class TestMultiQueryLLMSpecific:
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }}",
+                "prompt_template": "{{ row.text_content }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {
@@ -125,7 +128,7 @@ class TestMultiQueryLLMSpecific:
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }}",
+                "prompt_template": "{{ row.text_content }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {
@@ -160,7 +163,7 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }} {{ row.criterion_name }}",
+                "prompt_template": "{{ row.text_content }} {{ row.criterion_name }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {
@@ -208,3 +211,55 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
         assert result.reason["query_index"] == 0
         assert result.reason["raw_response_preview"] == "not valid JSON"
         assert result.reason["discarded_successful_queries"] == 0
+
+    def test_provider_auth_failure_emits_non_retryable_query_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_azure_openai: _FakeAzureOpenAI,
+    ) -> None:
+        """Contract: provider auth failures fail closed through on_error routing."""
+        mock_azure_openai.chat.completions.error = RuntimeError("authentication failed")
+
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "multi_query_failed"
+        assert result.reason["failed_query_name"] == "cs1_test_criterion"
+        assert result.reason["failed_query_index"] == 0
+        assert "authentication failed" in result.reason["error"]
+        assert result.reason["discarded_successful_queries"] == 0
+
+    def test_token_usage_is_recorded_on_success(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+    ) -> None:
+        """Contract: successful multi-query rows carry provider usage metadata."""
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        row = result.row.to_dict()
+        assert row["cs1_test_criterion_llm_response_usage"] == {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        }
+        assert row["cs1_test_criterion_llm_response_model"] == "gpt-4o"

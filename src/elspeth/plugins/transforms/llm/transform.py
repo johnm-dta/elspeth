@@ -25,15 +25,15 @@ from operator import or_
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 import structlog
+from pydantic import BaseModel, TypeAdapter
 from pydantic import Field as PydanticField
-from pydantic import TypeAdapter
 
 from elspeth.contracts import Determinism, TransformErrorReason, TransformResult, propagate_contract
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
-from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import register_value_source_plugin
@@ -42,10 +42,12 @@ from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputP
 from elspeth.plugins.infrastructure.clients.llm import ContextLengthError, LLMClientError
 from elspeth.plugins.infrastructure.pooling import PooledExecutor, RowContext
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.telemetry import make_warn_telemetry_before_start
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.plugins.transforms.llm import (
     _OUTPUT_FIELD_TYPE_TO_SCHEMA,
     _build_augmented_output_schema,
+    _build_llm_output_schema_config,
     _build_multi_query_output_schema,
     _FieldType,
     build_llm_audit_metadata,
@@ -74,12 +76,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.plugin_semantics import OutputSemanticDeclaration
 
 
-def _warn_telemetry_before_start(event: Any) -> None:
-    """Default telemetry callback before on_start() — warns instead of silently dropping."""
-    logger.warning(
-        "telemetry_emit called before on_start() — event dropped",
-        event_type=type(event).__name__,
-    )
+_warn_telemetry_before_start = make_warn_telemetry_before_start(logger)
 
 
 _FINISH_REASON_ERRORS: dict[FinishReason, tuple[str, str]] = {
@@ -1041,8 +1038,9 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "llm"
+    requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:070f87f5e115a2b9"
+    source_file_hash: str | None = "sha256:f0485bad9f8e2eeb"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1118,6 +1116,11 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         return schema
 
     @classmethod
+    def discriminated_variants(cls) -> tuple[str, dict[str, type[BaseModel]]]:
+        """Expose provider variants to composer knob-schema lowering."""
+        return ("provider", {provider: config_cls for provider, (config_cls, _) in _PROVIDERS.items()})
+
+    @classmethod
     def probe_config(cls) -> dict[str, Any]:
         """Minimal no-network config for the ADR-009 forward invariant.
 
@@ -1134,7 +1137,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             "provider": "openrouter",
             "api_key": "probe-key",
             "model": "openai/gpt-4o",
-            "template": "{{ row.llm_probe_text }}",
+            "prompt_template": "{{ row.llm_probe_text }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -1181,6 +1184,9 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     finish_reason=FinishReason.STOP,
                 )
 
+            def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+                del operation_id, model
+
             def close(self) -> None:
                 return None
 
@@ -1219,8 +1225,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         # OpenRouterConfig requires model. So self._config.model is always non-empty.
         self._model = self._config.model
         self._template = PromptTemplate(
-            self._config.template,
-            template_source=self._config.template_source,
+            self._config.prompt_template,
+            template_source=self._config.prompt_template_source,
             lookup_data=self._config.lookup,
             lookup_source=self._config.lookup_source,
         )
@@ -1231,6 +1237,14 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._response_field = self._config.response_field
         self._max_capacity_retry_seconds = self._config.max_capacity_retry_seconds
         self._pool_size = self._config.pool_size
+        # Phase 5b Task 9 — cross-DB hash anchor. ``None`` when this LLM
+        # transform was not staged via an interpretation event; populated
+        # by the session service's ``resolve_interpretation_event`` writer
+        # when the transform's prompt template carried a
+        # ``{{interpretation:<term>}}`` placeholder the user resolved.
+        # Forwarded to every audited LLM call so the Landscape
+        # ``calls.resolved_prompt_template_hash`` column populates.
+        self._resolved_prompt_template_hash = self._config.resolved_prompt_template_hash
 
         # Schema (input — same for both single and multi-query)
         schema_config = self._config.schema_config
@@ -1299,24 +1313,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
             # Output schema config with prefixed fields for DAG contract propagation.
             # INVARIANT: guaranteed_fields must be a superset of declared_output_fields.
-            # This transform builds _output_schema_config manually (not via
-            # _build_output_schema_config) because multi-query field computation
-            # requires prefix interpolation beyond the generic helper's scope.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = set(schema_config.guaranteed_fields or ())
-            output_fields = base_guaranteed | prefixed_guaranteed
-            # Preserve None-vs-empty-tuple semantics: None = abstain, () = explicitly empty.
-            upstream_declared = schema_config.guaranteed_fields is not None
-            if upstream_declared or output_fields:
-                guaranteed_fields_result = tuple(sorted(output_fields))
-            else:
-                guaranteed_fields_result = None
-            self._output_schema_config = SchemaConfig(
-                mode=schema_config.mode,
-                fields=schema_config.fields,
-                guaranteed_fields=guaranteed_fields_result,
-                required_fields=schema_config.required_fields,
-            )
+            self._output_schema_config = _build_llm_output_schema_config(schema_config, prefixed_guaranteed)
 
             # Pydantic output schema with prefixed LLM fields
             # Build extracted_fields mapping: query_name → (field_name, schema_type) tuples
@@ -1352,19 +1350,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             # Output schema config with LLM output fields for DAG contract propagation.
             # INVARIANT: guaranteed_fields must be a superset of declared_output_fields.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = set(schema_config.guaranteed_fields or ())
-            output_fields = base_guaranteed | set(guaranteed)
-            upstream_declared = schema_config.guaranteed_fields is not None
-            if upstream_declared or output_fields:
-                guaranteed_fields_result = tuple(sorted(output_fields))
-            else:
-                guaranteed_fields_result = None
-            self._output_schema_config = SchemaConfig(
-                mode=schema_config.mode,
-                fields=schema_config.fields,
-                guaranteed_fields=guaranteed_fields_result,
-                required_fields=schema_config.required_fields,
-            )
+            self._output_schema_config = _build_llm_output_schema_config(schema_config, guaranteed)
 
             # Pydantic output schema with unprefixed LLM fields
             self.output_schema = _build_augmented_output_schema(
@@ -1483,6 +1469,22 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 content_recording=self._tracing_config.enable_content_recording,
             )
 
+    def runtime_preflight(self, ctx: LifecycleContext) -> None:
+        """Fail fast if the configured LLM provider/model cannot be reached."""
+        if self._provider is None:
+            raise FrameworkBugError("LLMTransform runtime_preflight called before provider initialization")
+        if ctx.operation_id is None:
+            raise FrameworkBugError("LLMTransform runtime_preflight requires an operation audit parent")
+
+        try:
+            self._provider.runtime_preflight(operation_id=ctx.operation_id, model=self._model)
+        except LLMClientError as exc:
+            raise RuntimePreflightFailedError(
+                plugin_name=self.name,
+                provider=self._config.provider,
+                cause=exc,
+            ) from exc
+
     def _create_provider(self) -> LLMProvider:
         """Instantiate the provider with all required dependencies.
 
@@ -1502,6 +1504,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 run_id=self._run_id,
                 telemetry_emit=self._telemetry_emit,
                 limiter=self._limiter,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
         elif isinstance(self._config, OpenRouterConfig):
             return OpenRouterLLMProvider(
@@ -1512,6 +1515,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 run_id=self._run_id,
                 telemetry_emit=self._telemetry_emit,
                 limiter=self._limiter,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
         else:
             raise RuntimeError(f"Unknown config type: {type(self._config).__name__}")
@@ -1566,6 +1570,67 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
         self._recorder = None
         self._shutdown_event = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="llm",
+                issue_code=None,
+                summary="Call an LLM provider (Azure OpenAI or OpenRouter) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
+                composer_hints=(
+                    "Call list_models before pinning 'model:' — deployments don't all ship the same providers.",
+                    "If you create a prompt template from the user's goal, data, or prose instead of copying it verbatim, stage an llm_prompt_template review for the authored prompt text.",
+                    "When you author LLM judgment semantics — a scoring scale, rubric, category meaning, threshold, signal weighting, cutoff, comparison set, or subjective criterion definition — stage a vague_term review on the LLM node before set_pipeline.",
+                    "Measurable adjectives are not exempt: if the user gives the metric/cutoff, use it; if you choose a cutoff such as 'over 6 ft' or a ranking rule such as 'top quartile', review that authored threshold semantics.",
+                    "Prompt-template review is not enough for authored judgment semantics: put both interpretation_requirements in the LLM node options before set_pipeline — one vague_term for the rubric/definition/threshold/category semantics and one llm_prompt_template for the raw prompt.",
+                    "For an authored-judgment vague_term review, use a stable user_term preserving the user's criterion phrase, not the whole task phrase; for an adjective embedded in prose, use the adjective or noun phrase that names the criterion.",
+                    "For an authored-judgment vague_term review, llm_draft must equal the semantics you wrote; only an llm_prompt_template review is incomplete.",
+                    "When repairing or upserting an LLM node, repeat the review preflight; carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements before stopping.",
+                    "Do not stop by saying the rubric is part of the reviewed prompt. If you wrote the scale, label meanings, thresholds, cutoff, comparison rule, tie break, or signals, add the separate vague_term requirement and request its review.",
+                    "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result, that output shape is authored judgement semantics when you chose the scale, class meaning, threshold, or ranking rule.",
+                    "Objective extraction such as identifying primary colours used does not by itself need a vague_term review unless you add subjective scoring, ranking, thresholds, or category semantics.",
+                    "For how <adjective> phrasing, use the adjective itself as user_term unless the user supplied a more specific criterion phrase; do not use the whole how-phrase.",
+                    "Token-usage and model-ID fields are appended automatically as <response_field>_usage / _model — don't hand-add them.",
+                    "If downstream cleanup, sink, mapper, or transform needs the LLM response, guarantee the response_field by name in the LLM node schema. If downstream also needs source or scrape fields that pass through the LLM, also guarantee pass-through fields such as URL or identifier fields.",
+                    "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
+                    "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
+                    "If internet content, public web content, search results, crawled pages, or other untrusted remote text will flow into this LLM, prompt-injection shielding is important: surface this to the user as a strong recommendation.",
+                    "For prompt-injection shielding when untrusted remote text flows into this LLM, recommend azure_prompt_shield or the deployment's equivalent before the LLM; continuing without it is allowed.",
+                    "For prompt-injection shielding when untrusted remote text flows into this LLM, recommendation is not permission to add a node automatically — do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
+                    "If the workflow proceeds without an authorized prompt shield, surface a pipeline_decision warning on the LLM node with user_term prompt_injection_shield_recommendation.",
+                    "For an unshielded-LLM pipeline_decision warning, use a draft recommending azure_prompt_shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
+                    "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and a prompt_injection_shield_recommendation warning on the same LLM node.",
+                    "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
+                    "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
+                    "This is prompt-injection defense; do not substitute azure_content_safety. Use azure_content_safety only for harmful-content moderation or safety classification.",
+                    "max_concurrency and per_minute_rate_limit interact — neither bounds the other; set both when the provider has hard rate caps.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        # Manual _usage / _model field declared by hand → tell them it's automatic.
+        if "response_field" in config_snapshot and "output_schema" in config_snapshot:
+            response_field = config_snapshot["response_field"]
+            output_schema = config_snapshot["output_schema"]
+            if isinstance(response_field, str) and isinstance(output_schema, Mapping) and "fields" in output_schema:
+                fields = output_schema["fields"]
+                if isinstance(fields, Sequence):
+                    manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
+                    declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
+                    if manual_appendix & declared:
+                        hints.append(
+                            f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from output_schema.fields."
+                        )
+        return tuple(hints)
 
 
 # Register opt-in for value-source compliance: the typed Pydantic config

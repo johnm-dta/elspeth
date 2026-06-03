@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -92,13 +93,23 @@ class BatchDistributionProfile(BaseTransform):
     group when ``group_by`` is configured. ``None`` values are treated as
     missing data. NaN and infinity are type-valid but operation-unsafe, so they
     are excluded from statistics and reported separately.
+
+    Phase 6A B6 — opts into Phase 6B's narrative-mode result rendering via
+    ``capability_tags = ("narrative-summary",)``. The frontend reads this tag
+    on the catalog response and, when set, renders the run result as a
+    narrative panel (consuming any Phase 5b interpretation events as an
+    overlay) rather than the default tabular preview. The wire contract for
+    the tag is: the transform's output schema must include a ``summary`` field
+    that the narrative renderer surfaces.
     """
 
     name = "batch_distribution_profile"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:af404628fc32f1f9"
+    source_file_hash: str | None = "sha256:dfff28e93b76f3d9"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
+    capability_tags: tuple[str, ...] = ("narrative-summary",)
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:
@@ -162,6 +173,19 @@ class BatchDistributionProfile(BaseTransform):
     ) -> PluginAssistance | None:
         from elspeth.contracts.plugin_assistance import PluginAssistance
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="batch_distribution_profile",
+                issue_code=None,
+                summary="Aggregate numeric descriptive statistics — mean, stddev, quartiles, optionally per group. Numeric-only; categorical counts go to batch_top_k.",
+                composer_hints=(
+                    "Use batch_distribution_profile under aggregations with a trigger; it summarizes a flushed batch.",
+                    "value_field must be int or float. Strings (theme/category names) belong in batch_top_k, not here.",
+                    "group_by partitions by a categorical field; omit it for a single distribution over all rows.",
+                    "Output is descriptive-statistic summary rows and does not preserve the original row shape.",
+                    "Words like 'distribution', 'theme frequency', 'category counts' usually mean batch_top_k unless the user clearly wants numeric stats.",
+                ),
+            )
         if issue_code != "batch_distribution_profile.value_field.numeric":
             return None
         return PluginAssistance(

@@ -144,10 +144,22 @@ class TestAzureBlobSourceConfig:
         with pytest.raises(PluginConfigError, match="container"):
             _make_source(cfg)
 
+    @pytest.mark.parametrize("container", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_container_raises(self, container: str) -> None:
+        cfg = _base_config(container=container)
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            _make_source(cfg)
+
     def test_empty_blob_path_raises(self) -> None:
         """Empty blob_path raises PluginConfigError."""
         cfg = _base_config(blob_path="")
         with pytest.raises(PluginConfigError, match="blob_path"):
+            _make_source(cfg)
+
+    @pytest.mark.parametrize("blob_path", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_blob_path_raises(self, blob_path: str) -> None:
+        cfg = _base_config(blob_path=blob_path)
+        with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
 
     def test_columns_rejected_for_json(self) -> None:
@@ -221,6 +233,24 @@ class TestAzureBlobSourceCSV:
         assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
         assert rows[1].row["name"] == "bob"
         assert rows[2].row["value"] == "300"
+
+    def test_header_normalization_collision_quarantined_not_crash(self, ctx: PluginContext) -> None:
+        """External CSV header collision in a blob is Tier-3 bad data: quarantined, not crashed.
+
+        ``"User ID"`` and ``"user-id"`` both normalize to ``user_id``. Like the local CSV
+        source, the blob source records the parse-level failure and quarantines a single
+        header row rather than raising an uncaught ValueError that aborts the run.
+        """
+        csv_bytes = b"User ID,user-id,data\n1,2,3\n"
+        source = _make_source(_base_config())
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert rows[0].is_quarantined is True
+        assert rows[0].quarantine_error is not None
+        assert "collision" in rows[0].quarantine_error.lower()
 
     def test_custom_delimiter(self, ctx: PluginContext) -> None:
         """CSV with semicolon delimiter."""
@@ -531,6 +561,46 @@ class TestAzureBlobSourceJSON:
         assert len(rows) == 1
         assert rows[0].row == {"display_name": "Alice", "order_id": 101}
         assert source.get_field_resolution() is not None
+
+    def test_non_object_row_in_json_array_quarantines(self, ctx: PluginContext) -> None:
+        """A non-object element in a JSON array is Tier-3 bad source data: the row
+        is quarantined (recorded + routed), the rest of the array keeps processing.
+
+        Pins the preserved data-fault behaviour after _normalize_row_keys was changed
+        to raise ExternalHeaderError (not plain ValueError) for a non-object row, so
+        _validate_and_yield still quarantines it rather than crashing the run.
+        """
+        data = [{"id": 1}, "not_an_object", {"id": 2}]
+        source = _make_source(_base_config(format="json"))
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+            rows = list(source.load(ctx))
+
+        valid = [r for r in rows if not r.is_quarantined]
+        quarantined = [r for r in rows if r.is_quarantined]
+        assert len(valid) == 2
+        assert len(quarantined) == 1
+        assert "Expected JSON object" in quarantined[0].quarantine_error
+
+    def test_json_field_mapping_collision_crashes_not_quarantines(self, ctx: PluginContext) -> None:
+        """A field_mapping that collapses two distinct fields into one final name is a
+        CONFIG fault (ours), not bad source data: it must crash, not be quarantined.
+
+        Here field_mapping maps 'a' -> 'x' while the row also carries a passthrough
+        'x', so resolve_field_names raises a plain ValueError ('field_mapping creates
+        collision'). After narrowing _validate_and_yield to catch only the Tier-3
+        ExternalHeaderError marker, this config ValueError propagates and crashes —
+        mirroring the CSV header path (which lets the same plain ValueError escape).
+        Previously the broad `except ValueError` masked it as a per-row quarantine.
+        """
+        data = [{"a": 1, "x": 2}]
+        source = _make_source(_base_config(format="json", field_mapping={"a": "x"}))
+
+        with (
+            patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())),
+            pytest.raises(ValueError, match="collision"),
+        ):
+            list(source.load(ctx))
 
 
 # ---------------------------------------------------------------------------

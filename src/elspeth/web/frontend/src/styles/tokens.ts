@@ -44,10 +44,3 @@ export const VALIDATION_COLORS = {
   invalid: "var(--color-error)",
   unchecked: "var(--color-status-pending)",
 };
-
-export const VALIDATION_BACKGROUNDS = {
-  valid: "var(--color-success-bg)",
-  warning: "var(--color-warning-bg)",
-  invalid: "var(--color-error-bg)",
-  unchecked: "rgba(122, 154, 154, 0.1)",
-};

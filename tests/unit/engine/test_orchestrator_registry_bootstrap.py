@@ -152,12 +152,17 @@ def test_bootstrap_fails_when_specific_contract_conditionally_skipped(_isolate_b
 
     from elspeth.contracts.declaration_contracts import (
         DeclarationContract,
+        DeclarationContractViolation,
         implements_dispatch_site,
     )
+
+    class _DummyViolation(DeclarationContractViolation):
+        payload_schema = _DummyPayload
 
     class _UnexpectedContract(DeclarationContract):
         name = "unexpected_for_c2_test"
         payload_schema: type = _DummyPayload
+        violation_class: type[_DummyViolation] = _DummyViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -210,12 +215,17 @@ def test_bootstrap_fails_when_extra_contract_registered(_isolate_both_registries
 
     from elspeth.contracts.declaration_contracts import (
         DeclarationContract,
+        DeclarationContractViolation,
         implements_dispatch_site,
     )
+
+    class _DummyViolation(DeclarationContractViolation):
+        payload_schema = _DummyPayload
 
     class _UnexpectedContract(DeclarationContract):
         name = "extra_not_in_manifest"
         payload_schema: type = _DummyPayload
+        violation_class: type[_DummyViolation] = _DummyViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -311,12 +321,17 @@ def test_bootstrap_freezes_declaration_registry(_isolate_both_registries) -> Non
 
     from elspeth.contracts.declaration_contracts import (
         DeclarationContract,
+        DeclarationContractViolation,
         implements_dispatch_site,
     )
+
+    class _PostBootstrapViolation(DeclarationContractViolation):
+        payload_schema = _PostBootstrapPayload
 
     class _PostBootstrapContract(DeclarationContract):
         name = "post_bootstrap_contract"
         payload_schema: type = _PostBootstrapPayload
+        violation_class: type[_PostBootstrapViolation] = _PostBootstrapViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False

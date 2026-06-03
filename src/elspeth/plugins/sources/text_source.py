@@ -15,11 +15,12 @@ from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from typing import Any
 
-from pydantic import ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
@@ -42,10 +43,10 @@ def _surrogateescape_line_to_bytes(value: str, encoding: str) -> bytes:
 class TextSourceConfig(SourceDataConfig):
     """Configuration for the plain-text line source plugin."""
 
-    column: str
-    encoding: str = "utf-8"
-    strip_whitespace: bool = True
-    skip_blank_lines: bool = True
+    column: str = Field(description="Pipeline field name that receives each emitted text line.")
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the input file.")
+    strip_whitespace: bool = Field(default=True, description="Whether to trim leading and trailing whitespace from each line.")
+    skip_blank_lines: bool = Field(default=True, description="Whether to drop blank lines after optional whitespace trimming.")
 
     @field_validator("column")
     @classmethod
@@ -70,8 +71,9 @@ class TextSource(BaseSource):
     """Load one output row per text line into a configured column."""
 
     name = "text"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c76a93b112ac51ca"
+    source_file_hash: str | None = "sha256:1fb33ad7cfb6e9f7"
     config_model = TextSourceConfig
     _on_validation_failure: str
 
@@ -196,6 +198,26 @@ class TextSource(BaseSource):
 
         if not self._first_valid_row_processed and self._contract_builder is not None:
             self.set_schema_contract(self._contract_builder.contract.with_locked())
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Reads a plain-text file and emits one row per line into the configured column.",
+                composer_hints=(
+                    "Use text for line-oriented files; it does not parse CSV headers, delimiters, or JSON structures.",
+                    "Set column to the exact downstream field name; every emitted row has that one field.",
+                    "With skip_blank_lines=True, blank lines are discarded and audited instead of emitted as rows.",
+                    "Use strip_whitespace=False when leading or trailing whitespace is meaningful data.",
+                    "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
+                    "If you have been asked to generate text rows yourself (the invented_source path): emit one record per line with no blank padding between rows, and choose a `column` value that names what each line contains (e.g. `url`, `prompt`, `line_text`).",
+                    "When generating text rows yourself, the chosen `column` must be a valid Python identifier and must not be a Python keyword. Declare that column in `schema.fields` or `schema.guaranteed_fields` so downstream nodes can resolve it by name.",
+                    "When generating text rows yourself, do not insert a header line — `text` source treats every non-blank line as a data row.",
+                ),
+            )
+        return None
 
     def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext) -> Iterator[SourceRow]:
         """Validate a line row and quarantine schema failures."""

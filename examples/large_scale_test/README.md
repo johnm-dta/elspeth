@@ -128,8 +128,12 @@ This example is useful for:
 ### Add Transforms
 
 ```yaml
-row_plugins:
-  - plugin: your_transform
+transforms:
+  - name: your_transform_0
+    plugin: your_transform
+    input: gate_in
+    on_success: output
+    on_error: output
     options:
       schema:
         mode: observed

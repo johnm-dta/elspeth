@@ -28,7 +28,7 @@ transforms:
       \ this EXACT JSON format:\n{\n  \"echo_row\": \"<the ROW value>\",\n  \"echo_case\": \"<the CASE value>\",\n  \"echo_criterion\"\
       : \"<the CRITERION value>\",\n  \"echo_word\": \"<the WORD value>\",\n  \"echo_number\": \"<the NUMBER value>\",\n \
       \ \"echo_color\": \"<the COLOR value>\"\n}\n\nCopy the values EXACTLY as provided. Do not add or change anything.\n"
-    template: 'Echo: {{ row.input_1 }}'
+    prompt_template: 'Echo: {{ row.input_1 }}'
     required_input_fields: []
     queries:
       cs1_criterion_a:

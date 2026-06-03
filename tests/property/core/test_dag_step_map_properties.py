@@ -12,7 +12,7 @@ from typing import Any, cast
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
+from elspeth.contracts import Determinism, SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.types import AggregationName, GateName
 from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -24,6 +24,8 @@ from tests.fixtures.plugins import CollectSink, ListSource
 
 class _NoopTransform(_TestTransformBase):
     """Minimal transform used only to construct production-path graphs."""
+
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self, *, name: str) -> None:
         super().__init__()

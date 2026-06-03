@@ -1,0 +1,93 @@
+{
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "revision_reviewed": "rev-5 plan, post rev-4 fix set (uncommitted at review time, committed in same revision as this JSON)",
+  "review_pass": "rev-5",
+  "summary": "First review pass with no BLOCKERs across all four reviewers. The 3-way convergence pattern that drove rev-3 and rev-4 was broken: rev-4's property-test rewrite (type-agnostic path-aware `!=` invariant) is confirmed by Quality and Systems as a genuine structural inversion — the comparison site now uses Python `__ne__` which is defined for every object, so there is no equivalent surface to silently exempt an annotation class via a type filter. All four lanes (Reality, Architecture, Quality, Systems) returned APPROVED_WITH_WARNINGS. Six actionable warnings folded in-revision; four warnings deferred with rationale (see Appendix E of the plan).",
+  "plan_file": "/home/john/elspeth/.worktrees/composer-progress-1a/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md",
+  "plan_branch": "feat/composer-progress-persistence-1a",
+  "plan_head": "b73abd8a + rev-4 + rev-5 in-session edits",
+  "reviewed_at": "2026-05-12T18:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "reviewer_summaries": {
+    "reality":      {"verdict": "APPROVED_WITH_WARNINGS", "blocking": 0, "warnings": 3, "minor": 0,
+                     "rev4_closures": "B1 CLOSED, M1 CLOSED, M2 CLOSED, W1W2 CLOSED, W7 PARTIAL, W8a CLOSED, W8b CLOSED, W8c CLOSED, A2 CLOSED, R-W3 CLOSED"},
+    "architecture": {"verdict": "APPROVED_WITH_WARNINGS", "blocking": 0, "near_blocking": 0, "warnings": 3, "minor": 3,
+                     "rev4_closures": "B1 CLOSED, M1 CLOSED, M2 CLOSED, A2 CLOSED"},
+    "quality":      {"verdict": "APPROVED_WITH_WARNINGS", "blocking": 0, "warnings": 1, "minor": 0,
+                     "rev4_closures": "B1 CLOSED (genuine elimination of silent-pass family, no residual modes after walking through exotic cases), W7 PARTIAL (dual-typo scenario), W8a CLOSED, W8b CLOSED, W8c CLOSED"},
+    "systems":      {"verdict": "APPROVED_WITH_WARNINGS", "blocking": 0, "major": 0, "warnings": 4, "minor": 2,
+                     "rev4_closures": "B1 CLOSED (genuine structural inversion), M1 CLOSED, M2 CLOSED (wave-by-wave grep procedure sound)"}
+  },
+  "rev4_closure_verification": {
+    "B1_property_test_rewrite": {
+      "status": "CLOSED",
+      "convergence": "Quality and Systems independently characterised the rev-4 design as a 'genuine structural inversion' that eliminates the entire silent-pass family, not just the isinstance(str) mode. The Python `__ne__` comparison site has no equivalent of the type filter that prior versions admitted.",
+      "exotic_modes_examined_and_dismissed": [
+        "Container substituted with string sentinel: value_provider(redacted) raises TypeError; no defensive except absorbs it; test fails loudly",
+        "Both raw and redacted None: explicit single allowed skip rule; over-aggressive redaction is out of scope",
+        "Hypothesis generates value equal to summarizer output: false-positive on redactor correctness, not silent-pass; acceptable noise",
+        "sensitive_nodes built once outside @given: deterministic walker; correct"
+      ],
+      "evidence": "Plan body Task 19 property test lines ~1727-1900; six-item implementer cross-check; rev-history banner inside test docstring"
+    },
+    "M1_unconditional_removal": {
+      "status": "CLOSED",
+      "evidence": "Tasks 4, 13, 14 all state REMOVE unconditionally with CLAUDE.md No Legacy Code Policy citation; Done-When adds explicit grep-clean criterion"
+    },
+    "M2_missing_required_paths_grep": {
+      "status": "CLOSED",
+      "evidence": "Task 4 Step 4 'MissingRequiredPaths test-pin update' subsection contains canonical grep command + per-match decision rules; Tasks 13/14 cite Task 4 by reference; test_service.py:367 explicitly assigned to Task 14 (set_pipeline); wave-by-wave execution sound (Task 4 set_source removal does not affect Task 13's matches)"
+    },
+    "W1W2_test_counts":          {"status": "CLOSED", "evidence": "Preflight refreshed with 14,948 / 785 figures verified by live collection on 2026-05-12"},
+    "W7_per_entry_runtime":      {"status": "PARTIAL → CLOSED via rev-5 quality folded fix", "evidence": "Task 16-final-a per-entry smoke; Task 10 sixth assertion (set(sensitive_response_keys) <= set(known_response_keys)) closes the dual-typo gap quality lane identified"},
+    "W8a_optional_scalar_arm":   {"status": "CLOSED", "evidence": "Task 1 test_walk_optional_annotated_scalar_arm; Pydantic 2.13.4 preserves Annotated metadata through Optional unwrap (reality lane verified empirically)"},
+    "W8b_atomicity":             {"status": "CLOSED", "evidence": "Task 7 'Walker atomicity contract' test case with implementation-agnostic sentinel-pattern shape"},
+    "W8c_empty_known_response":  {"status": "CLOSED", "evidence": "Task 7 'Empty known_response_keys' test case with fail-closed sentinel + telemetry counter"},
+    "A2_freeze_elision_comment": {"status": "CLOSED", "evidence": "Task 1 TraversalNode docstring expanded with three-condition design rationale"},
+    "RW3_json_decode_line":      {"status": "CLOSED", "evidence": "Task 17 citation refreshed to service.py:1838-1881, verified by grep against current service.py"}
+  },
+  "blocking_issues": [],
+  "warnings_folded_in_revision": [
+    {"id": "rev5-Q1", "source": "quality", "title": "W7 PARTIAL: dual-typo silent-pass (sensitive_response_keys misspelled and correct key on known_response_keys passthrough)",
+     "closed_by": "Task 10 sixth adequacy assertion: set(policy.sensitive_response_keys) <= set(policy.known_response_keys) per declarative entry, construction-time"},
+    {"id": "rev5-R1", "source": "reality", "title": "W-OPT-PATHS phantom symbol: _TOOL_OPTIONAL_PATHS does not exist in service.py",
+     "closed_by": "Tasks 4 and 13 corrected; speculative reference removed; correction note added"},
+    {"id": "rev5-A1", "source": "architecture", "title": "Nested Sensitive-in-Sensitive container descent unspecified",
+     "closed_by": "Task 1 walker contract: Sensitive marker on container short-circuits descent; new test_walk_short_circuits_under_sensitive_container pins the behaviour"},
+    {"id": "rev5-A2", "source": "architecture", "title": "Hypothesis ResolutionFailed at collection time silently disables parametrize entries",
+     "closed_by": "Task 19 collection-time verification step + Done-When criterion"},
+    {"id": "rev5-S1", "source": "systems", "title": "Empty-container vacuous-pass branch (latent; unreachable under current MANIFEST)",
+     "closed_by": "Hypothesis event() instrumentation added; empty-container ratio observable in test summary"},
+    {"id": "rev5-S2", "source": "systems", "title": "Phase 3 inherits property-test correctness claim without independent integration check at persistence boundary",
+     "closed_by": "Added explicit Phase 3 precondition: end-to-end test driving a non-set_source promoted tool through compose-loop → redaction → chat_messages write asserting canary absence"}
+  ],
+  "warnings_deferred_with_rationale": [
+    {"id": "rev5-A3", "source": "architecture", "title": "Done-When list 22→25 flat items, could be grouped",
+     "disposition": "Stylistic; no mechanical effect; re-evaluate if a future revision adds further items"},
+    {"id": "rev5-S3", "source": "systems", "title": "Done-When manual checkbox enforcement",
+     "disposition": "Out of scope for plan-doc edits; mechanical enforcement would require a separate test_phase2_done_when.py meta-test workstream"},
+    {"id": "rev5-S4", "source": "systems", "title": "Bulk-editorial PR clears single label-gate check (rev-3 N6 / rev-4 S5 carry-forward)",
+     "disposition": "Documented known limitation; operator is sole PR author, risk bounded in practice"},
+    {"id": "rev5-R-minor", "source": "reality", "title": "Test count presentation: 14948 selection vs 14951 raw collection",
+     "disposition": "Counts are accurate for the cited commands; preflight prose says verify zero failures not exact count"}
+  ],
+  "convergence_findings": [
+    {
+      "finding": "Property test rev-4 design is a structural inversion of the prior failure-mode family",
+      "reviewers_converged": ["quality", "systems"],
+      "confidence": "high",
+      "treatment": "Both lanes independently arrived at 'genuine structural inversion' language. The rev-3/rev-4 pattern of converging at the same line range is BROKEN at this pass.",
+      "pattern_note": "First review pass since this plan's history began that has no convergent silent-pass mode in the property test region. Each fix between rev-3 and rev-5 reduced the comparison-site surface: rev-3 removed ad-hoc path parsing; rev-4 removed isinstance/None-skip/except filters; rev-5 hardened against latent modes (empty container, nested Sensitive). The final invariant uses Python __ne__ which has no operator-level filter."
+    }
+  ],
+  "recommendations_for_implementer": [
+    "Read Appendices C, D, E IN ORDER before editing Task 19's property test. The institutional memory chain is: rev-2 string-substring shape → rev-3 path-traversal fix → rev-4 isinstance-filter family → rev-5 type-agnostic !=. Editing the test without reading this chain risks re-introducing a closed silent-pass mode.",
+    "The six-item implementer cross-check appended to Task 19's task body is load-bearing. A code-quality reviewer signing off without re-checking each item is a process gap (cited in the task body itself).",
+    "The collection-time verification step (`pytest --collect-only -q`) MUST run before the property-test commit. Hypothesis `ResolutionFailed` at collection time disables a parametrize entry without an obvious signal."
+  ],
+  "next_steps": {
+    "required_before_execution": [],
+    "strongly_recommended_before_execution": [],
+    "rev6_review_scope": "If a future rev-6 review is requested before Phase 2 implementation begins, it should be a focused re-check of (a) Task 10 sixth adequacy assertion correctness, (b) Task 1 short-circuit test, and (c) Task 19 event() instrumentation — the three structural additions in rev-5. No reviewer flagged a region needing broad rework, so a full 4-reviewer pass is not required."
+  }
+}

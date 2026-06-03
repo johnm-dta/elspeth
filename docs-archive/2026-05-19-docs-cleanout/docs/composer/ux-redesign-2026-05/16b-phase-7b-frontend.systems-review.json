@@ -1,0 +1,226 @@
+{
+  "review_type": "systems",
+  "plan": "16b-phase-7b-frontend.md",
+  "reviewer": "systems-thinking agent",
+  "date": "2026-05-17",
+  "verdict": "NO-GO",
+  "verdict_rationale": "Two blockers are independently sufficient for NO-GO. First: the frontend audit-characteristics vocabulary diverges from the finalized 16a backend allowlist — three flags in 16a's canonical 13-member set are absent from 16b's metadata table, and one flag in 16b's table uses a name 16a's round-2 review explicitly corrected. The mismatch silently degrades the display for ~23% of the vocabulary. Second: removing `onCloseDrawer` from `PluginCardProps` without updating its sole production call site in `CatalogDrawer.tsx` will cause `tsc --noEmit` to fail; the plan's 'Expected: PASS' at Task 5 Step 5 is wrong, and the fix is not covered by 16c's scope.",
+
+  "dependency_chain": {
+    "changed_components": [
+      "src/elspeth/web/frontend/src/types/index.ts",
+      "src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx",
+      "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx",
+      "src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.ts (new)",
+      "src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.tsx (new)",
+      "src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx (new)"
+    ],
+    "dependency_map": [
+      "PluginCard.tsx (rewritten)",
+      "  consumed by → CatalogDrawer.tsx (NOT modified in 16b)",
+      "    consumed by → InspectorPanel (parent mount point)",
+      "  exports → PREFILL_CHAT_INPUT_EVENT",
+      "    consumed by → ChatInput.tsx (NOT modified in 16b)",
+      "    consumed by → InlineChatSourceEntry.tsx (16c, new)",
+      "auditCharacteristics.ts (new, vocabulary table)",
+      "  consumed by → AuditCharacteristicIcon.tsx",
+      "    consumed by → PluginCard.tsx",
+      "    consumed by → FilterChipStrip.tsx (16c, new)",
+      "  KNOWN_AUDIT_FLAGS must match → 16a VALID_AUDIT_CHARACTERISTICS (Python backend)"
+    ],
+    "ripple_risk": "High"
+  },
+
+  "findings": [
+    {
+      "id": "SYS-001",
+      "severity": "critical",
+      "title": "Frontend audit-characteristics vocabulary diverges from 16a canonical allowlist",
+      "category": "Cross-slice schema drift",
+      "archetype": "Tragedy of the Commons — each slice updates its own vocabulary; no mechanical gate keeps them in sync",
+      "evidence": {
+        "backend_allowlist_source": "16a-phase-7a-backend.md:1181-1197",
+        "backend_13_members": [
+          "io_read", "io_write", "external_call", "deterministic", "seeded", "non_deterministic",
+          "provenance", "retention", "quarantine", "coerce", "signed", "network", "credentials"
+        ],
+        "frontend_table_source": "16b-phase-7b-frontend.md:482-590",
+        "frontend_11_members": [
+          "deterministic", "seeded", "io_read", "io_write", "external_call", "non_deterministic",
+          "quarantine", "coerce", "emits_provenance", "signed", "credentials"
+        ],
+        "in_backend_not_frontend": ["provenance", "retention", "network"],
+        "in_frontend_not_backend": ["emits_provenance"],
+        "prior_correction_missed": "16a review history (16a-phase-7a-backend.md:2323) explicitly states: 'Corrected test fixture emits_provenance → provenance to match 08-catalog-reshape.md authoritative vocabulary'. That fixup landed in 16a but 16b was never resynced."
+      },
+      "failure_mode": {
+        "silent": "Backend emits flag strings 'provenance', 'retention', 'network' (all in 16a's allowlist, all authored on boundary plugins). Frontend lookupAuditCharacteristic() returns null for each. Renders as grey .audit-icon-unknown chips with raw flag text. The plan's forward-compatibility path was designed for future unknown flags; here it masks a present misalignment. No test failure — the 'unknown chip is forward-compatible' guard swallows the signal.",
+        "loud": "None. The unknown-chip fallback is specifically designed to not crash, so this is a pure silent degradation path.",
+        "severity_justification": "23% of the vocabulary (3 of 13 members) renders incorrectly at staging smoke. The demo canonical test case (CSV source) annotated with 'provenance' and 'quarantine' as declared audit_characteristics in 16a Task 5 will show 'provenance' as a grey unknown chip, not its intended 'extra provenance' icon. Directly affects the operator's standard demo prompt."
+      },
+      "fix": "In 16b Task 2 Step 3: (1) Replace flag 'emits_provenance' with 'provenance' throughout auditCharacteristics.ts and auditCharacteristics.test.ts. (2) Add entries for 'retention' and 'network'. The 16b reality review at line 1359 already made the network→external_call correction once; the provenance/retention gap is a second residual drift that was not caught in either of 16b's two reality reviews."
+    },
+    {
+      "id": "SYS-002",
+      "severity": "critical",
+      "title": "Removing onCloseDrawer from PluginCardProps leaves CatalogDrawer.tsx with a TypeScript excess-property error",
+      "category": "Stranded call site — prop removed from interface, caller not updated",
+      "archetype": "Shifting the Burden — 16b removes the prop, 16c rewrites CatalogDrawer, neither plan explicitly owns the cleanup of the intermediate broken state",
+      "evidence": {
+        "current_caller": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:359",
+        "current_caller_code": "onCloseDrawer={onClose}",
+        "prop_removed_in": "16b-phase-7b-frontend.md:62-66 (scope statement), implemented in Task 5 Step 3 (new PluginCardProps interface has no onCloseDrawer)",
+        "catalogdrawer_not_in_16b_file_list": "16b-phase-7b-frontend.md:129-156 — CatalogDrawer.tsx is not in Modified list",
+        "16c_coverage_gap": "16c-phase-7c-frontend-integration.md:737-929 (Task 3 implementation) shows the CatalogDrawer rewrite but never renders <PluginCard> — the rewritten snippet only shows InlineChatSourceEntry and pluginList.map stubs. The onCloseDrawer cleanup at the call site is not explicitly stated anywhere in 16b or 16c."
+      },
+      "failure_mode": {
+        "silent": "None. TypeScript excess-property check on JSX attributes rejects unknown props passed to a component interface. tsc --noEmit will fail.",
+        "loud": "Task 5 Step 5 'npx tsc --noEmit' fails with: 'Type { ... onCloseDrawer: () => void; } is not assignable to type IntrinsicAttributes & PluginCardProps. Object literal may only specify known properties, and onCloseDrawer does not exist in type PluginCardProps'. Plan states 'Expected: PASS' — this is incorrect.",
+        "severity_justification": "Compile failure blocks the Task-5 regression sweep from passing. If 16c is treated as the fix, the gap needs to be explicit in 16c's scope — currently it is not. Between 16b merge and 16c merge the frontend build is broken."
+      },
+      "fix": "16b Task 5 must also update CatalogDrawer.tsx line 359 to remove the onCloseDrawer prop from the <PluginCard> render, and add CatalogDrawer.tsx to the Task-5 commit. The plan currently says 'Files: Modify PluginCard.tsx, Modify PluginCard.test.tsx' — CatalogDrawer.tsx needs to be added to Task 5's file list. Alternatively, defer to 16c but make the 16c task description explicitly list the onCloseDrawer cleanup as a step."
+    },
+    {
+      "id": "SYS-003",
+      "severity": "high",
+      "title": "No mechanical parity gate between backend VALID_AUDIT_CHARACTERISTICS and frontend KNOWN_AUDIT_FLAGS",
+      "category": "Missing feedback loop — vocabulary drift has no detection circuit",
+      "archetype": "Limits to Growth — the vocabulary starts aligned, but each independent backend addition creates a drift opportunity with no circuit breaker",
+      "evidence": {
+        "backend_gate": "16a-phase-7a-backend.md line ~1129: test_all_plugin_audit_characteristics_are_valid asserts declared strings are members of VALID_AUDIT_CHARACTERISTICS",
+        "frontend_gap": "16b-phase-7b-frontend.md Task 2 tests (lines 383-434) test that specific flags return non-null, but do NOT assert that KNOWN_AUDIT_FLAGS is a superset of the backend allowlist. The forward-compatibility 'null is valid' design masks the gap."
+      },
+      "failure_mode": {
+        "silent": "When 16a adds a 14th characteristic to VALID_AUDIT_CHARACTERISTICS, the frontend renders it as the grey unknown chip without any test failure. The drift accumulates silently across phases.",
+        "loud": "None — the forward-compatibility path never crashes.",
+        "severity_justification": "SYS-001 proves this scenario is not hypothetical: the drift has already happened in the current plan. Without a gate, it will recur. High severity because the failure is silent and the pattern is established."
+      },
+      "fix": "Add a test to auditCharacteristics.test.ts that imports the backend VALID_AUDIT_CHARACTERISTICS list (or a TypeScript-accessible mirror) and asserts KNOWN_AUDIT_FLAGS is a strict superset. If importing Python is not feasible in the frontend test environment, define a shared constant (e.g. a generated TypeScript file or a manually-maintained mirror constant) and add a CI check that compares it against the Python frozenset. A manual review note in the plan is insufficient — this needs a mechanical gate."
+    },
+    {
+      "id": "SYS-004",
+      "severity": "medium",
+      "title": "TrustTierBadge semantic inversion risk: Tier 3 reads as 'worse' but could read as 'better' without tooltip context",
+      "category": "Cognitive model mismatch — badge semantics are anti-intuitive for non-technical users",
+      "archetype": "Implicit dependency on user mental model matching CLAUDE.md's three-tier framing",
+      "evidence": {
+        "badge_text": "Tier 1, Tier 2, Tier 3 (bare ordinal labels)",
+        "contextual_framing": "16b-phase-7b-frontend.md:826-835 — tooltips explain the tiers correctly",
+        "tooltip_mechanism": "title attribute only (16b plan line 654-660 and TrustTierBadge implementation)",
+        "persona_risk": "Linda persona (non-technical compliance user) does not hover tooltips reliably, does not understand the three-tier ELSPETH model, and will assign natural-language meaning to Tier 1/2/3 ordinals. 'Tier 3' sources can read as 'most capable', 'most complex', or 'most risky' depending on prior frame. CLAUDE.md §Data Manifesto frames tier 3 as 'external data, zero trust' — a negative connotation — while the badge itself is neutral."
+      },
+      "failure_mode": {
+        "silent": "Non-technical users form wrong mental model; no test detects this.",
+        "loud": "None in tests. Surfaces in user interviews or demo.",
+        "severity_justification": "Medium: the tooltips are present and correct, and the badge CSS classes allow visual styling (trust-tier-badge-1/2/3) to reinforce the framing. This is recoverable via color treatment in the CSS pass without code changes."
+      },
+      "fix": "In the CSS pass, ensure tier-3 styling does not use 'warning' or 'danger' red/yellow which would confirm the 'risky' misread. Use neutral or descriptive color treatment (e.g., a distinct border without a valence color). Consider replacing bare 'Tier 1/2/3' text with a short descriptor like 'External boundary' for tier 3. The design doc 08-§"Audit-characteristic icons" uses '✓' and '⚠' iconography which carries its own valence — ensure that framing does not bleed into the tier badge."
+    },
+    {
+      "id": "SYS-005",
+      "severity": "medium",
+      "title": "Removing PluginCard's onCloseDrawer and buildInsertionPrompt removes ALL action-from-catalog paths, but ChatInput.tsx comment still reads 'dispatched by PluginCard Use in pipeline action'",
+      "category": "Stale comment at integration point — misleads maintainers about event ownership",
+      "evidence": {
+        "stale_comment": "src/elspeth/web/frontend/src/components/chat/ChatInput.tsx:63 — '// Listen for prefill events dispatched by PluginCard Use in pipeline action.'",
+        "new_dispatchers_in_16c": "InlineChatSourceEntry.tsx (16c) becomes the only dispatcher after PluginCard.tsx stops dispatching",
+        "16b_scope": "16b-phase-7b-frontend.md:149-155 lists ChatInput.tsx as Not modified"
+      },
+      "failure_mode": {
+        "silent": "The comment survives both 16b and (likely) 16c. A maintainer reading ChatInput.tsx six months from now infers that PluginCard dispatches prefill events and is confused why PluginCard.tsx has no such logic.",
+        "loud": "None in tests.",
+        "severity_justification": "Medium: functional correctness is unaffected. The event contract still works. This is a maintenance debt item, not a functional bug. However, the ELSPETH CLAUDE.md instruction 'Comments are your institutional memory. Treat comments as load-bearing' elevates comment accuracy above normal priority."
+      },
+      "fix": "16b Task 5 Step 3 (or Step 6 commit) should update the ChatInput.tsx comment to describe the new dispatcher: 'Dispatched by InlineChatSourceEntry (catalog drawer) when the synthetic source entry is clicked.' The plan should add ChatInput.tsx to the files touched by Task 5."
+    },
+    {
+      "id": "SYS-006",
+      "severity": "low",
+      "title": "io_write attention-tone icon will flag every sink in the catalog as 'attention'",
+      "category": "Unintended reinforcing signal — visual tone designed for cautionary context applied uniformly",
+      "evidence": {
+        "io_write_tone": "16b-phase-7b-frontend.md:517-520 — flag 'io_write', tone 'attention', tooltip 'Be careful — replay re-applies the side effects'",
+        "sinks_are_io_write": "All sink plugins write I/O by definition; their audit_characteristics will include 'io_write' via the determinism derivation in 16a's _derive_audit_characteristics",
+        "visual_signal": "Every plugin on the Sinks tab will carry a yellow/warning-style io_write chip"
+      },
+      "failure_mode": {
+        "silent": "User scanning the Sinks tab sees every entry carrying an attention icon. May interpret the Sinks tab as 'everything here is risky', reducing confidence in the catalog as a reference surface.",
+        "loud": "None.",
+        "severity_justification": "Low: the icon is accurate (sinks do write I/O; replay implications are real). This is a UX communication issue, not a correctness issue. The tooltip explains the semantics. Mitigated if CSS pass uses a muted rather than prominent attention color for io_write."
+      },
+      "fix": "Consider either (a) demoting io_write to 'positive' tone with an informational framing ('writes output, replay-aware') rather than cautionary, or (b) treating io_write as expected-and-unremarkable for sinks and omitting it from the strip for sink-type plugins. This is a design decision for the CSS pass / 16c."
+    }
+  ],
+
+  "summary": {
+    "blocking_issues": 2,
+    "warnings": 2,
+    "recommendations": 2,
+    "dependency_chain_depth": 3,
+    "potential_feedback_loops": 1,
+    "timing_assumptions": 0,
+    "pattern_matches": [
+      "Tragedy of the Commons (vocabulary drift)",
+      "Shifting the Burden (prop cleanup deferred without explicit ownership)",
+      "Implicit Dependency (frontend trusts backend vocabulary alignment without a gate)"
+    ]
+  },
+
+  "blocking_issues": [
+    {
+      "id": "SYS-001",
+      "short": "auditCharacteristics.ts metadata table diverges from 16a's canonical VALID_AUDIT_CHARACTERISTICS — 'provenance', 'retention', 'network' absent; 'emits_provenance' present instead of 'provenance'. Silent render degradation for ~23% of vocabulary."
+    },
+    {
+      "id": "SYS-002",
+      "short": "Removing onCloseDrawer from PluginCardProps without updating CatalogDrawer.tsx:359 breaks tsc --noEmit. Plan expects PASS at Task 5 Step 5; actual result is a TypeScript excess-property compile error."
+    }
+  ],
+
+  "warnings": [
+    {
+      "id": "SYS-003",
+      "short": "No mechanical parity test between backend VALID_AUDIT_CHARACTERISTICS and frontend KNOWN_AUDIT_FLAGS. The drift that created SYS-001 will recur on every backend vocabulary addition."
+    },
+    {
+      "id": "SYS-004",
+      "short": "TrustTierBadge semantic inversion risk: bare ordinal labels (Tier 1/2/3) without icon-level framing may mislead non-technical personas. Mitigated by CSS pass color choices."
+    }
+  ],
+
+  "recommendations": [
+    {
+      "id": "SYS-005",
+      "short": "Update ChatInput.tsx:63 comment in Task 5 to reflect that PREFILL_CHAT_INPUT_EVENT is dispatched by InlineChatSourceEntry (16c), not PluginCard. Load-bearing comment per CLAUDE.md."
+    },
+    {
+      "id": "SYS-006",
+      "short": "Consider demoting io_write tone from 'attention' to informational, or omitting it for sink-type plugins, to avoid flagging every Sinks-tab entry with a cautionary icon."
+    }
+  ],
+
+  "integration_point_stress": [
+    {
+      "point": "auditCharacteristics.ts vocabulary vs 16a VALID_AUDIT_CHARACTERISTICS",
+      "failure_modes": "Silent render degradation for flags present in backend but absent in frontend table",
+      "plan_coverage": "NO — forward-compatibility path masks the gap; no parity test exists"
+    },
+    {
+      "point": "CatalogDrawer.tsx → PluginCard interface (onCloseDrawer prop)",
+      "failure_modes": "TypeScript excess-property error breaks tsc --noEmit",
+      "plan_coverage": "NO — CatalogDrawer.tsx not in 16b's modified file list; 16c does not explicitly own the cleanup"
+    },
+    {
+      "point": "ChatInput.tsx PREFILL_CHAT_INPUT_EVENT listener",
+      "failure_modes": "Event contract preserved correctly; comment becomes stale",
+      "plan_coverage": "PARTIAL — event export stays, comment not updated"
+    }
+  ],
+
+  "fix_surface": {
+    "task_2_step_3": "Replace 'emits_provenance' with 'provenance'; add 'retention' and 'network' entries to AUDIT_CHARACTERISTICS array. Update auditCharacteristics.test.ts test descriptions to match.",
+    "task_5_file_list": "Add CatalogDrawer.tsx to Task 5 modified files; remove onCloseDrawer={onClose} from the <PluginCard> render at CatalogDrawer.tsx:359.",
+    "task_5_or_later": "Update ChatInput.tsx:63 comment to name InlineChatSourceEntry as the new dispatcher.",
+    "future_gate": "Add a vocabulary parity test in auditCharacteristics.test.ts (or a CI script) asserting KNOWN_AUDIT_FLAGS covers the full backend vocabulary."
+  }
+}

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from elspeth.contracts import SourceRow
+from elspeth.contracts import Determinism, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.infrastructure.base import BaseSource
@@ -15,6 +15,7 @@ from elspeth.plugins.sources.text_source import TextSource
 
 class _StubSource(BaseSource):
     name = "stub"
+    determinism = Determinism.IO_READ
 
     def __init__(self, schema_config: SchemaConfig) -> None:
         super().__init__({})

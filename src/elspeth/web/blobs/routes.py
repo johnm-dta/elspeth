@@ -45,6 +45,19 @@ def _blob_response(record: BlobRecord) -> BlobMetadataResponse:
         created_by=record.created_by,
         source_description=record.source_description,
         status=record.status,
+        # Inline-blob provenance (Phase 5a Task 2.5). The Tier 1 read
+        # guard on ``BlobRecord`` has already validated
+        # ``creation_modality`` against the closed enum; the API surface
+        # uses the wire-form value (Literal alias) for strict-mode
+        # compatibility, so we pass ``.value`` here rather than the enum
+        # instance.
+        creation_modality=record.creation_modality.value,
+        created_from_message_id=record.created_from_message_id,
+        creating_model_identifier=record.creating_model_identifier,
+        creating_model_version=record.creating_model_version,
+        creating_provider=record.creating_provider,
+        creating_composer_skill_hash=record.creating_composer_skill_hash,
+        creating_arguments_hash=record.creating_arguments_hash,
     )
 
 

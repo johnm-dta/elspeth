@@ -20,6 +20,17 @@ export class ComposerPage {
     await this.page.getByLabel("Chat panel").waitFor({ state: "visible" });
   }
 
+  async createSession(_title: string): Promise<void> {
+    await this.page.getByRole("button", { name: /session switcher/i }).click();
+    await this.page.getByRole("menuitem", { name: "+ New session" }).click();
+    await this.waitForChatReady();
+  }
+
+  async sendMessage(content: string): Promise<void> {
+    await this.chatInput().fill(content);
+    await this.page.getByRole("button", { name: "Send message" }).click();
+  }
+
   chatInput(): Locator {
     // ChatInput renders a textarea inside an aria-labelled region. Use the
     // textbox role with the existing label "Message" (or fall back to any

@@ -1,0 +1,12 @@
+[
+  {
+    "column": 4,
+    "file_path": "_fixture_rule.py",
+    "fingerprint": "sink/metadata_gap:missing_description:missing-description",
+    "line": 9,
+    "message": "sink/metadata_gap:missing_description: missing description",
+    "rule_id": "plugin_contract.options_metadata",
+    "severity": "error",
+    "suggestion": null
+  }
+]

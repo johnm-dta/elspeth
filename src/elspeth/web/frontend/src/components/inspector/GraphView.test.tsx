@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { GraphView } from "./GraphView";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
+import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
 
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
@@ -16,6 +17,7 @@ vi.mock("@xyflow/react", () => ({
     fitView,
     onInit,
     fitViewOptions,
+    onNodeClick,
   }: any) => (
     <div
       data-testid="react-flow"
@@ -29,7 +31,12 @@ vi.mock("@xyflow/react", () => ({
       data-fit-view-options={fitViewOptions ? JSON.stringify(fitViewOptions) : ""}
     >
       {nodes?.map((n: any) => (
-        <div key={n.id} data-testid={`node-${n.id}`} style={n.style}>
+        <div
+          key={n.id}
+          data-testid={`node-${n.id}`}
+          style={n.style}
+          onClick={(event) => onNodeClick?.(event, n)}
+        >
           {typeof n.data?.label === "string" ? n.data.label : n.data?.label}
         </div>
       ))}
@@ -136,11 +143,33 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   };
 }
 
+function makeProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "call-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the pipeline.",
+    rationale: "Requested by the current composer turn.",
+    affects: ["graph", "validation", "yaml"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: "event-1",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("GraphView", () => {
   beforeEach(() => {
-    useSessionStore.setState({ compositionState: null });
+    useSessionStore.setState({ compositionState: null, compositionProposals: [] });
     document.documentElement.removeAttribute("style");
   });
 
@@ -157,6 +186,64 @@ describe("GraphView", () => {
     expect(screen.getByText("classify")).toBeInTheDocument();
     // The plugin name
     expect(screen.getByText("llm_transform")).toBeInTheDocument();
+  });
+
+  it("renders a pending proposal pill when proposal affects graph", () => {
+    useSessionStore.setState({
+      compositionState: makeState({
+        nodes: [
+          makeNode({
+            id: "classify",
+            node_type: "transform",
+            plugin: "llm_transform",
+          }),
+        ],
+      }),
+      compositionProposals: [makeProposal()],
+    });
+
+    render(<GraphView />);
+
+    expect(screen.getByText("pending #1")).toBeInTheDocument();
+  });
+
+  it("opens a structured plugin configuration panel when a graph node is clicked", async () => {
+    const user = userEvent.setup();
+    useSessionStore.setState({
+      compositionState: makeState({
+        nodes: [
+          makeNode({
+            id: "colour_lookup",
+            node_type: "transform",
+            plugin: "llm",
+            options: {
+              prompt: "Find colours",
+              output_schema: {
+                fields: ["url", "colours"],
+              },
+            },
+          }),
+        ],
+      }),
+    });
+
+    render(<GraphView />);
+    await user.click(screen.getByTestId("node-colour_lookup"));
+
+    const panel = screen.getByRole("complementary", {
+      name: /colour_lookup configuration/i,
+    });
+    expect(panel).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("heading", { name: /colour_lookup config/i }),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("llm")).toBeInTheDocument();
+    expect(within(panel).getByText("prompt")).toBeInTheDocument();
+    expect(within(panel).getByText("Find colours")).toBeInTheDocument();
+    expect(within(panel).getByText("output_schema")).toBeInTheDocument();
+    expect(within(panel).getByText("fields")).toBeInTheDocument();
+    expect(within(panel).getByText("url")).toBeInTheDocument();
+    expect(within(panel).queryByText(/^\{.*\}$/)).not.toBeInTheDocument();
   });
 
   it("renders edge labels for on_success", () => {
@@ -249,7 +336,7 @@ describe("GraphView", () => {
     render(<GraphView />);
 
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-color-mode", "light");
-    expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-color", "var(--color-border)");
+    expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-color", "var(--color-canvas-grid)");
     expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-gap", "16");
     expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-size", "1");
 
@@ -263,7 +350,7 @@ describe("GraphView", () => {
   });
 
   it("bridges React Flow CSS variables to the Elspeth theme tokens", () => {
-    const appCss = readFileSync("src/App.css", "utf8");
+    const appCss = readFileSync("src/components/inspector/inspector.css", "utf8");
 
     expect(appCss).toContain("--xy-background-color-default: var(--color-bg);");
     expect(appCss).toContain("--xy-controls-button-background-color-default: var(--color-surface-elevated);");

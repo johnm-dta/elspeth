@@ -1,31 +1,9 @@
-## Summary
+# Bug Tracking Has Moved
 
-[One-line description of the bug]
+ELSPETH uses Filigree as the source of truth for bug tracking. This file remains
+only as a compatibility pointer for older links that expected a Markdown bug
+template under `docs/bugs/`.
 
-## Severity
-
-- Severity: [critical | major | minor | trivial]
-- Priority: [P0 | P1 | P2 | P3]
-
-## Location
-
-- File: [path/to/file.py]
-- Line(s): [line number(s)]
-- Function/Method: [name]
-
-## Evidence
-
-[Cite specific file paths and line numbers. Include code snippets showing the bug.
-Explain what the code does vs. what it should do.]
-
-## Root Cause Hypothesis
-
-[Explain why the bug exists and what the underlying cause is.]
-
-## Suggested Fix
-
-[Describe the fix. Include code snippets if helpful.]
-
-## Impact
-
-[What breaks, what data is affected, what audit guarantees are violated.]
+Use Filigree for current bugs, statuses, owners, comments, and closeout
+evidence. Generated scanner reports, when present, live under
+`docs/bugs/generated/` until each report is validated and resolved.

@@ -1,0 +1,54 @@
+[project]
+name = "elspeth-lints"
+version = "0.1.0"
+description = "Workspace-only static analyzer for ELSPETH-specific CI invariants"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0,<7"]
+
+[project.optional-dependencies]
+# The 'judge' extra pulls in the OpenAI SDK used by the `justify`
+# subcommand. The lint tool itself must remain installable without a
+# network LLM SDK (it runs in CI lanes that don't carry an API key),
+# so this is intentionally optional. The SDK is pointed at OpenRouter
+# (https://openrouter.ai/api/v1) rather than OpenAI; the project-wide
+# standard is to route LLM calls through OpenRouter so model identity
+# and vendor are policy decisions, not hard-wired imports. Install
+# with:
+#     uv pip install -e ".[judge]"  (from the elspeth-lints/ directory)
+# or include the extra in the root project's dev install.
+judge = ["openai>=1.0,<2"]
+# The 'judge-agent' extra pulls in the Claude Agent SDK used by the
+# `--judge-transport agent` path. Like 'judge' it is optional: the lint
+# tool runs in CI lanes that carry neither SDK. The agent transport
+# authenticates via an installed + logged-in Claude Code CLI (subscription
+# / Agent-SDK credit pool) or ANTHROPIC_API_KEY or Bedrock/Vertex/Azure.
+# Install with:
+#     uv pip install -e ".[judge-agent]"  (from the elspeth-lints/ directory)
+judge-agent = ["claude-agent-sdk>=0.1"]
+
+[project.scripts]
+elspeth-lints = "elspeth_lints.core.cli:main"
+
+[project.entry-points."elspeth_lints.rules"]
+meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer:RULE"
+plugin-contract-options-metadata = "elspeth_lints.rules.plugin_contract.options_metadata:RULE"
+plugin-contract-component-type = "elspeth_lints.rules.plugin_contract.component_type:RULE"
+plugin-contract-plugin-hashes = "elspeth_lints.rules.plugin_contract.plugin_hashes:RULE"
+composer-catch-order = "elspeth_lints.rules.composer.catch_order:RULE"
+composer-exception-channel = "elspeth_lints.rules.composer.exception_channel:RULE"
+immutability-freeze-guards = "elspeth_lints.rules.immutability.freeze_guards:RULE"
+immutability-frozen-annotations = "elspeth_lints.rules.immutability.frozen_annotations:RULE"
+audit-evidence-nominal-base = "elspeth_lints.rules.audit_evidence.audit_evidence_nominal:RULE"
+audit-evidence-tier-1-decoration = "elspeth_lints.rules.audit_evidence.tier_1_decoration:RULE"
+audit-evidence-guard-symmetry = "elspeth_lints.rules.audit_evidence.guard_symmetry:RULE"
+audit-evidence-gve-attribution = "elspeth_lints.rules.audit_evidence.gve_attribution:RULE"
+trust-tier-model = "elspeth_lints.rules.trust_tier.tier_model:RULE"
+# Rule entry points are added by migration tasks.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/elspeth_lints"]

@@ -1,0 +1,5 @@
+per_file_rules:
+  - pattern: good.py
+    rules: [FG2]
+    reason: Fixture proves per-file allowlist suppression.
+    max_hits: 1

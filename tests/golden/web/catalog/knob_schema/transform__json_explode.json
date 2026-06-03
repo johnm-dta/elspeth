@@ -1,0 +1,42 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Name of the array field to explode",
+        "kind": "text",
+        "label": "Array Field",
+        "name": "array_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "item",
+        "description": "Name for the exploded element",
+        "kind": "text",
+        "label": "Output Field",
+        "name": "output_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to include item_index field",
+        "kind": "checkbox",
+        "label": "Include Index",
+        "name": "include_index",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "json_explode"
+}

@@ -52,6 +52,24 @@ class TestExecutionError:
             "phase": "flush",
         }
 
+    def test_execution_error_audit_payload_is_structured(self) -> None:
+        """ExecutionError serializes to the stable audit payload shape."""
+        from elspeth.contracts import ExecutionError
+
+        error = ExecutionError(
+            exception="Another error",
+            exception_type="RuntimeError",
+            traceback="Traceback (most recent call last):\n  File ...",
+        )
+
+        payload = error.to_dict()
+        assert payload == {
+            "exception": "Another error",
+            "type": "RuntimeError",
+            "traceback": "Traceback (most recent call last):\n  File ...",
+        }
+        assert "exception_type" not in payload
+
 
 class TestRoutingReasonSchema:
     """Tests for RoutingReason union type schema introspection."""

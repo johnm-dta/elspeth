@@ -1,6 +1,9 @@
 # Your First Pipeline
 
-Build and run an ELSPETH pipeline in 10 minutes. No external APIs required.
+Build and run an ELSPETH pipeline from the CLI, the browser, or Docker.
+The CLI and Docker paths require no external APIs. The Web UI path uses the
+same runtime and audit model, and uses the Web Composer when you want browser
+authoring and execution.
 
 ---
 
@@ -28,6 +31,7 @@ Choose your environment:
 | Environment | Requirements |
 |-------------|--------------|
 | **Local Python** | Python 3.11+, uv package manager |
+| **Web UI** | Python 3.11+, uv, npm, `.[webui]` extra, local auth user |
 | **Docker** | Docker installed and running |
 
 ---
@@ -224,7 +228,129 @@ Every decision is traceable. If an auditor asks "why was this transaction flagge
 
 ---
 
-## Option B: Running with Docker
+## Option B: Running in the Web UI
+
+The Web UI is the browser-based authoring and execution surface. It is not a
+separate engine: composed pipelines are validated and executed through the same
+runtime path as hand-edited YAML, and run evidence is recorded in the configured
+audit store.
+
+Use this path when you want to:
+
+- build or revise a pipeline with the Web Composer
+- upload source files into a session-scoped file store
+- inspect the graph, YAML, validation, audit-readiness, and run outputs in one
+  place
+- start a background run and watch progress in the browser
+
+> **Note:** The Web Composer requires whatever LLM/provider configuration your
+> deployment uses for composition. If you want the fully offline path, use
+> [Option A](#option-a-running-locally-python).
+
+### Step 1: Install the Web UI Extra
+
+From the repository root:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[webui,dev]"
+```
+
+### Step 2: Build the Frontend Bundle
+
+```bash
+cd src/elspeth/web/frontend
+npm install
+npm run build
+cd ../../../../
+```
+
+The FastAPI app serves the built React bundle from
+`src/elspeth/web/frontend/dist/`.
+
+### Step 3: Create a Local Demo User
+
+Use a non-default signing key and create a local development account:
+
+```bash
+export ELSPETH_WEB__SECRET_KEY="local-dev-secret-key"
+
+python - <<'PY'
+import os
+from pathlib import Path
+from elspeth.web.auth.local import LocalAuthProvider
+
+provider = LocalAuthProvider(
+    db_path=Path("data/auth.db"),
+    secret_key=os.environ["ELSPETH_WEB__SECRET_KEY"],
+)
+try:
+    provider.create_user(
+        user_id="demo",
+        password="demo12345",
+        display_name="Demo User",
+        email="demo@example.com",
+    )
+    print("Created demo user: demo / demo12345")
+except ValueError:
+    print("Demo user already exists: demo / demo12345")
+PY
+```
+
+Do not reuse these credentials outside local development.
+
+### Step 4: Start the Web App
+
+```bash
+elspeth web --host 127.0.0.1 --port 8451
+```
+
+Open <http://127.0.0.1:8451> and sign in with `demo` / `demo12345`.
+
+### Step 5: Create a Browser-Authored Version
+
+1. Use the session switcher and choose **+ New session**.
+2. Keep the default guided mode, or choose **Switch to guided** if your
+   account default is freeform.
+3. Upload `examples/threshold_gate/input.csv` through the **Files** panel with
+   **+ Upload**.
+4. Tell the composer:
+
+   ```text
+   Use the uploaded transactions CSV as the source. Build a pipeline that routes
+   rows with amount > 1000 to a high_values CSV output and all other rows to a
+   normal CSV output. Validate it before running.
+   ```
+
+5. Review any proposed source, sink, gate, or transform choices before
+   accepting them. If the composer asks for field types, keep the same schema
+   as the CLI example: `id: int`, `name: str`, `amount: int`, `category: str`.
+6. When validation passes, use **Run pipeline**.
+
+The completion bar also exposes **Save for review** and **Export YAML**. Use
+**Export YAML** if you want to compare the browser-authored configuration with
+`examples/threshold_gate/settings.yaml`.
+
+### Step 6: Inspect the Browser Run
+
+After the run starts, the UI keeps execution in the session:
+
+- progress streams while the run is active
+- output artifacts appear in the run results and file surfaces
+- diagnostics show validation or runtime failures instead of leaving a silent
+  spinner
+- audit-readiness and generated YAML stay attached to the composition you ran
+
+The important model is the same as the CLI walkthrough:
+
+```text
+source CSV -> threshold decision -> normal/high-value outputs -> audit record
+```
+
+---
+
+## Option C: Running with Docker
 
 ### Step 1: Set Up Directory Structure
 
@@ -468,6 +594,9 @@ gates:
 
 Re-run and see how the routing changes.
 
+In the Web UI, ask the composer to change the threshold and then review the
+updated validation result before using **Run pipeline** again.
+
 ### Add a Third Tier
 
 Route "premium" transactions (> $2500) separately:
@@ -588,9 +717,11 @@ condition: "row['amount'] > 1000"
 Now that you've built your first pipeline:
 
 1. **Add an LLM transform** - See `examples/openrouter_sentiment/` for LLM classification
-2. **Export the audit trail** - Add `landscape.export` to create signed exports
-3. **Build a custom plugin** - See [PLUGIN.md](../../PLUGIN.md) for plugin development
-4. **Explore the architecture** - See [ARCHITECTURE.md](../../ARCHITECTURE.md) for system design
+2. **Try guided browser authoring** - See [User Manual: Web Composer](user-manual.md#web-composer-guided-mode)
+3. **Share a browser-authored pipeline for review** - See [Sharing Pipelines](sharing-pipelines.md)
+4. **Export the audit trail** - Add `landscape.export` to create signed exports
+5. **Build a custom plugin** - See [PLUGIN.md](../../PLUGIN.md) for plugin development
+6. **Explore the architecture** - See [ARCHITECTURE.md](../../ARCHITECTURE.md) for system design
 
 ---
 
@@ -604,6 +735,28 @@ elspeth run --settings path/to/settings.yaml --execute
 elspeth explain --run latest --row <row_id> --database examples/threshold_gate/runs/audit.db
 elspeth plugins list
 ```
+
+### Web UI Commands
+
+```bash
+uv pip install -e ".[webui,dev]"
+
+cd src/elspeth/web/frontend
+npm install
+npm run build
+cd ../../../../
+
+export ELSPETH_WEB__SECRET_KEY="local-dev-secret-key"
+elspeth web --host 127.0.0.1 --port 8451
+```
+
+| UI Control | Description |
+|------------|-------------|
+| `+ New session` | Start a new browser composition session |
+| `+ Upload` | Add a session-scoped source file |
+| `Run pipeline` | Execute the validated composition |
+| `Export YAML` | Inspect or download generated YAML |
+| `Save for review` | Create a shareable read-only review link when validation passes |
 
 ### Docker Commands
 
@@ -630,6 +783,8 @@ docker run --rm \
 ## See Also
 
 - [README.md](../../README.md) - Project overview
+- [User Manual](user-manual.md) - CLI and Web Composer reference
+- [Sharing Pipelines](sharing-pipelines.md) - Save-for-review and shared inspect flow
 - [Docker Guide](docker.md) - Complete Docker deployment
 - [PLUGIN.md](../../PLUGIN.md) - Creating custom plugins
-- [examples/](../../../examples/) - More example pipelines
+- [examples/](../../examples/) - More example pipelines

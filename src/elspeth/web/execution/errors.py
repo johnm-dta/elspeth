@@ -12,8 +12,10 @@ to access entries and contracts.
 
 from __future__ import annotations
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.web.composer.state import ValidationEntry
+from elspeth.web.interpretation_state import InterpretationReviewSite
 
 
 class SemanticContractViolationError(ValueError):
@@ -34,6 +36,121 @@ class SemanticContractViolationError(ValueError):
         self.contracts = contracts
         message = "; ".join(entry.message for entry in entries)
         super().__init__(message)
+
+
+class ExecuteRequestValidationError(ValueError):
+    """Caller-authored /execute request data failed validation.
+
+    Subclasses ValueError for compatibility with older service-level tests
+    and callers, but route handlers should catch this specific base class
+    and return HTTP 400 rather than conflating malformed input with 404
+    not-found/IDOR responses.
+    """
+
+
+class PathAllowlistViolationError(ExecuteRequestValidationError):
+    """Raised when a source or sink path escapes the configured allowlist."""
+
+
+class MalformedBlobRefError(ExecuteRequestValidationError):
+    """Raised when caller-supplied blob_ref is not a UUID."""
+
+
+class UnresolvedInterpretationPlaceholderError(Exception):
+    """Raised when /execute encounters an LLM transform whose prompt_template
+    still carries one or more unresolved ``{{interpretation:<term>}}``
+    placeholders (F-17 / F-21 — Phase 5b Task 5 follow-on).
+
+    The compose-loop is expected to call ``request_interpretation_review``
+    for each such placeholder during composition; the placeholder is then
+    replaced with the user-accepted concrete value, and the audit-primary
+    record is the ``interpretation_events`` row.  If a placeholder survives
+    to /execute, the LLM under-fired the review tool — typically after a
+    model upgrade where the skill's prompt no longer reliably triggers the
+    review path.  We refuse to run the pipeline with the literal
+    ``{{interpretation:…}}`` string flowing into the LLM transform (which
+    would produce a useless or surprising response) and surface a
+    user-actionable error.
+
+    NOT a subclass of ``ExecuteRequestValidationError``: that base maps to
+    400 in the route catch order, but this site maps to 422 (Unprocessable
+    Entity) to mirror the ``SemanticContractViolationError`` precedent —
+    the request was syntactically valid but the composition state is not
+    yet executable until the operator resolves the surfaced placeholders.
+
+    The ``placeholders`` field carries ``(node_id, term)`` tuples — NOT
+    the ``prompt_template`` value (which may include user-supplied
+    content; PII risk).  The route handler renders the same shape into the
+    HTTP 422 payload so the frontend banner can list every unresolved
+    site without parsing the message string.
+    """
+
+    def __init__(
+        self,
+        *,
+        placeholders: tuple[tuple[str, str], ...] | None = None,
+        sites: tuple[InterpretationReviewSite, ...] | None = None,
+    ) -> None:
+        if sites is None:
+            if not placeholders:
+                # Offensive guard: callers must not raise this exception with
+                # an empty placeholders tuple.  An empty list means the gate
+                # passed and execution should proceed; constructing the
+                # exception in that case is a control-flow bug worth crashing
+                # for rather than silently producing an actionable error with
+                # an empty body.
+                raise ValueError(
+                    "UnresolvedInterpretationPlaceholderError requires at "
+                    "least one (node_id, term) tuple — caller must check the "
+                    "detector's return value before raising."
+                )
+            sites = tuple(
+                InterpretationReviewSite(
+                    component_id=node_id,
+                    component_type="transform",
+                    user_term=term,
+                    kind=InterpretationKind.VAGUE_TERM,
+                )
+                for node_id, term in placeholders
+            )
+        elif not sites:
+            # Offensive guard: callers must not raise this exception with
+            # an empty sites tuple.  An empty list means the gate
+            # passed and execution should proceed; constructing the
+            # exception in that case is a control-flow bug worth crashing
+            # for rather than silently producing an actionable error with
+            # an empty body.
+            raise ValueError(
+                "UnresolvedInterpretationPlaceholderError requires at "
+                "least one interpretation-review site — caller must check the "
+                "detector's return value before raising."
+            )
+        self.sites = sites
+        self.placeholders = tuple(
+            (site.component_id, site.user_term)
+            for site in sites
+            if site.component_type == "transform" and site.kind is InterpretationKind.VAGUE_TERM
+        )
+        if placeholders is not None and self.placeholders != placeholders:
+            raise ValueError("placeholders must match transform/vague_term interpretation-review sites")
+        # User-actionable message: list every unresolved (node, term) so
+        # the operator sees all sites at once.  Single-site messages read
+        # naturally; multi-site messages join with "; " to stay on one
+        # line for the frontend banner.
+        rendered_sites = "; ".join(_render_interpretation_site(site) for site in sites)
+        message = (
+            f"Unresolved interpretation review(s) — {rendered_sites}. "
+            f"Resolve via request_interpretation_review (compose loop) and "
+            f"the /interpretations/<event_id>/resolve endpoint before "
+            f"running the pipeline."
+        )
+        super().__init__(message)
+
+
+def _render_interpretation_site(site: InterpretationReviewSite) -> str:
+    if site.component_type == "transform" and site.kind is InterpretationKind.VAGUE_TERM:
+        return f"{{{{interpretation:{site.user_term}}}}} in LLM transform '{site.component_id}'"
+    return f"{site.kind.value} review for {site.component_type} '{site.component_id}': {site.user_term}"
 
 
 class BlobSourcePathMismatchError(Exception):

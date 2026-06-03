@@ -1256,6 +1256,35 @@ class TestStage1Validation:
         assert not result.is_valid
         assert any("plugin" in e.message for e in result.errors)
 
+    def test_unknown_node_type_is_invalid(self) -> None:
+        """Stage 1 must reject node types outside the closed runtime set."""
+        node = NodeSpec.from_dict(
+            {
+                "id": "mystery",
+                "node_type": "bogus",
+                "plugin": "passthrough",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {},
+                "condition": None,
+                "routes": None,
+                "fork_to": None,
+                "branches": None,
+                "policy": None,
+                "merge": None,
+            }
+        )
+        state = self._empty_state().with_source(self._make_source(on_success="source_out"))
+        state = state.with_output(self._make_output())
+        state = state.with_node(node)
+        state = state.with_edge(self._make_edge("e1", "source", "mystery"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any("unknown node_type 'bogus'" in e.message for e in result.errors)
+
     def test_unreachable_node(self) -> None:
         """Node exists but no edge points to it and source.on_success doesn't match."""
         state = self._empty_state()
@@ -2180,6 +2209,9 @@ class TestWebScrapeAbuseContactValidation:
     def _abuse_contact_error_messages(self, state: CompositionState) -> list[str]:
         return [e.message for e in state.validate().errors if "abuse_contact" in e.message]
 
+    def _web_scrape_identity_error_messages(self, state: CompositionState) -> list[str]:
+        return [e.message for e in state.validate().errors if "web_scrape.http." in e.message]
+
     @pytest.mark.parametrize(
         "address",
         [
@@ -2203,6 +2235,40 @@ class TestWebScrapeAbuseContactValidation:
         msg = messages[0]
         assert "fabricated identity" in msg
         assert "abuse_contact" in msg
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("abuse_contact", "<OPERATOR_REQUIRED>"),
+            ("abuse_contact", "operator required"),
+            ("scraping_reason", "<OPERATOR_REQUIRED>"),
+            ("scraping_reason", "operator required"),
+        ],
+    )
+    def test_rejects_wire_visible_operator_required_placeholders(self, field_name: str, value: str) -> None:
+        """The skill's sentinel values must be blocking validation errors, not persisted defaults."""
+        http_block = {
+            "abuse_contact": "ops@somecompany.gov.au",
+            "scraping_reason": "User-authorised page colour lookup",
+            "allowed_hosts": "public_only",
+        }
+        http_block[field_name] = value
+        state = self._state_with_web_scrape(
+            None,
+            options_override={
+                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                "url_field": "url",
+                "content_field": "content",
+                "fingerprint_field": "content_fingerprint",
+                "format": "markdown",
+                "http": http_block,
+            },
+        )
+
+        messages = self._web_scrape_identity_error_messages(state)
+        assert messages, f"Expected reject for web_scrape.http.{field_name}={value!r}"
+        assert f"web_scrape.http.{field_name}" in messages[0]
+        assert "placeholder" in messages[0]
 
     @pytest.mark.parametrize(
         "address",

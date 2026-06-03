@@ -10,7 +10,7 @@ from collections.abc import Collection, Mapping
 from copy import deepcopy
 from typing import Any
 
-from elspeth.contracts.secrets import ResolvedSecret, WebSecretResolver
+from elspeth.contracts.secrets import ResolvedSecret, SecretRefPlacementViolation, WebSecretResolver
 
 _EXACT_ENV_VAR_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
 
@@ -165,6 +165,79 @@ def collect_credential_field_violations(
         for item in options:
             violations.extend(collect_credential_field_violations(item, env_ref_names))
     return violations
+
+
+def collect_disallowed_secret_ref_markers(
+    options: Any,
+    env_ref_names: Collection[str] = frozenset(),
+    *,
+    additional_allowed_fields: Collection[str] = frozenset(),
+) -> list[SecretRefPlacementViolation]:
+    """Return secret-ref markers placed outside credential-bearing fields.
+
+    The returned objects name field paths and secret names only. They never
+    include secret values. A marker is allowed when its immediate containing
+    field is credential-bearing according to ``is_secret_field`` or is listed in
+    ``additional_allowed_fields`` by the caller for plugin-specific credentials
+    such as the database sink's whole-DSN ``url`` field.
+    """
+    allowed_exact = frozenset(field.lower() for field in additional_allowed_fields)
+    violations: list[SecretRefPlacementViolation] = []
+    _collect_disallowed_secret_ref_markers(
+        options,
+        env_ref_names,
+        allowed_exact,
+        path=(),
+        violations=violations,
+    )
+    return violations
+
+
+def _field_allows_secret_ref(field_name: str, additional_allowed_fields: Collection[str]) -> bool:
+    return is_secret_field(field_name) or field_name.lower() in additional_allowed_fields
+
+
+def _collect_disallowed_secret_ref_markers(
+    obj: Any,
+    env_ref_names: Collection[str],
+    additional_allowed_fields: Collection[str],
+    *,
+    path: tuple[str, ...],
+    violations: list[SecretRefPlacementViolation],
+) -> None:
+    ref_name = _is_secret_ref(obj)
+    if ref_name is None:
+        ref_name = _is_secret_env_ref(obj, env_ref_names)
+    if ref_name is not None:
+        field_name = path[-1] if path else ""
+        if not _field_allows_secret_ref(field_name, additional_allowed_fields):
+            violations.append(
+                SecretRefPlacementViolation(
+                    field_path=".".join(path) if path else "<root>",
+                    secret_name=ref_name,
+                )
+            )
+        return
+
+    if isinstance(obj, Mapping):
+        for key, value in obj.items():
+            next_path = (*path, key) if isinstance(key, str) else (*path, f"<{type(key).__name__}>")
+            _collect_disallowed_secret_ref_markers(
+                value,
+                env_ref_names,
+                additional_allowed_fields,
+                path=next_path,
+                violations=violations,
+            )
+    elif isinstance(obj, (list, tuple)):
+        for index, item in enumerate(obj):
+            _collect_disallowed_secret_ref_markers(
+                item,
+                env_ref_names,
+                additional_allowed_fields,
+                path=(*path, f"[{index}]"),
+                violations=violations,
+            )
 
 
 def _walk(

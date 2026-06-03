@@ -1,0 +1,12 @@
+[
+  {
+    "column": 11,
+    "file_path": "bad.py",
+    "fingerprint": "5bea5e7c4819aaa6",
+    "line": 3,
+    "message": "isinstance freeze guard (dict) in __post_init__: if isinstance(self.data, dict):",
+    "rule_id": "FG2",
+    "severity": "error",
+    "suggestion": "Use deep_freeze() which is idempotent on already-frozen values -- no guard needed"
+  }
+]

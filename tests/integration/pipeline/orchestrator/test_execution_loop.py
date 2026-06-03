@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.contracts.errors import GracefulShutdownError, OrchestrationInvariantError
 from elspeth.contracts.events import (
     PhaseCompleted,
@@ -118,6 +118,7 @@ class ShutdownAfterNTransform(BaseTransform):
     """Transform that sets a shutdown event after processing N rows."""
 
     name = "shutdown_trigger"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -156,6 +157,7 @@ class FailOnSecondRowTransform(BaseTransform):
     """Transform that succeeds once, then crashes on the second row."""
 
     name = "fail_on_second_row"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

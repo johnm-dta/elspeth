@@ -54,6 +54,7 @@ class TokenRef:
 
 
 _SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
+_SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
@@ -87,12 +88,20 @@ class Run:
     exported_at: datetime | None = None
     export_format: str | None = None
     export_sink: str | None = None
+    llm_call_count: int | None = None
+    seeded_from_cache: bool = False
+    cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Validate enum fields - Tier 1 crash on invalid types."""
+        require_int(self.llm_call_count, "llm_call_count", optional=True, min_value=0)
         _validate_enum(self.status, RunStatus, "status")
         _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade")
         _validate_enum(self.export_status, ExportStatus, "export_status")
+        if type(self.seeded_from_cache) is not bool:
+            raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
+        if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
+            raise ValueError(f"cache_key must be 64 lowercase hex chars or None, got {self.cache_key!r} for run {self.run_id!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +189,7 @@ class Token:
     expand_group_id: str | None = None  # For deaggregation grouping
     branch_name: str | None = None
     step_in_pipeline: int | None = None  # Step where token was created (fork/coalesce/expand)
+    token_data_ref: str | None = None  # Content-addressable ref for per-token payload (expand/coalesce writers)
 
     def __post_init__(self) -> None:
         """Validate int fields - Tier 1 crash on invalid types."""
@@ -350,12 +360,30 @@ class Call:
     response_ref: str | None = None
     error_json: str | None = None
     latency_ms: float | None = None
+    # Cross-DB hash anchor for LLM transforms downstream of an interpretation
+    # event (Phase 5b Task 9 / Option A). Populated at execution time by the
+    # LLM plugin when it reads ``options.resolved_prompt_template_hash`` from
+    # the node config (written there by ``resolve_interpretation_event`` at
+    # compose time). ``None`` for non-LLM calls and for LLM transforms that
+    # never went through an interpretation surface. Must equal the matching
+    # ``interpretation_events.resolved_prompt_template_hash`` in the session
+    # audit DB when non-None; inequality = Tier-1 audit anomaly.
+    resolved_prompt_template_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Validate enum fields and structural invariants — Tier 1 crash on invalid types."""
         require_int(self.call_index, "call_index", min_value=0)
         _validate_enum(self.call_type, CallType, "call_type")
         _validate_enum(self.status, CallStatus, "status")
+        if self.resolved_prompt_template_hash is not None:
+            if self.call_type is not CallType.LLM:
+                raise ValueError(
+                    f"Call.resolved_prompt_template_hash is defined only for CallType.LLM calls, got call_type={self.call_type!r}"
+                )
+            if not isinstance(self.resolved_prompt_template_hash, str) or not _SHA256_HEX_PATTERN.fullmatch(
+                self.resolved_prompt_template_hash
+            ):
+                raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
         # XOR: exactly one of state_id or operation_id must be set
         has_state = self.state_id is not None
         has_operation = self.operation_id is not None
@@ -737,6 +765,18 @@ class TerminalPairFieldConstraints:
     exact: Mapping[str, object] = field(default_factory=dict)
     forbidden: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        # ``required`` and ``forbidden`` are tuple[str, ...] — strings are
+        # immutable, the tuples themselves are immutable; they need no
+        # guard. ``exact`` is Mapping[str, object] and the constructor
+        # default is a fresh ``dict()`` — the dict is mutable through
+        # the attribute reference and would lie about ``frozen=True``
+        # without deep_freeze. Producers populate ``exact`` with
+        # scalar/string values for ADR-019 (outcome, path) discriminator
+        # matches, but the field type does not statically guarantee it,
+        # so deep-freeze is the correct guard rather than a shallow wrap.
+        freeze_fields(self, "exact")
+
 
 _DISCRIMINATOR_FIELDS = (
     "sink_name",
@@ -838,7 +878,7 @@ class Operation:
     operation_id: str
     run_id: str
     node_id: str
-    operation_type: Literal["source_load", "sink_write"]
+    operation_type: Literal["source_load", "sink_write", "runtime_preflight"]
     started_at: datetime
     status: Literal["open", "completed", "failed", "pending"]
     completed_at: datetime | None = None
@@ -849,7 +889,7 @@ class Operation:
     error_message: str | None = None
     duration_ms: float | None = None
 
-    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"source_load", "sink_write"})
+    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"runtime_preflight", "source_load", "sink_write"})
     _ALLOWED_STATUSES: ClassVar[frozenset[str]] = frozenset({"open", "completed", "failed", "pending"})
 
     def __post_init__(self) -> None:

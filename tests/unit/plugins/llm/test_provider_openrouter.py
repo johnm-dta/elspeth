@@ -366,6 +366,39 @@ class TestExecuteQuery:
 
         assert result.finish_reason is FinishReason.STOP
 
+    def test_sends_current_openrouter_app_attribution_headers(
+        self,
+        mock_recorder: MagicMock,
+        mock_telemetry_emit: MagicMock,
+    ) -> None:
+        mock_recorder.allocate_call_index.side_effect = [0, 1]
+        provider = OpenRouterLLMProvider(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            timeout_seconds=30.0,
+            recorder=mock_recorder,
+            run_id="run-1",
+            telemetry_emit=mock_telemetry_emit,
+        )
+
+        with patch("elspeth.plugins.infrastructure.clients.http.httpx.Client") as mock_client_class:
+            mock_client = mock_client_class.return_value
+            mock_client.post.return_value = _make_http_response()
+
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
+
+        request_headers = mock_client.post.call_args.kwargs["headers"]
+        assert request_headers["HTTP-Referer"] == "https://github.com/johnm-dta/elspeth"
+        assert request_headers["X-OpenRouter-Title"] == "Elspeth"
+        assert "elspeth-rapid" not in set(request_headers.values())
+
 
 class TestHTTPErrorMapping:
     """Tests for HTTP status code → exception mapping."""
@@ -522,6 +555,32 @@ class TestHTTPErrorMapping:
                     token_id="tok-1",
                 )
 
+    def test_400_anthropic_prompt_too_long_pattern(self, provider: OpenRouterLLMProvider) -> None:
+        # Anthropic via OpenRouter returns "prompt is too long: N tokens > M maximum"
+        # (an envelope wrapping Anthropic's invalid_request_error). Previously
+        # misclassified as a generic LLMClientError → audit reason llm_call_failed;
+        # must classify as ContextLengthError → audit reason context_length_exceeded.
+        anthropic_body = (
+            '{"error":{"message":"Provider returned error","code":400,'
+            '"metadata":{"raw":"{\\"type\\":\\"error\\",\\"error\\":{\\"type\\":'
+            '\\"invalid_request_error\\",\\"message\\":\\"prompt is too long: '
+            '202814 tokens > 200000 maximum\\"}}","provider_name":"Anthropic"}}}'
+        )
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=anthropic_body)
+            mock_get.return_value = mock_client
+
+            with pytest.raises(ContextLengthError):
+                provider.execute_query(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="anthropic/claude-sonnet-4",
+                    temperature=0.0,
+                    max_tokens=100,
+                    state_id="state-1",
+                    token_id="tok-1",
+                )
+
     def test_empty_choices_raises(self, provider: OpenRouterLLMProvider) -> None:
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
@@ -629,3 +688,125 @@ class TestProtocolCompliance:
             telemetry_emit=MagicMock(),
         )
         assert isinstance(provider, LLMProvider)
+
+
+class TestRuntimePreflight:
+    """Tests for runtime_preflight — provider warm-up probe before row processing.
+
+    The preflight probe sends a minimal chat-completions request and asserts that
+    the provider accepts it. Two contracts are pinned here because both have
+    bitten us in production:
+
+    1. max_tokens must clear the underlying-provider minimum. Azure-backed
+       routes enforce max_output_tokens >= 16; values below floor 400 with
+       "integer_below_min_value" and kill the entire pipeline before any
+       row processing. Run 8294aab2 on 2026-05-13 failed this way.
+
+    2. When the provider returns a 4xx/5xx, the wrapped exception's message
+       must include (truncated) response body. Without the body, the operator
+       sees only "HTTP 400" + an MDN URL — the actual provider message
+       ("max_output_tokens below minimum") lives only in the audit DB.
+    """
+
+    def test_preflight_request_max_tokens_meets_azure_floor(self, provider: OpenRouterLLMProvider) -> None:
+        """Preflight request body must include max_tokens >= 16 (Azure backend floor)."""
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_http_response(content="OK")
+            mock_client_cls.return_value = mock_client
+
+            provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            request_body = mock_client.post.call_args.kwargs["json"]
+            assert "max_tokens" in request_body, (
+                "Preflight must send max_tokens; Azure-backed OpenRouter routes reject requests without it."
+            )
+            assert request_body["max_tokens"] >= 16, (
+                f"Preflight max_tokens={request_body['max_tokens']} is below the "
+                "Azure backend floor of 16; will 400 with integer_below_min_value."
+            )
+
+    def test_preflight_400_includes_response_body_in_exception(self, provider: OpenRouterLLMProvider) -> None:
+        """A 4xx from the provider must surface the response body in the raised exception."""
+        provider_body = (
+            '{"error":{"message":"Invalid \'max_output_tokens\': integer below minimum '
+            'value. Expected a value >= 16, but got 4 instead.","code":400}}'
+        )
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=provider_body)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            message = str(exc_info.value)
+            assert "HTTP 400" in message
+            assert "max_output_tokens" in message, (
+                "The provider's actual error message must be in the exception text; "
+                "operators cannot read the audit DB to discover what went wrong."
+            )
+
+    def test_preflight_429_includes_response_body_in_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
+        """A 429 from the provider must surface the response body."""
+        provider_body = '{"error":{"message":"Rate limit exceeded: 60 RPM","code":429}}'
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(429, body=provider_body)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(RateLimitError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            assert "60 RPM" in str(exc_info.value)
+
+    def test_preflight_500_includes_response_body_in_server_error(self, provider: OpenRouterLLMProvider) -> None:
+        """A 5xx from the provider must surface the response body."""
+        provider_body = '{"error":{"message":"Upstream provider unavailable","code":500}}'
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(500, body=provider_body)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(ServerError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            assert "Upstream provider unavailable" in str(exc_info.value)
+
+    def test_execute_query_400_includes_response_body(self, provider: OpenRouterLLMProvider) -> None:
+        """The same body-surfacing contract applies to per-row execute_query calls."""
+        provider_body = '{"error":{"message":"Model openai/gpt-5-mini not found","code":400}}'
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=provider_body)
+            mock_get.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.execute_query(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="gpt-5-mini",
+                    temperature=0.0,
+                    max_tokens=100,
+                    state_id="state-1",
+                    token_id="tok-1",
+                )
+
+            assert "openai/gpt-5-mini not found" in str(exc_info.value)
+
+    def test_preflight_truncates_oversized_response_body(self, provider: OpenRouterLLMProvider) -> None:
+        """Pathologically large response bodies are truncated to keep exception messages bounded."""
+        huge_body = '{"error":"' + ("x" * 10_000) + '"}'
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=huge_body)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            message = str(exc_info.value)
+            assert len(message) < 2_000, (
+                f"Exception message length {len(message)} exceeds reasonable bound; "
+                "_summarize_http_error_body must truncate oversized bodies."
+            )
+            assert "…" in message, "Truncation marker should be present for oversized bodies."

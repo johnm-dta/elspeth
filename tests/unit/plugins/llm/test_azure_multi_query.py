@@ -45,7 +45,7 @@ def _make_config(**overrides: Any) -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Evaluate: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Evaluate: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],

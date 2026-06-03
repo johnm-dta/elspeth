@@ -1,0 +1,139 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Prefix used for fields emitted by retrieval, such as contexts and scores.",
+        "kind": "text",
+        "label": "Output Prefix",
+        "name": "output_prefix",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Input row field containing the retrieval query text.",
+        "kind": "text",
+        "label": "Query Field",
+        "name": "query_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Optional template used to build the retrieval query from row fields.",
+        "kind": "text",
+        "label": "Query Template",
+        "name": "query_template",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional regular expression used to extract the retrieval query from query_field.",
+        "kind": "text",
+        "label": "Query Pattern",
+        "name": "query_pattern",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Retrieval provider name registered in the RAG provider catalog.",
+        "kind": "text",
+        "label": "Provider",
+        "name": "provider",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Provider-specific retrieval configuration passed to the selected provider.",
+        "kind": "json-object",
+        "label": "Provider",
+        "name": "provider_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": 5,
+        "description": "Maximum number of matching documents to return for each query.",
+        "kind": "number-int",
+        "label": "Top K",
+        "name": "top_k",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 0.0,
+        "description": "Minimum relevance score required for a retrieved document.",
+        "kind": "number-float",
+        "label": "Min Score",
+        "name": "min_score",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "quarantine",
+        "description": "Behavior when no retrieval results satisfy the score threshold.",
+        "enum": [
+          "quarantine",
+          "continue"
+        ],
+        "kind": "enum",
+        "label": "On No Results",
+        "name": "on_no_results",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "numbered",
+        "description": "Formatting style used when combining retrieved contexts into output text.",
+        "enum": [
+          "numbered",
+          "separated",
+          "raw"
+        ],
+        "kind": "enum",
+        "label": "Context Format",
+        "name": "context_format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "\n---\n",
+        "description": "Separator inserted between retrieved contexts when applicable.",
+        "kind": "text",
+        "label": "Context Separator",
+        "name": "context_separator",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional maximum character length for the combined context output.",
+        "kind": "number-int",
+        "label": "Max Context Length",
+        "name": "max_context_length",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "rag_retrieval"
+}

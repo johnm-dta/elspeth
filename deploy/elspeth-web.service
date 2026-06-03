@@ -1,0 +1,51 @@
+[Unit]
+Description=ELSPETH Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=john
+Group=john
+WorkingDirectory=/home/john/elspeth
+RuntimeDirectory=elspeth
+
+# --- Application configuration ---
+# SECRET_KEY: generate with `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
+# Env vars in EnvironmentFile — systemd Environment= mangles JSON quoting.
+EnvironmentFile=/home/john/elspeth/deploy/elspeth-web.env
+# Pin imports to the served checkout. The venv editable-install .pth has drifted
+# to stale worktrees before, which let /api stay healthy while the SPA root 404ed.
+Environment=PYTHONPATH=/home/john/elspeth/src
+
+ExecStart=/home/john/elspeth/.venv/bin/uvicorn elspeth.web.app:create_app \
+    --factory \
+    --uds /run/elspeth/uvicorn.sock \
+    --proxy-headers \
+    --forwarded-allow-ips=/run/elspeth/uvicorn.sock \
+    --no-server-header \
+    --limit-concurrency 100 \
+    --limit-max-requests 10000
+
+Restart=on-failure
+RestartSec=2
+UMask=0007
+
+# --- Security hardening (matches keisei-serve.service) ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+ReadWritePaths=/run/elspeth /home/john/elspeth/data
+
+[Install]
+WantedBy=multi-user.target

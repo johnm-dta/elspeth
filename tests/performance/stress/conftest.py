@@ -32,7 +32,7 @@ import pytest
 from errorworks.llm.config import ChaosLLMConfig, load_config
 from errorworks.llm.server import ChaosLLMServer
 
-from elspeth.contracts import NodeType, PipelineRow, TransformErrorReason, TransformResult
+from elspeth.contracts import ExceptionResult, NodeType, PipelineRow, TransformErrorReason, TransformResult
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     import httpx
 
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.engine.batch_adapter import ExceptionResult
 
 # Dynamic schema for LLM transforms
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -542,7 +541,7 @@ class CollectingOutputPort:
         ExceptionResults are treated as errors.
         """
         # Handle ExceptionResult (plugin bugs)
-        if hasattr(result, "exception"):
+        if isinstance(result, ExceptionResult):
             with self._lock:
                 self.errors.append(({"reason": "test_error", "error": f"exception: {result.exception}"}, token))
             return
@@ -713,7 +712,7 @@ def make_azure_llm_config(
         "deployment_name": "gpt-4o",
         "endpoint": chaosllm_url,
         "api_key": "test-key",
-        "template": "Analyze: {{ row.text }}",
+        "prompt_template": "Analyze: {{ row.text }}",
         "system_prompt": "You are a helpful assistant.",
         "schema": DYNAMIC_SCHEMA,
         "pool_size": 4,
@@ -748,7 +747,7 @@ def make_openrouter_llm_config(
         "model": "anthropic/claude-3-opus",
         "base_url": f"{chaosllm_url}/v1",  # Append /v1 for ChaosLLM compatibility
         "api_key": "test-key",
-        "template": "Analyze: {{ row.text }}",
+        "prompt_template": "Analyze: {{ row.text }}",
         "system_prompt": "You are a helpful assistant.",
         "schema": DYNAMIC_SCHEMA,
         "pool_size": 4,
@@ -781,7 +780,7 @@ def make_azure_multi_query_config(
         "deployment_name": "gpt-4o",
         "endpoint": chaosllm_url,
         "api_key": "test-key",
-        "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "queries": {
             "cs1_diagnosis": {
@@ -846,7 +845,7 @@ def make_openrouter_multi_query_config(
         "model": "anthropic/claude-3-opus",
         "base_url": f"{chaosllm_url}/v1",  # Append /v1 for ChaosLLM compatibility
         "api_key": "test-key",
-        "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "queries": {
             "cs1_diagnosis": {

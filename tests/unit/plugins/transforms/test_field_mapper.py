@@ -188,8 +188,17 @@ class TestFieldMapper:
         assert result.row["origin"] == "api"
         assert "meta" in result.row  # Original nested structure preserved
 
-    def test_nested_field_type_mismatch_raises_in_non_strict_mode(self, ctx: PluginContext) -> None:
-        """Non-dict intermediate on dotted path raises type error (upstream bug)."""
+    def test_nested_field_type_mismatch_routes_in_non_strict_mode(self, ctx: PluginContext) -> None:
+        """Non-dict intermediate on a dotted path routes to on_error — it does not crash.
+
+        ELSPETH contracts are flat: they describe top-level fields, never nested shape.
+        A ``mapping: {"user.name": ...}`` is a config-level expectation that ``user`` is
+        a dict; the input contract neither promises nor can promise that. When ``user``
+        is a string, no type *contract* was violated — the dotted-path navigation
+        *operation* failed on this row's value (the same class as a divide-by-zero on a
+        type-valid divisor). That is operation-unsafe Tier-2 data, so the row routes to
+        on_error and is recorded; one malformed nested value must not abort the run.
+        """
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
         transform = FieldMapper(
@@ -200,11 +209,22 @@ class TestFieldMapper:
             }
         )
 
-        with pytest.raises(TypeError, match="expected dict"):
-            transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
+        result = transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
 
-    def test_nested_field_type_mismatch_raises_in_strict_mode(self, ctx: PluginContext) -> None:
-        """Strict mode should not mask type mismatches as missing fields."""
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "type_mismatch"
+        assert result.reason["field"] == "user.name"
+
+    def test_nested_field_type_mismatch_routes_in_strict_mode(self, ctx: PluginContext) -> None:
+        """Strict mode must never mask a type mismatch as a missing field (silent skip).
+
+        The original concern this test guarded — that a type mismatch must not be
+        swallowed as an absent field — is preserved: a non-navigable dotted path routes
+        to on_error with a distinct ``type_mismatch`` reason in BOTH modes. The only
+        behaviour change is that the failure no longer crashes the entire run on a single
+        malformed row; it is recorded and routed like any other per-row data fault.
+        """
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
         transform = FieldMapper(
@@ -215,8 +235,12 @@ class TestFieldMapper:
             }
         )
 
-        with pytest.raises(TypeError, match="expected dict"):
-            transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
+        result = transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "type_mismatch"
+        assert result.reason["field"] == "user.name"
 
     def test_empty_mapping_passthrough(self, ctx: PluginContext) -> None:
         """Empty mapping acts as passthrough."""

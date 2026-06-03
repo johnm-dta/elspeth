@@ -1,7 +1,7 @@
 """Security utilities for ELSPETH.
 
 Exports:
-- secret_fingerprint: Compute HMAC-SHA256 fingerprint of a secret
+- secret_fingerprint: Compute a keyed fingerprint of a secret
 - get_fingerprint_key: Get the fingerprint key from environment
 - SecretLoadError: Raised when secret loading fails
 - load_secrets_from_config: Load secrets from pipeline config

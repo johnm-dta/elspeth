@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.enums import OutputMode
 from elspeth.contracts.errors import PassThroughContractViolation
 from elspeth.contracts.schema_contract import (
@@ -73,6 +74,7 @@ class _MisannotatedBatchDropper(BaseTransform):
     """
 
     name = "misannotated-batch-dropper"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
     source_file_hash: str | None = None
     input_schema = _TestSchema
@@ -119,6 +121,7 @@ class _HonestBatchPreserver(BaseTransform):
     """
 
     name = "honest-batch-preserver"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
     source_file_hash: str | None = None
     input_schema = _TestSchema

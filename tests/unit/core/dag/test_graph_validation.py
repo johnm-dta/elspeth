@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts import EdgeInfo
 from elspeth.contracts.enums import NodeType, RoutingMode
 from elspeth.contracts.types import NodeID, SinkName
 from elspeth.core.dag.graph import ExecutionGraph
@@ -68,6 +69,37 @@ class TestRouteResolutionMapCompleteAllMissing:
 
         with pytest.raises(GraphValidationError, match="no registered route label"):
             graph.validate()
+
+
+class TestTypedEdgeContracts:
+    """ExecutionGraph edge query APIs must return EdgeInfo contracts."""
+
+    def test_get_edges_and_incoming_edges_preserve_routing_mode_enum(self) -> None:
+        graph = ExecutionGraph()
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("gate", node_type=NodeType.GATE, plugin_name="expression")
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json")
+
+        graph.add_edge("src", "gate", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink", label="flagged", mode=RoutingMode.COPY)
+
+        edges = graph.get_edges()
+        assert all(isinstance(edge, EdgeInfo) for edge in edges)
+        assert {edge.label: edge.mode for edge in edges} == {
+            "continue": RoutingMode.MOVE,
+            "flagged": RoutingMode.COPY,
+        }
+        assert all(isinstance(edge.mode, RoutingMode) for edge in edges)
+
+        incoming = graph.get_incoming_edges("sink")
+        assert incoming == [
+            EdgeInfo(
+                from_node=NodeID("gate"),
+                to_node=NodeID("sink"),
+                label="flagged",
+                mode=RoutingMode.COPY,
+            )
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -282,7 +282,7 @@ class TestWalkerInValidatePipeline:
         truth for value-source compliance under the Option-B refactor.
         """
         mock_yaml_gen = MagicMock()
-        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
 
         # Construct the same exception shape the walker would raise — one
         # structured finding, attributable to a specific component.
@@ -330,7 +330,7 @@ class TestWalkerInValidatePipeline:
         raising, both PLUGINS and VALUE_SOURCE are recorded as passed and
         validation continues into graph construction."""
         mock_yaml_gen = MagicMock()
-        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
 
         mock_bundle = MagicMock()
         mock_bundle.source = MagicMock()
@@ -521,4 +521,5 @@ def _make_settings() -> WebSettings:
         composer_max_discovery_turns=5,
         composer_timeout_seconds=30.0,
         composer_rate_limit_per_minute=60,
+        shareable_link_signing_key=b"\x00" * 32,
     )

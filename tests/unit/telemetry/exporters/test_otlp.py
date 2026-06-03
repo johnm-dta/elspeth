@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts import TokenCompleted, TokenUsage
 from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
@@ -516,8 +517,8 @@ class TestOTLPExporterLifecycle:
         # shutdown called only once (exporter set to None after first close)
         mock_sdk.shutdown.assert_called_once()
 
-    def test_export_failure_does_not_raise(self) -> None:
-        """Export failures are logged but don't raise exceptions."""
+    def test_export_failure_reports_handled_failure(self) -> None:
+        """Export transport failures are reported without raising."""
         exporter, mock_sdk = self._create_configured_exporter()
         mock_sdk.export.side_effect = ConnectionError("Network error")
 
@@ -528,14 +529,14 @@ class TestOTLPExporterLifecycle:
             source_plugin="csv",
         )
 
-        # Should not raise even with batch_size=1 (immediate export)
         exporter._batch_size = 1
-        exporter.export(event)  # Triggers export which fails
+        result = exporter.export(event)  # Triggers export which fails
+        assert result is False
         # Buffer should be cleared despite failure
         assert len(exporter._buffer) == 0
 
-    def test_flush_failure_does_not_raise(self) -> None:
-        """flush() failures are logged but don't raise exceptions."""
+    def test_flush_failure_reports_handled_failure(self) -> None:
+        """flush() transport failures are reported without raising."""
         exporter, mock_sdk = self._create_configured_exporter()
         mock_sdk.export.side_effect = ConnectionError("Network error")
 
@@ -547,8 +548,24 @@ class TestOTLPExporterLifecycle:
         )
         exporter.export(event)
 
-        # Should not raise
-        exporter.flush()
+        result = exporter.flush()
+        assert result is False
+
+    def test_sdk_failure_status_reports_handled_failure(self) -> None:
+        """SDK failure return values are delivery failures, not successful flushes."""
+        exporter, mock_sdk = self._create_configured_exporter()
+        mock_sdk.export.return_value = SpanExportResult.FAILURE
+
+        event = RunStarted(
+            timestamp=datetime.now(UTC),
+            run_id="run-123",
+            config_hash="abc",
+            source_plugin="csv",
+        )
+        exporter.export(event)
+
+        result = exporter.flush()
+        assert result is False
 
     def test_close_failure_does_not_raise(self) -> None:
         """close() shutdown failures are logged but don't raise."""

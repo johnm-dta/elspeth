@@ -1038,6 +1038,40 @@ class TestUnionMerge:
         # Key should be in completed set (rejects late arrivals)
         assert key in executor._completed_keys, "key should be marked completed to reject late arrivals"
 
+    def test_merge_audit_integrity_error_propagates_without_recording_failed(self):
+        """An AuditIntegrityError raised during merge must re-raise WITHOUT writing
+        any further audit records.
+
+        When the audit database is already compromised, the cleanup handler must
+        NOT call complete_node_state(FAILED) or record_token_outcome(FAILED) —
+        writing more rows to an untrustworthy DB is less honest than leaving the
+        node states pending. This pins the dedicated `except AuditIntegrityError:
+        raise` clause in _execute_merge (the offensive ordering that replaced the
+        prior isinstance(merge_exc, AuditIntegrityError) shape-guard).
+        """
+        executor, execution, data_flow, _, _ = _make_executor()
+        s = _settings(branches=["a", "b"], merge="union")
+        executor.register_coalesce(s, "node_1")
+
+        # Inject audit-DB compromise at the first step inside the merge try-body.
+        executor._merge_data = Mock(  # type: ignore[method-assign]
+            side_effect=AuditIntegrityError("audit DB unreadable mid-merge")
+        )
+
+        t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
+        t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
+        executor.accept(t1, "merge")
+        with pytest.raises(AuditIntegrityError, match="audit DB unreadable mid-merge"):
+            executor.accept(t2, "merge")
+
+        # The compromised-DB path must record NOTHING further: no FAILED state
+        # writes and no terminal-outcome writes from the cleanup handler.
+        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
+        assert failed_calls == [], "AuditIntegrityError path must not write FAILED states to a compromised audit DB"
+        assert data_flow.record_token_outcome.call_args_list == [], (
+            "AuditIntegrityError path must not record terminal outcomes to a compromised audit DB"
+        )
+
     # ------------------------------------------------------------------
     # Orthogonality: union_collision_policy vs arrival policy
     # ------------------------------------------------------------------
@@ -2484,6 +2518,28 @@ class TestCheckpointCompletedKeys:
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
         assert outcome.outcomes_recorded is True
+
+    def test_get_checkpoint_state_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch):
+        """Checkpoint state construction must not pre-serialize the DTO.
+
+        The CheckpointManager is the persistence boundary that serializes the
+        state.  Serializing here purely for size validation doubles checkpoint
+        cost on every interrupted coalesce run.
+        """
+        import elspeth.engine.coalesce_executor as coalesce_module
+
+        def fail_if_called(_obj: object) -> str:
+            raise AssertionError("CoalesceExecutor.get_checkpoint_state must not serialize")
+
+        monkeypatch.setattr(coalesce_module, "checkpoint_dumps", fail_if_called, raising=False)
+
+        executor, _execution, _data_flow, _, _clock = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), "node_1")
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+
+        checkpoint = executor.get_checkpoint_state()
+
+        assert checkpoint.pending
 
     def test_landscape_reconstruction_restores_all_completed_keys(self):
         """Multiple completed keys restored from Landscape, not checkpoint."""

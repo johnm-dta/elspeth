@@ -128,7 +128,7 @@ The Azure Blob plugins support four authentication methods:
 Time-limited, permission-scoped tokens. Best for demos and CI/CD:
 
 ```yaml
-datasource:
+source:
   plugin: azure_blob
   options:
     sas_token: "${AZURE_STORAGE_SAS_TOKEN}"
@@ -142,7 +142,7 @@ datasource:
 Simplest option, good for quick development:
 
 ```yaml
-datasource:
+source:
   plugin: azure_blob
   options:
     connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"
@@ -155,7 +155,7 @@ datasource:
 Best for Azure-hosted workloads (VMs, App Service, Functions):
 
 ```yaml
-datasource:
+source:
   plugin: azure_blob
   options:
     use_managed_identity: true
@@ -169,7 +169,7 @@ datasource:
 Best for production CI/CD pipelines:
 
 ```yaml
-datasource:
+source:
   plugin: azure_blob
   options:
     tenant_id: "${AZURE_TENANT_ID}"
@@ -239,7 +239,7 @@ Both source and sink support:
 ### Example: JSON format
 
 ```yaml
-datasource:
+source:
   plugin: azure_blob
   options:
     connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"

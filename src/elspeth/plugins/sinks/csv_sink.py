@@ -15,10 +15,11 @@ import os
 from collections.abc import Sequence
 from typing import IO, TYPE_CHECKING, Any, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.plugin_assistance import PluginAssistance
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -26,6 +27,7 @@ from elspeth.contracts.contexts import SinkContext
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import OutputCollisionPolicy, SinkPathConfig
 from elspeth.plugins.infrastructure.display_headers import (
+    display_name_for,
     get_effective_display_headers,
     init_display_headers,
     resolve_contract_from_context_if_needed,
@@ -37,6 +39,7 @@ from elspeth.plugins.infrastructure.output_paths import (
     should_create_exclusively,
     validate_output_collision_policy_mode,
 )
+from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 
 
@@ -49,9 +52,9 @@ class CSVSinkConfig(SinkPathConfig):
     - Header output mode (headers: normalized | original | {mapping})
     """
 
-    delimiter: str = ","
-    encoding: str = "utf-8"
-    mode: Literal["write", "append"] = "write"
+    delimiter: str = Field(default=",", description="Single-character delimiter used when writing CSV fields.")
+    encoding: str = Field(default="utf-8", description="Text encoding used when writing the CSV file.")
+    mode: Literal["write", "append"] = Field(default="write", description="Whether to create/replace the CSV file or append rows.")
 
     @field_validator("delimiter")
     @classmethod
@@ -108,8 +111,9 @@ class CSVSink(BaseSink):
     """
 
     name = "csv"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c24ad00a6582427b"
+    source_file_hash: str | None = "sha256:08dc7bc1f1c7baa7"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -175,12 +179,13 @@ class CSVSink(BaseSink):
         display_map = get_effective_display_headers(self)
         if display_map is not None:
             # Map normalized -> display for comparison against file headers
-            expected = [display_map.get(f, f) for f in expected_normalized]
+            expected = [display_name_for(display_map, f) for f in expected_normalized]
         elif self._headers_mode == HeaderMode.ORIGINAL:
-            # ORIGINAL mode but field_resolution not yet available — comparing
-            # normalized names against display-name file headers would be wrong.
-            # Skip validation; it will be checked once headers are resolved.
-            return OutputValidationResult.success(target_fields=existing)
+            return OutputValidationResult.failure(
+                message="CSV headers: original requires source field resolution before resume validation",
+                target_fields=existing,
+                schema_fields=expected_normalized,
+            )
         else:
             expected = expected_normalized
 
@@ -221,7 +226,7 @@ class CSVSink(BaseSink):
         self._mode = cfg.mode
         self._collision_policy = cfg.collision_policy
         self._write_target_claimed = False
-        if self._mode != "append":
+        if self._mode != "append" and not plugin_preflight_mode_enabled():
             self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
 
         # Display header state (shared module handles all modes)
@@ -316,16 +321,11 @@ class CSVSink(BaseSink):
             self._fieldnames = data_fields
 
             # Stage rows in memory — if any row is invalid, we fail here
-            # BEFORE the file is created/truncated.
-            staging_buffer = io.StringIO()
-            staging_writer = csv.DictWriter(
-                staging_buffer,
-                fieldnames=data_fields,
-                delimiter=self._delimiter,
-            )
-            for row in rows:
-                staging_writer.writerow(row)
-            staged_content = staging_buffer.getvalue()
+            # BEFORE the file is created/truncated. A row that can't be staged
+            # is a per-row Tier-2 data fault (one row's value/shape, not a batch
+            # failure): it is diverted (recorded + routed per on_write_failure)
+            # and the remaining rows are written, rather than aborting the batch.
+            staged_content = self._stage_rows_per_row(data_fields, rows)
 
             # Staging succeeded — now safe to open (truncate) and write.
             self._open_file_write_mode(data_fields, display_fields)
@@ -382,18 +382,14 @@ class CSVSink(BaseSink):
             # extra fields rejected by DictWriter), NO rows are written to disk.
             # Without this, row N failing after rows 0..N-1 are written causes
             # audit divergence -- CSV has rows the Landscape marks as FAILED.
-            staging_buffer = io.StringIO()
+            #
+            # A row that can't be staged is a per-row Tier-2 data fault (one
+            # row's value/shape, not a batch failure): it is diverted (recorded +
+            # routed per on_write_failure) and the remaining rows are written.
             fieldnames = self._fieldnames
             if fieldnames is None:
                 raise RuntimeError("write() called before _fieldnames set by _write_header()")
-            staging_writer = csv.DictWriter(
-                staging_buffer,
-                fieldnames=fieldnames,
-                delimiter=self._delimiter,
-            )
-            for row in rows:
-                staging_writer.writerow(row)
-            staged_content = staging_buffer.getvalue()
+            staged_content = self._stage_rows_per_row(fieldnames, rows)
 
             # Track write position before writing for incremental hashing.
             # Use file.tell() not stat().st_size — stat() has a TOCTOU race where
@@ -434,8 +430,56 @@ class CSVSink(BaseSink):
                 path=str(self._path),
                 content_hash=content_hash,
                 size_bytes=size_bytes,
-            )
+            ),
+            diversions=self._get_diversions(),
         )
+
+    def _stage_rows_per_row(self, fieldnames: Sequence[str], rows: list[dict[str, Any]]) -> str:
+        """Stage rows for write, diverting any row that cannot be staged.
+
+        Each row is trial-encoded INDIVIDUALLY into a throwaway in-memory buffer
+        so a row that csv.DictWriter cannot serialize never leaves partial bytes
+        in the staging buffer handed to the file. A row that fails staging with a
+        CSV serialization error — a ``ValueError`` from DictWriter's
+        ``extrasaction='raise'`` default (a field outside the established column
+        lock), or a ``csv.Error`` from the underlying writer — is a per-row
+        Tier-2 data fault attributable to that single row. Such a row is diverted
+        (recorded + routed per on_write_failure) and the surrounding good rows
+        are still staged, rather than aborting the batch.
+
+        The catch is deliberately narrow, mirroring the json_sink reference: only
+        serialization-shaped errors are diverted. A value whose ``str()`` itself
+        raises an arbitrary exception is a broken object (an upstream bug), not
+        operation-unsafe data — it propagates and crashes (Plugin Ownership).
+
+        The trial-encode targets an in-memory StringIO only — it touches no file,
+        no shared state, and no external system. (Batch-integrity failures — file
+        open/permission, disk-full on the real write, the rollback path — happen
+        in write() AFTER this method returns and remain raises.)
+
+        Args:
+            fieldnames: The locked column names for the DictWriter.
+            rows: The original input batch. ``row_index`` in each diversion is the
+                index into THIS list, so the executor can correlate to tokens.
+
+        Returns:
+            The staged CSV text for the rows that encoded successfully (no header).
+        """
+        staging_buffer = io.StringIO()
+        for row_index, row in enumerate(rows):
+            row_buffer = io.StringIO()
+            row_writer = csv.DictWriter(
+                row_buffer,
+                fieldnames=fieldnames,
+                delimiter=self._delimiter,
+            )
+            try:
+                row_writer.writerow(row)
+            except (ValueError, csv.Error) as exc:
+                self._divert_row(row, row_index=row_index, reason=f"CSV serialization failed: {exc}")
+                continue
+            staging_buffer.write(row_buffer.getvalue())
+        return staging_buffer.getvalue()
 
     def _open_file(self, rows: list[dict[str, Any]]) -> None:
         """Open file for append mode.
@@ -486,7 +530,7 @@ class CSVSink(BaseSink):
                     # Reverse the display map to get display_name -> data_field
                     reverse_map = {v: k for k, v in display_map.items()}
                     # Map existing headers (display names) back to data field names
-                    self._fieldnames = [reverse_map.get(h, h) for h in existing_fieldnames]
+                    self._fieldnames = [display_name_for(reverse_map, h) for h in existing_fieldnames]
                 else:
                     self._fieldnames = list(existing_fieldnames)
 
@@ -592,7 +636,7 @@ class CSVSink(BaseSink):
 
         # Map field names to display names, falling back to original if not mapped
         # This handles transform-added fields that have no original header
-        display_fields = [display_map.get(field, field) for field in data_fields]
+        display_fields = [display_name_for(display_map, field) for field in data_fields]
         return data_fields, display_fields
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
@@ -619,3 +663,19 @@ class CSVSink(BaseSink):
             self._file.close()
             self._file = None
             self._writer = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="csv",
+                issue_code=None,
+                summary="Write rows as CSV. Configurable encoding, quoting, collision_policy, and header-display overrides.",
+                composer_hints=(
+                    "delimiter and quoting are operator-level concerns — pick deliberately for the consuming tool (Excel prefers ',' + QUOTE_MINIMAL; analytics tools may prefer '\\t').",
+                    "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
+                    "Header row is written once at start. Resume appends must use the same column order; pin headers explicitly with headers when schema can evolve.",
+                    "Set on_write_failure to a quarantine sink so per-row write errors don't crash the run.",
+                ),
+            )
+        return None

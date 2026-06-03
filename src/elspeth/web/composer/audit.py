@@ -49,14 +49,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 import rfc8785
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolRecorder,
     ComposerToolStatus,
 )
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallRecorder
+from elspeth.contracts.composer_llm_audit import (
+    ComposerChatTurn,
+    ComposerChatTurnRecorder,
+    ComposerLLMCall,
+    ComposerLLMCallRecorder,
+)
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.protocol import ToolArgumentError
 
@@ -68,6 +73,7 @@ __all__ = [
     "begin_dispatch",
     "begin_dispatch_or_arg_error",
     "build_canonicalization_sentinel",
+    "canonicalize_pydantic_cause",
     "dispatch_with_audit",
     "finish_arg_error",
     "finish_plugin_crash",
@@ -176,13 +182,15 @@ def build_canonicalization_sentinel(
     return sentinel
 
 
-class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
+class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder, ComposerChatTurnRecorder):
     """Append-only in-memory buffer for composer audit records.
 
-    Used inside :meth:`ComposerServiceImpl._compose_loop`. The buffer is
-    surfaced on :class:`ComposerResult` and on the partial-state-carrier
-    exceptions so the route handler always has the per-tool-call decision
-    trail and per-LLM-call operational trail.
+    Used inside :meth:`ComposerServiceImpl._compose_loop`. After Phase 3,
+    compose-loop tool rows are committed by
+    ``SessionServiceProtocol.persist_compose_turn_async`` inside the loop;
+    the route-layer ``tool_invocations`` drain is retained only for older
+    non-loop carriers. LLM call and guided chat-turn sidecars still use this
+    buffer as their route-persisted staging area.
 
     Threading: ``record()`` is safe to call from any thread. The compose
     loop dispatches synchronously to a worker via ``run_sync_in_worker``
@@ -193,6 +201,7 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
     def __init__(self) -> None:
         self._invocations: list[ComposerToolInvocation] = []
         self._llm_calls: list[ComposerLLMCall] = []
+        self._chat_turns: list[ComposerChatTurn] = []
         self._lock = threading.Lock()
 
     def record(self, invocation: ComposerToolInvocation) -> None:
@@ -202,6 +211,16 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
     def record_llm_call(self, call: ComposerLLMCall) -> None:
         with self._lock:
             self._llm_calls.append(call)
+
+    def record_chat_turn(self, turn: ComposerChatTurn) -> None:
+        """Append a :class:`ComposerChatTurn` record (Phase A slice 5).
+
+        Persistence to the audit DB is wired by the route handler via
+        the future ``_persist_chat_turns`` helper; this buffer is the
+        in-memory staging area for the request's per-turn records.
+        """
+        with self._lock:
+            self._chat_turns.append(turn)
 
     @property
     def invocations(self) -> tuple[ComposerToolInvocation, ...]:
@@ -214,6 +233,12 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
         """Snapshot the current LLM-call buffer as an immutable tuple."""
         with self._lock:
             return tuple(self._llm_calls)
+
+    @property
+    def chat_turns(self) -> tuple[ComposerChatTurn, ...]:
+        """Snapshot the current chat-turn buffer as an immutable tuple."""
+        with self._lock:
+            return tuple(self._chat_turns)
 
     def resolve_session(self, session_id: str) -> None:
         """Protocol no-op — the in-memory buffer has nothing to flush.
@@ -252,6 +277,19 @@ def audit_envelope(invocation: ComposerToolInvocation) -> dict[str, object]:
 def llm_call_audit_envelope(call: ComposerLLMCall) -> dict[str, object]:
     """Wrap an LLM call in the canonical ``tool_calls`` JSON envelope."""
     return {"_kind": "llm_call_audit", "call": call.to_dict()}
+
+
+def chat_turn_audit_envelope(turn: ComposerChatTurn) -> dict[str, object]:
+    """Wrap a chat turn in the canonical ``tool_calls`` JSON envelope.
+
+    Sibling of :func:`llm_call_audit_envelope`.  The ``_kind`` discriminator
+    distinguishes this from LLM-call audit payloads so a reader of
+    ``chat_messages`` can dispatch on the field without inspecting the body.
+
+    ``turn.to_dict()`` already serialises the enum + datetimes; the envelope
+    just adds the kind tag.
+    """
+    return {"_kind": "chat_turn_audit", "turn": turn.to_dict()}
 
 
 # ---------------------------------------------------------------------------
@@ -397,17 +435,24 @@ def finish_success(
     ``result_canonical``. Only path-level failures (ARG_ERROR,
     PLUGIN_CRASH) get a non-success status.
 
-    Sentinel-canonical fallback (B1 fix)
-    ------------------------------------
-    Wrap ``canonical_json(result_payload)`` and ``stable_hash(result_payload)``
-    in try/except so a non-finite float or non-serializable type in the
-    result does not raise out of the success path and either crash the
-    request or silently skip the audit record. Mirrors the standalone-MCP
-    sentinel at ``composer_mcp/server.py:715-721`` exactly so both
-    surfaces have the same canonicalization-failure discipline. The audit
-    row still lands; the verifier can detect the sentinel by parsing
-    ``result_canonical`` and noticing the ``_canonicalization_error``
-    key.
+    Crash-on-anomaly (no sentinel fallback)
+    ---------------------------------------
+    ``result_payload`` is the SUCCESS-path output of a composer tool
+    handler (``ToolResult.to_dict()`` — our own code). It is a
+    first-party authored value, so a non-finite float or non-serializable
+    type here means one of our handlers produced un-canonicalizable
+    output: a bug in our code, not malformed external data. Per the trust
+    model, ``canonical_json`` / ``stable_hash`` on our own dispatch output
+    is a Tier-1-equivalent act — it crashes on anomaly rather than
+    substituting a degraded sentinel and reporting SUCCESS (which would
+    launder our bug into a clean-looking audit row). The audit record is
+    still guaranteed: :func:`dispatch_with_audit`'s ``finally`` clause
+    catches the raise, records PLUGIN_CRASH, and re-raises — so the
+    failure surfaces loudly *with* an audit row, not silently. (Contrast
+    the ARG_ERROR path, where the composer-LLM authors the tool
+    *arguments* — genuinely Tier-3 — and
+    :func:`build_canonicalization_sentinel` does produce a bounded
+    sentinel rather than crash.)
 
     Pydantic normalization (elspeth-281f259235 fix)
     -----------------------------------------------
@@ -416,30 +461,24 @@ def finish_success(
     ``BaseModel`` instances to plain dicts. Discovery tool results
     (``list_sources``, ``list_transforms``, ``list_sinks``,
     ``get_plugin_schema``) carry ``PluginSummary`` / ``PluginSchemaInfo``
-    instances on ``ToolResult.data``; without this step the
-    canonicalization-failure sentinel would obliterate the actual result
-    body that the LLM saw, breaking the attributability test (auditors
-    cannot reconstruct what data the LLM made its decision against).
-
-    Sentinel shape (elspeth-281f259235 fix)
-    ---------------------------------------
-    On the fallback path, :func:`build_canonicalization_sentinel`
-    enriches the sentinel with diagnostic metadata —
-    ``_canonicalization_detail`` (allowlisted to
-    :class:`rfc8785.CanonicalizationError` whose messages are
-    value-free by spec) and ``_payload_keys`` (top-level keys only;
-    no values, no leak risk). An auditor reading the sentinel can
-    fingerprint the failure shape (discovery-tool vs mutation vs
-    runtime-preflight) without correlating with operational logs.
+    instances on ``ToolResult.data``; without this step canonicalization
+    would reject the ``BaseModel`` and crash the success path on output
+    that is in fact legitimate — normalization keeps well-formed handler
+    results canonicalizable so only genuine anomalies trip the crash.
     """
     normalized = _normalize_audit_payload(result_payload)
-    try:
-        canon = canonical_json(normalized)
-        result_hash = stable_hash(normalized)
-    except (ValueError, TypeError) as canon_exc:
-        sentinel = build_canonicalization_sentinel(canon_exc, result_payload)
-        canon = canonical_json(sentinel)
-        result_hash = stable_hash(sentinel)
+    # ``result_payload`` is the SUCCESS-path output of a composer tool handler —
+    # ``ToolResult.to_dict()`` (our own code building structured catalog/state
+    # data). It is a first-party authored value, not an external-origin one: the
+    # composer-LLM authors tool *arguments* (handled on the ARG_ERROR path), never
+    # the handler's *result*. A non-finite float or non-serializable object here
+    # therefore means one of our handlers produced un-canonicalizable output —
+    # a bug in our code, not malformed external data. Per the trust model,
+    # ``canonical_json`` on our own dispatch output is a Tier-1-equivalent act:
+    # crash on anomaly rather than substituting a degraded sentinel and reporting
+    # SUCCESS, which would launder our bug into a clean-looking audit row.
+    canon = canonical_json(normalized)
+    result_hash = stable_hash(normalized)
     return ComposerToolInvocation(
         tool_call_id=audit.tool_call_id,
         tool_name=audit.tool_name,
@@ -599,10 +638,11 @@ async def dispatch_with_audit(
     SUCCESS
         ``do_dispatch`` returned a value. The success branch records
         the post-dispatch state version, and the ``finally`` clause
-        builds the SUCCESS invocation via :func:`finish_success` (which
-        itself wraps ``canonical_json`` in a sentinel-fallback
-        try/except so a non-finite float in the result cannot bypass
-        audit). Returns :class:`DispatchOutcome`.
+        builds the SUCCESS invocation via :func:`finish_success`. If
+        :func:`finish_success` raises while canonicalizing first-party
+        handler output (a bug producing un-canonicalizable data), the
+        ``finally`` clause records PLUGIN_CRASH and re-raises — the
+        failure cannot bypass audit. Returns :class:`DispatchOutcome`.
 
     ARG_ERROR
         ``do_dispatch`` raised :class:`ToolArgumentError`. The except
@@ -723,10 +763,11 @@ async def dispatch_with_audit(
 
         # SUCCESS path. The final recorder.record(...) lives in
         # ``finally`` for structural symmetry; here we only capture the
-        # handler result and post-dispatch version. ``finish_success``
-        # itself wraps canonical_json / stable_hash in a
-        # sentinel-fallback try/except (B1 fix), so a non-finite float
-        # in result cannot skip the audit record.
+        # handler result and post-dispatch version. If ``finish_success``
+        # raises while canonicalizing first-party handler output, the
+        # ``finally`` clause records PLUGIN_CRASH and re-raises (see the
+        # try/except around finish_success below), so a canonicalization
+        # failure cannot skip the audit record.
         success_result = result
         success_version_after = version_after_provider(result)
         status = ComposerToolStatus.SUCCESS
@@ -809,3 +850,91 @@ def _result_to_audit_payload(result: Any) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise TypeError(f"dispatch_with_audit: result.to_dict() returned {type(payload).__name__}, expected Mapping")
     return payload
+
+
+# ---------------------------------------------------------------------------
+# F2 (spec §4.2.6): Pydantic ``__cause__`` canonicalization for ARG_ERROR.
+#
+# Placed at module tail to keep the AST body-index ordering of the existing
+# functions stable — the tier-model enforcer fingerprints findings by AST
+# path (``body[N]``), so inserting a new module-level def in the middle of
+# the file would rotate every downstream fingerprint and force a churn of
+# allowlist re-keying that has nothing to do with this change.
+# ---------------------------------------------------------------------------
+
+
+def canonicalize_pydantic_cause(exc: BaseException | None) -> list[dict[str, Any]] | None:
+    """Canonicalize a Pydantic ``ValidationError`` chained on ``__cause__``.
+
+    F2 disposition (spec §4.2.6): promoted-handler ``ToolArgumentError``
+    sites raise ``from pydantic.ValidationError``. The chained
+    ``ValidationError`` carries field-name detail (``loc``/``msg``/``type``)
+    that is auditably valuable for recovery flows in Phase 3+, but
+    ``ValidationError.errors()`` also exposes ``input``/``url``/``ctx``
+    fields that are leak vectors — ``input`` is the rejected value
+    verbatim (Tier-3, secret-bearing), ``url`` is a Pydantic docs URL
+    with no audit value, and ``ctx`` may carry the rejected value in
+    its context dict.
+
+    This helper produces a leak-safe canonical projection: a fresh list
+    of dicts containing ONLY ``loc`` (stringified), ``msg`` (the
+    Pydantic-generated message — NOT user-supplied), and ``type`` (the
+    Pydantic error-type discriminator like ``"int_parsing"``,
+    ``"missing"``, ``"value_error"``).
+
+    Behaviour
+    ---------
+    - ``exc is None`` → ``None`` (no chained cause to canonicalize).
+    - ``exc`` is not a ``pydantic.ValidationError`` → ``None`` (the
+      helper opts out cleanly so non-Pydantic causes don't synthesize
+      empty audit fields).
+    - ``exc.errors()`` returns empty (shouldn't happen for a real
+      ValidationError but defensively) → ``None`` (recording
+      ``validation_errors: []`` has no audit value; the absence of the
+      key is the signal).
+    - Otherwise → ``list[dict[str, Any]]`` with one dict per error.
+
+    Loc-safety note
+    ---------------
+    The ``loc`` tuple contains field-path elements (model field names
+    for typed fields, list indices for sequence fields). For
+    ``dict[str, Any]`` fields, Pydantic only validates dict shape and
+    does NOT descend into values, so ``loc`` paths cannot contain
+    user-supplied dict keys under the current MANIFEST convention
+    (``dict[str, Any]`` for all unknown-shape fields). If a future
+    model introduces ``dict[str, TypedSubmodel]``, Pydantic WILL
+    descend and ``loc`` may then contain user-supplied keys — the
+    safety analysis here MUST be re-evaluated at that point.
+
+    Tier discipline
+    ---------------
+    Pydantic's ``__cause__`` is a Tier-3 boundary input (the LLM's
+    tool-call shape). This helper sits at the Tier-3 → Tier-1
+    audit-record boundary, so defensive handling (the ``isinstance``
+    check, the stringification of non-``str`` loc elements) is the
+    correct discipline. ``exc.errors()`` itself is NOT wrapped in a
+    ``try/except`` — if Pydantic's own ``errors()`` raises, that is a
+    Pydantic-internal bug and must propagate (offensive programming).
+    """
+    if exc is None:
+        return None
+    if not isinstance(exc, ValidationError):
+        return None
+    raw_errors = exc.errors()
+    if not raw_errors:
+        return None
+    canonicalized: list[dict[str, Any]] = []
+    for err in raw_errors:
+        # Stringify every loc element. Pydantic produces ``tuple[int |
+        # str, ...]`` (ints for list-index errors); coerce to ``list[str]``
+        # so the recorded shape is uniform and downstream audit consumers
+        # don't have to branch on element type.
+        loc_stringified = [str(piece) for piece in err["loc"]]
+        canonicalized.append(
+            {
+                "loc": loc_stringified,
+                "msg": err["msg"],
+                "type": err["type"],
+            }
+        )
+    return canonicalized

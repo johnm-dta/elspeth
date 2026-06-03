@@ -128,7 +128,19 @@ class Determinism(StrEnum):
 
 
 class RoutingKind(StrEnum):
-    """Kind of routing action from a gate.
+    """Kind of routing action a gate returns.
+
+    Each kind pairs with specific destination and ``RoutingMode``
+    invariants enforced in ``contracts.routing.RoutingAction.__post_init__``:
+
+    - CONTINUE: Token continues to the next node in the pipeline.
+      No destinations (``destinations == ()``); MOVE mode only.
+    - ROUTE: Token is sent to a single labeled destination (sink or
+      "continue"); exactly one destination; MOVE or DIVERT mode (COPY
+      is rejected to preserve the single-terminal-state-per-token
+      audit invariant).
+    - FORK_TO_PATHS: Token clones to multiple parallel paths; one or
+      more destinations; COPY mode only (fork always copies).
 
     Stored in routing_events.
     """
@@ -394,6 +406,122 @@ class OutputMode(StrEnum):
 
     PASSTHROUGH = "passthrough"
     TRANSFORM = "transform"
+
+
+# ── Plugin catalog types (Phase 7A) ──────────────────────────────────────
+#
+# These types are referenced by base plugin classes (L3) and protocols (L0)
+# and by catalog/audit-readiness services (L3).  They live here at L0 so
+# every layer can import them without violating the dependency rules.
+
+
+class AuditCharacteristic(StrEnum):
+    """Closed vocabulary of audit-characteristic flags rendered on catalog cards.
+
+    Determinism-derived (composed from Determinism enum via
+    _DETERMINISM_TO_AUDIT_FLAG in web/catalog/service.py):
+        IO_READ, IO_WRITE, EXTERNAL_CALL, DETERMINISTIC, SEEDED, NON_DETERMINISTIC
+    Author-declared (per 08-catalog-reshape.md vocabulary):
+        PROVENANCE, RETENTION, QUARANTINE, COERCE, SIGNED, CREDENTIALS
+
+    External-network behaviour is signalled exclusively through
+    ``EXTERNAL_CALL`` (derived from ``Determinism.EXTERNAL_CALL``). An
+    earlier ``NETWORK`` author-declared variant was deleted: no plugin
+    declared it, and its rendered chip ("Network call", attention tone)
+    was visually identical to ``EXTERNAL_CALL``'s. Add it back only when
+    a concrete plugin needs to signal a network call that the
+    determinism derivation rules can't infer, AND pair the addition
+    with a distinguishing UI label.
+
+    The StrEnum IS the closed vocabulary: a typo at the declaration site
+    (e.g. ``frozenset({"io-read"})``) fails mypy rather than silently
+    disappearing from the rendered catalog card.  When a new visual cue is
+    added to the UI, extend this enum together with 08-catalog-reshape.md.
+    """
+
+    # Determinism-derived
+    IO_READ = "io_read"
+    IO_WRITE = "io_write"
+    EXTERNAL_CALL = "external_call"
+    DETERMINISTIC = "deterministic"
+    SEEDED = "seeded"
+    NON_DETERMINISTIC = "non_deterministic"
+    # Author-declared (08-catalog-reshape.md vocabulary)
+    PROVENANCE = "provenance"
+    RETENTION = "retention"
+    QUARANTINE = "quarantine"
+    COERCE = "coerce"
+    SIGNED = "signed"
+    CREDENTIALS = "credentials"
+
+
+# Wire-format asymmetry for audit characteristics:
+#   - Declared on plugin classes as an *unordered* frozenset (set semantics
+#     match the author's intent — "this plugin has flags X, Y, Z").
+#   - Derived on PluginSummary as a *sorted* tuple for stable wire-format
+#     ordering (the catalog API response is canonical-byte-stable across
+#     reordered declarations).
+type DeclaredAuditCharacteristics = frozenset[AuditCharacteristic]
+type DerivedAuditCharacteristics = tuple[AuditCharacteristic, ...]
+
+
+# ── Inline-blob provenance (Phase 5a) ──────────────────────────────────
+#
+# CLOSED LIST — do not extend without design review.
+# Describes how an inline-blob source's content was produced.  Mirrored by
+# the ``ck_blobs_creation_modality`` CHECK constraint in
+# ``web/sessions/models.py``: the StrEnum is the canonical declaration,
+# the SQL CHECK is the DB-side enforcement. Both must change together.
+#
+# Adding a fifth value MUST include:
+#   (a) a spec amendment documenting the new modality and its audit
+#       semantics;
+#   (b) an integration test exercising the new write/read path;
+#   (c) a Filigree ticket linking the change back to this enum.
+#
+# An auditor calling ``explain(recorder, run_id, token_id)`` reaches the
+# originating blob row's ``creation_modality`` field through the
+# inline-source provenance projection (Task 2.5 / Phase 5a); the closed
+# vocabulary keeps the rendered chip set bounded so the UI's switch
+# arms remain exhaustive.
+class CreationModality(StrEnum):
+    VERBATIM = "verbatim"
+    """User typed content directly; content is byte-identical to the
+    triggering chat-message body."""
+
+    LLM_GENERATED = "llm_generated"
+    """LLM generated rows; user confirmed without amendment."""
+
+    DISAMBIGUATED = "disambiguated"
+    """LLM interpreted ambiguous user input into structured rows; user
+    confirmed the interpretation."""
+
+    LLM_GENERATED_THEN_AMENDED = "llm_generated_then_amended"
+    """LLM generated rows, user then amended the content before
+    finalisation."""
+
+    def requires_llm_provenance(self) -> bool:
+        """Return whether this modality requires LLM-provenance fields."""
+        return self in _LLM_AUTHORED_CREATION_MODALITIES
+
+
+# The set of modalities that require LLM-provenance fields (the five
+# ``creating_*`` columns on ``blobs_table``).  Mirrored by the
+# ``ck_blobs_creating_llm_provenance_nullability`` CHECK constraint in
+# ``web/sessions/models.py``.  An auditor querying ``creating_provider IS
+# NOT NULL`` MUST get exactly the rows whose modality is in this set.
+_LLM_AUTHORED_CREATION_MODALITIES: frozenset[CreationModality] = frozenset(
+    {
+        CreationModality.LLM_GENERATED,
+        CreationModality.DISAMBIGUATED,
+        CreationModality.LLM_GENERATED_THEN_AMENDED,
+    }
+)
+
+
+def is_llm_authored_creation_modality(modality: CreationModality) -> bool:
+    """Return whether a blob modality requires LLM-provenance fields."""
+    return modality.requires_llm_provenance()
 
 
 def error_edge_label(transform_id: str) -> str:

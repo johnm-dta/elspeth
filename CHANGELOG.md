@@ -4,6 +4,320 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
+## [Unreleased]
+
+_No unreleased changes recorded._
+
+---
+
+## [0.5.2] - 2026-05-19 (RC-5.2 — Guided Composer, Durable Progress, and Recovery UX)
+
+RC-5.2 is the large Web Composer release train that folds the guided-mode
+wizard, composer progress persistence, manifest-keyed redaction, per-step chat,
+chat-as-data-entry, interpretation review, shareable completion gestures,
+frontend recovery UX, CI/CD gate consolidation, release-documentation refreshes,
+and RC5.2 hardening back onto `main`. It moves the composer from a best-effort
+interactive surface toward an audited, recoverable authoring system: model
+calls, tool dispatch, redacted tool payloads, persisted transcript rows,
+interpretation decisions, recovery diffs, and operator-visible failure causes
+now share one evidence story.
+
+### Added
+
+#### Composer Guided Mode
+
+- **Composer guided mode** — new structured-protocol wizard for first-time
+  pipeline authors. Source → sink → transforms in three steps; closed
+  six-turn taxonomy; deterministic recipe pre-match; LLM-read-only with
+  respect to pipeline state. Ships alongside the unmodified freeform
+  composer; mode transition uses progressive disclosure.
+  See `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+- **ComposerLLMCall audit channel** — every `solve_chain` invocation in
+  guided mode now records a `ComposerLLMCall` audit row (provider, model,
+  status, latency, prompt/completion tokens). Pairs with the existing
+  `ComposerToolInvocation` audit channel so an auditor can reconstruct
+  both what the model was asked and what tools it then dispatched.
+
+#### Composer Progress Persistence — Phase 1A (schema)
+
+- **`chat_messages` audit columns** — `tool_call_id`, `sequence_no`,
+  `writer_principal`, `parent_assistant_id` are now required by the
+  schema, with biconditional CHECK constraints
+  (`ck_chat_messages_tool_call_id_role`, `ck_chat_messages_parent_role`)
+  pinning the OpenAI-shaped tool-call linkage. `role` now permits the
+  `audit` value alongside the prior four for breadcrumb rows that have
+  no parent assistant.
+- **`composition_states.provenance` column** — every composition-state
+  write declares one of `tool_call`, `convergence_persist`,
+  `plugin_crash_persist`, `preflight_persist`, `session_seed`,
+  `session_fork`. The enum is enforced by
+  `ck_composition_states_provenance`.
+- **`run_events` table** — new SQLAlchemy table for per-run event
+  records (`progress` / `error` / `completed` / `cancelled` / `failed`)
+  with `ck_run_events_type` CHECK.
+- **`audit_access_log` table** — scaffolded INERT for Phase 3+
+  read-side audit (`requesting_principal`, `request_path`,
+  `query_args`, `ip_address`, `writer_principal`).
+- **Per-session indices** — `ix_audit_access_log_session_timestamp`
+  and new partial uniqueness on `chat_messages(session_id, sequence_no)`.
+
+#### Composer Progress Persistence — Phase 1B (single-transaction primitive)
+
+- **`SessionServiceImpl.persist_compose_turn` / `persist_compose_turn_async`** —
+  new single-transaction primitive that writes assistant message,
+  redacted tool rows, and composition state atomically. Sync primitive
+  for in-thread tests; async wrapper for production.
+  See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`.
+- **`_persist_payload.py` DTOs** — `StatePayload`, `_ToolOutcome`,
+  `RedactedToolRow`, `AuditOutcome` formalize the turn payload shape.
+- **Advisory-lock primitive** — `contracts/advisory_locks.py` typed
+  helpers; Postgres `pg_advisory_xact_lock` for cross-session
+  serialization, SQLite per-session `RLock` for testcontainer parity.
+- **Sequence-number reservation** — `_reserve_sequence_range` allocates
+  a contiguous `sequence_no` block under the session write lock to
+  preserve per-session monotonicity under concurrent writers.
+
+#### Composer Progress Persistence — Phase 1C (Postgres portability lane)
+
+- **Testcontainer-backed integration tests** — a new `@pytest.mark.testcontainer`
+  lane spins up an ephemeral Postgres container per test. Exercises
+  `pg_advisory_xact_lock` semantics, commit-wins concurrency, and
+  Postgres-specific blob `ready_hash` partial uniqueness that SQLite
+  cannot model. `psycopg2-binary` and `testcontainers[postgres]` are
+  shipped as opt-in deps.
+
+#### Composer Progress Persistence — Phase 2 (redaction walker + MANIFEST)
+
+- **Redaction walker** — `web/composer/redaction.py` grew from a
+  42-line stub to a 2,752-line walker. Recursively descends LLM-supplied
+  argument and response payloads, applies `Sensitive[T]` typed markers
+  with per-field summarizers, and produces a redacted payload safe for
+  Tier-1 audit storage and Tier-3 LLM echo.
+- **38-entry MANIFEST** — every composer tool now has an explicit
+  redaction policy: 10 type-driven entries with Pydantic argument
+  models (`CreateBlobArgumentsModel`, `UpdateBlobArgumentsModel`,
+  `SetSourceArgumentsModel`, `SetSourceFromBlobArgumentsModel`,
+  `SetPipelineArgumentsModel`, `ApplyPipelineRecipeArgumentsModel`,
+  `PatchSourceOptionsArgumentsModel`, `PatchNodeOptionsArgumentsModel`,
+  `PatchOutputOptionsArgumentsModel`) plus 28 declarative entries for
+  discovery and inspection tools.
+- **Pydantic-first ARG_ERROR routing** — promoted tools now validate
+  arguments via their argument model first; `pydantic.ValidationError`
+  is re-raised as `ToolArgumentError` so the compose loop's ARG_ERROR
+  channel receives the right exception class. LLM-facing error message
+  names the argument-bundle + model name only, never per-field detail
+  (rev-2 BLOCKER_A leak discipline). Structured Pydantic detail
+  survives on `__cause__` for auditors via
+  `canonicalize_pydantic_cause`.
+- **Adequacy guard** — `test_adequacy_guard.py` pins manifest-registry
+  parity (every registered tool must have a MANIFEST entry) and a
+  byte-identical redaction snapshot (`redaction_policy_snapshot.json`).
+  Any MANIFEST change must regenerate the snapshot via
+  `scripts/cicd/bootstrap_redaction_snapshot.py`.
+- **F1–F6 hardening** — completeness Hypothesis property tests,
+  walker-guard parity, summarizer contract Hypothesis, label-gate
+  CI workflow, drift guards for Hypothesis strategy overrides.
+
+#### Composer Progress Persistence — Phase 3 (compose loop persistence)
+
+- **Atomic compose-loop tool turns** — `_compose_loop` now persists assistant
+  messages, tool-call breadcrumbs, redacted tool payloads, and composition-state
+  snapshots through `persist_compose_turn`, preserving the audit-first contract
+  even when tools fail, cancellation lands mid-turn, or a plugin crash triggers
+  recovery handling.
+- **Per-turn tool-call cap** — composer turns enforce a bounded tool-call count
+  and emit a `tool_call_cap_exceeded` reason code instead of allowing unbounded
+  tool recursion.
+- **Audit-grade transcript access** — session message reads can opt into
+  `include_tool_rows=true` and record access through `audit_access_log`, giving
+  auditors a path to reconstruct tool rows without exposing them in normal chat
+  history.
+- **Compose-loop invariant coverage** — property and integration tests now pin
+  audit counter conservation, manifest redaction, cancellation commit windows,
+  failed-turn tool-response counts, no-op behaviour, and the compose-loop
+  persistence harness.
+
+#### Composer Progress Persistence — Phase 4 (frontend recovery)
+
+- **Recovery panel** — the frontend now detects recoverable composer failures
+  and opens a dedicated recovery surface with the assistant transcript, redacted
+  tool rows, and before/after state diff for operator inspection.
+- **Recovery transcript and diff rendering** — recovery payloads are parsed,
+  stored in the session store, fetched with `include_tool_rows=true`, and
+  rendered through focused `RecoveryTranscript`, `RecoveryDiff`, and
+  `RecoveryPanel` components.
+- **Frontend lint gate** — the frontend package now ships an ESLint config and
+  `npm run lint` gate so recovery/guided-mode UI changes have a static quality
+  check alongside tests, typecheck, and build.
+
+#### RC5.2 Hotfix Integration
+
+- **Auth and audit hardening** — local/Entra auth flows now audit token
+  issuance, auth failure classes, local login outcomes, refresh-provider
+  invariants, provider outages, and web-run attribution into Landscape while
+  redacting JWKS failure detail and suppressing token-response caching.
+- **Execution and validation hardening** — web execution now classifies
+  validation errors, sanitizes broad execution errors, persists resolved run
+  config, rejects misplaced secret refs, and preserves guided audit persistence
+  failures.
+- **Engine/plugin correctness fixes** — checkpoint resume parsing, empty
+  coalesce checkpoint state, pending batch row identities, JSON sink parent
+  creation, sink preflight collision timing, Web Scrape fail-closed boundaries,
+  LLM provider preflight, and shared LLM telemetry helpers were tightened.
+- **Frontend accessibility and theming fixes** — guided/catalog/run UI now has
+  improved contrast, forced-colors fallbacks, theme initialization and cross-tab
+  sync, screen-reader-safe status symbols, catalog retry controls, keyboard
+  shortcut support, and preserved plugin descriptions.
+
+#### Composer UX Redesign, Preferences, and Review Flow
+
+- **Composer preferences** — new user preferences schema, service, routes, and
+  frontend defaults let users choose their composer starting mode, with review
+  follow-up hardening for backend validation, frontend error surfacing, and
+  preference write-failure alerts.
+- **Chat as data entry** — short chat inputs can project into audited inline
+  blob sources with source provenance, hash evidence, MIME parsing, ambiguity
+  handling, fallback prompts, and audit-readiness panel support.
+- **LLM interpretation review** — ambiguous prompt-template decisions can now
+  pause for operator review, persist append-only interpretation events, support
+  opt-out, gate execution while unresolved reviews remain, and show guided and
+  freeform review widgets in the chat surface.
+- **Completion gestures and shareable reviews** — composer sessions gained
+  completion events, HMAC-signed shareable review links, YAML-export audit
+  events, narrative result views, save-for-review dialogs, shared inspection
+  views, and reusable frontend primitives for completion flows.
+- **First-run tutorial and mode guidance** — the Phase 4 tutorial introduces
+  the composer through a hello-world path, persistent tutorial state, cache-skip
+  telemetry, and explicit guidance for switching between freeform and guided
+  authoring.
+- **Catalog reshape and audit-readiness UI** — plugin catalog cards, filters,
+  audit characteristics, inline chat-source entry, SideRail audit status, graph
+  and YAML modals, validation suggestions, and modal focus traps were rebuilt
+  around the new composer information architecture.
+
+#### Engine, Transform, and Plugin Additions
+
+- **Batch-aware aggregation context** — transforms can receive
+  `AggregationBatchContext`, enabling the new `report_assemble` transform with
+  end-to-end pipeline coverage, metadata-collision checks, and documentation.
+- **Composer knob schema lowering** — plugin option metadata now lowers into
+  one-knob composer schemas, with discriminated plugin protocol support,
+  visible-when scope guards, recipe-slot adapters, golden catalog coverage, and
+  config-metadata enforcement.
+- **Determinism declaration enforcement** — plugin infrastructure now enforces
+  determinism declarations mechanically via `__init_subclass__`, with catalog
+  and boundary-classification follow-up coverage.
+
+#### CI, Lints, and Release Documentation
+
+- **`elspeth-lints` static analyzer** — custom CI analyzers moved into the
+  `elspeth-lints` package with rule fixtures, parity harnesses, emitters, SARIF
+  output, ADR-023, rule-author documentation, and migrated tests for composer,
+  contract, audit-evidence, immutability, manifest, and trust-tier rules.
+- **CI/CD master-plan consolidation** — CI now gates RC branches, consolidates
+  static analysis, runs CodeQL, checks dependency/license state, gates
+  Playwright E2E as a required signal, and carries branch-protection runbooks
+  plus allowlist audit findings.
+- **Telemetry backfill trailer enforcement** — commit hooks and GitHub Actions
+  now enforce cohort-attribution trailers for commits touching telemetry
+  backfill surfaces.
+- **Release docs and docs cleanout** — RC-1/RC-2 changelog fragments,
+  superseded release snapshots, frozen architecture packs, generated reviews,
+  and completed handover corpora were moved to the dated
+  `docs-archive/2026-05-19-docs-cleanout/` archive with a manifest, while
+  current release, executive, progress, velocity, assurance, composer evidence,
+  and audit documents stay linked from `docs/README.md`.
+- **PDF tooling hygiene** — generated PDF output now defaults under
+  `tools/pdf/out/`, with build scripts and docs updated so generated artifacts
+  no longer pollute tracked documentation paths.
+
+### Changed
+
+- **`SessionServiceImpl.add_message()` requires `writer_principal=`** —
+  one of `compose_loop`, `route_user_message`, `route_system_message`,
+  `admin_tool`, `session_fork`. Enforced by `ck_chat_messages_writer_principal`.
+- **`SessionServiceImpl.save_composition_state()` requires `provenance=`** —
+  one of the 6 values above. Enforced by `ck_composition_states_provenance`.
+- **`SessionServiceImpl.__init__()` requires `telemetry=` and `log=`** —
+  callers construct via `build_sessions_telemetry()` from
+  `web/sessions/telemetry.py`.
+- **Composer chain-solver tool response shape** — guided-mode chain
+  solver now constrains tool response shape and surfaces malformed
+  responses via the auto-drop channel rather than masking them.
+- **Exit-from-COMPLETED terminal returns 200** — guided sessions in
+  `kind=completed` terminal accept `control_signal=exit_to_freeform`
+  via POST `/api/sessions/{id}/guided/respond` and transition to
+  `kind=exited_to_freeform` (previously returned 409).
+- **Per-step guided chat** — guided mode now has a separate per-step advisory
+  chat channel with persisted `chat_history`, `ComposerChatTurn` audit rows,
+  route-level invariant auditing, and a `GuidedChatHistory` frontend component.
+- **Guided-mode prompt loading** — the guided composer skill pack is split into
+  base plus step-specific prompt files, preserving the deployment overlay and
+  allowing step-scoped context without flattening all guidance into one prompt.
+- **Finite status typing** — MCP finite status fields and guided wire shapes use
+  narrower literals/enums, with cross-language SlotType drift checked by CI.
+- **Composer dependency packaging** — `chromadb`, `html2text`, and
+  `beautifulsoup4` are mandatory dependencies rather than optional `rag` / `web`
+  extras, matching the composer and web-scrape surfaces that import them during
+  normal RC5.2 operation.
+- **Session schema durability** — session SQLite engines now set WAL,
+  `busy_timeout`, synchronous PRAGMA, schema epoch guards, orphan PENDING-row
+  recovery, and cross-DB hash spot-checks for interpretation runtime handoff.
+- **Frontend auto-validation and session state** — validation triggers now use
+  cache-aware `requestValidate`, failed validation no longer poisons version
+  caches, active run progress blocks auto-validation, auth/session transitions
+  clear stale validation state, and active-session null transitions reset
+  execution state.
+- **Hash routing and retired views** — the composer hash router moved from
+  retired Spec/Runs tabs to graph/YAML/catalog modal actions, with stale
+  bookmark redirects, shortcut rewiring, and explicit preservation notes for
+  RunsView capabilities that moved into successor panels.
+
+### Removed
+
+- **Composer replacement-shape machinery** —
+  `_runtime_preflight_failure_message`,
+  `_enforce_replacement_non_prefix_invariant`, `_ReplacementBranch`,
+  and `_INTERCEPTED_ASSISTANT_HISTORY_PREFIX` are deleted along with
+  the 7 tests pinning the removed behaviour. The compose loop's
+  augmentation shape (state-claim grounding correction + non-empty-state
+  preflight) is now the sole codepath.
+- **Retired composer IA surfaces** — the old Spec tab, Runs tab, SessionSidebar,
+  inspector panel, inspector-page E2E object, and staging migration shims were
+  removed after their live capabilities moved into the SideRail, modals, session
+  switcher, run history, diagnostics, output panels, and validation banner.
+- **Optional dependency extras drift** — the `web` and `rag` extras were retired
+  once their packages became mandatory dependencies for the shipped composer/web
+  surface.
+- **Active-doc clutter** — superseded prompt files, generated review sidecars,
+  completed handovers, point-in-time audits, archived release checklists, and
+  one-off test-bug fixture scripts were removed from active paths or relocated
+  into `docs-archive/2026-05-19-docs-cleanout/`.
+
+### Operational
+
+- **Sessions DB schema deployment requires recreation** — Phase 1A's
+  new columns, tables, CHECKs, and partial unique indices are not
+  applied via Alembic. Per `project_db_migration_policy`: stop the
+  service, archive the old `sessions.db`, restart. The bootstrap
+  creates the new schema on first start. Procedure documented in
+  `docs/runbooks/staging-session-db-recreation.md`.
+- **Phase 5 interpretation deployment requires two DBs to move together** —
+  `interpretation_events_table`, `interpretation_review_disabled`, and the
+  Landscape `calls_table.resolved_prompt_template_hash` handoff require the
+  session DB and Landscape audit DB to be reset together on schema cutover.
+  The staging recreation runbook documents the coupled reset.
+- **Frontend-only deploys require static rebuild, not service restart** —
+  `npm run build` refreshes `src/elspeth/web/frontend/dist/`; backend Python,
+  dependency, environment, systemd, or Caddy changes still require
+  `elspeth-web.service` restart.
+- **Current PR check posture** — PR #39 now includes more than 770 committed
+  branch commits over `main`, including the docs-cleanout merge. The PR body and
+  release docs should be treated as the review map for the whole RC5.2 train,
+  not for a single feature slice.
+
+---
+
 ## [0.5.1] - 2026-05-11 (RC-5.1 — Composer Correctness, Validator Hardening, and Audit-Integrity Coverage)
 
 RC-5.1 is a correctness and assurance follow-up to RC-5. The Web Composer's
@@ -1117,8 +1431,9 @@ plugin system, and CLI.
 
 ## Historical Changelogs
 
-- [RC-1 Changelog](CHANGELOG-RC1.md) — Initial framework build and hardening (Jan 12 – Feb 2, 2026)
-- [RC-2 Changelog](CHANGELOG-RC2.md) — Sub-releases RC2 through RC2.5 (Feb 2 – Feb 12, 2026)
+The root changelog is the visible release-history document. Earlier RC-1 and
+RC-2 fragment files were removed during the repository cleanout because their
+useful history is represented here and in git history.
 
 <!-- Comparison links — tags created at release time -->
 [0.5.1]: https://github.com/tachyon-beep/elspeth/compare/v0.5.0-rc5.0...v0.5.1-rc5.1

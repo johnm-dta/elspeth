@@ -51,19 +51,18 @@ def _find_non_finite_value_path(value: Any, path: str = "$") -> str | None:
     if isinstance(value, np.floating) and not np.isfinite(value):
         return path
 
-    # NumPy arrays: scan for non-finite elements and report a useful path
-    if isinstance(value, np.ndarray) and value.size > 0:
-        try:
-            if np.any(~np.isfinite(value)):
-                flat = value.flat
-                for idx, elem in enumerate(flat):
-                    if isinstance(elem, float | np.floating) and not np.isfinite(elem):
-                        indices = np.unravel_index(idx, value.shape)
-                        index_str = "][".join(str(i) for i in indices)
-                        return f"{path}[{index_str}]"
-        except TypeError:
-            # np.isfinite raises TypeError for non-numeric dtypes (e.g., strings)
-            pass
+    # NumPy arrays: scan for non-finite elements and report a useful path.
+    # Gate on a floating dtype rather than catching np.isfinite()'s TypeError on
+    # non-numeric dtypes: non-float dtypes (string/object/int/bool/complex) cannot
+    # harbour the NaN/Infinity floats this scanner reports, so they are skipped.
+    # (Complex arrays were never reported by the prior float-only element check
+    # either; np.floating preserves that — np.number would wrongly include them.)
+    if value_type is np.ndarray and value.size > 0 and np.issubdtype(value.dtype, np.floating) and np.any(~np.isfinite(value)):
+        for idx, elem in enumerate(value.flat):
+            if not np.isfinite(elem):
+                indices = np.unravel_index(idx, value.shape)
+                index_str = "][".join(str(i) for i in indices)
+                return f"{path}[{index_str}]"
 
     return None
 

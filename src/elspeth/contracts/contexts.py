@@ -28,10 +28,19 @@ if TYPE_CHECKING:
     from elspeth.contracts.audit_protocols import PluginAuditWriter
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.identity import TokenInfo
+    from elspeth.contracts.node_state_context import AggregationBatchContext
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import ValidationErrorToken
     from elspeth.contracts.schema_contract import SchemaContract
-    from elspeth.core.rate_limit import RateLimitRegistry
+
+
+@runtime_checkable
+class RateLimitRegistryProtocol(Protocol):
+    """Minimal rate-limit registry surface exposed to plugins."""
+
+    def get_limiter(self, service_name: str) -> Any:
+        """Return a limiter object for the named external service."""
+        ...
 
 
 @runtime_checkable
@@ -110,6 +119,9 @@ class TransformContext(Protocol):
     def batch_token_ids(self) -> tuple[str, ...] | None: ...
 
     @property
+    def aggregation_batch(self) -> AggregationBatchContext | None: ...
+
+    @property
     def contract(self) -> SchemaContract | None: ...
 
     @property
@@ -184,13 +196,16 @@ class LifecycleContext(Protocol):
     def node_id(self) -> str | None: ...  # [R1] Set by orchestrator before on_start()
 
     @property
+    def operation_id(self) -> str | None: ...
+
+    @property
     def landscape(self) -> PluginAuditWriter | None: ...
 
     @property
     def payload_store(self) -> PayloadStore | None: ...
 
     @property
-    def rate_limit_registry(self) -> RateLimitRegistry | None: ...
+    def rate_limit_registry(self) -> RateLimitRegistryProtocol | None: ...
 
     @property
     def telemetry_emit(self) -> Callable[[Any], None]: ...

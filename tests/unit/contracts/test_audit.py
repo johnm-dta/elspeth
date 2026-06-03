@@ -191,6 +191,59 @@ class TestCall:
         assert call.response_hash == "def456"
         assert call.latency_ms == 150.5
 
+    def test_llm_call_accepts_resolved_prompt_template_hash(self) -> None:
+        """LLM calls may carry the cross-DB resolved-prompt hash anchor."""
+        call = Call(
+            call_id="call-123",
+            state_id="state-456",
+            call_index=0,
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
+            request_hash="abc123",
+            created_at=datetime.now(UTC),
+            resolved_prompt_template_hash="a" * 64,
+        )
+
+        assert call.resolved_prompt_template_hash == "a" * 64
+
+    def test_non_llm_call_rejects_resolved_prompt_template_hash(self) -> None:
+        """Only LLM calls may carry the resolved-prompt hash anchor."""
+        with pytest.raises(ValueError, match=r"resolved_prompt_template_hash.*CallType.LLM"):
+            Call(
+                call_id="call-123",
+                state_id="state-456",
+                call_index=0,
+                call_type=CallType.HTTP,
+                status=CallStatus.SUCCESS,
+                request_hash="abc123",
+                created_at=datetime.now(UTC),
+                resolved_prompt_template_hash="a" * 64,
+            )
+
+    @pytest.mark.parametrize(
+        "resolved_prompt_template_hash",
+        [
+            "a" * 63,
+            "g" * 64,
+        ],
+    )
+    def test_resolved_prompt_template_hash_must_be_64_char_hex(
+        self,
+        resolved_prompt_template_hash: str,
+    ) -> None:
+        """Non-null resolved_prompt_template_hash is a 64-character hex digest."""
+        with pytest.raises(ValueError, match=r"resolved_prompt_template_hash.*64.*hex"):
+            Call(
+                call_id="call-123",
+                state_id="state-456",
+                call_index=0,
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
+                request_hash="abc123",
+                created_at=datetime.now(UTC),
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
+            )
+
 
 class TestArtifact:
     """Tests for Artifact audit model."""

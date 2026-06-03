@@ -1,0 +1,560 @@
+
+================================================================================
+ENTRY 01: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=054e76166ade23bc
+RATIONALE: CSV source parsing reads Tier-3 external bytes; csv.Error during skip_rows means the parser consumed an unknown amount of data (e.g. unmatched quote swallowed subsequent lines). The handler records the error via ctx.record_validation_error and stops processing to avoid silent data loss from corrupted parser state. Never coerces the error into a continued parse.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:11.734425+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9994 cached=0 (0% hit)
+
+Judge rationale:
+  The rationale describes a csv.Error during skip_rows scenario, but the flagged except block at line 549 catches ValidationError (pydantic), not csv.Error, and it does not 'stop processing' — it records the error, optionally yields a quarantined row, and continues the loop. The rationale does not actually describe the code at the flagged site. Furthermore, the handler does record_validation_error and yields a quarantine SourceRow, which is an explicit error result — but R6 flags that no re-raise or explicit error return terminates the handler in a way the analyzer recognises, and the rationale fails to engage with why the quarantine-yield pattern satisfies R6 here. The mismatch between rationale and code makes this a corrupted audit record; the agent should either rewrite the rationale to honestly describe the ValidationError->quarantine flow at this exact site, or restructure if the analyzer genuinely sees a gap.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 02: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=0fb2b154fb016195
+RATIONALE: CSV source reads Tier-3 external bytes; StopIteration after skip_rows means skip_rows consumed all content before a header row was found. Records the absence via ctx.record_validation_error so the audit trail shows skip_rows exhausted the file. Returns cleanly with no fabricated rows.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:20.039832+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10004 cached=7975 (80% hit)
+
+Judge rationale:
+  The flagged StopIteration handler at line 441 simply does `break` with no audit recording — it is the normal end-of-file path during the main data-row loop, not the skip_rows-exhausted-the-file case the rationale describes. The rationale's claim that this branch 'records the absence via ctx.record_validation_error' is contradicted by the excerpt: only the csv.Error branch records anything; the StopIteration branch is a silent break. The rationale therefore does not honestly describe what this site does. That said, breaking out of an iterator loop on StopIteration is the conventional Python idiom for end-of-input and is arguably benign, but the suppression should be justified on those grounds (normal termination signal, not an error being swallowed), not on a fabricated audit-recording claim. Resubmit with an accurate rationale or restructure using a for-loop that doesn't need to catch StopIteration at all.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 03: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=bb231ad98805d136
+RATIONALE: CSV source schema validation catches pydantic ValidationError on Tier-3 rows that violate the configured schema. Records the validation failure via ctx.record_validation_error and yields a quarantined SourceRow per the on_validation_failure policy. Never coerces the error.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.90
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:29.310848+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9994 cached=7975 (80% hit)
+
+Judge rationale:
+  This is a textbook Tier-3 boundary handler: CSV parsing raises csv.Error on malformed external input, and the except block records the failure via ctx.record_validation_error (audit trail fires) and yields a quarantined SourceRow per the configured on_validation_failure policy. The error is neither swallowed nor coerced — it is converted into an explicit quarantine result, which is exactly the remediation R6 prescribes. The rationale also correctly notes the parser-state corruption concern, justifying the stop-processing behaviour. The agent's claim matches the code excerpt.
+
+Proposed entry:
+
+================================================================================
+ENTRY 04: plugins/sources/csv_source.py:R6:CSVSource._load_from_file:fp=7b8583638b096231
+RATIONALE: CSV source reading Tier-3 external bytes; csv.Error during main data row iteration means the parser is in a corrupted state (bad quoting, unmatched quotes). Records the error via ctx.record_validation_error and stops processing to avoid silent data loss from corrupted parser state. Never coerces the error into a continued parse.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:35.703236+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10038 cached=7975 (79% hit)
+
+Judge rationale:
+  The flagged except block catches ExternalHeaderError at a genuine Tier-3 boundary (CSV header bytes from an external file). It does not silently swallow: it records the failure via ctx.record_validation_error, yields a quarantined SourceRow when appropriate, and returns to stop processing — an explicit error/quarantine result, which is exactly R6's prescribed remediation. The rationale's reference to csv.Error is slightly imprecise (the actual catch is ExternalHeaderError on header resolution), but the structural pattern matches policy: external boundary, record-and-quarantine, no fabrication, no silent continuation. The decorator nudge does not apply (R6 is not in the {R1,R5} suppressible set).
+
+Proposed entry:
+
+================================================================================
+ENTRY 05: plugins/sources/dataverse.py:R1:DataverseSource._normalize_row_fields:fp=b9db16c1b599becb
+RATIONALE: Dataverse API rows are Tier-3 and may be sparse; the field_resolution mapping is built from the first row but Dataverse may return fields absent from that first row in later rows. mapping.get(k) returns None specifically to detect unmapped fields, which are then normalized individually. None is the correct sentinel for field-not-in-mapping and is never used as a fabricated default value.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:44.293530+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9970 cached=7975 (80% hit)
+
+Judge rationale:
+  The `mapping` dict here is the internal field-resolution mapping built from the first row's headers; the `.get(k)` is using None as a sentinel to detect 'key k is not in the resolution mapping' so the code can fall through to individual normalization. This is semantic sentinel use, not defensive shape-guarding of external data — the absent key is a meaningful signal that triggers explicit handling (rebuilding the resolution), not a silent default substitution. The decorator nudge does not apply: the subject `mapping` is rooted at `self._field_resolution`, not at an external parameter, and the actual Tier-3 row keys are iterated directly. No fabrication occurs (None is consumed locally as a branch condition, not stored).
+
+Proposed entry:
+
+================================================================================
+ENTRY 06: plugins/infrastructure/manager.py:R4:PluginManager.register:fp=0e88b71c015f8aa0
+RATIONALE: Rollback-preserves-primary-error pattern: a broad Exception catch in the registration path triggers unregister and cache-refresh rollback, then re-raises the original failure. The inner try/except on the rollback itself logs the rollback error but re-raises the outer exception unchanged so the secondary failure never buries the original diagnostic.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:51.045397+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10186 cached=7975 (78% hit)
+
+Judge rationale:
+  The broad except at line 107 catches rollback failures specifically to log them and then allow the outer `raise` at line 109 to re-raise the ORIGINAL registration error unchanged. This is the canonical 'preserve primary diagnostic during cleanup' pattern: without the inner catch, a rollback failure would shadow the real cause via implicit exception chaining. The rollback error is logged with exc_info, so it is not silently swallowed. The rule R4 concern (suppressing bugs) is directly addressed — the primary bug surfaces via the outer raise, and the secondary failure is recorded.
+
+Proposed entry:
+
+================================================================================
+ENTRY 07: plugins/infrastructure/batching/mixin.py:R9:BatchTransformMixin._release_loop:fp=2f93bd40222e5b89
+RATIONALE: Release loop submission tracking cleanup: .pop(..., None) on the _batch_submissions dict after a result has been released. The entry may already be absent if evict_submission() ran concurrently (batch timeout race). Returning None when not found is the correct documented behavior for this race-aware cleanup. This is process-internal state, not defensive masking of a bug.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:16:58.665540+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10141 cached=7975 (79% hit)
+
+Judge rationale:
+  This is process-internal state cleanup with a documented concurrent-eviction race: the entry may legitimately be absent if evict_submission() removed it first under the batch timeout path. The pop-with-None is not masking a missing-key bug in a schema/contract — it's the standard idiom for 'remove if present' on shared mutable state where absence is a valid concurrent outcome. R9's concern (hiding schema bugs) does not apply: there is no external data, no Tier-3 boundary, and the alternative (KeyError) would itself be the bug, since absence here is expected. The decorator nudge does not apply (not R1/R5, no external parameter).
+
+Proposed entry:
+
+================================================================================
+ENTRY 08: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin._release_loop:fp=24666a1e729638d7
+RATIONALE: Release loop output-port failure handler: when the emit fails after the token is known, the exception is wrapped into an ExceptionResult so the waiting caller gets an error response rather than hanging indefinitely. When token is None (pre-unpack), the exception re-raises immediately as a first-party invariant violation. This is the thread-boundary exception transport pattern: waiters cannot receive bare exceptions so they are channeled through ExceptionResult.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:05.345734+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10175 cached=7975 (78% hit)
+
+Judge rationale:
+  The finding is R6 on line 354 — the ShutdownError handler that does a bare `break`. The rationale provided does not address this handler at all; it describes the generic Exception handler below (the ExceptionResult wrapping pattern for output-port failures). A ShutdownError-break is likely defensible as a clean exit path, but the rationale must speak to THAT pattern (clean shutdown signal, drained by contract) — not to a different except clause elsewhere in the function. This is a shallow/mistargeted rationale and should be rewritten to address the actual flagged line.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 09: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient._parse_response_body:fp=c10e1a372d3013e8
+RATIONALE: HTTP response content-type header is a Tier-3 external boundary; content_type = response.headers.get('content-type', '') uses empty string default when the header is absent. An absent content-type maps to binary encoding which is the correct safe choice for unknown content types. Not a fabricated absence but a legitimate dispatch decision.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:12.304270+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10033 cached=7975 (79% hit)
+
+Judge rationale:
+  This is a structural Tier-3 boundary case: _parse_response_body takes an external httpx.Response as a parameter, the finding is R1 (in the decorator's suppressible set), and the subject response.headers.get('content-type', '') is rooted at that external parameter. The correct remediation is @trust_boundary(tier=3, source_param='response', suppresses=('R1',), ...) on the function rather than a per-line allowlist entry. The excerpt does not show decorators above the function definition; if one already exists, the agent should make that visible, but as presented this should be a decorator refactor.
+
+BLOCKED: use the @trust_boundary decorator on the enclosing function with source_param='response' instead of adding this allowlist entry. The decorator is the structural replacement for per-line YAML allowlist entries covering Tier-3 external-data trust boundaries; see src/elspeth/contracts/trust_boundary.py for the decorator signature and notes/cicd-judge-cli-prototype-plan.md (Pillar B) for the rationale.
+
+================================================================================
+ENTRY 10: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=153b600f7b824428
+RATIONALE: LLM provider usage mappings are Tier-3 external data; providers may omit prompt_tokens, completion_tokens, or total_tokens. dict.get with None default preserves honest absence: missing fields become None in the downstream TokenUsage.from_dict normalization, not fabricated zeros. Never coerces a missing count.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:18.005602+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10209 cached=7975 (78% hit)
+
+Judge rationale:
+  This is a structural Tier-3 boundary case: the function takes external provider usage data as the `usage` parameter, the rule is R1 (in the decorator's suppressible set), and the flagged `.get()` calls are rooted at that parameter. The rationale itself is honest and correct on the merits — missing fields propagate as None, not fabricated zeros — but the correct remediation per policy is the @trust_boundary decorator on the function, not a per-line allowlist entry.
+
+BLOCKED: use the @trust_boundary decorator on the enclosing function with source_param='usage' instead of adding this allowlist entry. The decorator is the structural replacement for per-line YAML allowlist entries covering Tier-3 external-data trust boundaries; see src/elspeth/contracts/trust_boundary.py for the decorator signature and notes/cicd-judge-cli-prototype-plan.md (Pillar B) for the rationale.
+
+================================================================================
+ENTRY 11: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=54f676db05cacf08
+RATIONALE: LLM provider usage mappings are Tier-3 external data; providers may omit prompt_tokens, completion_tokens, or total_tokens. dict.get with None default preserves honest absence: missing fields become None in the downstream TokenUsage.from_dict normalization, not fabricated zeros. Never coerces a missing count.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.88
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:25.977682+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10184 cached=7975 (78% hit)
+
+Judge rationale:
+  This is a Tier-3 boundary on an LLM provider's usage payload, R1 is in the decorator's suppressible set, and the flagged subject (`usage.get("completion_tokens")`) is rooted at the function's `usage` parameter — all three structural-remediation conditions are met. The correct fix is to apply `@trust_boundary(tier=3, source='LLM provider usage payload', source_param='usage', suppresses=('R1','R5'), invariant='missing/non-int fields normalize to None via TokenUsage.from_dict; never fabricates zeros', test_ref=..., test_fingerprint=...)` on `_extract_usage_from_provider_response` rather than landing per-line allowlist entries. The rationale itself is substantively correct (honest absence preserved as None, no fabrication), which makes it a clean decorator candidate, not an ACCEPT.
+
+BLOCKED: use the @trust_boundary decorator on the enclosing function with source_param='usage' instead of adding this allowlist entry. The decorator is the structural replacement for per-line YAML allowlist entries covering Tier-3 external-data trust boundaries; see src/elspeth/contracts/trust_boundary.py for the decorator signature and notes/cicd-judge-cli-prototype-plan.md (Pillar B) for the rationale.
+
+================================================================================
+ENTRY 12: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=3ce6385129d45fcc
+RATIONALE: LLM provider usage mappings are Tier-3 external data; providers may omit prompt_tokens, completion_tokens, or total_tokens. dict.get with None default preserves honest absence: missing fields become None in the downstream TokenUsage.from_dict normalization, not fabricated zeros. Never coerces a missing count.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:31.980697+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10192 cached=7975 (78% hit)
+
+Judge rationale:
+  This is a textbook Tier-3 external-data boundary handling LLM provider usage payloads, and the rationale correctly identifies it as such — None preserves absence rather than fabricating zeros. However, the finding is R1 on a parameter (`usage`) that flows directly into the suppressed `.get()` calls, which is exactly what the @trust_boundary decorator exists to handle structurally. The correct remediation is to decorate `_extract_usage_from_provider_response` with @trust_boundary(tier=3, source_param='usage', suppresses=('R1',), ...) rather than landing per-line allowlist entries.
+
+BLOCKED: use the @trust_boundary decorator on the enclosing function with source_param='usage' instead of adding this allowlist entry. The decorator is the structural replacement for per-line YAML allowlist entries covering Tier-3 external-data trust boundaries; see src/elspeth/contracts/trust_boundary.py for the decorator signature and notes/cicd-judge-cli-prototype-plan.md (Pillar B) for the rationale.
+
+================================================================================
+ENTRY 13: plugins/infrastructure/clients/llm.py:R2:_extract_usage_from_provider_response:fp=92c580e9594a61bd
+RATIONALE: LLM provider SDK usage objects vary by version and may omit token count attributes; getattr with None default preserves honest absence: missing attributes become None in the downstream TokenUsage.from_dict normalization, not fabricated zeros. The parameter is typed as Any because providers use both dict-shaped and object-shaped usage payloads. Never coerces.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.60
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:41.369356+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10151 cached=7975 (79% hit)
+
+Judge rationale:
+  This is an R2 (getattr) finding, not R1/R5, so the @trust_boundary decorator does not cover it. The function does take external Tier-3 data (`usage` from provider SDK) and shape-guarding is legitimate at this boundary — the rationale's tier reasoning is correct and absence is recorded as None (not fabricated). However, the decorator's suppresses set is restricted to R1/R5; an R2 suppression must be justified on its own terms, and the structural alternative here is to normalize the SDK object into a Mapping at the boundary (e.g. `vars(usage)` or an explicit attribute-extraction helper that raises on missing required fields) rather than three getattr-with-default calls. Since R2 is outside the decorator's scope and the rationale does not address why direct attribute access plus AttributeError handling is unworkable, the per-line suppression is not justified as written.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 14: plugins/infrastructure/clients/llm.py:R2:_extract_usage_from_provider_response:fp=d741dbbe7cf1857f
+RATIONALE: LLM provider SDK usage objects vary by version and may omit token count attributes; getattr with None default preserves honest absence: missing attributes become None in the downstream TokenUsage.from_dict normalization, not fabricated zeros. The parameter is typed as Any because providers use both dict-shaped and object-shaped usage payloads. Never coerces.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.60
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:50.060306+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10103 cached=7975 (79% hit)
+
+Judge rationale:
+  This is a Tier-3 external boundary (provider SDK usage objects), R2 is in scope for boundary handling, and the subject is rooted at the `usage` parameter — so this is a textbook structural case for `@trust_boundary`. However, R2 is NOT in the decorator's supported suppression set ({R1, R5}); the decorator cannot cover getattr-with-default. The honest fix here is to follow the policy literally: access attributes directly and let AttributeError surface, or branch on hasattr-free shape detection by trying mapping access first and otherwise constructing TokenUsage.unknown(). Substituting `None` via getattr's default still silently absorbs a shape mismatch (an SDK object that lacks the attribute entirely) into a 'honest absence' value — that is the silent-recovery pattern the rule targets, even at a Tier-3 boundary.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 15: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform._configured_collection_name:fp=757eb1e99aea1a3e
+RATIONALE: Provider config is a discriminated union of typed provider-specific models; different providers use either collection or index attribute for the readiness-audit name. getattr with None default is the only non-hasattr way to probe which naming convention the provider uses. If neither attribute is present, FrameworkBugError is raised immediately as offensive detection of a misconfigured provider config, not silent coercion.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:17:59.170067+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9977 cached=7975 (80% hit)
+
+Judge rationale:
+  This is first-party plugin code probing a discriminated union of typed provider config models. If the union is truly typed, the correct offensive pattern is to dispatch on the concrete type (isinstance against the known variants, or a match statement, or a shared protocol/base attribute) — not to probe by attribute name with getattr defaults. The current code uses getattr precisely to avoid committing to the type contract, which is the defensive pattern R2 targets: it would silently accept any object that happens to have a 'collection' or 'index' attribute, and would mask a refactor that renamed the field on one variant. The FrameworkBugError fallback only fires when BOTH attributes are absent; a wrong-shaped variant with one of the names still slips through. Fix the contract (give the union a common accessor, or branch on type) rather than entrench attribute-name probing.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 16: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform._configured_collection_name:fp=b22badfe2569d3ea
+RATIONALE: Provider config field values come from getattr with None default which returns None when the attribute is absent. isinstance(value, str) guards against a provider config that has the attribute but with a non-string value, which is a first-party contract violation. The guard rejects unusable values rather than passing them to the readiness audit call. If neither attribute yields a non-empty string, FrameworkBugError is raised.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:06.942879+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9974 cached=7975 (80% hit)
+
+Judge rationale:
+  The provider_config is a first-party plugin object with a typed contract — it's not Tier-3 external data. Using getattr with a None default and then isinstance to handle the case where a first-party config might have a non-string value is exactly the Plugin Ownership violation the policy forbids: if a provider config exposes 'collection' or 'index' with a non-string value, that's a bug in our plugin code and should crash, not be silently rejected via isinstance. The correct shape is to declare the contract (e.g., a Protocol or base class with typed attributes) and access the field directly; let it AttributeError or TypeError if the contract is violated. The decorator nudge does not apply — provider_config is not an external parameter (R5 here is on first-party plugin data, not Tier-3).
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 17: plugins/sinks/chroma_sink.py:R6:ChromaSink.write:fp=8501da8c0e5bf4c0
+RATIONALE: ChromaDB metadata fields are optional per-field: a row may lack any of the configured metadata fields and a missing metadata field is not an error. The except KeyError continue skips the field rather than diverting the row. The row is valid without the metadata field and continues processing normally. No audit evidence is lost.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:13.038184+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=9987 cached=7975 (80% hit)
+
+Judge rationale:
+  The flagged line (296) is an except KeyError that diverts the row via self._divert_row with a reason naming the missing field — this is an explicit quarantine result, not a silent swallow. However, the rationale provided argues about optional metadata fields (lines 322+), which is a different except block than the one flagged. The rationale does not address the actual flagged site, which concerns required id/document fields. A correct rationale must speak to the specific R6 instance flagged; this one describes a different block in the same function.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 18: plugins/sinks/chroma_sink.py:R5:ChromaSink.write:fp=12aaa412bd91a810
+RATIONALE: ChromaDB rejects metadata values that are not str, int, float, bool, or None and also rejects non-finite floats. isinstance type discrimination is required to identify and divert rows with incompatible metadata values before they hit the ChromaDB API and cause an unattributable batch failure. The check prevents a runtime API error from swallowing the row without trace. Diverted rows carry an explicit reason and are handled per on_write_failure policy.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:20.946377+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10090 cached=7975 (79% hit)
+
+Judge rationale:
+  The flagged isinstance check is on `raw_id` extracted from `row`, but `row` is pipeline data inside a Sink — per the Three-Tier Trust Model, Sinks operate on Tier-2 data whose shape is guaranteed by upstream source validation and typed contracts. The policy is explicit: 'Sink: no coercion, expect types' and re-checking shape with isinstance on Tier-2 data is the forbidden defensive pattern. If `raw_id` is not a str, that is an upstream source/transform bug and should crash, not be silently diverted. The rationale conflates 'ChromaDB's external API requirements' with a Tier-3 boundary, but the data flowing in is first-party Tier-2, not external input to ELSPETH. The decorator nudge does not apply: `row` is not an external parameter to a boundary function, and the Sink is not a Tier-3 ingestion site.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 19: plugins/sinks/chroma_sink.py:R5:ChromaSink.write:fp=87156d7ec508a40b
+RATIONALE: ChromaDB rejects non-finite float metadata values (NaN, Infinity). isinstance(value, float) narrows to float before the math.isfinite check, which is the only way to test for non-finite floats without raising TypeError on non-numeric types. The check identifies and diverts rows with non-finite metadata values before they hit the ChromaDB API. Diverted rows carry an explicit reason and are handled per on_write_failure policy.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.82
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:27.438707+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10094 cached=7975 (79% hit)
+
+Judge rationale:
+  The finding is R5 at line 311 (isinstance(raw_doc, str)), but the rationale exclusively discusses the math.isfinite/float check at line 333 — a different isinstance call. The rationale never addresses the flagged pattern. Additionally, the sink is operating on pipeline row data, which per policy is Tier-2: types should already be guaranteed by source validation, and re-checking shape at the sink is the forbidden defensive pattern. If the rationale is that rows come from heterogeneous sources and may carry arbitrary types, that argument needs to be made explicitly and tied to the actual flagged line. As written, the rationale is non-responsive to the finding.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 20: plugins/sinks/chroma_sink.py:R6:ChromaSink.write:fp=fe6fa1b761d7dd9c
+RATIONALE: ChromaDB metadata fields are optional per-field: a row may lack any of the configured metadata fields and a missing metadata field is not an error. The except KeyError continue skips the field rather than diverting the row. The row is valid without the metadata field and continues processing normally. No audit evidence is lost.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.78
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:35.631173+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10026 cached=7975 (80% hit)
+
+Judge rationale:
+  The except KeyError here handles per-field optional metadata in a Sink processing row data. The contract treats each configured metadata field as optional: absence is a legitimate state, not an error, and the loop simply skips that field while the row continues processing with whatever metadata was present. This is not silent error swallowing — it's expressing 'this field is optional' via control flow, and the surrounding code still diverts rows on actual type violations. No audit evidence is lost since the row proceeds normally with its available metadata. R6's concern (swallowing real errors) does not apply to a KeyError that encodes 'field-absent is allowed'.
+
+Proposed entry:
+
+================================================================================
+ENTRY 21: plugins/transforms/web_scrape.py:R5:WebScrapeTransform.get_post_call_hints:fp=f919002b3beb8525
+RATIONALE: config_snapshot contains LLM-supplied option values where text_separator type is not statically guaranteed (the parameter is Mapping[str, object]). isinstance(sep, str) is required before the substring membership check since passing a non-string to the in operator raises TypeError. If sep is not a string (malformed LLM output), no hint is generated rather than crashing the hints function. This is a type-narrowing guard at a Tier-3 untyped input seam.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.72
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:42.877413+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10129 cached=7975 (79% hit)
+
+Judge rationale:
+  The function takes config_snapshot: Mapping[str, object] which is a first-party typed contract — config has already been validated through the plugin's config schema by the time get_post_call_hints is called. If text_separator must be a string per the plugin's config schema, the isinstance check is redundant defensive code masking a contract violation; if the schema permits non-string values, the fix is to tighten the schema, not guard at the consumer. The rationale claims 'LLM-supplied option values' but config_snapshot is post-validation pipeline configuration, not raw LLM tool-call arguments — this is Tier-2 data dressed up as Tier-3. The decorator nudge does not apply because config_snapshot is not an external untyped parameter at this seam.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 22: plugins/sinks/azure_blob_sink.py:R6:AzureBlobSink.write:fp=304f148f13df7df3
+RATIONALE: Tier-2 pipeline rows for JSON/JSONL Azure Blob upload may contain non-serializable values (NaN, Infinity, or non-serializable objects); json.dumps(allow_nan=False) raises ValueError or TypeError. Per-row divert rather than batch abort: one bad value does not abort the entire blob upload. The exception is narrow (ValueError, TypeError), each failing row is diverted via _divert_row with an explicit reason, and the remaining serializable rows are uploaded.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:52.784336+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10351 cached=7975 (77% hit)
+
+Judge rationale:
+  The except catches narrow exceptions (ValueError, TypeError) from json.dumps(allow_nan=False) on Tier-2 row values — type-valid shapes but operation-unsafe values (NaN/Infinity or non-serializable objects), which is exactly the value-level threat the Tier-2 policy says to wrap. The handler is not silent: it explicitly diverts the offending row via _divert_row with a reason string including the exception, then continues — this is quarantine-on-failure, not swallowing. Per-row divert preserves audit fidelity and avoids aborting the whole upload over one bad value, matching the 'Quarantine row, continue' guidance for bad data. R6's concern (swallowing without re-raise or explicit error result) is directly addressed by the explicit divert call.
+
+Proposed entry:
+
+================================================================================
+ENTRY 23: plugins/sinks/database_sink.py:R6:DatabaseSink._insert_with_per_row_diversion:fp=9e9d1f67fecbd6f2
+RATIONALE: Batch IntegrityError triggers the per-row diversion strategy: the batch savepoint is rolled back and rows are re-inserted individually to isolate the constraint-violating rows. This is not swallowing: the batch failure is expected when constraints are violated and the row-by-row pass identifies and diverts only the offending rows. Connection and programming errors are not caught here and propagate unhandled.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.86
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:18:59.443392+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10228 cached=7975 (78% hit)
+
+Judge rationale:
+  The outer except IntegrityError is not silent swallowing: it triggers a documented per-row diversion strategy that rolls back the batch savepoint and re-executes row-by-row to attribute the constraint violation to specific rows, which are then diverted via _divert_row (an explicit quarantine result). The inner per-row IntegrityError handler likewise diverts with the constraint reason, preserving the audit trail. Other error classes (connection/operational/programming) are not caught and propagate as batch-integrity failures. This matches Tier-3 user-data handling: quarantine the offending row, continue the pipeline.
+
+Proposed entry:
+
+================================================================================
+ENTRY 24: plugins/sinks/database_sink.py:R6:DatabaseSink._insert_with_per_row_diversion:fp=d64a7ca89b0cfe0e
+RATIONALE: Per-row IntegrityError in the diversion pass: each row is executed in its own savepoint and a constraint violation rolls back that savepoint and diverts the row via _divert_row with the specific constraint violation detail. Rows that succeed are committed into the outer transaction. Not error swallowing: each diverted row carries the original exception reason.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.90
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:19:06.433941+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10125 cached=7975 (79% hit)
+
+Judge rationale:
+  The except block does not swallow the IntegrityError: it rolls back the per-row savepoint and routes the row to _divert_row with the original exception's detail (exc.orig) as the diversion reason. This is the explicit quarantine path R6's remediation calls for — the error becomes a recorded diverted-row outcome rather than a silently dropped exception. The pattern is the standard per-row quarantine-on-constraint-violation for a Sink writing user data, which policy explicitly permits (user data with bad values → quarantine row, continue).
+
+Proposed entry:
+
+================================================================================
+ENTRY 25: plugins/sinks/csv_sink.py:R6:CSVSink._stage_rows_per_row:fp=73ebd4f4b271eb4f
+RATIONALE: Tier-2 pipeline rows may trigger DictWriter serialization failures (ValueError from extrasaction=raise on fields outside the locked column set, or csv.Error from the writer); per-row trial-encode in a throwaway buffer diverts only the failing row so the batch continues. The exceptions are narrow (ValueError, csv.Error). A value whose str() itself raises is a broken object and propagates unhandled as a plugin bug.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:19:13.325876+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10191 cached=7975 (78% hit)
+
+Judge rationale:
+  The except clause catches narrow, serialization-shaped exceptions (ValueError, csv.Error) from DictWriter.writerow and diverts the offending row via _divert_row — that is an explicit quarantine result, not silent swallowing. R6's concern is errors swallowed without re-raise or explicit error result; here the row is recorded as a diversion with the exception message as the reason, which is the quarantine-row pattern the policy prescribes for value-unsafe Tier-2 data at a sink. Broader exceptions (a broken str()) deliberately propagate as plugin bugs, consistent with Plugin Ownership. The scope is a throwaway in-memory buffer, so batch integrity is preserved.
+
+Proposed entry:
+
+================================================================================
+ENTRY 26: plugins/sinks/json_sink.py:R6:JSONSink.write:fp=70e172c6d4480200
+RATIONALE: JSONL write rollback guard: any failure in the write path (write_jsonl_content, flush, hash, stat) must roll back the file to pre_write_pos to prevent partial writes from corrupting the JSONL file. The broad except is always followed by raise so no error is swallowed. The inner OSError handler on the rollback preserves the original error via raise from rollback_err.
+================================================================================
+Verdict:          BLOCKED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.88
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:19:20.378791+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10100 cached=7975 (79% hit)
+
+Judge rationale:
+  The flagged line is 368: `except (ValueError, TypeError) as exc:` which catches JSON serialization errors and diverts the row via `_divert_row`. The rationale provided describes a completely different code path — the JSONL rollback guard at lines 347-358 — and never addresses the actual flagged pattern at line 368. A rationale that argues for a different except block than the one flagged is shallow by definition and cannot serve as an audit record for this suppression. The agent must either write a site-specific rationale for the row-diversion pattern at line 368 (which on its face looks like a legitimate Tier-2 per-row quarantine) or correct the line target.
+
+BLOCKED: the judge rejected this suppression. The judge does not propose fixes; remediation (refactor, broaden a per-file rule, abandon the suppression) is the agent's responsibility.
+
+================================================================================
+ENTRY 27: plugins/sinks/json_sink.py:R6:JSONSink._write_jsonl_content:fp=7f2a8740a6f881fa
+RATIONALE: Tier-2 pipeline rows may contain non-JSON-serializable values (NaN, Infinity, or non-serializable objects); json.dumps(allow_nan=False) raises ValueError or TypeError on such values. Per-row divert rather than batch abort: one bad value does not stop the remaining rows from being written to the JSONL file. The exception is narrow (ValueError, TypeError), the failing row is diverted via _divert_row with explicit reason.
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.85
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:19:25.947233+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10388 cached=7975 (77% hit)
+
+Judge rationale:
+  R6 flags exception swallowing, but this except clause does not swallow — it routes the failing row to _divert_row with an explicit reason, which is the documented quarantine path for per-row Tier-2 value faults. The scope is narrow (ValueError, TypeError from json.dumps with allow_nan=False), the action is an explicit quarantine result (not a silent continue with fabricated data), and the remaining rows proceed as designed. This matches the policy's quarantine-row pattern for value-level faults in Tier-2 data and the rule's own remediation hint ('return an explicit error/quarantine result').
+
+Proposed entry:
+
+================================================================================
+ENTRY 28: plugins/sources/azure_blob_source.py:R6:AzureBlobSource._load_csv:fp=e59ce88529f38df2
+RATIONALE: CSV blob data from Azure Blob Storage is Tier-3 external content; UnicodeDecodeError means the blob bytes cannot be decoded with the configured encoding. Records the failure via ctx.record_validation_error and yields a quarantined SourceRow if not in discard mode, rather than propagating an unhandled decode error. The exception is narrow (UnicodeDecodeError only).
+================================================================================
+Verdict:          ACCEPTED
+Judge model:      anthropic/claude-4.7-opus-20260416
+Confidence:       0.92
+Policy hash:      sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0
+Recorded at:      2026-06-01T08:19:32.287261+00:00
+Target YAML:      config/cicd/enforce_tier_model/plugins.yaml
+Operator override:  no
+Dry run:          yes
+Wrote:            no
+Cache:            prompt_tokens=10043 cached=7975 (79% hit)
+
+Judge rationale:
+  The finding is at a genuine Tier-3 source boundary (Azure Blob Storage CSV ingestion). The except block catches a narrow, specific exception (ExternalHeaderError) raised when the blob's own header bytes cannot be resolved — external data fault. It does not silently swallow: it records the failure via ctx.record_validation_error (audit trail) and yields an explicit quarantined SourceRow (or discards per config), which is precisely the R6 remediation ('return an explicit error/quarantine result'). The rationale correctly distinguishes external header faults from config faults (which still raise). This is the canonical Tier-3 source-boundary quarantine pattern.
+
+Proposed entry:

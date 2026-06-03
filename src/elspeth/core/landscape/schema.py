@@ -5,6 +5,7 @@ and compatibility with multiple database backends.
 """
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 
 # Shared metadata for all tables
@@ -47,7 +49,18 @@ metadata = MetaData()
 #        can deduplicate per failed batch rather than per aggregation node.
 #   7 → ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
 #        (`outcome`, `path`, `completed`) instead of the old single-axis outcome + is_terminal.
-SQLITE_SCHEMA_EPOCH = 7
+#   8 → Phase 5b interpretation-review audit anchor:
+#        calls.resolved_prompt_template_hash records the runtime-side hash used
+#        to join Landscape LLM calls back to session interpretation_events.
+#   9 → Phase 4 hello-world tutorial audit-story fields:
+#        runs.llm_call_count, runs.seeded_from_cache, and runs.cache_key.
+#  10 → OpenRouter catalog snapshot anchor (audit-completeness):
+#        runs.openrouter_catalog_sha256 and runs.openrouter_catalog_source
+#        record which model catalog blessed each run's decisions.
+#  11 → resume fork/expand/coalesce re-emit fix: tokens.token_data_ref persists per-token
+#        payloads (expand children + coalesce merged tokens) and node_states.resume_checkpoint_id
+#        marks resume re-drives, so incomplete tokens are reconstructable + attributable.
+SQLITE_SCHEMA_EPOCH = 11
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -92,7 +105,43 @@ runs_table = Table(
     # runs X and Y?"). The column is nullable for resume paths and for
     # tests that skip the full bootstrap path.
     Column("runtime_val_manifest_json", Text),
+    # Phase 4 audit-story projection fields. `started_at` already exists
+    # above; source_data_hash and plugin_versions remain on rows/nodes and
+    # are aggregated by the read side instead of denormalized here.
+    Column("llm_call_count", Integer, nullable=True),
+    Column("seeded_from_cache", Boolean, nullable=False, default=False, server_default=text("0")),
+    Column("cache_key", String(64), nullable=True),
+    # OpenRouter model catalog snapshot anchor (audit-completeness):
+    # records which catalog blessed the run's model decisions.  The sha
+    # is canonical (sorted utf-8 ids joined on '\n') so it is invariant
+    # under prime-order; source ∈ {"live", "bundled"} distinguishes
+    # online-probed snapshots from the bundled litellm fallback.  Both
+    # NOT NULL — see ``read_openrouter_catalog_snapshot_id`` for the
+    # reader the orchestrator uses to populate them.  Per CLAUDE.md
+    # Tier-1 doctrine no ``server_default`` is set: a synthetic
+    # placeholder in the audit trail would be indistinguishable from a
+    # real hash to any downstream reader, violating the fabrication
+    # test.  Production goes through :meth:`RunLifecycleRepository.begin_run`
+    # which validates both fields; direct ``runs_table.insert()`` from
+    # test fixtures must supply them explicitly.
+    Column("openrouter_catalog_sha256", String(64), nullable=False),
+    Column("openrouter_catalog_source", String(8), nullable=False),
+    CheckConstraint(
+        "openrouter_catalog_source IN ('live', 'bundled')",
+        name="ck_runs_openrouter_catalog_source",
+    ),
 )
+
+run_attributions_table = Table(
+    "run_attributions",
+    metadata,
+    Column("run_id", String(64), ForeignKey("runs.run_id"), primary_key=True),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("initiated_by_user_id", String(255), nullable=False),
+    Column("auth_provider_type", String(32), nullable=False),
+    CheckConstraint("auth_provider_type IN ('local', 'oidc', 'entra')", name="ck_run_attributions_auth_provider_type"),
+)
+Index("ix_run_attributions_user", run_attributions_table.c.initiated_by_user_id, run_attributions_table.c.auth_provider_type)
 
 # === Nodes (Plugin Instances) ===
 
@@ -172,6 +221,12 @@ tokens_table = Table(
     Column("expand_group_id", String(32), nullable=True, index=True),  # For deaggregation
     Column("branch_name", String(64)),
     Column("step_in_pipeline", Integer),  # Step where this token was created (fork/coalesce/expand)
+    # Payload-store ref for a token whose row_data differs from its source row:
+    # expand/deaggregation children (independently-transformed data) AND post-coalesce
+    # merged tokens (the merged row, computed in memory at barrier time). NULL for fork
+    # children, which share the parent/source payload retrievable by row_id. Enables
+    # faithful reconstruction of incomplete expand/coalesce tokens on resume (epoch 11).
+    Column("token_data_ref", String(64), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Composite unique target for downstream composite FKs (token_id, run_id)
     UniqueConstraint("token_id", "run_id"),
@@ -261,6 +316,21 @@ node_states_table = Table(
     Column("success_reason_json", Text),  # TransformSuccessReason for successful transforms
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
+    # Resume provenance marker (epoch 11): NULL for every node_state written during the
+    # original run; set to the resumed-from checkpoint id for every node_state written
+    # while re-driving a reconstructed incomplete token on resume. Makes a resume re-drive
+    # (which records at attempt = max+1 under the SAME run_id) provably distinguishable
+    # from a run-1 tenacity retry — explain() filters on resume_checkpoint_id IS NULL.
+    #
+    # MARKER-ONLY (no FK): the id is a durable provenance fact, like a content hash — it
+    # endures even after its checkpoint row is purged. Checkpoints are deletable progress
+    # state (delete_checkpoints clears them unconditionally on successful completion); the
+    # marker on node_states does NOT keep them alive and carries NO referential constraint
+    # to the checkpoints table. explain() distinguishes resume re-drives from run-1 retries
+    # purely by this column's NULL-ness (resume_checkpoint_id IS NOT NULL), which survives
+    # checkpoint purge. (Operator decision 2026-05-30, faithful to "hashes survive payload
+    # deletion".)
+    Column("resume_checkpoint_id", String(64), nullable=True),
     # Composite unique target for run-scoped FKs to node_states.
     UniqueConstraint("state_id", "run_id"),
     UniqueConstraint("token_id", "node_id", "attempt"),
@@ -283,7 +353,7 @@ operations_table = Table(
     Column("operation_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False, index=True),
     Column("node_id", String(64), nullable=False),
-    Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write'
+    Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write' | 'runtime_preflight'
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
     Column("status", String(16), nullable=False),  # 'open' | 'completed' | 'failed' | 'pending'
@@ -314,6 +384,26 @@ calls_table = Table(
     Column("request_ref", String(256)),
     Column("response_hash", String(64)),
     Column("response_ref", String(256)),
+    # Cross-DB hash anchor for interpretation events (Option A — Phase 5b).
+    # Populated by the LLM-transform plugin at execution time when the runtime
+    # node config contains a ``resolved_prompt_template_hash`` sibling field
+    # (written by ``resolve_interpretation_event`` at compose time and committed
+    # into ``composition_states.nodes``). If the sibling field is absent (the
+    # LLM transform is NOT downstream of an interpretation event), this column
+    # is NULL.
+    #
+    # When non-NULL, this hash MUST equal the corresponding
+    # ``interpretation_events.resolved_prompt_template_hash`` in the session
+    # audit DB for the same resolved prompt string. An inequality indicates
+    # tampering or a composition-to-execution coherence failure. Checked by the
+    # audit-tooling layer; a mismatch is a Tier-1 crash-on-anomaly.
+    #
+    # Hash scheme: SHA-256 over rfc8785 canonical JSON of the resolved
+    # prompt-template string, using ``CANONICAL_VERSION = "sha256-rfc8785-v1"``
+    # (contracts/hashing.py:CANONICAL_VERSION). Identical scheme used by both
+    # the session service (write at resolve time) and the runtime plugin (write
+    # at execution time), so the hashes are comparable byte-for-byte.
+    Column("resolved_prompt_template_hash", String(64), nullable=True),
     Column("error_json", Text),
     Column("latency_ms", Float),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -462,6 +552,15 @@ Index("ix_node_states_token", node_states_table.c.token_id)
 Index("ix_node_states_node", node_states_table.c.node_id)
 Index("ix_calls_state", calls_table.c.state_id)
 Index("ix_calls_operation", calls_table.c.operation_id)  # For operation call lookups
+# Phase 5b — supports the cross-DB anchor lookup: "given a session-side
+# interpretation_events.resolved_prompt_template_hash, find the matching
+# Landscape calls row". The index is sparse on NULL (SQLite excludes NULL
+# keys from B-tree indexes by default), so the storage cost is proportional
+# to the number of LLM-transform calls downstream of an interpretation event.
+Index(
+    "ix_calls_resolved_prompt_template_hash",
+    calls_table.c.resolved_prompt_template_hash,
+)
 Index("ix_operations_node_run", operations_table.c.node_id, operations_table.c.run_id)
 Index("ix_artifacts_run", artifacts_table.c.run_id)
 
@@ -568,6 +667,12 @@ Index(
     checkpoints_table.c.run_id,
     checkpoints_table.c.sequence_number,
 )
+Index(
+    "ix_checkpoints_run_sequence_unique",
+    checkpoints_table.c.run_id,
+    checkpoints_table.c.sequence_number,
+    unique=True,
+)
 
 # === Secret Resolutions (P2-10: Key Vault Secret Audit Trail) ===
 # Records which secrets were loaded from where during pipeline startup.
@@ -590,6 +695,45 @@ secret_resolutions_table = Table(
 )
 
 Index("ix_secret_resolutions_run", secret_resolutions_table.c.run_id)
+
+
+# === Web Auth Events ===
+# Additive, non-run-scoped Landscape table for web authentication audit.
+# Records must never contain passwords, bearer tokens, raw JWTs, or unredacted
+# provider exception text.
+
+auth_events_table = Table(
+    "auth_events",
+    metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("outcome", String(16), nullable=False),
+    Column("provider", String(16), nullable=False),
+    Column("user_id", String(256)),
+    Column("username", String(256)),
+    Column("failure_category", String(64)),
+    Column("request_id", String(64)),
+    Column("client_host", String(128)),
+    Column("user_agent", Text),
+    Column("metadata_json", Text, nullable=False),
+    CheckConstraint(
+        "event_type IN ('login', 'token_issued', 'auth_failure')",
+        name="ck_auth_events_event_type",
+    ),
+    CheckConstraint(
+        "outcome IN ('success', 'failure')",
+        name="ck_auth_events_outcome",
+    ),
+    CheckConstraint(
+        "provider IN ('local', 'oidc', 'entra')",
+        name="ck_auth_events_provider",
+    ),
+)
+
+Index("ix_auth_events_occurred_at", auth_events_table.c.occurred_at)
+Index("ix_auth_events_type_outcome", auth_events_table.c.event_type, auth_events_table.c.outcome)
+Index("ix_auth_events_user", auth_events_table.c.user_id)
 
 # === Pre-flight Results (Pipeline Dependencies & Commencement Gates) ===
 

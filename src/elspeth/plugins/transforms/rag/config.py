@@ -72,18 +72,34 @@ class RAGRetrievalConfig(TransformDataConfig):
             return SchemaConfig.from_dict(v)
         return v
 
-    output_prefix: str
-    query_field: str
-    query_template: str | None = None
-    query_pattern: str | None = None
-    provider: str
-    provider_config: dict[str, Any]
-    top_k: int = Field(default=5, ge=1, le=100)
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    on_no_results: Literal["quarantine", "continue"] = "quarantine"
-    context_format: Literal["numbered", "separated", "raw"] = "numbered"
-    context_separator: str = "\n---\n"
-    max_context_length: int | None = Field(default=None, ge=1)
+    output_prefix: str = Field(description="Prefix used for fields emitted by retrieval, such as contexts and scores.")
+    query_field: str = Field(description="Input row field containing the retrieval query text.")
+    query_template: str | None = Field(
+        default=None,
+        description="Optional template used to build the retrieval query from row fields.",
+    )
+    query_pattern: str | None = Field(
+        default=None,
+        description="Optional regular expression used to extract the retrieval query from query_field.",
+    )
+    provider: str = Field(description="Retrieval provider name registered in the RAG provider catalog.")
+    provider_config: dict[str, Any] = Field(description="Provider-specific retrieval configuration passed to the selected provider.")
+    top_k: int = Field(default=5, ge=1, le=100, description="Maximum number of matching documents to return for each query.")
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum relevance score required for a retrieved document.")
+    on_no_results: Literal["quarantine", "continue"] = Field(
+        default="quarantine",
+        description="Behavior when no retrieval results satisfy the score threshold.",
+    )
+    context_format: Literal["numbered", "separated", "raw"] = Field(
+        default="numbered",
+        description="Formatting style used when combining retrieved contexts into output text.",
+    )
+    context_separator: str = Field(default="\n---\n", description="Separator inserted between retrieved contexts when applicable.")
+    max_context_length: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum character length for the combined context output.",
+    )
 
     @field_validator("output_prefix")
     @classmethod
@@ -97,6 +113,22 @@ class RAGRetrievalConfig(TransformDataConfig):
             )
         return v
 
+    @field_validator("query_field")
+    @classmethod
+    def validate_query_field(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("query_field cannot be empty")
+        if not stripped.isidentifier():
+            raise ValueError(f"query_field must be a valid Python identifier, got {v!r}")
+        if keyword.iskeyword(stripped):
+            raise ValueError(f"query_field must not be a Python keyword, got {stripped!r}")
+        return stripped
+
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        return super().declared_input_fields | frozenset({self.query_field})
+
     @model_validator(mode="after")
     def validate_query_modes(self) -> Self:
         if self.query_template and self.query_pattern:
@@ -105,10 +137,9 @@ class RAGRetrievalConfig(TransformDataConfig):
 
     @model_validator(mode="after")
     def validate_provider_config(self) -> Self:
-        provider_entry = PROVIDERS.get(self.provider)
-        if provider_entry is None:
+        if self.provider not in PROVIDERS:
             raise ValueError(f"Unknown provider: {self.provider!r}. Available: {sorted(PROVIDERS)}")
-        config_cls, _ = provider_entry
+        config_cls, _ = PROVIDERS[self.provider]
         config_cls(**self.provider_config)
         return self
 

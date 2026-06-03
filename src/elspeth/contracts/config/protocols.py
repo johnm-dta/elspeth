@@ -28,11 +28,160 @@ Note on jitter:
     the value is always provided by RuntimeRetryConfig's factory methods.
 """
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from elspeth.contracts.config.runtime import ExporterConfig
     from elspeth.contracts.enums import BackpressureMode, TelemetryGranularity
+
+
+class RetrySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeRetryConfig.
+
+    Members are read-only ``@property`` getters because the concrete settings
+    object (``RetrySettings``) is a frozen Pydantic model: a mutable protocol
+    attribute would not be satisfied by a read-only field. A read-only protocol
+    member accepts both frozen and mutable implementations.
+    """
+
+    @property
+    def max_attempts(self) -> int:
+        """Maximum number of attempts (includes the initial try)."""
+        ...
+
+    @property
+    def initial_delay_seconds(self) -> float:
+        """Initial backoff delay in seconds."""
+        ...
+
+    @property
+    def max_delay_seconds(self) -> float:
+        """Maximum backoff delay in seconds."""
+        ...
+
+    @property
+    def exponential_base(self) -> float:
+        """Exponential backoff multiplier (e.g. 2.0 for doubling)."""
+        ...
+
+
+class ServiceRateLimitSettingsProtocol(Protocol):
+    """Settings-side shape for one service rate-limit override.
+
+    Read-only ``@property`` members (like the other ``*SettingsProtocol``
+    classes here) so the frozen Pydantic settings models satisfy them.
+    """
+
+    @property
+    def requests_per_minute(self) -> int:
+        """Service-specific requests-per-minute limit."""
+        ...
+
+
+class RateLimitSettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeRateLimitConfig."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether rate limiting is active."""
+        ...
+
+    @property
+    def default_requests_per_minute(self) -> int:
+        """Default requests per minute for unconfigured services."""
+        ...
+
+    @property
+    def persistence_path(self) -> str | None:
+        """Optional SQLite path for cross-process persistence."""
+        ...
+
+    @property
+    def services(self) -> Mapping[str, ServiceRateLimitSettingsProtocol]:
+        """Per-service rate-limit overrides keyed by service name."""
+        ...
+
+
+class ConcurrencySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeConcurrencyConfig."""
+
+    @property
+    def max_workers(self) -> int:
+        """Maximum number of parallel workers."""
+        ...
+
+
+class CheckpointSettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeCheckpointConfig."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether checkpointing is active."""
+        ...
+
+    @property
+    def frequency(self) -> str:
+        """Checkpoint frequency token (e.g. 'every_row', 'every_n')."""
+        ...
+
+    @property
+    def checkpoint_interval(self) -> int | None:
+        """Row interval for frequency='every_n'; None otherwise."""
+        ...
+
+    @property
+    def aggregation_boundaries(self) -> bool:
+        """Whether to checkpoint at aggregation flush boundaries."""
+        ...
+
+
+class TelemetryExporterSettingsProtocol(Protocol):
+    """Settings-side shape for one telemetry exporter config."""
+
+    @property
+    def name(self) -> str:
+        """Exporter name (e.g. 'console', 'otlp')."""
+        ...
+
+    @property
+    def options(self) -> Mapping[str, Any]:
+        """Exporter-specific options."""
+        ...
+
+
+class TelemetrySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeTelemetryConfig."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether telemetry is active."""
+        ...
+
+    @property
+    def granularity(self) -> str:
+        """Granularity token (parsed to TelemetryGranularity)."""
+        ...
+
+    @property
+    def backpressure_mode(self) -> str:
+        """Backpressure-mode token (parsed to BackpressureMode)."""
+        ...
+
+    @property
+    def fail_on_total_exporter_failure(self) -> bool:
+        """Whether to fail the run if all exporters fail."""
+        ...
+
+    @property
+    def max_consecutive_failures(self) -> int:
+        """Consecutive total failures before disabling or raising."""
+        ...
+
+    @property
+    def exporters(self) -> Sequence[TelemetryExporterSettingsProtocol]:
+        """Configured telemetry exporters."""
+        ...
 
 
 @runtime_checkable

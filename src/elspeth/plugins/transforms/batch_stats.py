@@ -12,8 +12,10 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -111,10 +113,27 @@ class BatchStats(BaseTransform):
     """
 
     name = "batch_stats"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4d7ff4cc4c61ba64"
+    source_file_hash: str | None = "sha256:7506d083ef17eb83"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Aggregates a numeric field into count, sum, and optional mean rows.",
+                composer_hints=(
+                    "Use batch_stats under aggregations with a trigger; it is not a per-row transform.",
+                    "value_field must contain numeric int or float values; missing and non-finite values are skipped and reported.",
+                    "Output is derived summary row(s) and does not preserve original row fields.",
+                    "Set group_by only when you want one summary row per group; avoid names that collide with output fields.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

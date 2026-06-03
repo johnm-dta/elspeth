@@ -20,10 +20,12 @@ import structlog
 from elspeth.contracts import Determinism, TransformResult, propagate_contract
 from elspeth.contracts.errors import FrameworkBugError, RetrievalNotReadyError, TransformErrorReason
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
+from elspeth.plugins.infrastructure.telemetry import make_warn_telemetry_before_start
 from elspeth.plugins.transforms.rag.config import PROVIDERS, RAGRetrievalConfig
 from elspeth.plugins.transforms.rag.formatter import format_context
 from elspeth.plugins.transforms.rag.query import QueryBuilder
@@ -35,12 +37,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _warn_telemetry_before_start(event: Any) -> None:
-    """Default telemetry callback before on_start() — warns instead of silently dropping."""
-    logger.warning(
-        "telemetry_emit called before on_start() — event dropped",
-        event_type=type(event).__name__,
-    )
+_warn_telemetry_before_start = make_warn_telemetry_before_start(logger)
 
 
 class RAGRetrievalTransform(BaseTransform):
@@ -58,7 +55,7 @@ class RAGRetrievalTransform(BaseTransform):
 
     name = "rag_retrieval"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:146ccd250aefa105"
+    source_file_hash: str | None = "sha256:f79530b7533b8958"
     determinism: Determinism = Determinism.EXTERNAL_CALL
     config_model = RAGRetrievalConfig
     passes_through_input = True
@@ -474,3 +471,19 @@ class RAGRetrievalTransform(BaseTransform):
         self._score_mean += delta / self._score_count
         delta2 = score - self._score_mean
         self._score_m2 += delta * delta2
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="rag_retrieval",
+                issue_code=None,
+                summary="Vector retrieval against a configured backend (Chroma, etc). Builds a query from row fields, returns ranked chunks for downstream LLM grounding.",
+                composer_hints=(
+                    "Collection naming is per-provider — check provider config for the canonical pattern before pinning collection_name.",
+                    "Query template uses row-field interpolation; document what fields are read so downstream consumers can wire them.",
+                    "top_k and score_threshold interact — high threshold + low top_k may return zero chunks. Configure on_zero_results to handle the empty-result case.",
+                    "The transform emits running mean/variance telemetry for retrieval scores — watch these to catch retrieval-quality regressions.",
+                ),
+            )
+        return None

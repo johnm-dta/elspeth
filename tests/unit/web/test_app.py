@@ -4,22 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import sys
+import weakref
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretBytes, ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
+from structlog.testing import capture_logs
 
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
+    _BodySizeLimitMiddleware,
     _periodic_orphan_cleanup,
     _settings_from_env,
     create_app,
     lifespan,
 )
+from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -33,9 +39,10 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": SecretBytes(b"\x00" * 32),
     }
     defaults.update(overrides)
-    return WebSettings(**defaults)
+    return WebSettings(**defaults)  # type: ignore[arg-type]
 
 
 class _StaticJsonResponse:
@@ -91,6 +98,33 @@ class TestCreateApp:
         assert app.state.settings is settings
         assert app.state.settings.port == 9999
 
+    def test_tutorial_cache_stored_on_app_state_with_configured_dir(self, tmp_path) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.web.preferences.tutorial_cache import (
+            CANONICAL_SEED_PROMPT,
+            TutorialCache,
+            TutorialCacheEntry,
+        )
+
+        cache_dir = tmp_path / "custom-cache"
+        app = create_app(_settings(tmp_path, tutorial_cache_dir=cache_dir))
+
+        cache = app.state.tutorial_cache
+        assert isinstance(cache, TutorialCache)
+        cache.store(
+            TutorialCacheEntry(
+                canonical_prompt=CANONICAL_SEED_PROMPT,
+                model_id="gpt-5.5:gpt-5.5",
+                cached_at=datetime(2026, 5, 15, tzinfo=UTC),
+                rows=[],
+                source_data_hash="hash",
+                llm_call_count=0,
+                pipeline_yaml="source: {}\n",
+            )
+        )
+        assert len(list(cache_dir.glob("*.json"))) == 1
+
     def test_loopback_default_secret_key_allowed_without_pytest_module(self, tmp_path, monkeypatch) -> None:
         """Loopback startup must follow the WebSettings contract outside pytest too."""
         settings = _settings(tmp_path, host="127.0.0.1")
@@ -100,6 +134,26 @@ class TestCreateApp:
         app = create_app(settings)
 
         assert app is not None
+
+    def test_abandoned_app_disposes_session_engine(self, tmp_path, monkeypatch) -> None:
+        """Unit tests often instantiate ``create_app`` without running lifespan."""
+        app = create_app(_settings(tmp_path))
+        disposed = False
+        original_dispose = app.state.session_engine.dispose
+
+        def dispose() -> None:
+            nonlocal disposed
+            disposed = True
+            original_dispose()
+
+        monkeypatch.setattr(app.state.session_engine, "dispose", dispose)
+        app_ref = weakref.ref(app)
+
+        del app
+        gc.collect()
+
+        assert app_ref() is None
+        assert disposed
 
 
 class TestHealthEndpoint:
@@ -116,6 +170,39 @@ class TestHealthEndpoint:
         client = TestClient(app)
         response = client.get("/api/health")
         assert response.json() == {"status": "ok"}
+
+
+class TestMetricsEndpoint:
+    """Tests for GET /metrics (Prometheus scrape endpoint)."""
+
+    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_metrics_scrape_failure_returns_503_and_records_cause(self, tmp_path) -> None:
+        """A third-party collector raising inside generate_latest() must not
+        leak a traceback into the response and must not drop the error
+        silently. The handler returns a fixed 503 and records *why* via slog
+        (sanctioned telemetry-system-failure logging per CLAUDE.md), carrying
+        a bounded detail that identifies which collector broke.
+        """
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        boom = RuntimeError("collector 'broken_metric' raised during collect()")
+        with (
+            patch("elspeth.web.app.generate_latest", side_effect=boom),
+            capture_logs() as logs,
+        ):
+            response = client.get("/metrics")
+        assert response.status_code == 503
+        assert response.content == b"# scrape failed\n"
+        events = [e for e in logs if e.get("event") == "prometheus_scrape_failed"]
+        assert len(events) == 1, f"expected one scrape-failure log, got {logs!r}"
+        assert events[0]["exc_class"] == "RuntimeError"
+        assert "broken_metric" in events[0]["detail"]
 
 
 class TestCORSMiddleware:
@@ -147,6 +234,110 @@ class TestCORSMiddleware:
         )
         # Starlette CORS middleware omits the header for disallowed origins
         assert "access-control-allow-origin" not in response.headers
+
+
+class TestBodySizeLimitMiddleware:
+    """Tests that the 10 MB body-size guard rejects oversized requests.
+
+    Phase 5b.0.5 (F-3): the ASGI body-size middleware is defense-in-depth
+    against unbounded payload allocation.  The Pydantic per-field caps
+    (``SendMessageRequest.content``, ``_InlineBlobModel.content``) are
+    the actual guarantees; the middleware short-circuits Content-Length
+    declarations that would otherwise reach the parser at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejects_oversized_content_length(self) -> None:
+        # 11 MB declared > 10 MB cap. Body content itself doesn't matter
+        # because the middleware checks the header and short-circuits before
+        # reading the body.
+        response = await self._dispatch_with_content_length(11_000_000)
+
+        assert response.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_allows_under_limit_content_length(self) -> None:
+        # Sanity check that the middleware does not over-reject — a
+        # tiny declared body must still reach call_next, not be 413'd by the
+        # size guard.
+        response = await self._dispatch_with_content_length(2)
+        assert response.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_allows_exact_content_length_boundary(self) -> None:
+        response = await self._dispatch_with_content_length(_BodySizeLimitMiddleware._MAX_BODY_BYTES)
+        assert response.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_rejects_one_byte_over_content_length_boundary(self) -> None:
+        response = await self._dispatch_with_content_length(_BodySizeLimitMiddleware._MAX_BODY_BYTES + 1)
+        assert response.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
+        """No Content-Length means the middleware defers to per-route validators."""
+
+        async def noop_app(scope, receive, send) -> None:
+            return None
+
+        middleware = _BodySizeLimitMiddleware(app=noop_app)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/health",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+
+        async def receive() -> dict[str, object]:
+            raise AssertionError("Content-Length-only guard must not read streamed bodies")
+
+        request = Request(scope, receive)
+
+        async def call_next(_request: Request) -> StarletteResponse:
+            return StarletteResponse(status_code=204)
+
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 204
+
+    async def _dispatch_with_content_length(self, content_length: int) -> StarletteResponse:
+        async def noop_app(scope, receive, send) -> None:
+            return None
+
+        middleware = _BodySizeLimitMiddleware(app=noop_app)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/health",
+            "headers": [
+                (b"content-length", str(content_length).encode("ascii")),
+                (b"content-type", b"application/json"),
+            ],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+
+        async def receive() -> dict[str, object]:
+            raise AssertionError("Content-Length-only guard must not read request bodies")
+
+        request = Request(scope, receive)
+
+        async def call_next(_request: Request) -> StarletteResponse:
+            return StarletteResponse(status_code=204)
+
+        response = await middleware.dispatch(request, call_next)
+        assert isinstance(response, StarletteResponse)
+        return response
 
 
 class TestGetSettingsDependency:
@@ -253,6 +444,13 @@ class TestAuthWiring:
     def test_auth_provider_on_app_state(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         assert app.state.auth_provider is not None
+
+    def test_auth_audit_recorder_on_app_state(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        app = create_app(settings)
+
+        assert isinstance(app.state.auth_audit_recorder, AuthAuditRecorder)
+        assert app.state.auth_audit_recorder.landscape_url == settings.get_landscape_url()
 
     def test_auth_routes_registered(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
@@ -412,6 +610,19 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS", "10")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS", "85.0")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE", "10")
+        # Phase 6A required: shareable_link_signing_key.
+        #
+        # DC-2 FIX-L: env-var ingestion now requires the value to be a
+        # base64-encoded string (the documented ``openssl rand -base64 32``
+        # recipe). The model's ``mode="before"`` validator decodes it
+        # explicitly — no utf-8 multibyte ambiguity. 32 raw bytes decoded
+        # is the validator floor; a 44-char base64 string satisfies it.
+        import base64
+
+        monkeypatch.setenv(
+            "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY",
+            base64.b64encode(b"\x00" * 32).decode("ascii"),
+        )
 
     def test_parses_json_tuple_values(self, monkeypatch) -> None:
         """JSON-encoded lists are converted to tuples for tuple-typed fields."""
@@ -725,6 +936,7 @@ class TestDataDirCreation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         )
         create_app(settings)
         assert fresh_dir.exists()

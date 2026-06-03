@@ -1,0 +1,135 @@
+{
+  "review_date": "2026-05-16",
+  "reviewer": "Plan Review Architecture Agent (claude-sonnet-4-6)",
+  "plans_reviewed": [
+    "14-phase-2-audit-readiness-panel.md (umbrella, UNCHANGED)",
+    "14a-phase-2a-backend.md (rev: +290 lines)",
+    "14b-phase-2b-frontend.md (rev: +99 lines)",
+    "14c-phase-2c-frontend-integration.md (rev: +163 lines)"
+  ],
+  "commits_reviewed": ["aa037c6f8 (14b)", "4e7f751c6 (14a)", "5d631fa0a (14c)"],
+  "verdict": "CHANGES_REQUESTED",
+
+  "prior_blockers_status": {
+    "B1": {
+      "original": "Phase 2C deletes handleValidate side effects before Phase 3A Task 8 creates the replacement subscription",
+      "status": "PARTIALLY_ADDRESSED",
+      "assessment": "The scope-shrink was applied correctly: 14c Task 8 now retains handleValidate, injectSystemMessage, and sendValidationFeedback in InspectorPanel.tsx and removes only the Validate button UI. The architectural insight (deletion must be atomic with relocation) is preserved. However, the handoff guard mechanism introduced as the mechanical replacement (Task 8.5) does NOT enforce the constraint mechanically. See NA2 for the new blocking issue this creates.",
+      "residual_risk": "handleValidate has no active callers remaining after the button is removed (the button was the only caller per Task 8 Step 5, which acknowledges canValidate/isValidating may become unused). injectSystemMessage and sendValidationFeedback fire only from handleValidate. Retaining them as 'wired and live' is technically accurate but operationally misleading: the side effects are unreachable from the UI. The plan should acknowledge that the regression window still exists — validation-chat feedback is silently inert from Phase 2C merge to Phase 3A landing regardless of the scope-shrink."
+    },
+    "B2": {
+      "original": "ValidationCheck.affected_nodes producers not updated in Phase 2A — provenance row component_ids always empty",
+      "status": "RESOLVED",
+      "assessment": "14a Task 1 Step 2b (convergence C1) now explicitly co-updates validation.py:1248 in the same commit as the schema change, passing affected_nodes=(identity_finding.node_id,). The schema fields (affected_nodes on ValidationCheck, error_code on ValidationError) are declared WITHOUT defaults — the plan states 'no compat-shim default' and 'Populated at every construction site — no compat-shim default.' An audit of all ValidationCheck(...) and ValidationError(...) sites is prescribed via grep. An integration test in Task 3 Step 2b asserts component_ids is non-empty when status is 'warning', exercising the real validate_pipeline path. CLAUDE.md No-Legacy requirement satisfied."
+    }
+  },
+
+  "prior_warnings_status": {
+    "W1": {
+      "original": "loadSnapshot monotonic guard — slow v=1 response can overwrite fast v=2",
+      "status": "RESOLVED",
+      "assessment": "14b now includes an AbortController per session (stored in abortControllers state map), per-call abort before starting a new fetch, monotonic write guard in the set() resolution arm (discards if arriving composition_version < currently cached), and clearSession aborts in-flight requests. A concurrent-fetch test (fast-v2 + slow-v1 interleaved) is included. The note 'if current.composition_version > snapshot.composition_version discard' correctly gates writes. Both the guard and the test are present."
+    },
+    "W2": {
+      "original": "EXTERNAL_BOUNDARY_TRANSFORMS/SINKS deletion not committed to when Phase 7 lands",
+      "status": "NOT_ADDRESSED",
+      "assessment": "The trust.py docstring in 14a contains no Phase 7 deletion commitment. A grep for 'When Phase 7', 'delete this module', 'data_trust_tier', and 'ClassVar' across the revised 14a plan returns empty. The trust.py docstring describes the two-tier rationale and allowlist instructions but does not contain the architectural commitment that Phase 7's data_trust_tier ClassVar addition should replace this module entirely. The prior review recommendation (add explicit note, file filigree dependency) was not implemented."
+    },
+    "W3": {
+      "original": "getattr(cls, 'determinism', None) in test_trust.py — CLAUDE.md ban on defensive getattr",
+      "status": "RESOLVED",
+      "assessment": "The revised test_trust.py (14a Task 2) now uses cls.determinism is Determinism.EXTERNAL_CALL directly with a comment 'offensive: attribute must exist per plugin-ownership doctrine'. The getattr defensive pattern is gone. Determinism is confirmed at L0 (src/elspeth/contracts/enums.py:105), so the import from contracts/enums.py in L3 trust.py is a downward import — no layer violation."
+    },
+    "W4": {
+      "original": "secret_service attribute name mismatch — plan uses app.state.secret_service but precedent is scoped_secret_resolver",
+      "status": "RESOLVED",
+      "assessment": "The plan now explicitly specifies app.state.scoped_secret_resolver throughout: the _SecretServiceLike Protocol drops auth_provider_type and declares list_refs(user_id: str) matching ScopedSecretResolver; the service.py constructor comment states 'Matches ScopedSecretResolver.list_refs — no auth_provider_type'; app.py wiring comment states 'DO NOT use app.state.secret_service' and explicitly references line 470 of app.py. The run_sync_in_worker wrapping for the sync list_refs call is present. Integration guard test (test_secrets_row_uses_scoped_resolver) is included."
+    }
+  },
+
+  "new_blocking_issues": [
+    {
+      "id": "NA2",
+      "title": "Task 8.5 'mechanical CI gate' is a skipped test, not a gate — Phase 3A can merge without it",
+      "severity": "BLOCKING",
+      "description": "14c Task 8.5 claims to add 'a mechanical CI gate that fails red until Phase 3A Task 8 lands the relocation' (Task 8 rationale, line 690; risk table line 1022). However, the guard is implemented as describe.skip(...) and Task 8.5 Step 2 explicitly states: 'Expected output: 1 skipped — it does NOT fail red in this state.' A describe.skip test is unconditionally excluded from CI runs. It provides no mechanical enforcement: Phase 3A's PR author can merge without unskipping it and CI remains green. The relocation can be omitted entirely without a build failure. The plan's risk mitigation column ('Task 8.5's .skip guard test fails red if Phase 3A's PR omits the relocation') is factually incorrect — a skipped test cannot fail. The prior review's C3 resolution required a test that 'fails red until the relocation lands.' What landed does not satisfy that requirement.",
+      "evidence": [
+        "14c Task 8 rationale: 'Task 8.5 (immediately below) adds a mechanical CI gate that fails red until Phase 3A Task 8 lands the relocation.'",
+        "14c Task 8.5 Step 2: 'Expected output: 1 skipped — the test is registered and skipped correctly; it does NOT fail red in this state.'",
+        "14c Risk table: 'Task 8.5's .skip guard test fails red if Phase 3A's PR omits the relocation.' — false; a .skip test does not fail.",
+        "14c line 864: 'describe.skip(\"subscriptions.ts — Phase 3A handoff: injectSystemMessage fires on validation failure\", ...' — unconditionally skipped."
+      ],
+      "required_resolution": "One of: (a) PREFERRED — Replace the skipped test with a non-skipped structural assertion that passes today and will continue to pass only if Phase 3A's relocation is present. Example: a test that imports subscriptions.ts and asserts it exports initStoreSubscriptions, then asserts that calling initStoreSubscriptions() in a validation-failure scenario eventually invokes a function from sessionStore named injectSystemMessage. This test fails today (function not wired) and passes after Phase 3A. (b) Replace the .skip guard with a grep-based CI step in the Phase 2 umbrella PR that checks subscriptions.ts does NOT contain a comment matching a known placeholder — less clean but mechanically enforcing. Option (a) is architecturally correct because it tests behavior, not structure. The guard's docstring already specifies the correct test content (the test body is complete and correct inside the describe.skip) — the only required change is removing .skip and running it at describe level, accepting that it fails today and must be fixed by Phase 3A before that PR can merge."
+    }
+  ],
+
+  "new_warnings": [
+    {
+      "id": "W2_OPEN",
+      "title": "W2 from prior review remains open — trust.py has no Phase 7 deletion commitment",
+      "severity": "WARNING",
+      "description": "The trust.py docstring in 14a does not contain the architectural commitment that Phase 7's data_trust_tier ClassVar addition must delete this module. The No-Legacy policy requires that when Phase 7 adds the ClassVar, the allowlist and classify_plugin() must be deleted in the same commit. Without the commitment in the code, Phase 7 can add data_trust_tier without removing the allowlist, creating two parallel sources of truth. The recommendation from the prior review (docstring note + filigree Phase 7 dependency) was not implemented.",
+      "required_resolution": "Add to trust.py docstring: 'When Phase 7 adds data_trust_tier: ClassVar to plugin base classes, delete this module entirely and replace classify_plugin() callers with a direct attribute lookup. Do not maintain both. CLAUDE.md No-Legacy policy requires same-commit replacement.' Also file a filigree dependency from Phase 7A backend to this deletion."
+    },
+    {
+      "id": "NA1",
+      "title": "14a grew 290 lines — structural additions are principled, no layer violations",
+      "severity": "INFO",
+      "description": "The 290-line growth breaks down as: (a) NodeSpec/OutputSpec test factories with full kwarg coverage (B1/B2 resolution) — principled, addresses codebase reality; (b) affected_nodes/error_code schema co-update prose + code (C1 resolution) — principled, No-Legacy requirement; (c) scoped_secret_resolver Protocol + wiring prose (C4 resolution) — principled, disambiguation; (d) mypy/ruff checklist additions per task (quality gate fix) — principled; (e) integration test for real validate_pipeline path (C1 guard) — principled. No new modules introduced that cross layers. Determinism import is contracts/enums.py (L0) → audit_readiness trust.py (L3) which is a downward import. No Determinism enum move was made — confirmed at contracts/enums.py:105. No new package boundaries created."
+    },
+    {
+      "id": "NA3",
+      "title": "Plan complexity growth is principled — no scope creep detected",
+      "severity": "INFO",
+      "description": "The 16% total growth (290 + 99 + 163 lines) maps directly to fixing the 10 blocking issues from the prior review. No new features were piggybacked. The plan does not introduce new abstractions, configuration surfaces, or interfaces beyond what the prior review required. The factory pattern is a targeted fix for a concrete failure mode (TypeError at construction), not a premature abstraction."
+    },
+    {
+      "id": "NA4",
+      "title": "scoped_secret_resolver trust assumptions are correctly matched to the list_refs semantic",
+      "severity": "INFO",
+      "description": "ScopedSecretResolver.list_refs(user_id) returns the user's inventory scoped to the configured auth provider. The 'list_refs returns the user's inventory' semantic the plan depends on is the scoped resolver's actual contract. The raw WebSecretService.list_refs(user_id, *, auth_provider_type) is the unscoped version. Using scoped_secret_resolver means auth_provider scoping is baked in at construction (app.py:470), which is correct for a per-user panel view. No trust assumption mismatch introduced."
+    },
+    {
+      "id": "NA5",
+      "title": "Deferral to Phase 3A is bounded, but the two-phase line-touch surface is real",
+      "severity": "WARNING",
+      "description": "14c Task 8 defers deletion of handleValidate/injectSystemMessage/sendValidationFeedback to Phase 3A Task 8, which is documented as the canonical owner. However, Phase 2C and Phase 3A now both touch InspectorPanel.tsx in adjacent regions: Phase 2C removes the button block; Phase 3A removes the handler definitions and adds subscription wiring. If these land on separate branches with long-lived divergence, the merge conflict surface is the handler block itself. The deferral is correctly bounded (Phase 3A Task 8 owns it, full stop) but the implementer should be aware that Phase 3A's InspectorPanel patch will apply near the Phase 2C button-removal edit. Risk is low if branches are kept short-lived; flag for Phase 3A Task 8 implementer.",
+      "required_resolution": "No plan change required. Phase 3A Task 8 should rebase on Phase 2C's output before implementing the deletion. Document this in 15a2's Task 8."
+    },
+    {
+      "id": "NA6",
+      "title": "state_from_record collaborator preserves test injection — No-Legacy not violated",
+      "severity": "INFO",
+      "description": "ReadinessService accepts an optional state_from_record collaborator (default: real converter). This is not a backwards-compatibility shim — it is a dependency-injection seam for unit testing without a database. The No-Legacy policy prohibits compatibility shims that preserve dead code paths; this is the opposite: it removes the defensive getattr pattern that was in the prior version and replaces it with an explicit typed collaborator. The None-default (producing the real converter) is correct: tests override it with a lambda, production uses the default. No flexibility was lost."
+    },
+    {
+      "id": "NA7",
+      "title": "NodeSpec/OutputSpec factories — backend centralized, frontend has two local definitions",
+      "severity": "WARNING",
+      "description": "The backend Python factories (make_node_spec, make_output_spec) are co-located in test_service.py with an explicit comment 'if this conftest grows, extract to tests/integration/web/audit_readiness/conftest.py', and test_explain.py imports them via 'from tests.unit.web.audit_readiness.test_service import make_node_spec, make_output_spec'. This is a single-source approach — good. On the frontend, 14b's AuditReadinessPanel.test.tsx defines makeComposition() locally (7 fields, optional TS fields marked optional), and 14c's ReadinessRowDetail.test.tsx defines its own makeComposition() locally (same shape, as never cast). These are two separate definitions of the same fixture. The TypeScript frontend does not have a shared test utility extracted yet. If the CompositionState interface changes, both must be updated independently.",
+      "required_resolution": "Extract the frontend makeComposition() to a shared test helper (e.g., frontend/src/test-utils/composerFixtures.ts) and import it in both AuditReadinessPanel.test.tsx and ReadinessRowDetail.test.tsx. Not blocking for Phase 2 but should be resolved before a third component test requires the same fixture."
+    }
+  ],
+
+  "pattern_alignment": {
+    "layer_model": "ALIGNED — audit_readiness is L3; all imports are downward (contracts L0, core L1, peer L3). Determinism import from contracts/enums.py is L0, confirmed. No upward imports detected in the plan's code.",
+    "no_legacy_policy": "ALIGNED for B2 (no compat-shim defaults on affected_nodes/error_code). CONCERN: canValidate/isValidating may become dead code in InspectorPanel.tsx after button removal; Task 8 Step 5 prescribes ESLint suppression with a TODO rather than deletion, citing the regression-window concern. This is a deliberate narrow exception documented with the Phase 3A reference.",
+    "tier_model": "ALIGNED — reads only Tier-1 data. scoped_secret_resolver wiring is correct. No new trust boundaries.",
+    "defensive_programming_ban": "RESOLVED — getattr(cls, 'determinism', None) replaced with cls.determinism. state_from_record collaborator replaces _state_override/getattr pattern.",
+    "mypy_ruff_gates": "RESOLVED — mypy and ruff check/format added to every Task commit checklist in 14a."
+  },
+
+  "blast_radius": {
+    "summary": "Unchanged from prior review. File count and criticality weighting are the same. The fix-up commits add test factories, schema producer updates, and wiring prose but do not introduce new file touches beyond those already counted.",
+    "risk_level": "Medium-High (unchanged)"
+  },
+
+  "notes": [
+    "The B1 scope-shrink is architecturally correct in intent but the residual operational reality is: after Phase 2C merges, handleValidate has no active UI callers (the button was removed), so injectSystemMessage and sendValidationFeedback are operationally unreachable even though they remain 'wired.' The validation-chat feedback regression exists either way until Phase 3A lands. The plan's framing ('not dead code — keyboard shortcuts or other callers invoke handleValidate directly') should be verified: Task 9 Step 4 instructs the implementer to grep ShortcutsHelp.tsx to confirm whether a keyboard shortcut exists. If no shortcut exists, the retention is purely forward-compatibility scaffolding for Phase 3A, and the regression window is real.",
+    "NA1 confirms: Determinism is at L0 (contracts/enums.py:105). The plan's import comment 'Determinism lives in contracts/enums.py (StrEnum, EXTERNAL_CALL = external_call)' is correct. No layer violation.",
+    "W2 was not addressed in this revision. The trust.py docstring in the revised 14a plan contains two-tier rationale and add-entry instructions but no Phase 7 deletion commitment. This is carried forward as W2_OPEN.",
+    "The factories pattern (NA7) is sound on the backend (single-source sibling import) and is debt on the frontend (two local makeComposition() definitions). Not blocking but should be resolved before a third component test is written."
+  ],
+
+  "summary": "One new blocking issue (NA2): Task 8.5 claims to provide a mechanical CI gate for the Phase 3A handoff but is implemented as describe.skip, which is unconditionally excluded from CI. A skipped test cannot fail red. Phase 3A can merge without unskipping it, and the relocation can be omitted without a build failure. The prior review's C3 resolution requirement ('fails red until relocation lands') is not satisfied. Priors B1 (scope-shrink) and B2 (producer wiring) are correctly addressed; W1 (monotonic guard), W3 (getattr ban), and W4 (scoped_secret_resolver) are fully resolved. W2 (Phase 7 trust.py deletion commitment) remains open — no docstring note was added. Four new warnings: W2 remains open, NA5 documents the two-phase InspectorPanel merge-conflict surface, NA7 flags two local frontend makeComposition() definitions as mild factory debt, and NA6/NA4/NA3/NA1 are all informational (sound architecture, principled growth, correct layer imports)."
+}

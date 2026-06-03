@@ -21,6 +21,10 @@ This guide covers common errors and their solutions when running ELSPETH pipelin
 - [Configuration Issues](#configuration-issues)
   - [YAML Parsing Errors](#yaml-parsing-errors)
   - [Schema Validation Failures](#schema-validation-failures)
+- [Web Composer — Guided Mode](#web-composer--guided-mode)
+  - [Auto-dropped to freeform — what happened?](#auto-dropped-to-freeform--what-happened)
+  - [Wizard disagreed with my source schema](#wizard-disagreed-with-my-source-schema)
+  - [Recipe didn't appear for my (CSV, JSONL) pipeline](#recipe-didnt-appear-for-my-csv-jsonl-pipeline)
 
 ---
 
@@ -421,6 +425,96 @@ The readiness probe prevents traffic before the app is ready. The liveness probe
    - Missing `sinks` section
    - Plugin options with wrong types
    - Undefined environment variables in `${VAR}` syntax
+
+---
+
+## Web Composer — Guided Mode
+
+### Auto-dropped to freeform — what happened?
+
+**Cause:** Guided mode dropped you to the freeform composer because the
+wizard could not complete the step you were on. Two paths trigger an
+auto-drop:
+
+- **`solver_exhausted`** — at Step 3, the LLM proposed a transform chain
+  that failed `preview_pipeline`. The wizard tried one repair attempt
+  (feeding the validator's rejection reason back to the LLM) and optionally
+  consulted the advisor. Both came back red, so the wizard handed the
+  partial pipeline state to freeform mode rather than loop forever.
+- **`protocol_violation`** — the LLM emitted a turn type that is not
+  legal at the current step. The wizard granted one retry, the LLM
+  emitted another illegal turn, and the wizard auto-dropped.
+
+**Solution:**
+
+1. Scroll up in the chat history. The drop is recorded as a system
+   message with the `drop_reason` field set. For `solver_exhausted`, the
+   validator's rejection reason is also recorded.
+2. Inspect the last `propose_chain` turn (if any) to see the chain the
+   LLM tried and what the validator said about it. The validator usually
+   names the specific edge or required-field constraint that was
+   violated.
+3. Finish the pipeline by hand in freeform mode. The composer carries
+   over the partial pipeline you had at the moment of the drop, so you
+   are not starting from scratch.
+4. If the LLM keeps producing the same broken chain on similar inputs,
+   that is a real bug — open an issue with the chat history attached.
+
+---
+
+### Wizard disagreed with my source schema
+
+**Cause:** Step 1 of guided mode runs `inspect_source` on the blob you
+attached and shows you the columns it observed. If the inspector's
+opinion of your data does not match what you expected (wrong column
+names, missing columns, columns that should not be there), one of the
+following is usually true:
+
+- The blob was uploaded with the wrong `mime_type`, so the inspector
+  picked the wrong parser (for example, JSONL parsed as plain text).
+- The CSV has a non-standard delimiter, encoding, or header row that
+  the inspector's default heuristics missed.
+- The data actually does have the columns the inspector reported, and
+  your expectation was based on a different file.
+
+**Solution:**
+
+1. Read the column list and sample values the `inspect_and_confirm` turn
+   is showing you. The truth is in the bytes of the blob, not in your
+   memory of the file.
+2. If the columns are wrong, edit the column list directly on the
+   `inspect_and_confirm` turn before continuing. Your edits are recorded
+   as the schema-of-record for the rest of the wizard.
+3. If the underlying problem is the parser choice, exit to freeform,
+   re-upload the blob with the correct `mime_type`, and use the
+   freeform composer's `inspect_source` tool to get an authoritative
+   reading before retrying guided mode.
+
+---
+
+### Recipe didn't appear for my (CSV, JSONL) pipeline
+
+**Cause:** The recipe pre-match step (Step 2.5) matches on the pipeline
+**topology** (source plugin, sink plugin, and sink count) **plus a
+discriminator** — usually a required output field that names the recipe's
+purpose. For example, the `classify-rows-llm-jsonl` recipe requires a
+`classifier_keyword`-style field in the output. A bare (CSV, JSONL)
+shape is not enough; the discriminator has to match too.
+
+**Solution:**
+
+1. Switch to freeform mode briefly and call `list_recipes`. The response
+   names every registered recipe, its required slots, and the
+   discriminator field(s) it matches on.
+2. If a recipe exists but its discriminator did not match your output
+   fields, go back to guided Step 2 and add the discriminator field to
+   the required-output list. The recipe will then match on the next
+   pass through Step 2.5.
+3. If no registered recipe matches your (source, sink) shape at all,
+   that is expected: the wizard will skip Step 2.5 and let the LLM
+   propose a chain in Step 3. You can also pre-apply a recipe manually
+   from freeform mode with `list_recipes` + the recipe-application tool,
+   then return to guided mode to finish the rest.
 
 ---
 

@@ -7,8 +7,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -92,10 +94,27 @@ class BatchThresholdSummary(BaseTransform):
     """Report threshold match counts and rates for finite numeric batch values."""
 
     name = "batch_threshold_summary"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5f5452c7f4dd2239"
+    source_file_hash: str | None = "sha256:baf0488c9134eca6"
     config_model = BatchThresholdSummaryConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Counts how many finite numeric batch values match named thresholds.",
+                composer_hints=(
+                    "Use batch_threshold_summary under aggregations with a trigger; it emits one summary row per threshold.",
+                    "value_field must be numeric; missing and non-finite values are skipped and counted.",
+                    "Each threshold needs a unique name, an operator from < <= > >= == !=, and a finite numeric value.",
+                    "Output is threshold summary rows, not pass-through source data.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

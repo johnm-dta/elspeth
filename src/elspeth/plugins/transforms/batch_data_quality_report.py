@@ -15,7 +15,10 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -54,6 +57,16 @@ class _QualityStats:
     observed_type_counts: Mapping[str, int]
     valid_values: tuple[object, ...]
 
+    def __post_init__(self) -> None:
+        # ``observed_type_counts`` is Mapping[str, int]; producers may
+        # pass a mutable dict. ``valid_values`` is tuple[object, ...] —
+        # the tuple itself is immutable, but the elements are
+        # ``object`` (typically scalar bucket entries from
+        # ``append_unique_bucket_value``); deep_freeze is identity-
+        # preserving for already-immutable scalars and would crash
+        # loudly if a future caller passed a nested mutable.
+        freeze_fields(self, "observed_type_counts", "valid_values")
+
     @property
     def observed_count(self) -> int:
         return sum(self.observed_type_counts.values())
@@ -90,10 +103,27 @@ class BatchDataQualityReport(BaseTransform):
     """Report field-level batch quality counts and rates."""
 
     name = "batch_data_quality_report"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:732ed1d012c5f982"
+    source_file_hash: str | None = "sha256:5f69026e933b8bbd"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Emits data-quality counts for configured fields across a batch.",
+                composer_hints=(
+                    "Use batch_data_quality_report under aggregations with a trigger; it inspects a flushed batch.",
+                    "inspect_fields must name existing input fields and must not be empty or duplicated.",
+                    "It emits one report row per inspected field with missing, blank, non-finite, non-scalar, and type counts.",
+                    "Output rows replace the source row shape; downstream stages should consume quality_report_* fields.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

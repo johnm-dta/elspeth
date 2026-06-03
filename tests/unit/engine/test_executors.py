@@ -84,6 +84,7 @@ from elspeth.contracts.errors import (
     TIER_1_ERRORS,
     AuditIntegrityError,
     ContractMergeError,
+    DeclarationContractViolation,
     DeclaredRequiredInputFieldsViolation,
     FrameworkBugError,
     OrchestrationInvariantError,
@@ -111,6 +112,7 @@ from elspeth.engine.executors import (
 )
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
+from tests.fixtures.audit_hashing import assert_stable_hash
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import make_test_step_resolver as _make_step_resolver
@@ -221,6 +223,14 @@ def _make_factory() -> MagicMock:
     factory.execution.get_batch.side_effect = get_batch_side_effect
     factory.execution.get_batch_members.side_effect = get_batch_members_side_effect
     return factory
+
+
+def _single_complete_node_state_kwargs(factory: MagicMock, *, status: NodeStateStatus) -> dict[str, Any]:
+    """Assert the node under test recorded exactly one terminal node-state completion."""
+    factory.execution.complete_node_state.assert_called_once()
+    kwargs = factory.execution.complete_node_state.call_args.kwargs
+    assert kwargs["status"] == status
+    return kwargs
 
 
 def _make_span_factory() -> SpanFactory:
@@ -632,15 +642,16 @@ class TestTransformExecutor:
         assert kwargs["status"] == NodeStateStatus.COMPLETED
         assert kwargs["state_id"] == "state_001"
 
-    def test_result_has_audit_fields_populated(self) -> None:
-        """Result has input_hash, output_hash, duration_ms populated by executor."""
+    def test_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Result hashes bind to the exact input and output payloads."""
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         token = _make_token(contract=contract)
+        output_row = make_row({"value": "out"}, contract=contract)
         transform = _make_transform()
         transform.process.return_value = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "test"},
         )
         ctx = make_context()
@@ -651,8 +662,8 @@ class TestTransformExecutor:
             ctx,
         )
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 
@@ -1481,10 +1492,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        # Verify FAILED state was recorded before raising
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_fork_destination_creates_children(self) -> None:
         """Config gate with 'fork' destination creates child tokens."""
@@ -1570,8 +1578,7 @@ class TestGateExecutor:
                 token_manager=None,
             )
 
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_missing_route_resolution_fails_closed(self) -> None:
         """Missing route resolution mapping raises MissingEdgeError (no fallback)."""
@@ -1596,9 +1603,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_exception_records_failed_and_reraises(self) -> None:
         """Exception during config gate eval records FAILED and re-raises.
@@ -1630,9 +1635,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_runtime_error_in_dispatch_records_failed_state(self) -> None:
         """RuntimeError during dispatch records FAILED state (Phase 0 fix #8).
@@ -1683,11 +1686,7 @@ class TestGateExecutor:
                 token_manager=None,  # Triggers OrchestrationInvariantError in dispatch
             )
 
-        # Verify FAILED status was recorded (the fix ensures this)
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses, (
-            "Node state should be FAILED when dispatch raises any Exception, not just MissingEdgeError"
-        )
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     # --- Error routing edge cases (exd audit) ---
 
@@ -1751,15 +1750,8 @@ class TestGateExecutor:
 
         executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the COMPLETED call (not the begin_node_state call)
-        completed_call = None
-        for call in factory.execution.complete_node_state.call_args_list:
-            if call.kwargs.get("status") == NodeStateStatus.COMPLETED:
-                completed_call = call
-                break
-
-        assert completed_call is not None, "Expected a COMPLETED node state call"
-        context_after = completed_call.kwargs.get("context_after")
+        completed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.COMPLETED)
+        context_after = completed_kwargs.get("context_after")
         assert context_after is not None, "context_after should be set on success path"
 
         # Verify it's the right DTO with correct values
@@ -1792,10 +1784,8 @@ class TestGateExecutor:
         with pytest.raises(MissingEdgeError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # The FAILED call should not have context_after
-        failed_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert failed_call.kwargs.get("status") == NodeStateStatus.FAILED
-        assert "context_after" not in failed_call.kwargs
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert "context_after" not in failed_kwargs
 
     # Note: test_post_dispatch_failure_marks_state_failed_via_guard was removed
     # because gate.py now reuses input_hash for output_hash (gates don't modify
@@ -2436,6 +2426,11 @@ class TestAggregationExecutor:
         assert context_after.trigger_type == "count"
         assert context_after.buffer_size == 2
         assert context_after.batch_id == "batch_001"
+        assert context_after.flush_index == 1
+        assert context_after.rows_seen_total == 2
+        assert context_after.row_start == 1
+        assert context_after.row_end == 2
+        assert context_after.is_end_of_source is False
 
     def test_execute_flush_error_result_marks_batch_failed(self) -> None:
         """Error result from transform marks batch as FAILED."""
@@ -2509,6 +2504,192 @@ class TestAggregationExecutor:
 
         # batch_token_ids must be None after error, not stale ["t1", "t2"]
         assert ctx.batch_token_ids is None
+
+    def test_execute_flush_exposes_aggregation_batch_context_to_transform(self) -> None:
+        """ctx.aggregation_batch is populated for batch-aware transforms during flush.
+
+        The batch context carries durable pagination metadata (flush_index,
+        row_start/end, rows_seen_total, is_end_of_source) that batch-aware
+        transforms (e.g. ReportAssembler) need in order to emit truthful
+        pagination columns. Counters are owned by AggregationExecutor (not the
+        transform) so they survive checkpoint round-trip.
+
+        After the flush returns, ctx.aggregation_batch must be cleared so that
+        subsequent transforms outside the aggregation don't see stale state.
+        """
+        from elspeth.contracts.node_state_context import AggregationBatchContext
+        from elspeth.contracts.plugin_context import PluginContext
+
+        captured: list[AggregationBatchContext] = []
+
+        class _CapturingBatchTransform:
+            """Tiny batch-aware transform that snapshots ctx.aggregation_batch."""
+
+            name = "capturing_agg"
+
+            def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
+                # ctx.aggregation_batch must be set by AggregationExecutor before process()
+                if ctx.aggregation_batch is None:
+                    raise AssertionError("ctx.aggregation_batch was None during transform.process()")
+                captured.append(ctx.aggregation_batch)
+                return TransformResult.success(
+                    make_row({"agg": "ok"}, contract=rows[0].contract),
+                    success_reason={"action": "agg"},
+                )
+
+        executor, _factory, nid = self._make_agg_executor(count=3)
+        contract = _make_contract()
+
+        ctx = make_context()
+
+        # === First flush: 3 rows ===
+        for i, label in enumerate(("a", "b", "c"), start=1):
+            executor.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        transform = _CapturingBatchTransform()
+        _result, _tokens, flushed_batch_id = executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        # ctx must be cleared after success
+        assert ctx.aggregation_batch is None
+
+        assert len(captured) == 1
+        first = captured[0]
+        assert first.trigger_type == "count"
+        assert first.batch_id == flushed_batch_id
+        assert first.batch_size == 3
+        assert first.flush_index == 1
+        assert first.rows_seen_total == 3
+        assert first.row_start == 1
+        assert first.row_end == 3
+        assert first.is_end_of_source is False
+
+        # === Second flush: another 3 rows ===
+        for i, label in enumerate(("d", "e", "f"), start=4):
+            executor.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert ctx.aggregation_batch is None
+        assert len(captured) == 2
+        second = captured[1]
+        assert second.flush_index == 2
+        assert second.rows_seen_total == 6
+        assert second.row_start == 4
+        assert second.row_end == 6
+
+    def test_execute_flush_clears_aggregation_batch_context_on_failure(self) -> None:
+        """On a failed flush, ctx.aggregation_batch is cleared in the failure cleanup path.
+
+        Mirrors test_execute_flush_exception_clears_batch_token_ids — exception
+        path must not leave aggregation_batch dangling on the shared ctx.
+        """
+        executor, _factory, nid = self._make_agg_executor(count=2)
+        contract = _make_contract()
+
+        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
+        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
+
+        transform = MagicMock()
+        transform.name = "agg"
+        transform.process.side_effect = RuntimeError("boom")
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert ctx.aggregation_batch is None
+
+    def test_aggregation_batch_context_resumes_pagination_after_checkpoint_restore(self) -> None:
+        """After restore, the next flush emits flush_index = M+1 and rows_seen_total = N + new_rows.
+
+        Headline guarantee of the durable-counter design: pagination metadata
+        derived from AggregationExecutor counters must survive a checkpoint
+        round-trip. This exercises checkpoint→restore→flush end-to-end:
+
+        1. Executor A flushes a batch of 3 rows successfully (accepted_count_total=3,
+           completed_flush_count=1, buffer empty).
+        2. get_checkpoint_state() emits a counter-only node (no buffered tokens).
+        3. Fresh executor B restores from that state.
+        4. Buffer 2 new rows and flush. AggregationBatchContext seen by the
+           transform must report flush_index=2, rows_seen_total=5, row_start=4,
+           row_end=5, batch_size=2.
+        """
+        from elspeth.contracts.node_state_context import AggregationBatchContext
+        from elspeth.contracts.plugin_context import PluginContext
+
+        # === Phase 1: Executor A flushes 3 rows successfully ===
+        executor_a, factory, nid = self._make_agg_executor(count=3)
+        contract = _make_contract()
+        ctx = make_context()
+
+        for i, label in enumerate(("a", "b", "c"), start=1):
+            executor_a.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        transform_a = MagicMock()
+        transform_a.name = "agg"
+        transform_a.process.return_value = TransformResult.success(
+            make_row({"v": "agg1"}, contract=contract),
+            success_reason={"action": "agg"},
+        )
+        executor_a.execute_flush(nid, transform_a, ctx, TriggerType.COUNT)
+
+        # === Phase 2: Checkpoint includes counter-only node ===
+        state = executor_a.get_checkpoint_state()
+        assert isinstance(state, AggregationCheckpointState)
+        assert str(nid) in state.nodes, "Counter-only node must be included in checkpoint"
+        node_ckpt = state.nodes[str(nid)]
+        assert node_ckpt.tokens == ()
+        assert node_ckpt.batch_id is None
+        assert node_ckpt.accepted_count_total == 3
+        assert node_ckpt.completed_flush_count == 1
+
+        # === Phase 3: Fresh executor B restores from checkpoint ===
+        executor_b = AggregationExecutor(
+            factory.execution,
+            _make_span_factory(),
+            _make_step_resolver(),
+            run_id="test-run",
+            aggregation_settings={
+                nid: AggregationSettings(
+                    name="test_agg",
+                    plugin="batch_stats",
+                    input="default",
+                    on_error="discard",
+                    trigger=TriggerConfig(count=2),
+                )
+            },
+        )
+        executor_b.restore_from_checkpoint(state)
+        assert executor_b.get_buffer_count(nid) == 0  # No buffered tokens restored
+
+        # === Phase 4: Buffer 2 new rows on B, flush, capture ctx.aggregation_batch ===
+        captured: list[AggregationBatchContext] = []
+
+        class _CapturingBatchTransform:
+            name = "capturing_agg"
+
+            def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
+                if ctx.aggregation_batch is None:
+                    raise AssertionError("ctx.aggregation_batch was None during transform.process()")
+                captured.append(ctx.aggregation_batch)
+                return TransformResult.success(
+                    make_row({"v": "agg2"}, contract=rows[0].contract),
+                    success_reason={"action": "agg"},
+                )
+
+        for i, label in enumerate(("d", "e"), start=4):
+            executor_b.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        executor_b.execute_flush(nid, _CapturingBatchTransform(), ctx, TriggerType.COUNT)
+
+        # === Phase 5: Pagination continues correctly ===
+        assert len(captured) == 1
+        post = captured[0]
+        assert post.flush_index == 2, "completed_flush_count restored as 1 → next flush is the 2nd"
+        assert post.rows_seen_total == 5, "accepted_count_total restored as 3 + 2 new rows = 5"
+        assert post.row_start == 4
+        assert post.row_end == 5
+        assert post.batch_size == 2
 
     def test_execute_flush_resets_batch_state(self) -> None:
         """After flush, batch state is reset (new batch on next row)."""
@@ -2661,6 +2842,24 @@ class TestAggregationExecutor:
         assert isinstance(token_ckpt.row_data, Mapping)
         assert dict(token_ckpt.row_data) == {"value": "test"}
 
+    def test_checkpoint_state_construction_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AggregationExecutor should build a DTO and leave serialization to CheckpointManager."""
+        import elspeth.engine.executors.aggregation as aggregation_module
+
+        def fail_if_called(_obj: object) -> str:
+            raise AssertionError("AggregationExecutor.get_checkpoint_state must not serialize")
+
+        monkeypatch.setattr(aggregation_module, "checkpoint_dumps", fail_if_called, raising=False)
+
+        executor, _, nid = self._make_agg_executor(count=10)
+        token = _make_token(data={"value": "test"}, contract=_make_contract())
+        executor.buffer_row(nid, token)
+
+        checkpoint = executor.get_checkpoint_state()
+
+        assert isinstance(checkpoint, AggregationCheckpointState)
+        assert checkpoint.nodes[str(nid)].tokens
+
     def test_checkpoint_includes_contract_for_restore(self) -> None:
         """Checkpoint should include contract info to enable PipelineRow restoration."""
         executor, _, nid = self._make_agg_executor(count=10)
@@ -2801,6 +3000,8 @@ class TestAggregationExecutor:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=1,
+                    completed_flush_count=0,
                 )
             },
         )
@@ -3406,7 +3607,7 @@ class TestSinkExecutor:
         ctx = make_context()
         pending = _default_pending()
 
-        with pytest.raises((ContractMergeError, FrameworkBugError)):
+        with pytest.raises(FrameworkBugError, match=r"Contract merge failed after .*ms") as exc_info:
             executor.write(
                 sink,
                 tokens,
@@ -3416,6 +3617,7 @@ class TestSinkExecutor:
                 pending_outcome=pending,
             )
 
+        assert isinstance(exc_info.value.__cause__, ContractMergeError)
         sink.write.assert_not_called()
         sink.flush.assert_not_called()
         factory.data_flow.record_token_outcome.assert_not_called()
@@ -3951,14 +4153,24 @@ class TestAggregationCheckpointVersion:
     """Tests for aggregation checkpoint version compatibility."""
 
     def test_old_checkpoint_version_rejected(self) -> None:
-        """Old checkpoint version (2.1) is rejected — prevents silent state corruption."""
+        """Old checkpoint version (2.1) is rejected — prevents silent state corruption.
+
+        Error message must include operator recovery guidance ("delete the
+        audit" database / "fresh run") consistent with the project DB
+        migration policy. Future drift that drops the recovery instruction
+        will fail this assertion.
+        """
         executor, _factory, _nid = TestAggregationExecutor._make_agg_executor(TestAggregationExecutor())
 
         # Construct typed DTO with wrong version — restore_from_checkpoint checks value
         old_checkpoint = AggregationCheckpointState(version="2.1", nodes={})
 
-        with pytest.raises(AuditIntegrityError, match="Incompatible checkpoint version"):
+        with pytest.raises(AuditIntegrityError, match="Incompatible aggregation checkpoint version") as exc_info:
             executor.restore_from_checkpoint(old_checkpoint)
+
+        message = str(exc_info.value)
+        assert "delete the audit" in message
+        assert "fresh run" in message
 
     def test_current_version_accepted(self) -> None:
         """Current checkpoint version is accepted without error."""
@@ -4725,17 +4937,17 @@ class TestAggregationExecutorTerminality:
         finally:
             agg_mod.stable_hash = original_hash  # type: ignore[attr-defined]
 
-        # Node state: FAILED (auto-completed by guard)
-        # Find the FAILED call — guard auto-completes with phase="executor_post_process"
-        failed_calls = [c for c in factory.execution.complete_node_state.call_args_list if c[1].get("status") == NodeStateStatus.FAILED]
-        assert len(failed_calls) >= 1
-        # At least one FAILED call should have the guard's phase tag
-        guard_fail = [c for c in failed_calls if getattr(c[1].get("error"), "phase", None) == "executor_post_process"]
-        assert len(guard_fail) == 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["state_id"] == "state_001"
+        assert getattr(failed_kwargs["error"], "phase", None) == "executor_post_process"
 
         # Batch: FAILED (outer except handler)
-        batch_failed = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
-        assert len(batch_failed) >= 1
+        factory.execution.complete_batch.assert_called_once()
+        batch_kwargs = factory.execution.complete_batch.call_args.kwargs
+        assert batch_kwargs["batch_id"] == "batch_001"
+        assert batch_kwargs["status"] == BatchStatus.FAILED
+        assert batch_kwargs["trigger_type"] == TriggerType.COUNT
+        assert batch_kwargs["state_id"] == "state_001"
 
         # Buffers cleared for recovery
         assert executor.get_buffer_count(nid) == 0
@@ -5004,14 +5216,10 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ExpressionEvaluationError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the FAILED call to complete_node_state
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1, "Expected at least one FAILED node state call"
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
         # Extract the error argument — it should be an ExecutionError
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert error_obj is not None, "error kwarg should be set on FAILED state"
         assert isinstance(error_obj, ExecutionError)
 
@@ -5048,12 +5256,9 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ValueError, match="unknown_route"):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert isinstance(error_obj, ExecutionError)
 
         # Verify serialization: 'type' key with value 'ValueError'
@@ -5159,10 +5364,14 @@ class TestReRaiseGuardPattern:
                 if isinstance(node, ast.ExceptHandler) and _is_framework_audit_handler(node):
                     count += 1
 
-        # Current count: ~41 TIER_1_ERRORS guards across the codebase.
-        # If this drops, a guard was removed.  Update if legitimately adding more.
-        assert count >= 35, (
-            f"Expected at least 35 TIER_1_ERRORS re-raise guards, found {count}. A TIER_1_ERRORS guard may have been removed."
+        # Current count: 33 explicit except-TIER_1_ERRORS handlers across the codebase.
+        # This is lower than historical counts because some explicit "except TIER_1_ERRORS:
+        # raise" guards were replaced by narrowed exception clauses (e.g. "except
+        # SQLAlchemyError") that provide the same protection implicitly — T1 errors
+        # are not SQLAlchemyErrors, so they propagate naturally. This ratchet counts
+        # the explicit pattern only; update the floor when a legitimate refactor changes it.
+        assert count >= 33, (
+            f"Expected at least 33 TIER_1_ERRORS re-raise guards, found {count}. A TIER_1_ERRORS guard may have been removed."
         )
 
 
@@ -5495,17 +5704,18 @@ class TestTransformExecutorBatchPath:
 
     # --- Audit fields populated ---
 
-    def test_batch_result_has_audit_fields(self) -> None:
-        """Batch transform results have input_hash, output_hash, duration_ms populated."""
+    def test_batch_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Batch transform hashes bind to the exact input batch and output payload."""
         from elspeth.engine.batch_adapter import SharedBatchAdapter
 
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
+        output_row = make_row({"value": "out"}, contract=contract)
 
         success_result = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "batched"},
         )
         mock_adapter = MagicMock(spec=SharedBatchAdapter)
@@ -5519,8 +5729,8 @@ class TestTransformExecutorBatchPath:
 
         result, _, _ = executor.execute_transform(transform, token, ctx)
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 
@@ -5688,9 +5898,10 @@ class TestPassThroughCrossCheck:
         assert violation.token_id == "tok_9"
 
     def test_cross_check_is_tier_1_registered(self) -> None:
-        """PassThroughContractViolation membership in TIER_1_ERRORS guards on_error bypass."""
+        """PassThroughContractViolation registration guards on_error bypass."""
         assert PassThroughContractViolation in TIER_1_ERRORS
-        assert issubclass(PassThroughContractViolation, PluginContractViolation)
+        assert issubclass(PassThroughContractViolation, DeclarationContractViolation)
+        assert not issubclass(PassThroughContractViolation, PluginContractViolation)
 
     def test_cross_check_crashes_when_emitted_row_contract_is_none(self) -> None:
         """Emitted row with contract=None is a framework invariant violation."""
@@ -5810,23 +6021,33 @@ class TestPassThroughCrossCheck:
     def test_cross_check_increments_telemetry_counter_on_violation(self) -> None:
         """Violation increments pass_through_cross_check_violations_total{transform=...}.
 
-        Builds its own InMemoryMetricReader rather than depending on the
-        shared ``in_memory_metric_reader`` fixture from
-        ``tests/unit/telemetry/conftest.py`` — that conftest is scoped to
-        telemetry tests. Inline build keeps the fixture exposure local.
+        Uses direct counter injection (via monkeypatching pass_through._VIOLATIONS_COUNTER)
+        rather than overriding the global OTel MeterProvider. After B1-r3, a real
+        MeterProvider is set at app module-import time and OTel 1.41+ prohibits
+        subsequent set_meter_provider calls.  The prior save/restore pattern was
+        always semantically fragile — it relied on the provider being overridable, which
+        OTel guarantees only for the NoOp → real transition (do_once semantics).
+        Monkeypatching the module-level singleton is the correct post-B1-r3 approach.
         """
-        from opentelemetry import metrics
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+        import elspeth.engine.executors.pass_through as pass_through_mod
+
         reader = InMemoryMetricReader()
         provider = MeterProvider(metric_readers=[reader])
-        prior = metrics.get_meter_provider()
-        metrics.set_meter_provider(provider)
+        # Create the counter directly from a local provider — bypasses the global
+        # OTel provider singleton so the test is hermetic regardless of what
+        # app.py or other tests installed globally.
+        injected_counter = provider.get_meter(pass_through_mod.__name__).create_counter(
+            "pass_through_cross_check_violations_total",
+            description="Count of passes_through_input=True transforms that dropped input fields at runtime",
+        )
+
+        saved = pass_through_mod._VIOLATIONS_COUNTER
+        pass_through_mod._VIOLATIONS_COUNTER = injected_counter
         try:
             factory = _make_factory()
-            # Build executor AFTER setting the global meter provider so the
-            # counter binds to the in-memory reader.
             executor = TransformExecutor(
                 factory.execution,
                 _make_span_factory(),
@@ -5861,5 +6082,5 @@ class TestPassThroughCrossCheck:
                 "Expected pass_through_cross_check_violations_total counter to be incremented with transform=test_transform attribute."
             )
         finally:
-            metrics.set_meter_provider(prior)
+            pass_through_mod._VIOLATIONS_COUNTER = saved
             reader.shutdown()

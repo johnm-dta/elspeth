@@ -44,8 +44,7 @@ class RuntimePreflightCoordinator:
         worker: RuntimePreflightWorker,
     ) -> RuntimePreflightEntry:
         async with self._lock:
-            task = self._inflight.get(key)
-            if task is None:
+            if key not in self._inflight:
                 task = asyncio.create_task(self._capture(worker))
                 self._inflight[key] = task
 
@@ -54,13 +53,17 @@ class RuntimePreflightCoordinator:
                 # a mid-flight cancellation followed by no future caller (the
                 # common case, because state_version rotates on every state
                 # mutation) would leak the entry for the life of the process.
-                # dict.pop() is GIL-safe and the identity guard prevents
-                # popping a replacement task scheduled by a later run().
+                # The membership check, identity comparison, and `del` below
+                # run with no intervening await, so they are atomic under the
+                # GIL; the identity guard prevents deleting a replacement task
+                # scheduled by a later run() after this one was evicted.
                 def _evict(finished: asyncio.Task[RuntimePreflightEntry]) -> None:
-                    if self._inflight.get(key) is finished:
-                        self._inflight.pop(key, None)
+                    if key in self._inflight and self._inflight[key] is finished:
+                        del self._inflight[key]
 
                 task.add_done_callback(_evict)
+
+            task = self._inflight[key]
 
         return await asyncio.shield(task)
 

@@ -976,6 +976,27 @@ def test_http_config_missing_scraping_reason_raises() -> None:
         WebScrapeTransform(_base_config(http={"abuse_contact": "test@example.com"}))
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("abuse_contact", "<OPERATOR_REQUIRED>"),
+        ("abuse_contact", "operator required"),
+        ("scraping_reason", "<OPERATOR_REQUIRED>"),
+        ("scraping_reason", "operator required"),
+    ],
+)
+def test_http_config_rejects_operator_required_placeholders(field_name: str, value: str) -> None:
+    """Wire-visible HTTP identity fields must not accept placeholder sentinels."""
+    http = {
+        "abuse_contact": "ops@somecompany.gov.au",
+        "scraping_reason": "User-authorised page colour lookup",
+    }
+    http[field_name] = value
+
+    with pytest.raises(PluginConfigError, match=field_name):
+        WebScrapeTransform(_base_config(http=http))
+
+
 def test_http_config_extra_field_raises() -> None:
     """Unknown fields in http config must be rejected (extra=forbid)."""
     with pytest.raises(PluginConfigError, match="extra_field"):
@@ -1155,6 +1176,20 @@ class TestWebScrapeDeclaredOutputFields:
         )
 
         assert transform.declared_output_fields
+
+
+class TestWebScrapeDeclaredInputFields:
+    """Tests for declared_input_fields — static external-call preconditions."""
+
+    def test_url_field_is_declared_as_static_input_requirement(self) -> None:
+        transform = WebScrapeTransform(_base_config())
+
+        assert transform.declared_input_fields == frozenset({"url"})
+
+    def test_url_field_is_merged_with_explicit_required_input_fields(self) -> None:
+        transform = WebScrapeTransform(_base_config(required_input_fields=["tenant_id"]))
+
+        assert transform.declared_input_fields == frozenset({"url", "tenant_id"})
 
 
 # ===========================================================================
@@ -1576,10 +1611,19 @@ class TestWebScrapeAssistance:
 
         assert WebScrapeTransform.get_agent_assistance(issue_code="nope.unknown") is None
 
-    def test_returns_none_when_no_issue_code(self):
+    def test_returns_discovery_assistance_when_no_issue_code(self):
+        """Phase 1 dual-use: issue_code=None returns discovery-time hints (Jam-1)."""
         from elspeth.plugins.transforms.web_scrape import WebScrapeTransform
 
-        assert WebScrapeTransform.get_agent_assistance(issue_code=None) is None
+        result = WebScrapeTransform.get_agent_assistance(issue_code=None)
+        assert result is not None
+        assert result.plugin_name == "web_scrape"
+        assert result.issue_code is None
+        assert result.composer_hints  # non-empty
+        # web_scrape's discovery-time hints document the SSRF guard and the
+        # audit recording — those are the load-bearing properties.
+        joined = "\n".join(result.composer_hints)
+        assert "audit" in joined.lower()
 
     def test_assistance_does_not_leak_secret_options(self):
         """Sentinel test: configured option values must not bleed into assistance prose.
@@ -1698,3 +1742,198 @@ class TestWebScrapeSecretLeakage:
         )
         assistance_repr = repr(assistance)
         assert self.SENTINEL not in assistance_repr
+
+
+class TestWebScrapeGuaranteedFieldsOptionKeyGuard:
+    """Reject the LLM-composer footgun of listing option-key names in guaranteed_fields.
+
+    A bad config has been observed where the literal strings 'content_field' and
+    'fingerprint_field' (names of WebScrapeConfig options) were placed inside
+    schema.guaranteed_fields instead of the column names those options point at.
+    The SchemaConfigModeContract catches this at runtime, but we want
+    plugin-validate-time rejection so composer authors (human or LLM) see an
+    actionable error before the pipeline runs.
+    """
+
+    def test_option_key_names_in_guaranteed_fields_rejected(self) -> None:
+        """Negative: literal option-key strings in guaranteed_fields are rejected."""
+        bad_config = {
+            "schema": {
+                "mode": "observed",
+                "guaranteed_fields": ["content_field", "fingerprint_field"],
+            },
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing option-key guard",
+            },
+        }
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            WebScrapeTransform(bad_config)
+
+        message = str(exc_info.value)
+        # Both bad entries are named.
+        assert "'content_field'" in message
+        assert "'fingerprint_field'" in message
+        # The suggested substitutions (the actual configured column-name values)
+        # are present so the LLM can self-correct.
+        assert "'content'" in message
+        assert "'content_fingerprint'" in message
+        # The message explains that those strings are option-key names, not column names.
+        assert "option-key" in message or "option key" in message
+
+    def test_url_field_in_guaranteed_fields_also_rejected(self) -> None:
+        """Negative: 'url_field' in guaranteed_fields is also caught (covers all three keys)."""
+        bad_config = {
+            "schema": {
+                "mode": "observed",
+                "guaranteed_fields": ["url_field"],
+            },
+            "url_field": "page_url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing option-key guard",
+            },
+        }
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            WebScrapeTransform(bad_config)
+
+        message = str(exc_info.value)
+        assert "'url_field'" in message
+        # Suggests substituting the configured value
+        assert "'page_url'" in message
+
+    def test_correct_column_names_in_guaranteed_fields_accepted(self) -> None:
+        """Positive regression-guard: actual column names in guaranteed_fields construct cleanly."""
+        good_config = {
+            "schema": {
+                "mode": "observed",
+                "guaranteed_fields": ["url", "content", "content_fingerprint"],
+            },
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing positive guard path",
+            },
+        }
+
+        transform = WebScrapeTransform(good_config)
+
+        assert transform._content_field == "content"
+        assert transform._fingerprint_field == "content_fingerprint"
+
+    def test_guaranteed_fields_absent_does_not_trigger_guard(self) -> None:
+        """Edge case: a schema with no guaranteed_fields must not crash inside the new validator."""
+        config_without_guaranteed = {
+            "schema": {"mode": "observed"},
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing absent-guaranteed_fields path",
+            },
+        }
+
+        # Must not raise.
+        transform = WebScrapeTransform(config_without_guaranteed)
+        assert transform._content_field == "content"
+
+    def test_option_key_names_in_required_fields_rejected(self) -> None:
+        """Negative: literal option-key strings in schema.required_fields are rejected.
+
+        ``required_fields`` is a sibling column-name list on SchemaConfig and is
+        equally vulnerable to the same hallucination as ``guaranteed_fields``.
+        """
+        bad_config = {
+            "schema": {
+                "mode": "observed",
+                "required_fields": ["content_field"],
+            },
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing required_fields option-key guard",
+            },
+        }
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            WebScrapeTransform(bad_config)
+
+        message = str(exc_info.value)
+        # The offending list is named so the author knows where to fix.
+        assert "required_fields" in message
+        # The bad entry and the suggested substitution are both surfaced.
+        assert "'content_field'" in message
+        assert "'content'" in message
+        assert "option-key" in message or "option key" in message
+
+    def test_option_key_names_in_audit_fields_rejected(self) -> None:
+        """Negative: literal option-key strings in schema.audit_fields are rejected.
+
+        ``audit_fields`` is the third sibling column-name list on SchemaConfig
+        and must be guarded for the same reason.
+        """
+        bad_config = {
+            "schema": {
+                "mode": "observed",
+                "audit_fields": ["fingerprint_field"],
+            },
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing audit_fields option-key guard",
+            },
+        }
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            WebScrapeTransform(bad_config)
+
+        message = str(exc_info.value)
+        # The offending list is named so the author knows where to fix.
+        assert "audit_fields" in message
+        # The bad entry and the suggested substitution are both surfaced.
+        assert "'fingerprint_field'" in message
+        assert "'content_fingerprint'" in message
+        assert "option-key" in message or "option key" in message
+
+    def test_column_literally_named_like_option_key_is_accepted(self) -> None:
+        """Degenerate-same-name edge case: when the configured value equals the option key.
+
+        If an operator configures ``content_field: "content_field"``, the column
+        on the row really is called ``content_field``. Listing ``"content_field"``
+        in ``guaranteed_fields`` is then *correct* — the schema entry names a
+        column that genuinely exists on the row. The guard must skip these
+        entries instead of false-positiving.
+        """
+        degenerate_config = {
+            "schema": {
+                "mode": "observed",
+                "guaranteed_fields": ["url", "content_field", "content_fingerprint"],
+            },
+            "url_field": "url",
+            "content_field": "content_field",  # column literally named 'content_field'
+            "fingerprint_field": "content_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "Testing degenerate same-name path",
+            },
+        }
+
+        # Must not raise: 'content_field' is a legitimate column name here
+        # because the knob value matches the knob key.
+        transform = WebScrapeTransform(degenerate_config)
+        assert transform._content_field == "content_field"
+        assert transform._fingerprint_field == "content_fingerprint"

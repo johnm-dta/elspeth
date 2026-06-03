@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.web.composer.service import (
+from elspeth.web.composer._required_paths_validator import (
     _ARRAY_ITEM_SEGMENT,
     _collect_required_paths,
     _CompiledRequiredPath,
@@ -162,58 +162,25 @@ class TestFindMissingRequiredPaths:
         assert missing == ["nodes[1].id", "nodes[3].id"]
 
 
-class TestSetPipelineCompiledIndex:
-    """Sanity checks on the compiled index for ``set_pipeline``.
-
-    Locks in the per-tool result so a future schema change that re-introduces
-    the elspeth-4e79436719 Bug A regression fails this test directly.
-    """
-
-    @pytest.fixture
-    def compiled(self) -> tuple[_CompiledRequiredPath, ...]:
-        from elspeth.web.composer.service import _TOOL_REQUIRED_PATHS
-
-        return _TOOL_REQUIRED_PATHS["set_pipeline"]
-
-    def test_inline_blob_inner_paths_are_conditional(self, compiled: tuple[_CompiledRequiredPath, ...]) -> None:
-        inline_paths = [p for p in compiled if "inline_blob" in p.path]
-        assert len(inline_paths) == 3
-        for p in inline_paths:
-            assert p.optional_ancestor == ("source", "inline_blob"), (
-                f"inline_blob inner path {p.path!r} must be conditional on the "
-                "presence of source.inline_blob; otherwise the elspeth-4e79436719 "
-                "Bug A regression has returned."
-            )
-
-    def test_top_level_source_fields_are_unconditional(self, compiled: tuple[_CompiledRequiredPath, ...]) -> None:
-        unconditional_paths = {p.path for p in compiled if not p.optional_ancestor}
-        assert ("source",) in unconditional_paths
-        assert ("source", "plugin") in unconditional_paths
-        assert ("source", "on_success") in unconditional_paths
-        assert ("source", "options") not in unconditional_paths
-
-    def test_set_pipeline_options_omissions_reach_handler_feedback(
-        self,
-        compiled: tuple[_CompiledRequiredPath, ...],
-    ) -> None:
-        arguments = {
-            "source": {"plugin": "csv", "on_success": "source_out"},
-            "nodes": [],
-            "edges": [],
-            "outputs": [{"sink_name": "main", "plugin": "json"}],
-        }
-
-        missing = _find_missing_required_paths(arguments, compiled)
-
-        assert "source.options" not in missing
-        assert "outputs[0].options" not in missing
-
-    def test_array_item_required_fields_are_unconditional(self, compiled: tuple[_CompiledRequiredPath, ...]) -> None:
-        unconditional_paths = {p.path for p in compiled if not p.optional_ancestor}
-        assert ("nodes", "[]", "id") in unconditional_paths
-        assert ("edges", "[]", "edge_type") in unconditional_paths
-        assert ("outputs", "[]", "sink_name") in unconditional_paths
-        assert ("outputs", "[]", "options") not in unconditional_paths
+# NOTE: The ``TestSetPipelineCompiledIndex`` class (formerly here) was
+# removed by Task 14 (Wave 3) when ``set_pipeline`` joined
+# ``_PROMOTED_TOOL_NAMES``.  The Pydantic model
+# :class:`elspeth.web.composer.redaction.SetPipelineArgumentsModel` is now
+# the single source of truth for ``set_pipeline`` argument validity, so
+# ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` is no longer populated and the
+# compiled-index sanity checks have nothing to assert against.  The
+# corresponding invariants (extra-forbid; inline_blob present-but-incomplete
+# yields nested errors; nodes/edges/outputs array-item required-fields)
+# are now expressed as Pydantic field declarations in
+# :class:`_InlineBlobModel`, :class:`_PipelineNodeModel`,
+# :class:`_PipelineEdgeModel`, :class:`_PipelineOutputModel` and exercised
+# end-to-end by ``test_promote_set_pipeline.py`` (Task 14) and the
+# Phase 1 adequacy guard tests in ``test_adequacy_guard.py``.
+#
+# The elspeth-4e79436719 Bug A regression (conditional inline_blob
+# inner-fields) is now structurally precluded — Pydantic only walks
+# ``_InlineBlobModel`` when ``source.inline_blob`` is supplied; an absent
+# ``inline_blob`` field skips its inner ``required`` checks entirely.
 
 
 class TestOptionalAncestorPresentRefusesArraySegment:
@@ -224,13 +191,15 @@ class TestOptionalAncestorPresentRefusesArraySegment:
     array as "present" would produce wrong validation results.
 
     Per CLAUDE.md ("Defensive Programming: Forbidden. Offensive Programming:
-    Encouraged"), the walker raises ``AssertionError`` with a diagnostic
+    Encouraged"), the walker raises ``NotImplementedError`` with a diagnostic
     pointing the next maintainer at the exact extension needed, rather than
     falling through and emitting incorrect missing-required-paths results.
+    ``NotImplementedError`` (not ``AssertionError``) communicates that the
+    code path is unimplemented, not that an internal invariant was violated.
     """
 
     def test_array_segment_in_optional_ancestor_raises_with_diagnostic(self) -> None:
-        with pytest.raises(AssertionError, match="optional_ancestor"):
+        with pytest.raises(NotImplementedError, match="optional_ancestor"):
             _optional_ancestor_present({"x": []}, ("x", _ARRAY_ITEM_SEGMENT))
 
     def test_diagnostic_message_names_the_extension_point(self) -> None:
@@ -239,7 +208,7 @@ class TestOptionalAncestorPresentRefusesArraySegment:
         at a generic 'unsupported' string — the next maintainer should be
         able to find the extension site without grepping.
         """
-        with pytest.raises(AssertionError) as exc_info:
+        with pytest.raises(NotImplementedError) as exc_info:
             _optional_ancestor_present({"y": [{"z": 1}]}, ("y", _ARRAY_ITEM_SEGMENT, "z"))
         message = str(exc_info.value)
         assert "_find_missing_required_paths" in message or "per-array-item" in message, (

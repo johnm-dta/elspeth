@@ -4,7 +4,7 @@
 from collections.abc import Iterator
 from typing import Any
 
-from elspeth.contracts import SourceRow
+from elspeth.contracts import Determinism, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.plugins.infrastructure.base import BaseSource
@@ -15,6 +15,7 @@ class StubSource(BaseSource):
     """Stub source implementation for testing."""
 
     name = "stub"
+    determinism = Determinism.IO_READ
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

@@ -1,0 +1,30 @@
+# versions.lock — pinned tool + Universe versions used to produce
+# the bundled PDFs in `out/` and the bundled diagrams in `diagrams/`.
+#
+# Format: `<tool>=<exact-version-string>`. Lines starting with `#`
+# and blank lines are ignored. `build.sh` reads this file at
+# preflight and emits a WARNING (not a failure) when the local
+# tool's reported version does not match the locked value. A
+# warning, not a failure, because reproducibility-by-pin is
+# advisory in this context — the PDFs build on any reasonably
+# modern Typst, but the visual output is only guaranteed identical
+# at the locked versions.
+#
+# Update protocol:
+#   1. Bump the tool here.
+#   2. Re-render the bundled diagrams and PDFs by running build.sh
+#      with the new tool version installed.
+#   3. Commit both files in the same change so the lockfile and the
+#      bundled outputs stay aligned.
+
+# --- CLI tools (matched against `<tool> --version` parsing) -------
+
+typst=0.14.2
+pandoc=3.9
+
+# --- Typst Universe packages (matched against import strings in
+#     *.typ; lockfile records them for review, the actual pin is
+#     in the `@preview/<name>:<version>` import directive) --------
+
+universe.cetz=0.4.2
+universe.cetz-plot=0.1.3

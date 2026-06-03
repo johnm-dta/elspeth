@@ -297,6 +297,11 @@ class TriggerEvaluator:
         # Restore fire times as absolute times (offset from restored first_accept_time)
         if count_fire_offset is not None:
             self._count_fire_time = self._first_accept_time + count_fire_offset
+        elif self._config.count is not None and batch_count >= self._config.count:
+            # Backward compatibility for checkpoints that predate count fire offsets:
+            # the restored batch already satisfied the count trigger, so latch it
+            # conservatively instead of waiting for another accepted row.
+            self._count_fire_time = self._first_accept_time
         else:
             self._count_fire_time = None
 

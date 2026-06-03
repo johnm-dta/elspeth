@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
 
 from elspeth.contracts import (
+    Determinism,
     PipelineRow,
     RunStatus,
     SourceProtocol,
@@ -90,6 +91,7 @@ class DoubleValueTransform(_TestTransformBase):
     """Transform that doubles the 'value' field."""
 
     name = "double_value"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -351,6 +353,7 @@ class TestT18CharacterizationExecuteRun:
 
         class ErrorTransform(_TestTransformBase):
             name = "error_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -416,6 +419,7 @@ class TestT18CharacterizationResumePath:
 
         class ContractCapturingTransform(_TestTransformBase):
             name = "contract_capture_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -487,6 +491,9 @@ class TestT18CharacterizationResumePath:
             restored_coalesce_state=None,
             payload_store=payload_store,
             schema_contract=resume_contract,
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
+            resume_checkpoint_id="t18-test-checkpoint",
         )
 
         # The transform must have seen the contract during process()
@@ -523,6 +530,7 @@ class TestT18CharacterizationResumePath:
 
         class TrackingTransform(_TestTransformBase):
             name = "tracking_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -597,6 +605,9 @@ class TestT18CharacterizationResumePath:
                 restored_coalesce_state=None,
                 payload_store=payload_store,
                 schema_contract=schema_contract,
+                incomplete_by_row={},
+                recovery_manager=MagicMock(),
+                resume_checkpoint_id="t18-test-checkpoint",
             )
 
         # _process_resumed_rows also returns RUNNING (same as _execute_run)
@@ -620,6 +631,7 @@ class SumBatchTransform(BaseTransform):
     """
 
     name = "sum_batch"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True

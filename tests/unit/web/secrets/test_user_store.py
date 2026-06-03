@@ -346,6 +346,73 @@ class TestUserSecretStore:
         with pytest.raises(SecretDecryptionError, match="cannot be decrypted"):
             store.get_secret("CORRUPT", user_id="u1", auth_provider_type="local")
 
+    def test_get_secret_accepts_memoryview_binary_columns(
+        self,
+        store: UserSecretStore,
+        db_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drivers may return LargeBinary columns as memoryview rather than bytes."""
+        store.set_secret("MEMORYVIEW", value="val", user_id="u1", auth_provider_type="local")
+
+        with db_engine.connect() as conn:
+            row = conn.execute(
+                sa.select(user_secrets_table.c.encrypted_value, user_secrets_table.c.salt).where(
+                    sa.and_(
+                        user_secrets_table.c.name == "MEMORYVIEW",
+                        user_secrets_table.c.user_id == "u1",
+                        user_secrets_table.c.auth_provider_type == "local",
+                    )
+                )
+            ).first()
+        assert row is not None
+        memoryview_row = type(
+            "_MemoryviewSecretRow",
+            (),
+            {
+                "encrypted_value": memoryview(row.encrypted_value),
+                "salt": memoryview(row.salt),
+            },
+        )()
+        monkeypatch.setattr(store, "_fetch_secret_row", lambda *args, **kwargs: memoryview_row)
+
+        value, ref = store.get_secret("MEMORYVIEW", user_id="u1", auth_provider_type="local")
+
+        assert value == "val"
+        assert ref.name == "MEMORYVIEW"
+
+    def test_has_secret_accepts_memoryview_binary_columns(
+        self,
+        store: UserSecretStore,
+        db_engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Availability checks must use the same binary normalization as get_secret."""
+        store.set_secret("MEMORYVIEW", value="val", user_id="u1", auth_provider_type="local")
+
+        with db_engine.connect() as conn:
+            row = conn.execute(
+                sa.select(user_secrets_table.c.encrypted_value, user_secrets_table.c.salt).where(
+                    sa.and_(
+                        user_secrets_table.c.name == "MEMORYVIEW",
+                        user_secrets_table.c.user_id == "u1",
+                        user_secrets_table.c.auth_provider_type == "local",
+                    )
+                )
+            ).first()
+        assert row is not None
+        memoryview_row = type(
+            "_MemoryviewSecretRow",
+            (),
+            {
+                "encrypted_value": memoryview(row.encrypted_value),
+                "salt": memoryview(row.salt),
+            },
+        )()
+        monkeypatch.setattr(store, "_fetch_secret_row", lambda *args, **kwargs: memoryview_row)
+
+        assert store.has_secret("MEMORYVIEW", user_id="u1", auth_provider_type="local") is True
+
     # -- Eager fingerprint / write-time atomicity (A+B best-practice design) --
 
     def test_set_secret_raises_fingerprint_missing_when_key_unset(self, store: UserSecretStore, monkeypatch: pytest.MonkeyPatch) -> None:

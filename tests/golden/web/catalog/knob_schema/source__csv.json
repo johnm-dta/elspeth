@@ -1,0 +1,78 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Filesystem path for the source input or sink output, resolved relative to the run data directory.",
+        "kind": "text",
+        "label": "Path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Sink name for non-conformant rows, or 'discard' for explicit drop",
+        "kind": "text",
+        "label": "On Validation Failure",
+        "name": "on_validation_failure",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Explicit normalized column names for headerless tabular input.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Columns",
+        "name": "columns",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional mapping from observed source field names to normalized pipeline field names.",
+        "kind": "json-object",
+        "label": "Field Mapping",
+        "name": "field_mapping",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": ",",
+        "description": "Single-character delimiter used to split CSV fields.",
+        "kind": "text",
+        "label": "Delimiter",
+        "name": "delimiter",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "utf-8",
+        "description": "Text encoding used to decode the CSV file.",
+        "kind": "text",
+        "label": "Encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 0,
+        "description": "Number of leading physical rows to skip before reading headers or data.",
+        "kind": "number-int",
+        "label": "Skip Rows",
+        "name": "skip_rows",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "source",
+  "plugin_name": "csv"
+}

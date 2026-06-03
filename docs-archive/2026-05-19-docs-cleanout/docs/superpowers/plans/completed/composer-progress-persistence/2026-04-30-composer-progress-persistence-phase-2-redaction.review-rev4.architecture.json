@@ -1,0 +1,144 @@
+{
+  "reviewer": "architecture",
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "revision_reviewed": "rev-5 (uncommitted edits on top of b73abd8a)",
+  "review_pass": "rev-4",
+  "reviewed_at": "2026-05-12T00:00:00Z",
+
+  "blocking_issues": [],
+
+  "near_blocking": [
+    {
+      "id": "A1",
+      "title": "Property test assertion is vacuous for dict-typed Sensitive fields",
+      "location": "test_redaction_completeness_property.py, lines ~1597-1602 (plan body)",
+      "defect": "The rev-3 B1 fix correctly replaces ad-hoc path.split() with value_provider-based extraction for container-descent Sensitive fields. But the assertion gate `isinstance(raw_value, str) and raw_value` means that for dict-typed Sensitive fields (e.g., set_source.options: Annotated[dict[str, Any], Sensitive(...)]), extracted is a dict, the isinstance check fails, and the assertion body never executes. The silence is total: no test error, no skip marker, no comment. The set_source case is covered by the Task 4 Step 8 canary test, but the property test parametrises over all type-driven manifest entries and its docstring claims 'no Sensitive[T] field value reaches json.dumps output' — a claim it structurally cannot make for dict-typed Sensitive fields.",
+      "why_near_blocking": "Same structural failure mode as rev-3 B1 (silent vacuous pass on the load-bearing security property test) with a different mechanism. The rev-3 B1 closure claim is partially compromised: closed for Sensitive[str] and Sensitive[list/dict/tuple of BaseModel] with scalar leaf values, but not for Sensitive[dict[str, Any]] and similar composite fields. The Hypothesis test's authority as the property-level closure for rev-2 BLOCKER_A is reduced.",
+      "current_coverage_gap": "All currently-promoted type-driven tools use str-typed Sensitive fields OR the specific dict case (set_source.options) is covered by the canary. The property test's gap is latent. But the test is cited in done-when criteria and as Phase 3's correctness foundation — a latent gap in a load-bearing assertion is worth flagging before Phase 2 ships.",
+      "resolution": "Add an explicit branch for composite/non-str Sensitive fields. For a Sensitive[dict] field, the correct property assertion is that the dict's nested sensitive content has been redacted — not a raw string-equality check. Two options: (a) for each raw_value that is not a str, serialize it to JSON and assert the serialization does not appear in the output verbatim; (b) for known composite types, call the summarizer's known output pattern and assert that appears instead. Option (a) is simpler. Alternatively, add a docstring caveat that explicitly enumerates the types this assertion covers and does not cover, making the scope limitation explicit and auditable.",
+      "severity": "Near-blocking",
+      "reversibility": "Easy (~10 lines)"
+    }
+  ],
+
+  "warnings": [
+    {
+      "id": "A2",
+      "title": "TraversalNode.metadata freeze-elision assumption is undocumented inline",
+      "location": "redaction.py, TraversalNode definition (lines ~396-402 in plan body)",
+      "issue": "The dataclass is frozen=True with metadata: tuple[Any, ...]. Rev-3 W3 flagged that _SensitiveMarker instances contained within are not deeply frozen (the freeze-guard tool does not look inside tuples). The resolution accepted in rev-3 was to document the design assumption inline — that markers are immutable by convention, not by mechanical enforcement. The rev-4 plan body does not add this inline comment. Without the comment, the next session (new-employee model) reads a frozen dataclass with a container field containing mutable objects and, following CLAUDE.md's pattern, will attempt to apply freeze_fields() and find it either does nothing or introduces incorrect behaviour.",
+      "resolution": "Add a comment in the TraversalNode definition: '# metadata is tuple[Any, ...]; elements are _SensitiveMarker instances which carry only a Callable reference. Callers must not mutate marker state after walk time; this is convention-enforced, not mechanically frozen, because deep_freeze() on Callable objects is undefined. The freeze-guard CI script elides this field correctly.'",
+      "priority_score": 4
+    },
+    {
+      "id": "A3",
+      "title": "_TOOL_REQUIRED_PATHS removal is still conditional in Task 4 and Task 13",
+      "location": "Task 4 Step 4 (line ~928), Task 13 per-tool sub-task (line ~1261)",
+      "issue": "Rev-3 N7 (architecture minor N4; systems S6) flagged that the 'if redundant, remove' language should be unconditional. The rev-4 plan retains the conditional at both sites. The plan's logic is that 'if there is a meaningful difference (e.g. dotted-path checks the model can't express), document why both are kept.' This is a reasonable hedge for investigation, but not for execution: CLAUDE.md's no-legacy-code policy combined with the fact that Pydantic model_validate is strictly more expressive than dotted-path string enumeration means the investigation conclusion is deterministic. The conditional leaves a door open for the next session to make a judgement call about whether to keep stale code, increasing divergence risk. The audit error_class string for the affected tools changes from 'MissingRequiredPaths' to the dispatch class when _TOOL_REQUIRED_PATHS entries are removed — a silent audit consumer impact noted in rev-3 N3/A4. Both sites should say 'remove unconditionally; the Pydantic model is at least as strict. If a dotted-path check exists that the model cannot replicate, that is a deficiency in the model, not a reason to retain the legacy structure.'",
+      "priority_score": 5
+    },
+    {
+      "id": "A4",
+      "title": "test_service.py:367 audit-class string pin is unaddressed",
+      "location": "Rev-3 N3 (architecture minor), referenced from A3 above",
+      "issue": "The plan acknowledges _TOOL_REQUIRED_PATHS removal changes the error_class emitted for missing-argument failures from the legacy 'MissingRequiredPaths' string to whatever the ARG_ERROR dispatch class produces. Rev-3 N3 flagged that test_service.py:367 pins the old string. The rev-4 plan does not add a step to audit-impact this change: enumerate all tests that pin 'MissingRequiredPaths' and update them as part of each removal step. Without this, the agent removing _TOOL_REQUIRED_PATHS entries will hit test failures and may treat them as regressions rather than expected test updates (the locked-in-buggy-expectations pattern from project memory). The plan should add an explicit sub-step to each Task 4 / Task 13 / Task 14 / Task 15 removal: 'grep for MissingRequiredPaths in tests/; update any pinned strings to the new audit class.'",
+      "priority_score": 4
+    }
+  ],
+
+  "minor": [
+    {
+      "id": "A5",
+      "title": "MANIFEST population comment in Task 4 describes 20-commit incremental rebinding",
+      "location": "Task 4 (line ~869), Tasks 13-16",
+      "issue": "Rev-3 A5 (minor N4) flagged that the 20-commit incremental MappingProxyType rebinding pattern diverges from the _build_tool_required_paths_index() factory precedent. The plan body acknowledges the pattern ('Subsequent task waves extend the manifest by building a new dict, then replacing the module-level binding — never by mutating the proxy view') but does not add a comment to the production code explaining the rebinding discipline. This is stylistically acceptable — it is incremental construction across tasks, not runtime mutation — but a single inline comment in redaction.py would prevent a future session from interpreting the sequential rebinding as an error pattern.",
+      "priority_score": 2
+    },
+    {
+      "id": "A6",
+      "title": "Task 15 investigation-to-commit gap has no explicit bridge task",
+      "location": "Tasks 15 and 16",
+      "issue": "Rev-3 W5 flagged that Task 15 (patch_*_options investigation) outcome-depends on Task 16 without an explicit cross-task bridge. The rev-4 plan resolves this structurally: Task 15 produces three named outcomes (promote / declarative / mixed) and defers the declarative path to Task 16. The bridge is implicit: Task 16's enumeration says 'remaining ~7-10 entries' and 'plus any patch_*_options not promoted in Task 15.' This is adequate for the architecture lane — the structural contract is clear. Minor: the Task 16b entry could add a bulleted note 'If Task 15 outcome was 2 or 3, insert the relevant patch_*_options entry here.' to make the bridge explicit for an agentic worker.",
+      "priority_score": 2
+    }
+  ],
+
+  "rev3_closure": {
+    "A1_property_test_pathskip": {
+      "status": "PARTIAL",
+      "evidence": "The value_provider-based extraction replaces ad-hoc path.split() and correctly handles Sensitive[str] fields in container-descent paths (e.g., items[*].secret returns [(0, 'X'), (1, 'Y')]). The rev-3 defect (None returned by dict.get() on container paths) is closed. However, the assertion gate isinstance(raw_value, str) silently exempts dict-typed Sensitive fields (e.g., set_source.options: Annotated[dict[str, Any], Sensitive(...)]) from the property check. For currently-promoted models this is covered by the Task 4 Step 8 canary, but the property test's claim is broader than its enforcement. See near-blocking A1 above."
+    },
+    "A2_traversalnode_metadata_freeze": {
+      "status": "OPEN",
+      "evidence": "TraversalNode definition at lines ~396-402 in the plan body still shows metadata: tuple[Any, ...] with no inline comment documenting the freeze-elision rationale. Rev-3 W3 resolution was 'document design assumption inline (markers are not mutated; freeze elision is intentional).' The plan does not add this comment. See warning A2 above."
+    },
+    "A4_test_service_367_audit_class_string": {
+      "status": "OPEN",
+      "evidence": "Neither Task 4 Step 4, Task 13's per-tool sub-task, nor the done-when criteria add a step to grep for 'MissingRequiredPaths' pins in the test suite or update them. The conditional 'if redundant, remove' language at Task 4 Step 4 and Task 13 means the audit-class-string impact may not be evaluated. See warning A3 and A4 above."
+    },
+    "A5_manifest_population_pattern": {
+      "status": "CLOSED",
+      "evidence": "Task 4 line ~869 explicitly documents the rebinding discipline: 'Subsequent task waves extend the manifest by building a new dict, then replacing the module-level binding — never by mutating the proxy view.' The MappingProxyType at module level mirrors the service.py:702 precedent. Stylistic note remains as minor A5 but the structural concern is addressed."
+    },
+    "A6_task15_task16_cross_task": {
+      "status": "CLOSED",
+      "evidence": "Task 15 now enumerates three named outcomes and explicitly says 'if outcome 2 or 3, this task is a no-op (entry created in Task 16).' Task 16b says 'plus any patch_*_options not promoted in Task 15.' The cross-task contract is explicit. Minor improvement opportunity noted in minor A6 but not a warning."
+    },
+    "A7_summarizer_json_dumps_raise": {
+      "status": "CLOSED",
+      "evidence": "Task 4 Step 3 (lines ~826-839) shows _summarize_set_source_options using json.dumps(..., default=str). Task 4 Step 3a adds a mechanical pin test (test_summarize_set_source_options_accepts_coerced_datetime) that explicitly validates a datetime input returns str without raising. Both the fix and the regression pin are present."
+    }
+  },
+
+  "blast_radius": {
+    "files_touched": "~16 source + 2 config (redaction.py, redaction_telemetry.py, tools.py ~8 promoted handlers, service.py minor, 1 GH Actions workflow, 1 CI script) plus ~13-14 test files",
+    "weighted_score": "Source files: redaction.py = 2x (core business logic), tools.py = 2x (core business logic), service.py = 2x. Test files = 0.5x each x 14 = 7. Config/CI = 0.5x x 2 = 1. Weighted total: approximately 19-22.",
+    "risk_level": "High",
+    "recommendation": "Proceed. The task sequencing (iterator first, tracer-bullet fourth, declarative bulk at Task 16) manages the blast radius appropriately. Tasks 1-4 validate integration assumptions before the bulk wave. The 18+ task structure is justified by the phase split — this is genuinely one phase worth of work. No recommendation to split further.",
+    "notes": "Task 4 IS the tracer bullet and is correctly positioned at step 4 (after foundation: iterator, manifest dataclass, telemetry). It validates the LLM dispatch path end-to-end before Tasks 13-15 lock in the bulk pattern. This addresses focus area 3 correctly."
+  },
+
+  "one_way_doors": {
+    "manifest_replaces_TOOL_REQUIRED_PATHS": {
+      "risk": "Medium",
+      "mitigation_present": "Partial — conditional removal language leaves escape hatch, but audit error_class change is a silent one-way door for any downstream consumer that parses 'MissingRequiredPaths' strings. See warning A3/A4."
+    },
+    "policy_hash_snapshot_committed": {
+      "risk": "Low",
+      "mitigation_present": "Yes — bootstrap_redaction_snapshot.py regenerates it; Task 12 includes a step for pre-merge regeneration. The snapshot is content-keyed and idempotent."
+    },
+    "label_gate_workflow": {
+      "risk": "Low",
+      "mitigation_present": "Yes — direction-aware gate. Can be relaxed without re-review of prior decisions (the gate only blocks misdirected labels, not all changes)."
+    },
+    "pydantic_model_validate_at_dispatch": {
+      "risk": "Medium — ValidationError disposition change",
+      "mitigation_present": "Yes — ToolArgumentError wrap is explicit in every promoted handler; ARG_ERROR routing verified by per-tool regression tests; Task 4 Step 5 adds the regression test for the error chain."
+    }
+  },
+
+  "walk_model_schema_assessment": {
+    "custom_vs_pydantic_introspection": "The bespoke iterator is load-bearing and justified. Pydantic 2.x's internal __pydantic_core_schema__ structures are not stable across patch releases and do not provide the (path, metadata, value_provider) tuple semantics the walker requires. model.model_fields gives field-level access but not recursive container descent with path accumulation. The plan correctly treats this as a case where Pydantic introspection cannot cleanly represent dict-key descent and defines a custom walk. The test set (10 container-shape tests + 4 rev-2 additions) IS the contract — the implementation note says this explicitly. This is not a reinvented wheel: no library provides the specific (path, field_type, metadata, value_provider) iterator with the project's path notation ([*], {*}, union arm descent).",
+    "verdict": "Justified"
+  },
+
+  "defense_in_depth_assessment": {
+    "five_controls": "Runtime walker (redact_tool_call_arguments / redact_tool_call_response), adequacy guard (test_adequacy_guard.py, 5 assertions), policy-hash snapshot (committed JSON + CI comparison), label gate (composer-redaction-gate.yml), Hypothesis property test.",
+    "failure_mode_independence": "The shared-iterator design means walker + adequacy guard share failure modes. A bug in walk_model_schema that silently drops a Sensitive annotation will blind BOTH controls simultaneously. Task 10's walker-completeness floor-check is the correct mitigation: it provides a separate-codepath oracle that catches field-level omissions. However, the floor-check is a structural bound (every field is walked), not a Sensitive-annotation-level bound (every Sensitive annotation is detected). A bug that walked all fields but failed to recognise a new Sensitive() syntax form would pass the floor-check and blind both controls. The policy-hash snapshot and the Hypothesis property test are independent of the walker and provide the remaining independent control. Assessment: failure-mode independence is adequate given the property test's parametric coverage, with the caveat from near-blocking A1 that the property test has a silent exemption for dict-typed Sensitive fields.",
+    "rev3_M1_oracle": "The floor-check at Task 10 (test_walker_emits_node_for_every_top_level_field) addresses rev-3 M1 structurally. It establishes a separate-codepath oracle for field-level coverage. The oracle does not detect annotation-form omissions, but combined with the Task 1 container-shape tests (which do exercise all annotation forms), the combined test set provides reasonable coverage."
+  },
+
+  "tdd_discipline": {
+    "preflight_meta_rule_present": "Yes — plan lines ~35-36 state: 'The compression is readability shorthand, not an exemption — when executing those tasks, expand to the same six-step sequence.' Rev-3 W4 is closed.",
+    "tasks_5_onward": "Tasks 5-12 use 'Standard TDD task' shorthand with explicit test-case lists. The preflight meta-rule now makes the six-step expansion mandatory. Adequately addressed."
+  },
+
+  "spec_alignment": {
+    "section_4_2": "Plan manifests match spec §4.2.1 ToolRedaction, §4.2.2 Sensitive[T], §4.2.3 HandlesNoSensitiveDataReason / ToolRedactionPolicy, §4.2.4 RedactionTelemetry Protocol, §4.2.5 walk_model_schema, §4.2.6 redact_tool_call_arguments. Alignment confirmed.",
+    "section_4_4": "Five adequacy assertions map directly to Tasks 9-12 + Task 10 fifth assertion. Walker completeness floor-check closes rev-3 M1. Alignment confirmed.",
+    "section_11_done_when": "Done-when criteria at lines ~1704-1722 explicitly enumerate all rev-3 B1 and M1/M2 closure items. Each maps to a specific task and test. Traceability is clean.",
+    "section_12_2": "Appendix C at lines 1766-1772 closes rev-3 B1, M1, M2 cleanly. Appendix A and B close rev-2 and prior findings. Cross-reference to spec §12.2 is consistent."
+  },
+
+  "notes": "Structural improvement in rev-4 is genuine and substantial. The key architectural wins over rev-3: (1) value_provider-based extraction in the property test closes rev-3 B1 for str-typed Sensitive fields (near-blocking A1 notes the residual dict-typed gap); (2) Task 10 walker-completeness floor-check (test_walker_emits_node_for_every_top_level_field) is the cleanest improvement in this revision — a true separate-codepath oracle that catches field-level iterator omissions and addresses rev-3 M1 mechanically; (3) Phase 3 call-order precondition pin in Task 17 closes rev-3 M2 with a 5-line test that mechanically constrains Phase 3's implementation. The plan is well-structured, well-cited, and traceable. Three near-blocking/warning items remain open from rev-3: the property test dict-typed Sensitive gap (A1, near-blocking), the TraversalNode freeze-elision comment (A2, warning), and the _TOOL_REQUIRED_PATHS conditional-removal audit-class-string impact (A3/A4, warning). None are blockers but they should be resolved before Phase 2 ships. The blast radius is High by weighted file count but is structurally managed by the task sequencing."
+}

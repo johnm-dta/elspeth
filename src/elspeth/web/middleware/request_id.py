@@ -91,8 +91,13 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
-        supplied = request.headers.get(REQUEST_ID_HEADER, "")
-        request_id = supplied if _is_safe_request_id(supplied) else _generate_request_id()
+        # Tier-3 inbound header. An absent header is an explicit decision to
+        # mint a fresh id; a present-but-unsafe value is likewise replaced.
+        supplied = request.headers[REQUEST_ID_HEADER] if REQUEST_ID_HEADER in request.headers else None
+        if supplied is not None and _is_safe_request_id(supplied):
+            request_id = supplied
+        else:
+            request_id = _generate_request_id()
         request.state.request_id = request_id
 
         response: Response = await call_next(request)

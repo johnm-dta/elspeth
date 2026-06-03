@@ -223,6 +223,7 @@ class SchemaConfigModeContract(DeclarationContract):
 
     name: ClassVar[str] = "schema_config_mode"
     payload_schema: ClassVar[type] = SchemaConfigModePayload
+    violation_class: ClassVar[type[SchemaConfigModeViolation]] = SchemaConfigModeViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return plugin._output_schema_config is not None

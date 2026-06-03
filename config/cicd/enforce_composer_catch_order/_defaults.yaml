@@ -1,4 +1,4 @@
-# Allowlist for enforce_composer_catch_order.py.
+# Allowlist for the elspeth-lints composer.catch_order rule.
 #
 # Rule CCO1 flags an except-handler whose class is shadowed by an earlier
 # handler for one of its supertypes in the same try block. There should be
@@ -7,7 +7,7 @@
 # what the narrowed catch was introduced to prevent.
 #
 # Entries here are explicit exemptions — each MUST include a non-empty
-# justification field (enforced by the script; missing/empty justification
+# justification field (enforced by the lint rule; missing/empty justification
 # fails the build). Before adding an entry, prefer fixing the handler
 # order: move the narrow except above the broader one.
 #

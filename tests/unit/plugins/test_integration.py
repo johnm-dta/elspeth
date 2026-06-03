@@ -4,6 +4,7 @@
 from collections.abc import Iterator
 from typing import Any, ClassVar
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.testing import make_field, make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -35,6 +36,7 @@ class TestPluginSystemIntegration:
         # Define plugins
         class ListSource(BaseSource):
             name = "list"
+            determinism = Determinism.IO_READ
             output_schema = InputSchema
 
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
@@ -52,6 +54,7 @@ class TestPluginSystemIntegration:
 
         class DoubleTransform(BaseTransform):
             name = "double"
+            determinism = Determinism.DETERMINISTIC
             input_schema = InputSchema
             output_schema = EnrichedSchema
 
@@ -69,6 +72,7 @@ class TestPluginSystemIntegration:
 
         class MemorySink(BaseSink):
             name = "memory"
+            determinism = Determinism.IO_WRITE
             input_schema = EnrichedSchema
             _on_write_failure: str | None = "discard"
             collected: ClassVar[list[dict[str, Any]]] = []

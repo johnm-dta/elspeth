@@ -160,7 +160,7 @@ For easier management, use docker-compose:
 # docker-compose.yaml
 services:
   elspeth:
-    image: ghcr.io/johnm-dta/elspeth:${IMAGE_TAG:-latest}
+    image: ghcr.io/johnm-dta/elspeth:${IMAGE_TAG:?set IMAGE_TAG to sha-<commit> or v*}
     environment:
       - DATABASE_URL=${DATABASE_URL:-sqlite:////app/state/landscape.db}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -274,9 +274,9 @@ livenessProbe:
 |-------------|---------|----------|
 | `sha-<commit>` | `sha-abc123f` | CI/CD deployments (immutable, recommended) |
 | `v<version>` | `v0.1.0` | Release versions |
-| `latest` | `latest` | Development only (avoid in production) |
 
-**Production recommendation:** Use `sha-<commit>` tags for immutable deployments.
+Use `sha-<commit>` tags for immutable deployments. The build workflow does not
+publish `latest`.
 
 ---
 

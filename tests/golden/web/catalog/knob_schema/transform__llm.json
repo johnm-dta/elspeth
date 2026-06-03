@@ -1,0 +1,623 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "enum": [
+          "azure",
+          "openrouter"
+        ],
+        "kind": "enum",
+        "label": "provider",
+        "name": "provider",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "",
+        "description": "Model identifier (defaults to deployment_name)",
+        "kind": "text",
+        "label": "Model",
+        "name": "model",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Multi-query specs (None = single-query mode)",
+        "kind": "json-value",
+        "label": "Queries",
+        "name": "queries",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Jinja2 prompt template",
+        "kind": "text",
+        "label": "Prompt Template",
+        "name": "prompt_template",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Optional system prompt",
+        "kind": "text",
+        "label": "System Prompt",
+        "name": "system_prompt",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0.0,
+        "description": "Sampling temperature",
+        "kind": "number-float",
+        "label": "Temperature",
+        "name": "temperature",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Maximum tokens in response",
+        "kind": "number-int",
+        "label": "Max Tokens",
+        "name": "max_tokens",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "llm_response",
+        "description": "Field name for LLM response in output",
+        "kind": "text",
+        "label": "Response Field",
+        "name": "response_field",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup data loaded from YAML file",
+        "kind": "json-object",
+        "label": "Lookup",
+        "name": "lookup",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Prompt template file path for audit (None if inline)",
+        "kind": "text",
+        "label": "Prompt Template Source",
+        "name": "prompt_template_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup file path for audit (None if no lookup)",
+        "kind": "text",
+        "label": "Lookup Source",
+        "name": "lookup_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "System prompt file path for audit (None if inline)",
+        "kind": "text",
+        "label": "System Prompt Source",
+        "name": "system_prompt_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 1,
+        "description": "Number of concurrent requests (1 = sequential)",
+        "kind": "number-int",
+        "label": "Pool Size",
+        "name": "pool_size",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0,
+        "description": "Minimum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Min Dispatch Delay Ms",
+        "name": "min_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 5000,
+        "description": "Maximum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Max Dispatch Delay Ms",
+        "name": "max_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 2.0,
+        "description": "Backoff multiplier on capacity error",
+        "kind": "number-float",
+        "label": "Backoff Multiplier",
+        "name": "backoff_multiplier",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 50,
+        "description": "Recovery step in milliseconds",
+        "kind": "number-int",
+        "label": "Recovery Step Ms",
+        "name": "recovery_step_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 3600,
+        "description": "Max seconds to retry capacity errors",
+        "kind": "number-int",
+        "label": "Max Capacity Retry Seconds",
+        "name": "max_capacity_retry_seconds",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Azure deployment name",
+        "kind": "text",
+        "label": "Deployment Name",
+        "name": "deployment_name",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Azure OpenAI endpoint URL",
+        "kind": "text",
+        "label": "Endpoint",
+        "name": "endpoint",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Azure OpenAI API key",
+        "kind": "text",
+        "label": "API Key",
+        "name": "api_key",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "2024-10-21",
+        "description": "Azure API version",
+        "kind": "text",
+        "label": "API Version",
+        "name": "api_version",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Tier 2 tracing configuration (azure_ai, langfuse, or none)",
+        "kind": "json-object",
+        "label": "Tracing",
+        "name": "tracing",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "azure",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Model identifier (e.g., 'openai/gpt-4o')",
+        "kind": "text",
+        "label": "Model",
+        "name": "model",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Multi-query specs (None = single-query mode)",
+        "kind": "json-value",
+        "label": "Queries",
+        "name": "queries",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Jinja2 prompt template",
+        "kind": "text",
+        "label": "Prompt Template",
+        "name": "prompt_template",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Optional system prompt",
+        "kind": "text",
+        "label": "System Prompt",
+        "name": "system_prompt",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0.0,
+        "description": "Sampling temperature",
+        "kind": "number-float",
+        "label": "Temperature",
+        "name": "temperature",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Maximum tokens in response",
+        "kind": "number-int",
+        "label": "Max Tokens",
+        "name": "max_tokens",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "llm_response",
+        "description": "Field name for LLM response in output",
+        "kind": "text",
+        "label": "Response Field",
+        "name": "response_field",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup data loaded from YAML file",
+        "kind": "json-object",
+        "label": "Lookup",
+        "name": "lookup",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Prompt template file path for audit (None if inline)",
+        "kind": "text",
+        "label": "Prompt Template Source",
+        "name": "prompt_template_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup file path for audit (None if no lookup)",
+        "kind": "text",
+        "label": "Lookup Source",
+        "name": "lookup_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "System prompt file path for audit (None if inline)",
+        "kind": "text",
+        "label": "System Prompt Source",
+        "name": "system_prompt_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 1,
+        "description": "Number of concurrent requests (1 = sequential)",
+        "kind": "number-int",
+        "label": "Pool Size",
+        "name": "pool_size",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0,
+        "description": "Minimum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Min Dispatch Delay Ms",
+        "name": "min_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 5000,
+        "description": "Maximum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Max Dispatch Delay Ms",
+        "name": "max_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 2.0,
+        "description": "Backoff multiplier on capacity error",
+        "kind": "number-float",
+        "label": "Backoff Multiplier",
+        "name": "backoff_multiplier",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 50,
+        "description": "Recovery step in milliseconds",
+        "kind": "number-int",
+        "label": "Recovery Step Ms",
+        "name": "recovery_step_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 3600,
+        "description": "Max seconds to retry capacity errors",
+        "kind": "number-int",
+        "label": "Max Capacity Retry Seconds",
+        "name": "max_capacity_retry_seconds",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "OpenRouter API key",
+        "kind": "text",
+        "label": "API Key",
+        "name": "api_key",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "https://openrouter.ai/api/v1",
+        "description": "OpenRouter API base URL",
+        "kind": "text",
+        "label": "Base URL",
+        "name": "base_url",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 60.0,
+        "description": "Request timeout",
+        "kind": "number-float",
+        "label": "Timeout Seconds",
+        "name": "timeout_seconds",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Tier 2 tracing configuration (langfuse only - azure_ai not supported)",
+        "kind": "json-object",
+        "label": "Tracing",
+        "name": "tracing",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "openrouter",
+          "field": "provider"
+        }
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "llm"
+}

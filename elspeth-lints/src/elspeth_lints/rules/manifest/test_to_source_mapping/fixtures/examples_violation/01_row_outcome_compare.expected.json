@@ -1,0 +1,22 @@
+[
+  {
+    "column": 11,
+    "file_path": "tests/unit/test_old.py",
+    "fingerprint": "tests/unit/test_old.py:row_outcome_compare:RowOutcome:5:11",
+    "line": 5,
+    "message": "row_outcome_compare: RowOutcome in result.outcome == RowOutcome.COMPLETED",
+    "rule_id": "row_outcome_compare",
+    "severity": "error",
+    "suggestion": "Migrate tests to the ADR-019 two-axis outcome/path contract and avoid raw token_outcomes outcome-only SQL."
+  },
+  {
+    "column": 29,
+    "file_path": "tests/unit/test_old.py",
+    "fingerprint": "tests/unit/test_old.py:row_outcome_attribute:COMPLETED:5:29",
+    "line": 5,
+    "message": "row_outcome_attribute: COMPLETED in RowOutcome.COMPLETED",
+    "rule_id": "row_outcome_attribute",
+    "severity": "error",
+    "suggestion": "Migrate tests to the ADR-019 two-axis outcome/path contract and avoid raw token_outcomes outcome-only SQL."
+  }
+]

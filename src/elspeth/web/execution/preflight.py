@@ -63,13 +63,19 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     if source is not None:
         if not isinstance(source, dict):
             raise TypeError(f"YAML generator produced non-dict 'source' value (got {type(source).__name__})")
-        opts = source.get("options")
-        if opts is not None:
-            if not isinstance(opts, dict):
-                raise TypeError(f"YAML generator produced non-dict 'source.options' value (got {type(opts).__name__})")
-            for key in ("path", "file"):
-                if key in opts and not Path(str(opts[key])).is_absolute():
-                    opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+        # yaml_generator always emits 'options' under a present source
+        # (yaml_generator.py:92), and both callers (service.py:559,
+        # validation.py:1143) feed generate_yaml() output here — never
+        # hand-authored YAML. A missing key is therefore a generator bug,
+        # not optional data: assert it loudly rather than masking with .get().
+        if "options" not in source:
+            raise TypeError("YAML generator produced 'source' without required 'options' key")
+        opts = source["options"]
+        if not isinstance(opts, dict):
+            raise TypeError(f"YAML generator produced non-dict 'source.options' value (got {type(opts).__name__})")
+        for key in ("path", "file"):
+            if key in opts and not Path(str(opts[key])).is_absolute():
+                opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
 
     sinks = config.get("sinks")
     if sinks is not None:

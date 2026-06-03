@@ -16,9 +16,11 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import PluginContractViolation, TransformSuccessReason
 from elspeth.contracts.field_collision import detect_field_collisions
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError, TransformDataConfig
@@ -94,8 +96,9 @@ class BatchReplicate(BaseTransform):
     """
 
     name = "batch_replicate"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fb88a2970208439a"
+    source_file_hash: str | None = "sha256:8af0f1d050828429"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
@@ -104,6 +107,22 @@ class BatchReplicate(BaseTransform):
     # unconditional pass-through contract dishonest even though every emitted
     # row deep-copies the originating input before adding copy_index.
     passes_through_input = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Replicates rows within an aggregation batch based on a copy-count field.",
+                composer_hints=(
+                    "Use batch_replicate under aggregations with output_mode=transform so emitted copies become new tokens.",
+                    "copies_field must be an int when present; missing values use default_copies and values outside 1..max_copies are quarantined.",
+                    "include_copy_index=True adds copy_index, so avoid input fields with that name or disable it.",
+                    "This expands row count and can drop invalid source rows from the successful output.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

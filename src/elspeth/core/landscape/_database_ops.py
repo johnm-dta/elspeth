@@ -3,16 +3,24 @@
 Consolidates the repeated `with self._db.connection() as conn:` pattern.
 """
 
-from typing import TYPE_CHECKING, Any
+from contextlib import AbstractContextManager
+from typing import Any, Protocol
 
 from sqlalchemy import Executable
-from sqlalchemy.engine import Row
+from sqlalchemy.engine import Connection, Row
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.core.landscape.errors import LandscapeRecordError
 
-if TYPE_CHECKING:
-    from elspeth.core.landscape.database import LandscapeDB
+
+class LandscapeConnectionProvider(Protocol):
+    """Connection surface required by database operation helpers."""
+
+    def read_only_connection(self) -> AbstractContextManager[Connection]:
+        raise NotImplementedError
+
+    def connection(self) -> AbstractContextManager[Connection]:
+        raise NotImplementedError
 
 
 class ReadOnlyDatabaseOps:
@@ -22,7 +30,7 @@ class ReadOnlyDatabaseOps:
     mutate the audit store, even if a caller passes a write-capable statement.
     """
 
-    def __init__(self, db: "LandscapeDB") -> None:
+    def __init__(self, db: LandscapeConnectionProvider) -> None:
         self._db = db
 
     def execute_fetchone(self, query: Executable) -> Row[Any] | None:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import structlog
 from sqlalchemy.exc import DatabaseError, OperationalError
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import NodeState, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending, NodeType
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.tui.types import LineageData, NodeStateInfo
@@ -215,12 +215,16 @@ class ExplainScreen:
         """
         self._selected_node_id = node_id
 
-        match self._state:
-            case LoadedState(db=db, run_id=run_id) | LoadingFailedState(db=db, run_id=run_id) if node_id:
-                node_state = self._load_node_state(db, run_id, node_id)
-                self._detail_panel.update_state(node_state)
-            case _:
-                self._detail_panel.update_state(None)
+        if not node_id:
+            self._detail_panel.update_state(None)
+            return
+
+        if isinstance(self._state, (LoadedState, LoadingFailedState)):
+            node_state = self._load_node_state(self._state.db, self._state.run_id, node_id)
+            self._detail_panel.update_state(node_state)
+            return
+
+        self._detail_panel.update_state(None)
 
     def _load_node_state(self, db: LandscapeDB, run_id: str, node_id: str) -> NodeStateInfo | None:
         """Load node state from database.
@@ -252,13 +256,66 @@ class ExplainScreen:
             "node_type": node.node_type.value,
         }
 
-        # Note: Full node state requires a token_id to look up execution state.
-        # When selecting a node in the tree (not a specific token), we only
-        # have the registered node info. Token-specific state (state_id,
-        # token_id, status, timing, hashes, errors) would be populated when
-        # the user selects a specific token-node combination.
+        node_states = [state for state in factory.query.get_all_node_states_for_run(run_id) if state.node_id == node_id]
+        if node_states:
+            self._add_execution_state(result, self._select_node_state_for_display(node_states))
 
         return result
+
+    def _select_node_state_for_display(self, node_states: list[NodeState]) -> NodeState:
+        """Choose the most recent execution state for a selected node."""
+        return max(
+            node_states,
+            key=lambda state: (
+                state.completed_at if isinstance(state, (NodeStatePending, NodeStateCompleted, NodeStateFailed)) else state.started_at,
+                state.token_id,
+                state.step_index,
+                state.attempt,
+            ),
+        )
+
+    def _add_execution_state(self, result: NodeStateInfo, state: NodeState) -> None:
+        """Add execution-state fields to a node detail result."""
+        result.update(
+            {
+                "state_id": state.state_id,
+                "token_id": state.token_id,
+                "status": state.status.value,
+                "input_hash": state.input_hash,
+                "started_at": state.started_at.isoformat(),
+            }
+        )
+
+        if isinstance(state, NodeStateOpen):
+            return
+
+        result.update(
+            {
+                "completed_at": state.completed_at.isoformat(),
+                "duration_ms": state.duration_ms,
+            }
+        )
+
+        if state.context_after_json is not None:
+            result["context_after_json"] = state.context_after_json
+
+        if isinstance(state, NodeStatePending):
+            return
+
+        if state.output_hash is not None:
+            result["output_hash"] = state.output_hash
+
+        if isinstance(state, NodeStateCompleted):
+            if state.success_reason_json is not None:
+                result["success_reason_json"] = state.success_reason_json
+            return
+
+        if isinstance(state, NodeStateFailed):
+            if state.error_json is not None:
+                result["error_json"] = state.error_json
+            return
+
+        raise TypeError(f"Unsupported node state type: {type(state).__name__}")
 
     def render(self) -> str:
         """Render the screen as text.
@@ -276,15 +333,12 @@ class ExplainScreen:
         lines.append("")
 
         # Render tree if in loaded state
-        match self._state:
-            case LoadedState(tree=tree):
-                lines.append("--- Lineage Tree ---")
-                for node in tree.get_tree_nodes():
-                    indent = "  " * node["depth"]
-                    lines.append(f"{indent}{node['label']}")
-                lines.append("")
-            case _:
-                pass  # No tree to render
+        if isinstance(self._state, LoadedState):
+            lines.append("--- Lineage Tree ---")
+            for node in self._state.tree.get_tree_nodes():
+                indent = "  " * node["depth"]
+                lines.append(f"{indent}{node['label']}")
+            lines.append("")
 
         lines.append("--- Node Details ---")
         lines.append(self._detail_panel.render_content())

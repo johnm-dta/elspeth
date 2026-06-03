@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from elspeth.contracts import PipelineRow, RunStatus, SinkProtocol, SourceProtocol
+from elspeth.contracts import Determinism, PipelineRow, RunStatus, SinkProtocol, SourceProtocol
 from elspeth.core.config import (
     CoalesceSettings,
     ElspethSettings,
@@ -43,6 +43,7 @@ class EnrichATransform(BaseTransform):
     """Adds 'enriched_a' field — identifies branch A processing."""
 
     name = "enrich_a"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -64,6 +65,7 @@ class EnrichBTransform(BaseTransform):
     """Adds 'enriched_b' field — identifies branch B processing."""
 
     name = "enrich_b"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

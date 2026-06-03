@@ -10,19 +10,18 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from unittest.mock import AsyncMock, patch
+from uuid import UUID, uuid4
 
 import pytest
+import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_progress import ComposerProgressEvent
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import (
-    PluginSchemaInfo,
-    PluginSummary,
-)
-from elspeth.web.composer.progress import ComposerProgressEvent
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -41,137 +40,86 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.composer.tools import execute_tool as _execute_tool
-from elspeth.web.config import WebSettings
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import (
+    ValidationCheck,
+    ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
+)
+from elspeth.web.execution.schemas import (
+    ValidationResult as ValidationResultModel,
+)
+from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from tests.unit.web.composer._helpers import (
+    FakeChoice,
+    FakeFunction,
+    FakeLLMResponse,
+    FakeMessage,
+    FakeToolCall,
+    _empty_state,
+    _make_llm_response,
+    _make_settings,
+    _mock_catalog,
+)
 
 
-@dataclass
-class FakeFunction:
-    name: str
-    arguments: str
+def _execution_ready() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
 
 
-@dataclass
-class FakeToolCall:
-    id: str
-    function: FakeFunction
-
-
-@dataclass
-class FakeMessage:
-    content: str | None
-    tool_calls: list[FakeToolCall] | None
-
-
-@dataclass
-class FakeChoice:
-    message: FakeMessage
-
-
-@dataclass
-class FakeLLMResponse:
-    choices: list[FakeChoice]
-
-
-def _empty_state() -> CompositionState:
-    return CompositionState(
-        source=None,
-        nodes=(),
-        edges=(),
-        outputs=(),
-        metadata=PipelineMetadata(),
-        version=1,
-    )
-
-
-def _mock_catalog() -> MagicMock:
-    """Mock CatalogService with real PluginSummary/PluginSchemaInfo instances.
-
-    AC #16: Tests must use real PluginSummary and PluginSchemaInfo instances,
-    not plain dicts. Mock return types must match the CatalogService protocol.
-    """
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV source",
-            plugin_type="source",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_transforms.return_value = [
-        PluginSummary(
-            name="passthrough",
-            description="Uppercase",
-            plugin_type="transform",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV sink",
-            plugin_type="sink",
-            config_fields=[],
-        ),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="csv",
-        plugin_type="source",
-        description="CSV source",
-        json_schema={"title": "Config", "properties": {}},
-    )
-    return catalog
-
-
-def _make_llm_response(
-    content: str | None = None,
-    tool_calls: list[dict[str, Any]] | None = None,
-) -> FakeLLMResponse:
-    """Build a typed fake LiteLLM response.
-
-    Uses typed dataclasses instead of MagicMock so tests fail if production
-    code accesses an attribute that doesn't exist on the real response shape.
-    """
-    fake_tool_calls: list[FakeToolCall] | None = None
-    if tool_calls:
-        fake_tool_calls = [
-            FakeToolCall(
-                id=tc["id"],
-                function=FakeFunction(
-                    name=tc["name"],
-                    arguments=json.dumps(tc["arguments"]),
-                ),
+def _not_authoring_ready(code: str = "test_blocker") -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=False,
+        execution_ready=False,
+        completion_ready=False,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=code,
+                component_id=None,
+                component_type=None,
+                detail=code,
             )
-            for tc in tool_calls
-        ]
-
-    message = FakeMessage(content=content, tool_calls=fake_tool_calls)
-    return FakeLLMResponse(choices=[FakeChoice(message=message)])
+        ],
+    )
 
 
-def _make_settings(**overrides: Any) -> WebSettings:
-    """Build WebSettings with Pydantic-enforced defaults.
+def _pending_interpretation_readiness() -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=True,
+        execution_ready=False,
+        completion_ready=True,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=INTERPRETATION_REVIEW_PENDING_CODE,
+                component_id="rate_node",
+                component_type="transform",
+                detail="rate_node:cool",
+            )
+        ],
+    )
 
-    Use keyword arguments to override specific fields for a test.
-    Defaults come from the Pydantic model — no drift possible.
 
-    data_dir defaults to /data (absolute) so test paths like
-    /data/blobs/file.csv pass S2 path validation.
-    """
-    defaults: dict[str, Any] = {
-        "data_dir": Path("/data"),
-        "composer_max_composition_turns": 15,
-        "composer_max_discovery_turns": 10,
-        "composer_timeout_seconds": 85.0,
-        "composer_rate_limit_per_minute": 10,
-    }
-    defaults.update(overrides)
-    return WebSettings(**defaults)
+def ValidationResult(
+    *,
+    is_valid: bool,
+    checks: list[ValidationCheck],
+    errors: list[ValidationError],
+    readiness: ValidationReadiness | None = None,
+    **kwargs: Any,
+) -> ValidationResultModel:
+    return ValidationResultModel(
+        is_valid=is_valid,
+        checks=checks,
+        errors=errors,
+        readiness=readiness or (_execution_ready() if is_valid else _not_authoring_ready()),
+        **kwargs,
+    )
 
 
 def _assert_no_mutation_empty_state_blocker(
@@ -223,11 +171,59 @@ def _session_engine_with_session() -> tuple[Any, str]:
                 user_id="test-user",
                 auth_provider_type="local",
                 title="Test Session",
+                trust_mode="auto_commit",
+                density_default="high",
                 created_at=now,
                 updated_at=now,
             )
         )
     return engine, session_id
+
+
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Persist a user chat message for tests that create verbatim blobs."""
+    user_message_id = str(uuid4())
+    with engine.begin() as conn:
+        latest = conn.execute(
+            select(chat_messages_table.c.sequence_no)
+            .where(chat_messages_table.c.session_id == session_id)
+            .order_by(chat_messages_table.c.sequence_no.desc())
+        ).first()
+        sequence_no = 1 if latest is None else latest.sequence_no + 1
+        conn.execute(
+            chat_messages_table.insert().values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[str, str]:
+    user_message_content = f"Use this exact content:\n{content}"
+    return {
+        "user_message_id": _insert_user_message(engine, session_id, user_message_content),
+        "user_message_content": user_message_content,
+    }
+
+
+def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> SessionServiceImpl:
+    return SessionServiceImpl(
+        engine,
+        data_dir=data_dir,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.composer.sessions"),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -372,8 +368,33 @@ class TestComposerTextOnlyResponse:
         """A blob-side success is not a successful CompositionState mutation."""
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
+        user_message_id = str(uuid4())
+        user_message_content = "Build a runnable pipeline from this text."
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                chat_messages_table.insert().values(
+                    id=user_message_id,
+                    session_id=session_id,
+                    role="user",
+                    content=user_message_content,
+                    raw_content=None,
+                    tool_calls=None,
+                    tool_call_id=None,
+                    sequence_no=1,
+                    writer_principal="route_user_message",
+                    created_at=now,
+                    composition_state_id=None,
+                    parent_assistant_id=None,
+                )
+            )
         settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
         state = _empty_state()
         create_blob_turn = _make_llm_response(
             tool_calls=[
@@ -393,7 +414,13 @@ class TestComposerTextOnlyResponse:
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = [create_blob_turn, text_response]
-            result = await service.compose("Build a runnable pipeline from this text.", [], state, session_id=session_id)
+            result = await service.compose(
+                user_message_content,
+                [],
+                state,
+                session_id=session_id,
+                user_message_id=user_message_id,
+            )
 
         assert result.state.version == state.version
         assert result.raw_assistant_content == final_prose
@@ -409,6 +436,356 @@ class TestComposerTextOnlyResponse:
 
 
 class TestComposerSingleToolCall:
+    @pytest.mark.asyncio
+    async def test_tool_dispatch_receives_configured_blob_quota(self) -> None:
+        """Composer dispatch must thread WebSettings blob quota into tool execution."""
+
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(max_blob_storage_per_session_bytes=3),
+        )
+        state = _empty_state()
+        captured_quota: list[int | None] = []
+
+        def fake_execute_tool(
+            _tool_name: str,
+            _arguments: dict[str, Any],
+            _state: CompositionState,
+            _catalog: CatalogService,
+            *args: Any,
+            max_blob_storage_per_session_bytes: int | None = None,
+            **kwargs: Any,
+        ) -> ToolResult:
+            del args, kwargs
+            captured_quota.append(max_blob_storage_per_session_bytes)
+            return ToolResult(
+                success=True,
+                updated_state=_state.with_metadata({"name": "captured"}),
+                validation=ValidationSummary(is_valid=True, errors=()),
+                affected_nodes=("metadata",),
+            )
+
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_set_metadata",
+                    "name": "set_metadata",
+                    "arguments": {"patch": {"name": "captured"}},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Done.")
+
+        with (
+            patch("elspeth.web.composer.tool_batch.execute_tool", side_effect=fake_execute_tool),
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_llm.side_effect = [turn, done]
+            await service.compose("Update metadata", [], state)
+
+        assert captured_quota == [3]
+
+    @pytest.mark.asyncio
+    async def test_tool_dispatch_receives_composer_source_provenance_context(self) -> None:
+        """Sync tool dispatch receives the user message and audited composer provenance."""
+
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(composer_model="gpt-5.5"),
+        )
+        service._availability = ComposerAvailability(  # type: ignore[misc]
+            available=True,
+            model="gpt-5.5",
+            provider="test-provider",
+        )
+        state = _empty_state()
+        captured_kwargs: dict[str, Any] = {}
+        arguments = {"patch": {"name": "captured"}}
+
+        def fake_execute_tool(
+            _tool_name: str,
+            _arguments: dict[str, Any],
+            _state: CompositionState,
+            _catalog: CatalogService,
+            *args: Any,
+            **kwargs: Any,
+        ) -> ToolResult:
+            del args, _arguments, _catalog
+            captured_kwargs.update(kwargs)
+            return ToolResult(
+                success=True,
+                updated_state=_state.with_metadata({"name": "captured"}),
+                validation=ValidationSummary(is_valid=True, errors=()),
+                affected_nodes=("metadata",),
+            )
+
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_set_metadata",
+                    "name": "set_metadata",
+                    "arguments": arguments,
+                }
+            ],
+        )
+        done = _make_llm_response(content="Done.")
+
+        with (
+            patch("elspeth.web.composer.tool_batch.execute_tool", side_effect=fake_execute_tool),
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_llm.side_effect = [turn, done]
+            await service.compose(
+                "Create generated source content.",
+                [],
+                state,
+                user_message_id="11111111-1111-1111-1111-111111111111",
+            )
+
+        assert captured_kwargs["user_message_id"] == "11111111-1111-1111-1111-111111111111"
+        assert captured_kwargs["user_message_content"] == "Create generated source content."
+        assert captured_kwargs["composer_model_identifier"] == "gpt-5.5"
+        assert captured_kwargs["composer_model_version"] == "gpt-5.5"
+        assert captured_kwargs["composer_provider"] == "test-provider"
+        assert captured_kwargs["composer_skill_hash"] == service._composer_skill_hash
+        assert captured_kwargs["tool_arguments_hash"] == stable_hash(arguments)
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_state_mutation(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        """Explicit approval mode stores mutating tool calls as pending proposals."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert len(proposals) == 1
+        assert proposals[0].tool_call_id == "call_set_pipeline"
+        assert proposals[0].tool_name == "set_pipeline"
+        assert proposals[0].status == "pending"
+        assert "Replace the pipeline" in proposals[0].summary
+        assert proposals[0].composer_model_identifier == composer_service_with_real_sessions._model
+        assert proposals[0].composer_model_version == composer_service_with_real_sessions._model
+        assert proposals[0].composer_provider == "test"
+        assert proposals[0].composer_skill_hash == composer_service_with_real_sessions._composer_skill_hash
+        assert proposals[0].tool_arguments_hash == stable_hash(proposals[0].arguments_json)
+        assert result.tool_outcomes[0].post_version == state.version
+
+    @pytest.mark.asyncio
+    async def test_create_composition_proposal_normalizes_composer_provenance(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+    ) -> None:
+        """Proposal provenance is normalized before it becomes audit-bearing state."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+
+        proposal = await sessions_service.create_composition_proposal(
+            session_id=session_uuid,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Composer proposed a pipeline update.",
+            affects=["graph"],
+            arguments_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            base_state_id=None,
+            actor="assistant",
+            composer_model_identifier=" openai/gpt-5-mini ",
+            composer_model_version=" gpt-5-mini-2026-05-01 ",
+            composer_provider=" openai ",
+            composer_skill_hash=" sha256:composer-skill ",
+            tool_arguments_hash=" sha256:tool-arguments ",
+        )
+
+        assert proposal.composer_model_identifier == "openai/gpt-5-mini"
+        assert proposal.composer_model_version == "gpt-5-mini-2026-05-01"
+        assert proposal.composer_provider == "openai"
+        assert proposal.composer_skill_hash == "sha256:composer-skill"
+        assert proposal.tool_arguments_hash == "sha256:tool-arguments"
+
+    @pytest.mark.asyncio
+    async def test_create_composition_proposal_rejects_blank_composer_provenance(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+    ) -> None:
+        """Blank proposal provenance fails before a partial audit row can persist."""
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+
+        with pytest.raises(AuditIntegrityError, match=r"composer provenance.*composer_provider"):
+            await sessions_service.create_composition_proposal(
+                session_id=session_uuid,
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                summary="Replace the pipeline.",
+                rationale="Composer proposed a pipeline update.",
+                affects=["graph"],
+                arguments_json={"source": {"plugin": "csv", "options": {}}},
+                arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+                base_state_id=None,
+                actor="assistant",
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="\t ",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            )
+
+        assert await sessions_service.list_composition_proposals(session_uuid) == []
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_does_not_intercept_create_blob(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_create_blob_then_set_pipeline: Any,
+    ) -> None:
+        """Regression for staging session 986fabf6-a723-4eb3-84de-2db1b7ae4e96:
+        under trust_mode=explicit_approve the previous behaviour intercepted
+        both create_blob and set_pipeline as proposals. The create_blob
+        proposal was structurally unacceptable — the accept endpoint
+        requires CompositionState.version to advance, but create_blob
+        never advances state (it is a blob-store side effect). So users
+        clicked 'Accept' on the proposal and got HTTP 409 'did not change
+        composition state'.
+
+        After the fix, create_blob executes immediately; only
+        composition-mutation tools (set_pipeline here) become pending
+        proposals."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_create_blob_then_set_pipeline,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        proposal_tools = sorted(p.tool_name for p in proposals)
+        # create_blob is NOT intercepted — it executes immediately and the
+        # resulting blob is available to set_pipeline at proposal-creation
+        # time.
+        assert "create_blob" not in proposal_tools
+        # set_pipeline IS still intercepted — it advances composition state
+        # and represents the meaningful operator approval.
+        assert "set_pipeline" in proposal_tools
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_invalid_arguments_do_not_crash_compose_loop(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_set_pipeline_with_misplaced_schema: Any,
+    ) -> None:
+        """Regression for staging session 100dc5cb-fd66-400b-8041-a1c165cbd8bd:
+        under trust_mode=explicit_approve the proposal-interception path
+        called redact_tool_call_arguments() with no exception handler. When
+        the LLM produced structurally-invalid arguments (schema at the node
+        body level instead of inside options), the Pydantic ValidationError
+        propagated up, crashed the compose request with HTTP 500, and the
+        frontend rendered a bare 'retry' button with no diagnostic.
+
+        After the fix, the redaction failure is caught, the proposal block
+        is skipped, and the normal dispatch path produces a clean
+        ToolArgumentError that the compose loop surfaces to the model as
+        a tool message — letting the model self-correct rather than
+        crashing the request."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        # Must not raise — the previous behavior raised a 500 here.
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_set_pipeline_with_misplaced_schema,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        # No proposal was created — the LLM arguments were invalid.
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert proposals == []
+        # The set_pipeline outcome surfaces as a tool argument failure that
+        # the loop carries into the model's next turn for self-correction.
+        outcome_tool_names = [o.call.function.name for o in result.tool_outcomes]
+        assert "set_pipeline" in outcome_tool_names
+        invalid_outcome = next(o for o in result.tool_outcomes if o.call.function.name == "set_pipeline")
+        assert invalid_outcome.error_class is not None
+        # State did not advance — invalid arguments are not committed.
+        assert invalid_outcome.post_version == state.version
+
+    @pytest.mark.asyncio
+    async def test_auto_commit_mutating_tool_preserves_existing_state_mutation_path(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        """Auto-commit mode still executes mutating tools through the existing path."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="auto_commit",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert proposals == []
+        assert result.tool_outcomes[0].post_version > state.version
+
     @pytest.mark.asyncio
     async def test_single_tool_call_then_text(self) -> None:
         """LLM makes one tool call, then responds with text."""
@@ -505,8 +882,15 @@ class TestComposerSingleToolCall:
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
         state = _empty_state()
+        user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
+        user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
         pipeline_args = {
             "source": {
@@ -552,6 +936,7 @@ class TestComposerSingleToolCall:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -582,10 +967,11 @@ class TestComposerSingleToolCall:
         ):
             mock_llm.side_effect = [build_turn, preview_turn, final_turn]
             result = await service.compose(
-                "I want a pipeline that takes the string 'hello' and appends ' world' to it.",
+                user_message_content,
                 [],
                 state,
                 session_id=session_id,
+                user_message_id=user_message_id,
             )
 
         assert result.message == "Pipeline configured."
@@ -994,7 +1380,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ToolArgumentError(
                     argument="content",
                     expected="a string",
@@ -1274,7 +1660,7 @@ class TestComposerErrorHandling:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=KeyError("internal_state_key"),
             ),
         ):
@@ -1340,7 +1726,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 wraps=_execute_tool,
             ) as mock_execute_tool,
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -1380,7 +1766,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 wraps=_execute_tool,
             ) as mock_execute_tool,
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -1443,7 +1829,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_openai_nested_cached_tokens_lands_on_audit_record(self) -> None:
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1453,7 +1839,7 @@ class TestProviderCacheTokenAudit:
                 "prompt_tokens_details": {"cached_tokens": 1024},
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.prompt_tokens == 1200
         assert usage.cached_prompt_tokens == 1024
         assert usage.cache_creation_input_tokens is None
@@ -1461,7 +1847,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_anthropic_sibling_cache_fields_land_on_audit_record(self) -> None:
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1471,7 +1857,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1486,7 +1872,7 @@ class TestProviderCacheTokenAudit:
         carry the SAME value because LiteLLM derives the former from the
         latter. The audit row must record only the Anthropic-shape signal.
         """
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1497,7 +1883,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1513,7 +1899,7 @@ class TestProviderCacheTokenAudit:
         misleads the auditor into thinking the provider reported a zero-hit
         cache read, when in fact the provider only reported cache creation.
         """
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1524,7 +1910,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 0,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 0
         assert usage.cached_prompt_tokens is None
@@ -1534,11 +1920,11 @@ class TestProviderCacheTokenAudit:
         """Pydantic-shaped (attribute) usage object also dedups when siblings present.
 
         Real LiteLLM responses are Pydantic ``Usage`` objects, not Mappings.
-        Verifies the elif branch in ``_token_usage_from_response`` honors the
+        Verifies the elif branch in ``token_usage_from_response`` honors the
         same dedup rule: nested ``prompt_tokens_details.cached_tokens`` is
         dropped when an Anthropic sibling is present on the attribute object.
         """
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         @dataclass
         class FakePromptTokensDetails:
@@ -1572,7 +1958,7 @@ class TestProviderCacheTokenAudit:
                 cache_read_input_tokens=1100,
             ),
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1580,10 +1966,10 @@ class TestProviderCacheTokenAudit:
     @pytest.mark.asyncio
     async def test_no_cache_metadata_leaves_fields_none(self) -> None:
         """Absent cache metadata must NOT be fabricated to zero."""
-        from elspeth.web.composer.service import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cached_prompt_tokens is None
         assert usage.cache_creation_input_tokens is None
         assert usage.cache_read_input_tokens is None
@@ -1978,7 +2364,7 @@ class TestComposeTimeout:
         with (
             patch.object(service, "_call_llm", new=first_tool_then_timeout_llm),
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_slow_mutation_tool,
             ),
             pytest.raises(ComposerConvergenceError) as exc_info,
@@ -2500,6 +2886,85 @@ class TestComposerAvailabilityAndBadRequest:
         assert "leaked-detail" not in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_bad_request_llm_error_preserves_provider_detail(self) -> None:
+        """``_BadRequestLLMError`` carries the underlying provider message.
+
+        The wrap message (``str(exc)``) is intentionally redacted so the
+        route layer does not leak provider details by default. The route
+        layer's ``expose_provider_error=True`` path re-uses
+        ``provider_detail`` to surface the raw message after scrubbing.
+
+        Ticket: elspeth-9f7f9d5787.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        bad_request = LiteLLMBadRequestError(
+            message="provider says bad",
+            model="gpt-4o",
+            llm_provider="openai",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        # str(exc) unchanged from the existing redacted wrap message.
+        assert str(exc_info.value) == "LLM request rejected (BadRequestError)"
+        # New attributes carry the provider detail for the route layer.
+        assert exc_info.value.provider_detail is not None
+        assert "provider says bad" in exc_info.value.provider_detail
+        assert exc_info.value.provider_status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_bad_request_llm_error_empty_message_collapses_to_none(self) -> None:
+        """Empty-string provider messages collapse to ``None`` so callers can
+        distinguish "no detail" from "empty string" via truthiness checks.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        # LiteLLM's BadRequestError formats the message into a longer string;
+        # passing an empty message still yields a non-empty rendered str.
+        # To exercise the empty-collapse path, raise the exception type
+        # directly with an empty rendered form.
+        bad_request = LiteLLMBadRequestError(message="", model="m", llm_provider="p")
+        # Force str(exc) == "" so the ``or None`` collapse can fire.
+        bad_request.args = ("",)
+        bad_request.message = ""
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        # str(bad_request) is "" so provider_detail should collapse to None.
+        # provider_status_code is still set from the .status_code attribute.
+        assert exc_info.value.provider_detail is None
+        assert exc_info.value.provider_status_code == 400
+
+    @pytest.mark.asyncio
     async def test_litellm_api_error_is_retried_before_unavailable(self) -> None:
         from litellm.exceptions import APIError as LiteLLMAPIError
 
@@ -2528,6 +2993,50 @@ class TestComposerAvailabilityAndBadRequest:
         assert result.message == "Recovered."
         assert mock_llm.call_count == 2
         mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bad_request_llm_error_is_not_retried(self) -> None:
+        """Provider 400-class errors are deterministic — not transient — and
+        must surface to the caller on the first attempt without consuming
+        any retry budget. Pins the no-retry policy made mechanically visible
+        in commit 361643809 (``except _BadRequestLLMError: raise`` between
+        the ``LiteLLMAuthError`` and ``LiteLLMAPIError`` clauses). Without
+        this negative-side assertion, a future refactor that either
+        (a) changes ``_BadRequestLLMError`` to inherit from
+        ``LiteLLMAPIError`` or (b) removes the explicit re-raise clause
+        could silently re-route bad-requests through the retry loop and
+        every existing positive-side test would still pass.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        bad_request = LiteLLMBadRequestError(
+            message="model gpt-foo does not exist",
+            model="gpt-foo",
+            llm_provider="openai",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ) as mock_llm,
+            patch("elspeth.web.composer.service.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(_BadRequestLLMError),
+        ):
+            await service.compose("Hello", [], state)
+
+        # Pins the no-retry contract: exactly one provider call, and no
+        # backoff sleep was awaited (the retry path's only observable
+        # side-effect besides the call count).
+        assert mock_llm.call_count == 1
+        mock_sleep.assert_not_awaited()
 
 
 class TestPluginBugCrashesFromToolExecution:
@@ -2567,7 +3076,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("invalid expression syntax — plugin bug"),
             ),
         ):
@@ -2605,7 +3114,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=TypeError("NoneType + int — plugin bug"),
             ),
         ):
@@ -2642,7 +3151,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "plugin bug"),
             ),
         ):
@@ -2722,7 +3231,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_fake_execute_tool,
             ),
         ):
@@ -2765,7 +3274,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ToolArgumentError(
                     argument="plugin",
                     expected="a string",
@@ -2832,7 +3341,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=leaky,
             ),
         ):
@@ -2893,6 +3402,8 @@ class TestPluginCrashSessionPersistence:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=self.seeded_at,
                     updated_at=self.seeded_at,
                 )
@@ -2907,6 +3418,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -2929,7 +3441,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug: /etc/secrets/bootstrap.key is bad"),
             ),
         ):
@@ -2995,6 +3507,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3017,7 +3530,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("original plugin bug"),
             ),
             patch.object(
@@ -3082,6 +3595,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3104,7 +3618,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug"),
             ),
             capture_logs() as cap_logs,
@@ -3153,6 +3667,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3175,7 +3690,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("original plugin bug"),
             ),
             patch.object(
@@ -3225,6 +3740,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3257,7 +3773,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug"),
             ),
             patch.object(service, "_persist_crashed_session", side_effect=capture_thread),
@@ -3319,7 +3835,7 @@ class TestToolExecutionThreadOffloading:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_capture_thread,
             ),
         ):
@@ -3434,7 +3950,7 @@ class TestToolExecutionThreadOffloading:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_blocking_tool,
             ),
         ):
@@ -3641,6 +4157,8 @@ class TestToolArgumentErrorAcrossThreadBoundary:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=now,
                     updated_at=now,
                 )
@@ -3648,11 +4166,29 @@ class TestToolArgumentErrorAcrossThreadBoundary:
 
     @pytest.mark.asyncio
     async def test_real_create_blob_type_guard_feeds_error_to_llm(self) -> None:
+        """Tier-3 wrong-type ``content`` routes through ARG_ERROR (Task 13 / Wave 2).
+
+        Post-promotion (Task 13) ``create_blob`` validates via
+        :class:`CreateBlobArgumentsModel` BEFORE ``_prepare_blob_create``
+        reads any field.  Pydantic rejects ``content: int`` and the
+        handler re-raises :class:`pydantic.ValidationError` as
+        :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327``,
+        rev-2 BLOCKER_A).  The LLM-facing payload is intentionally
+        leak-safe: it names the argument-bundle and the expected model,
+        not the offending value or per-field detail.  The structured
+        Pydantic detail survives on ``__cause__`` for auditors.
+
+        Memory: ``feedback_locked_in_buggy_expectations`` — the prior
+        assertion pinned the legacy ``_prepare_blob_create`` message
+        ``"'content' must be a string, got int"``; the Pydantic boundary
+        now fires first and that message no longer reaches the LLM.
+        """
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3679,16 +4215,38 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="create_blob",
-            expected_detail="'content' must be a string, got int",
+            expected_detail="ToolArgumentError",
         )
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
         error_content = json.loads(tool_messages[0]["content"])
-        assert "'content' must be a string, got int" in error_content["error"]
+        # New (post-promotion) LLM-facing message names the argument-bundle
+        # and the Pydantic model — no leak of the raw offending value.
+        assert "create_blob arguments" in error_content["error"]
+        assert "CreateBlobArgumentsModel" in error_content["error"]
+        # The raw value (42 / "int") MUST NOT survive into the LLM echo;
+        # actual_type is the exception's class name, not the value's type.
+        assert "got int" not in error_content["error"]
 
     @pytest.mark.asyncio
     async def test_real_set_source_from_blob_options_guard_feeds_error_to_llm(self) -> None:
+        """Tier-3 non-dict ``options`` routes through ARG_ERROR (Task 13 / Wave 2).
+
+        Post-promotion (Task 13) ``set_source_from_blob`` validates via
+        :class:`SetSourceFromBlobArgumentsModel` BEFORE any blob lookup.
+        Pydantic rejects ``options: str`` and the handler re-raises
+        :class:`pydantic.ValidationError` as :class:`ToolArgumentError`
+        (pattern at ``tools.py:2320-2327``, rev-2 BLOCKER_A).  The
+        LLM-facing payload is intentionally leak-safe: argument-bundle
+        name + Pydantic model name, not per-field detail.
+
+        Memory: ``feedback_locked_in_buggy_expectations`` — the prior
+        assertion pinned the legacy in-handler isinstance message
+        ``"'options' must be an object, got str"``; the Pydantic
+        boundary now fires earlier and that message no longer reaches
+        the LLM.
+        """
         from elspeth.web.composer.tools import execute_tool
 
         catalog = _mock_catalog()
@@ -3696,6 +4254,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3708,6 +4267,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "hello"),
         )
         blob_id = create_result.data["blob_id"]
 
@@ -3733,13 +4293,19 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="set_source_from_blob",
-            expected_detail="'options' must be an object, got str",
+            expected_detail="ToolArgumentError",
         )
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
         error_content = json.loads(tool_messages[0]["content"])
-        assert "'options' must be an object, got str" in error_content["error"]
+        # New (post-promotion) LLM-facing message names the argument-bundle
+        # and the Pydantic model — no leak of the raw offending value or
+        # its type (which the legacy handler echoed as "got str").
+        assert "set_source_from_blob arguments" in error_content["error"]
+        assert "SetSourceFromBlobArgumentsModel" in error_content["error"]
+        assert "got str" not in error_content["error"]
+        assert "column=text" not in error_content["error"]
 
 
 class TestComposerErrorConstructionInvariants:
@@ -3977,6 +4543,8 @@ class TestComposerRuntimePreflightFinalGate:
                     name="settings_load",
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
+                    affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[
@@ -3985,6 +4553,7 @@ class TestComposerRuntimePreflightFinalGate:
                     component_type="aggregation",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )
@@ -4005,6 +4574,61 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message != "The pipeline is complete and valid."
         assert result.raw_assistant_content == "The pipeline is complete and valid."
         assert result.runtime_preflight is failed_preflight
+        mock_preflight.assert_called_once_with(changed_state, "user-1")
+
+    @pytest.mark.asyncio
+    async def test_pending_interpretation_handoff_is_not_augmented_as_invalid_config(self) -> None:
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="rate_node",
+                options={"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            )
+        )
+        changed_state = replace(state, version=state.version + 1)
+        pending_preflight = ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name="interpretation_review",
+                    passed=False,
+                    detail="Interpretation review is pending for rate_node:cool.",
+                    affected_nodes=("rate_node",),
+                    outcome_code=None,
+                )
+            ],
+            errors=[
+                ValidationError(
+                    component_id="rate_node",
+                    component_type="transform",
+                    message="Interpretation review is pending for 'cool'.",
+                    suggestion="Resolve the pending interpretation review before running.",
+                    error_code=INTERPRETATION_REVIEW_PENDING_CODE,
+                )
+            ],
+            readiness=_pending_interpretation_readiness(),
+        )
+        model_prose = "Review is pending for cool."
+
+        with patch.object(service, "_runtime_preflight", return_value=pending_preflight) as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=changed_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=True,
+            )
+
+        assert result.message == model_prose
+        assert result.raw_assistant_content is None
+        assert result.runtime_preflight is pending_preflight
         mock_preflight.assert_called_once_with(changed_state, "user-1")
 
     @pytest.mark.asyncio
@@ -4043,6 +4667,8 @@ class TestComposerRuntimePreflightFinalGate:
                     name="settings_load",
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
+                    affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[
@@ -4051,6 +4677,7 @@ class TestComposerRuntimePreflightFinalGate:
                     component_type="aggregation",
                     message="Forbidden name: 'end_of_source'",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4293,7 +4920,195 @@ class TestEmptyStateFinalizePassthrough:
         assert "augmentation" in message
         assert "discriminator" in message
 
-    # ── End-to-end through _finalize_no_tool_response ────────────────────
+    # ── _last_mutation_was_pending_proposal helper ───────────────────────
+
+    @staticmethod
+    def _proposal_invocation(
+        *,
+        tool_name: str = "set_pipeline",
+        version: int = 1,
+    ) -> Any:
+        """Build an invocation whose result_canonical mirrors the proposal-payload shape.
+
+        Mirrors the proposal_result envelope written at composer/service.py
+        line ~2697: ToolResult(success=True, data={status: APPROVAL_REQUIRED, ...}).
+        The blocker classifier reads result_canonical, so the test pins the
+        wire shape — if the proposal payload moves, this test will catch it.
+        """
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        result_payload = {
+            "success": True,
+            "data": {
+                "status": "APPROVAL_REQUIRED",
+                "proposal_id": "00000000-0000-0000-0000-000000000000",
+                "tool_name": tool_name,
+                "summary": "Replace the pipeline with csv input, 3 transforms, and 1 output.",
+                "message": "The requested pipeline change is pending human approval and has not been applied.",
+            },
+        }
+        canon = canonical_json(result_payload)
+        h = stable_hash(result_payload)
+        t = datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC)
+        return ComposerToolInvocation(
+            tool_call_id="call_proposal",
+            tool_name=tool_name,
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=canon,
+            result_hash=h,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=version,
+            version_after=version,
+            started_at=t,
+            finished_at=t,
+            latency_ms=1,
+            actor="test",
+        )
+
+    def test_last_mutation_was_pending_proposal_true_for_approval_required_payload(self) -> None:
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        invocations = (self._proposal_invocation(),)
+        assert _last_mutation_was_pending_proposal(invocations) is True
+
+    def test_last_mutation_was_pending_proposal_false_for_empty_invocations(self) -> None:
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        assert _last_mutation_was_pending_proposal(()) is False
+
+    def test_last_mutation_was_pending_proposal_skips_discovery_tools(self) -> None:
+        """Discovery tools (get_plugin_schema, list_*) are transparent — the
+        model interleaves them between real mutations. A proposal followed by
+        a discovery call still counts as a pending-proposal turn."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        proposal = self._proposal_invocation()
+        discovery = ComposerToolInvocation(
+            tool_call_id="call_discovery",
+            tool_name="get_plugin_schema",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=b'{"success": true}',
+            result_hash="1" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=1,
+            version_after=1,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((proposal, discovery)) is True
+
+    def test_last_mutation_was_pending_proposal_false_when_most_recent_mutation_is_arg_error(self) -> None:
+        """An ARG_ERROR after a successful proposal means the model retried
+        and the retry failed. The augmentation should fire."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        proposal = self._proposal_invocation()
+        arg_error = ComposerToolInvocation(
+            tool_call_id="call_failed",
+            tool_name="set_pipeline",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=None,
+            result_hash=None,
+            status=ComposerToolStatus.ARG_ERROR,
+            error_class="ToolArgumentError",
+            error_message="bad shape",
+            version_before=1,
+            version_after=None,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((proposal, arg_error)) is False
+
+    def test_last_mutation_was_pending_proposal_false_for_create_blob_success(self) -> None:
+        """create_blob success without state advance is the original target
+        of the empty-state augmentation — it must continue to fire."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        create_blob_inv = ComposerToolInvocation(
+            tool_call_id="call_blob",
+            tool_name="create_blob",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=b'{"success": true, "data": {"blob_id": "abc"}}',
+            result_hash="2" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=1,
+            version_after=1,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((create_blob_inv,)) is False
+
+    # ── End-to-end: pending-proposal suppression of empty-state augmentation ─
+
+    @pytest.mark.asyncio
+    async def test_pending_proposal_does_not_trigger_empty_state_augmentation(self) -> None:
+        """Reproduces the convergence-failure path from staging session
+        d121ba9c-8775-463d-afdf-75fd6b6f2456: under trust_mode=explicit_approve
+        a successful set_pipeline produces a pending proposal with
+        version_after == version_before. The empty-state augmentation gate
+        previously misclassified this as no-mutation and appended
+        '[ELSPETH-SYSTEM] The pipeline is still empty', derailing both the
+        operator's framing and (via the synthesized suffix being re-read on
+        subsequent turns) the model's own state model."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        model_prose = (
+            "I picked 5 Australian Government agency pages and prepared the workflow, "
+            "but the platform has put the pipeline change into human-approval pending "
+            "state, so it has not been applied yet."
+        )
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                user_message="please build me a pipeline",
+                tool_invocations=(self._proposal_invocation(),),
+            )
+
+        # Model's truthful pending-approval prose preserved verbatim.
+        assert result.message == model_prose
+        # No "[ELSPETH-SYSTEM] pipeline is still empty" suffix — the build
+        # succeeded as a pending proposal; that is not an empty-state failure.
+        assert "[ELSPETH-SYSTEM]" not in result.message
+        assert "pipeline is still empty" not in result.message
+        # No re-run of runtime preflight (state.version unchanged).
+        mock_preflight.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_empty_state_invalid_preflight_passes_through_model_content(self) -> None:
@@ -4311,6 +5126,8 @@ class TestEmptyStateFinalizePassthrough:
                     name="settings_load",
                     passed=False,
                     detail="Pipeline state is empty",
+                    affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[
@@ -4319,6 +5136,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type=None,
                     message="2 validation errors for ElspethSettings — source: Field required, sinks: Field required",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4372,6 +5190,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type=None,
                     message="Pipeline empty",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4438,6 +5257,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type="transform",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )
@@ -4515,6 +5335,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type="transform",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )
@@ -4983,7 +5804,12 @@ class TestAttemptProofRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        self.service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
 
     def _state_with_blocking_csv(self):
         """Build a state whose preview emits csv_fixed_schema_omits_observed_columns."""
@@ -5016,6 +5842,7 @@ class TestAttemptProofRepair:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5235,7 +6062,12 @@ class TestComposeLoopForcedRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        self.service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
 
     def _wire_blocking_pipeline_tool_calls(self) -> list[dict[str, Any]]:
         """Tool calls that establish the blocking csv_fixed_schema_omits_observed_columns state."""
@@ -5259,6 +6091,7 @@ class TestComposeLoopForcedRepair:
                     "options": {
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -5281,6 +6114,93 @@ class TestComposeLoopForcedRepair:
                 "arguments": {"patch": {"schema": {"mode": "observed"}}},
             },
         ]
+
+    def _wire_uploaded_blob_to_output_tool_calls(self) -> list[dict[str, Any]]:
+        """Tool calls for the uploaded-CSV happy path after an empty-state stall."""
+        return [
+            {
+                "id": "call_source",
+                "name": "set_source_from_blob",
+                "arguments": {
+                    "blob_id": self.blob_id,
+                    "on_success": "out",
+                    "on_validation_failure": "discard",
+                    "options": {"schema": {"mode": "observed"}},
+                },
+            },
+            {
+                "id": "call_output",
+                "name": "set_output",
+                "arguments": {
+                    "sink_name": "out",
+                    "plugin": "json",
+                    "options": {
+                        "path": "outputs/out.json",
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                },
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_state_uploaded_blob_stall_forces_repair_turn(self) -> None:
+        """A no-tool prose reply must not end the turn when ready uploaded blobs exist.
+
+        Regression for elspeth-b493ddf810: the hard-mode uploaded-CSV happy
+        path produced repeated prose replies, no tool calls, and an empty
+        CompositionState even though a ready uploaded CSV blob was present.
+        The service should feed the model a concrete repair instruction naming
+        the ready blob and continue the loop, instead of finalizing the
+        empty-state response.
+        """
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turn1_stall = _make_llm_response(
+            content="The uploaded CSV appears to contain only the header row, so I cannot build yet.",
+            tool_calls=None,
+        )
+        turn2_build = _make_llm_response(content=None, tool_calls=self._wire_uploaded_blob_to_output_tool_calls())
+        turn3_done = _make_llm_response(content="Ready.", tool_calls=None)
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_stall, turn2_build, turn3_done]
+            result = await self.service.compose(
+                "Build from my uploaded CSV",
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 3
+        assert result.repair_turns_used == 1
+        assert result.state.source is not None
+        assert result.state.source.options["blob_ref"] == self.blob_id
+        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.outputs[0].name == "out"
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
+
+        turn2_messages = mock_llm.call_args_list[1].args[0]
+        repair_msgs = [
+            m
+            for m in turn2_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and self.blob_id in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1
+        repair_text = str(repair_msgs[0]["content"])
+        assert "ready uploaded blob" in repair_text
+        assert "inspect_source" in repair_text
+        assert "source.blob_id" in repair_text
+        assert "Do not infer that a CSV is header-only" in repair_text
 
     def _futile_repair_tool_call(self, call_id: str, name_value: str) -> list[dict[str, Any]]:
         """Tool call that mutates state but does NOT clear the proof blocker.
@@ -5528,6 +6448,7 @@ class TestComposeLoopForcedRepair:
                     options={
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",
@@ -5607,6 +6528,7 @@ class TestComposeLoopForcedRepair:
                     options={
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",
@@ -5634,3 +6556,56 @@ class TestComposeLoopForcedRepair:
         # Gate skipped — only one LLM call, no repair turns.
         assert mock_llm.call_count == 1
         assert result.repair_turns_used == 0
+
+
+class TestComposeLoopFreeformRecipeIntentRouting:
+    @pytest.mark.asyncio
+    async def test_fork_coalesce_truncate_intent_applies_recipe_before_llm(self, tmp_path: Path) -> None:
+        engine, session_id = _session_engine_with_session()
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
+        prompt = (
+            "Please create a pipeline that processes the following customer rows. "
+            "Each row should be processed two ways in parallel and combined into "
+            "a single merged output row at outputs/merged.jsonl: path A keeps the "
+            "original row unchanged, path B truncates the description field to 30 "
+            "characters with suffix '...'. Combine both branches under separate "
+            "keys `path_a` and `path_b` in each merged output row -- one input row "
+            "produces one output row containing both branches side-by-side. "
+            "Customer rows (CSV):\n"
+            "name,description\n"
+            "alice,this is a moderately long description for testing the truncation behaviour\n"
+            "bob,short note\n"
+            "charlie,another lengthy customer description that exceeds thirty characters comfortably"
+        )
+        user_message_id = _insert_user_message(engine, session_id, prompt)
+
+        with patch.object(
+            service,
+            "_call_llm_before_deadline",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("intent routing should bypass the cheap model"),
+        ) as mock_llm:
+            result = await service.compose(
+                prompt,
+                [],
+                _empty_state(),
+                session_id=session_id,
+                user_id="test-user",
+                user_message_id=user_message_id,
+            )
+
+        assert mock_llm.call_count == 0
+        assert result.state.validate().is_valid is True
+        assert result.state.source is not None
+        assert result.state.source.plugin == "csv"
+        assert result.state.source.options["blob_ref"]
+        assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
+        assert any(node.plugin == "truncate" for node in result.state.nodes)
+        assert result.state.outputs[0].name == "merged_rows"
+        assert result.state.outputs[0].options["path"] == "outputs/merged.jsonl"
+        assert "fork-coalesce-truncate-jsonl" in result.message

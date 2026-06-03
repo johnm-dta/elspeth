@@ -19,17 +19,19 @@ import io
 import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
+from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_headers_value
@@ -195,8 +197,12 @@ class AzureBlobSinkConfig(DataPluginConfig):
 
     @property
     def headers_mapping(self) -> dict[str, str] | None:
-        if isinstance(self.headers, dict):
-            return self.headers
+        # Dispatch on the canonical header mode (single source of truth) rather
+        # than re-inspecting the runtime type of the validated union field.
+        # parse_header_mode() returns CUSTOM iff headers is a non-empty dict, so
+        # the narrowing is exact.
+        if self.headers_mode is HeaderMode.CUSTOM:
+            return cast("dict[str, str]", self.headers)
         return None
 
     @model_validator(mode="after")
@@ -241,7 +247,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -249,7 +255,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="blob_path")
 
     @model_validator(mode="after")
     def validate_blob_path_template(self) -> Self:
@@ -301,13 +307,31 @@ class AzureBlobSink(BaseSink):
     """
 
     name = "azure_blob"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1816d1d5730f7f52"
+    source_file_hash: str | None = "sha256:8a61dd0396069293"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: Azure Blobs are immutable - cannot append
     supports_resume: bool = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Writes pipeline rows to Azure Blob Storage as CSV, JSON, or JSONL.",
+                composer_hints=(
+                    "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
+                    "blob_path is a Jinja2 template; use stable run metadata such as run_id or timestamp instead of row values.",
+                    "For CSV output, csv_options.include_header controls whether a header row is written.",
+                    "Set headers to normalized, original, or an explicit mapping when downstream consumers need display names.",
+                    "Azure Blob sink cannot resume append writes; choose unique blob paths for reruns or resumable workflows.",
+                ),
+            )
+        return None
 
     def configure_for_resume(self) -> None:
         """Azure Blob sink does not support resume.
@@ -583,6 +607,21 @@ class AzureBlobSink(BaseSink):
         output_rows = rows
         if self._format in {"json", "jsonl"}:
             output_rows = apply_display_headers(self, rows)
+            # A value that can't be encoded as standard JSON (NaN/Infinity, or a
+            # non-serializable object) is a per-row Tier-2/3 data fault, NOT a code
+            # bug: divert that row (recorded + routed per on_write_failure) so one bad
+            # value doesn't abort the whole blob upload. The blob upload stays
+            # all-or-nothing — but over the GOOD rows. CSV is unaffected (csv writes
+            # non-finite floats as text, so no serialization crash occurs there).
+            serializable_rows: list[dict[str, Any]] = []
+            for i, output_row in enumerate(output_rows):
+                try:
+                    json.dumps(output_row, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    self._divert_row(rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
+                    continue
+                serializable_rows.append(output_row)
+            output_rows = serializable_rows
 
         # Render the blob path once per instance and reuse it across writes.
         rendered_path = self._get_or_init_blob_path(ctx)
@@ -690,7 +729,8 @@ class AzureBlobSink(BaseSink):
                 path_or_uri=f"azure://{self._container}/{rendered_path}",
                 content_hash=content_hash,
                 size_bytes=size_bytes,
-            )
+            ),
+            diversions=self._get_diversions(),
         )
 
     def flush(self) -> None:

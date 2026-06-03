@@ -1,0 +1,543 @@
+/* catalog.css — Catalog drawer, plugin cards, shortcuts help, and audit-icon glyph.
+   Owners: .shortcuts-group, .shortcuts-list*, .plugin-card*, .audit-icon*,
+   .catalog-backdrop, .catalog-drawer, .catalog-header*, .catalog-close-btn,
+   .catalog-search*, .catalog-tab*, .catalog-list, .filter-chip*,
+   .catalog-status-message*, .inline-chat-source-entry*.
+   (The .command-palette-footer kbd descendant selector that lived in the
+   shortcuts banner moved to common.css next to its .command-palette-footer
+   ancestor.) */
+
+/* ---------------------------------------------------------------------------
+   Shortcuts Help
+   --------------------------------------------------------------------------- */
+.shortcuts-group {
+  margin-bottom: var(--space-md);
+}
+
+.shortcuts-list {
+  margin: 0 0 var(--space-xl);
+  padding: 0;
+}
+
+.shortcuts-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.shortcuts-list-item:last-child {
+  border-bottom: none;
+}
+
+.shortcuts-list-item dt {
+  flex-shrink: 0;
+  min-width: 80px;
+}
+
+.shortcuts-list-item dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+
+/* ---------------------------------------------------------------------------
+   PluginCard
+   --------------------------------------------------------------------------- */
+.plugin-card {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+}
+
+.plugin-card-header-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.plugin-card-name {
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  line-height: 1.25;
+}
+
+.plugin-card-kind {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.plugin-card-desc {
+  display: -webkit-box;
+  margin-top: 2px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plugin-card-audit-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--space-xs);
+}
+
+.audit-icon {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.audit-icon-glyph {
+  display: none;
+}
+
+.audit-icon-positive {
+  color: var(--color-success);
+  border-color: var(--color-success-border);
+  background-color: var(--color-success-bg);
+}
+
+.audit-icon-attention {
+  color: var(--color-warning);
+  border-color: var(--color-warning-border);
+  background-color: var(--color-warning-bg);
+}
+
+.audit-icon-informational {
+  color: var(--color-info);
+  border-color: var(--color-info-border);
+  background-color: var(--color-info-bg);
+}
+
+.plugin-card-actions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+}
+
+.plugin-card-detail-toggle,
+.plugin-card-disclosure {
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+}
+
+.plugin-card-details {
+  display: grid;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.plugin-card-prose-section {
+  display: grid;
+  gap: 2px;
+}
+
+.plugin-card-prose-label,
+.plugin-card-example-label {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.plugin-card-prose-body,
+.plugin-card-prose-fallback {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.plugin-card-example-code {
+  max-height: 140px;
+  margin: 4px 0 0;
+  padding: var(--space-sm);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-2xs);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.plugin-card-expanded {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+}
+
+.plugin-card-schema-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-error);
+}
+
+.plugin-card-schema-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.plugin-card-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plugin-card-field-name {
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+}
+
+.plugin-card-field-type {
+  color: var(--color-text-muted);
+  margin-left: var(--space-sm);
+  font-size: var(--font-size-xs);
+}
+
+.plugin-card-field-required {
+  color: var(--color-warning);
+  margin-left: var(--space-sm);
+  font-size: var(--font-size-3xs);
+}
+
+.plugin-card-field-desc {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.plugin-card-no-fields {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+
+/* ---------------------------------------------------------------------------
+   CatalogDrawer (inline styles migrated)
+   --------------------------------------------------------------------------- */
+.catalog-backdrop {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.3);
+  z-index: var(--z-catalog-backdrop);
+}
+
+.catalog-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, calc(100% - 24px));
+  z-index: var(--z-catalog);
+  background-color: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+}
+
+.catalog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.catalog-header-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.catalog-header-eyebrow {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.catalog-header-title {
+  font-weight: 700;
+  font-size: var(--font-size-base);
+  line-height: 1.25;
+}
+
+.catalog-header-subtitle {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.35;
+}
+
+.catalog-close-btn {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-base);
+  line-height: 1;
+  min-width: 44px;
+  min-height: var(--size-control);
+}
+
+.catalog-search-wrapper {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.catalog-search-container {
+  position: relative;
+}
+
+.catalog-search-input {
+  width: 100%;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.catalog-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  /* Hit-target floor: previously the 2px padding + 16px glyph left a ~20×20
+     button (below WCAG 2.5.8 AA's 24×24 floor). 28×28 clears the floor with
+     room to spare while staying small enough to sit inside the search input. */
+  min-width: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  padding: 2px;
+  line-height: 1;
+}
+
+.catalog-search-clear:hover,
+.catalog-search-clear:focus-visible {
+  color: var(--color-text);
+  background-color: var(--color-surface-hover);
+}
+
+.catalog-tab-strip {
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.catalog-tab {
+  flex: 1;
+  padding: var(--space-sm) var(--space-xs);
+  font-size: var(--font-size-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+}
+
+.catalog-tab-count {
+  font-size: var(--font-size-3xs);
+  padding: 1px 5px;
+  border-radius: var(--radius-lg);
+  font-weight: 600;
+}
+
+.catalog-tab-count--active {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+}
+
+.catalog-tab-count--inactive {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+}
+
+.catalog-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.filter-chip-strip {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.filter-chip-group {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-xs);
+}
+
+.filter-chip-group-label {
+  padding-top: 3px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.filter-chip {
+  /* Raised from the WCAG 2.5.8 AA floor (24px exactly) to 28px so the chip
+     comfortably clears the floor and tolerates browser font-size variation. */
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-3xs);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.filter-chip:hover,
+.filter-chip:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.filter-chip:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.filter-chip-active {
+  border-color: var(--color-accent);
+  background-color: var(--color-info-bg);
+  color: var(--color-text);
+}
+
+.filter-chip-clear {
+  justify-self: start;
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
+.catalog-status-message {
+  padding: var(--space-lg);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.catalog-status-message--error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--color-error);
+}
+
+.catalog-status-message--center {
+  text-align: center;
+}
+
+.inline-chat-source-entry {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface-elevated);
+}
+
+.inline-chat-source-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.inline-chat-source-entry-title {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.inline-chat-source-entry-badge {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.inline-chat-source-entry-desc {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.inline-chat-source-entry-try {
+  justify-self: start;
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+}

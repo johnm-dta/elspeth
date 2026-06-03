@@ -14,7 +14,9 @@
 #
 # Environment:
 #   ELSPETH_ARCH_PACK_DIR   Override the source directory (default: latest
-#                           docs/arch-pack-* by lexicographic order).
+#                           active docs/arch-pack-* or archived
+#                           docs-archive/*/docs/arch-pack-* by
+#                           lexicographic order).
 #   FORCE_DATE              Override the title-page date (default: today).
 
 set -euo pipefail
@@ -28,7 +30,7 @@ ARCH_PACK_DIR="$(els_discover_arch_pack)"
 echo "Source: $ARCH_PACK_DIR"
 
 OUTPUT_TYP="$SCRIPT_DIR/elspeth-arch-pack.typ"
-OUTPUT_PDF="$PROJECT_ROOT/docs/assets/elspeth-arch-pack.pdf"
+OUTPUT_PDF="$PROJECT_ROOT/tools/pdf/out/elspeth-arch-pack.pdf"
 MERMAID_DIR="$SCRIPT_DIR/.mermaid-tmp"
 
 # ─────────────────────────────────────────────────────────────

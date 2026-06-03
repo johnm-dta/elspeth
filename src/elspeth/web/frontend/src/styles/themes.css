@@ -1,0 +1,96 @@
+/* themes.css — High-contrast and forced-colors overrides.
+   Contains @media (prefers-contrast: more) and @media (forced-colors: active)
+   blocks that override .type-badge*, .status-badge*, .validation-banner-*,
+   .alert-banner, .tutorial-graph-*, .tutorial-progress-* etc.
+   MUST be imported LAST in styles/index.css — these rules override selectors
+   defined in every other file. */
+
+
+/* ---------------------------------------------------------------------------
+   High Contrast — respect OS-level contrast preferences
+   --------------------------------------------------------------------------- */
+@media (prefers-contrast: more) {
+  :root {
+    --color-text:           #ffffff;
+    --color-text-secondary: #b0d8d8;
+    --color-text-muted:     #96c0c0;
+    --color-border:         rgba(143, 200, 200, 0.30);
+    --color-border-strong:  rgba(143, 200, 200, 0.50);
+  }
+
+  [data-theme="light"] {
+    --color-text:           #000000;
+    --color-text-secondary: #1a3a44;
+    --color-text-muted:     #2a4a54;
+    --color-border:         rgba(15, 45, 53, 0.30);
+    --color-border-strong:  rgba(15, 45, 53, 0.50);
+  }
+
+  .type-badge {
+    border-width: 2px;
+  }
+
+  :focus-visible {
+    outline-width: 3px;
+  }
+}
+
+@media (forced-colors: active) {
+  .validation-banner-pass,
+  .validation-banner-fail,
+  .alert-banner {
+    border: 2px solid CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .type-badge-source,
+  .type-badge-transform,
+  .type-badge-gate,
+  .type-badge-sink,
+  .type-badge-aggregation,
+  .type-badge-coalesce {
+    border-width: 2px;
+    forced-color-adjust: none;
+  }
+
+  .react-flow__edge-path {
+    stroke: ButtonText;
+  }
+
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  .yaml-toolbar-btn[data-copied="true"] {
+    border: 2px solid Highlight;
+  }
+
+  /* First-run tutorial — high-contrast fallbacks. Without these the
+     graph nodes render borderless, the active progress dot is
+     indistinguishable from inactive dots, and the indeterminate
+     progress bar disappears into the surface. */
+  .tutorial-graph-node {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .tutorial-graph-chevron {
+    color: CanvasText;
+  }
+
+  .tutorial-progress-dot {
+    border: 1px solid CanvasText;
+  }
+
+  .tutorial-progress-dot--active {
+    background: Highlight;
+  }
+
+  .tutorial-progress-bar {
+    border: 1px solid CanvasText;
+  }
+
+  .tutorial-progress-bar::after {
+    background: Highlight;
+  }
+}

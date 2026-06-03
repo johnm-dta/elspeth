@@ -24,7 +24,7 @@ class TestLLMContractValidationBasics:
                 "schema": {"mode": "observed"},
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "Hello {{ row.customer_name }}",
+                "prompt_template": "Hello {{ row.customer_name }}",
                 "required_input_fields": ["customer_name"],
             }
         )
@@ -41,7 +41,7 @@ class TestLLMContractValidationBasics:
                 {
                     "schema": {"mode": "observed"},
                     "model": "gpt-4",
-                    "template": "Hello",
+                    "prompt_template": "Hello",
                     "required_input_fields": ["valid", "invalid-field"],
                 }
             )
@@ -61,7 +61,7 @@ class TestLLMTemplateFieldDeclarationRequired:
                     "schema": {"mode": "observed"},
                     "provider": "azure",
                     "model": "gpt-4",
-                    "template": "Customer: {{ row.customer_id }}, Amount: {{ row.amount }}",
+                    "prompt_template": "Customer: {{ row.customer_id }}, Amount: {{ row.amount }}",
                     # No required_input_fields - this is now an error
                 }
             )
@@ -81,7 +81,7 @@ class TestLLMTemplateFieldDeclarationRequired:
                 "schema": {"mode": "observed"},
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "Customer: {{ row.customer_id }}",
+                "prompt_template": "Customer: {{ row.customer_id }}",
                 "required_input_fields": [],  # Explicit: "I accept runtime risk"
             }
         )
@@ -98,7 +98,7 @@ class TestLLMTemplateFieldDeclarationRequired:
                 "schema": {"mode": "observed"},
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "Customer: {{ row.customer_id }}",
+                "prompt_template": "Customer: {{ row.customer_id }}",
                 "required_input_fields": ["customer_id"],
             }
         )
@@ -115,7 +115,7 @@ class TestLLMTemplateFieldDeclarationRequired:
                 "schema": {"mode": "observed"},
                 "provider": "azure",
                 "model": "gpt-4",
-                "template": "Static prompt with {{ lookup.value }}",
+                "prompt_template": "Static prompt with {{ lookup.value }}",
             }
         )
 

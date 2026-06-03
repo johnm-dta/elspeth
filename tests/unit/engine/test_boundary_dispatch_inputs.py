@@ -10,6 +10,7 @@ from elspeth.contracts.declaration_contracts import (
     BoundaryInputs,
     BoundaryOutputs,
     DeclarationContract,
+    DeclarationContractViolation,
     ExampleBundle,
     _clear_registry_for_tests,
     _restore_registry_snapshot_for_tests,
@@ -25,6 +26,10 @@ from elspeth.engine.executors.source_guaranteed_fields import SourceGuaranteedFi
 
 class _Payload(TypedDict):
     note: str
+
+
+class _Violation(DeclarationContractViolation):
+    payload_schema = _Payload
 
 
 def _contract(fields: tuple[str, ...]) -> SchemaContract:
@@ -48,6 +53,7 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 class _BoundaryOnlyContract(DeclarationContract):
     name: ClassVar[str] = "boundary_only_test"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_Violation]] = _Violation
     invoked: ClassVar[int] = 0
 
     def applies_to(self, plugin: Any) -> bool:
@@ -69,6 +75,7 @@ class _BoundaryOnlyContract(DeclarationContract):
 class _PostEmissionOnlyContract(DeclarationContract):
     name: ClassVar[str] = "post_only_test"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_Violation]] = _Violation
     invoked: ClassVar[int] = 0
 
     def applies_to(self, plugin: Any) -> bool:
@@ -87,12 +94,34 @@ class _PostEmissionOnlyContract(DeclarationContract):
         raise NotImplementedError
 
 
+class _CountingSourceGuaranteedFieldsContract(SourceGuaranteedFieldsContract):
+    name: ClassVar[str] = "counting_source_guaranteed_fields"
+    invoked: ClassVar[int] = 0
+
+    @implements_dispatch_site("boundary_check")
+    def boundary_check(self, inputs: BoundaryInputs, outputs: BoundaryOutputs) -> None:
+        type(self).invoked += 1
+        super().boundary_check(inputs, outputs)
+
+
+class _CountingSinkRequiredFieldsContract(SinkRequiredFieldsContract):
+    name: ClassVar[str] = "counting_sink_required_fields"
+    invoked: ClassVar[int] = 0
+
+    @implements_dispatch_site("boundary_check")
+    def boundary_check(self, inputs: BoundaryInputs, outputs: BoundaryOutputs) -> None:
+        type(self).invoked += 1
+        super().boundary_check(inputs, outputs)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registry():
     snapshot = _snapshot_registry_for_tests()
     _clear_registry_for_tests()
     _BoundaryOnlyContract.invoked = 0
     _PostEmissionOnlyContract.invoked = 0
+    _CountingSourceGuaranteedFieldsContract.invoked = 0
+    _CountingSinkRequiredFieldsContract.invoked = 0
     yield
     _restore_registry_snapshot_for_tests(snapshot)
 
@@ -157,13 +186,18 @@ def test_run_boundary_checks_dispatches_only_boundary_contracts() -> None:
 
 
 def test_run_boundary_checks_skips_sink_contract_for_source_plugin() -> None:
-    register_declaration_contract(SourceGuaranteedFieldsContract())
-    register_declaration_contract(SinkRequiredFieldsContract())
+    register_declaration_contract(_CountingSourceGuaranteedFieldsContract())
+    register_declaration_contract(_CountingSinkRequiredFieldsContract())
 
-    plugin = type("SourcePlugin", (), {})()
-    plugin.name = "csv"
-    plugin.node_id = "source-1"
-    plugin.declared_guaranteed_fields = frozenset({"value"})
+    class SourcePlugin:
+        name = "csv"
+        node_id = "source-1"
+        declared_guaranteed_fields = frozenset({"value"})
+
+        def load(self, ctx: Any) -> None:
+            raise NotImplementedError
+
+    plugin = SourcePlugin()
 
     assert (
         run_boundary_checks(
@@ -181,6 +215,8 @@ def test_run_boundary_checks_skips_sink_contract_for_source_plugin() -> None:
         )
         is None
     )
+    assert _CountingSourceGuaranteedFieldsContract.invoked == 1
+    assert _CountingSinkRequiredFieldsContract.invoked == 0
 
 
 def test_run_boundary_checks_skips_contracts_when_plugin_lacks_declaration_attrs() -> None:
@@ -210,13 +246,21 @@ def test_run_boundary_checks_skips_contracts_when_plugin_lacks_declaration_attrs
 
 
 def test_run_boundary_checks_skips_source_contract_for_sink_plugin() -> None:
-    register_declaration_contract(SourceGuaranteedFieldsContract())
-    register_declaration_contract(SinkRequiredFieldsContract())
+    register_declaration_contract(_CountingSourceGuaranteedFieldsContract())
+    register_declaration_contract(_CountingSinkRequiredFieldsContract())
 
-    plugin = type("SinkPlugin", (), {})()
-    plugin.name = "json"
-    plugin.node_id = "sink-1"
-    plugin.declared_required_fields = frozenset({"value"})
+    class SinkPlugin:
+        name = "json"
+        node_id = "sink-1"
+        declared_required_fields = frozenset({"value"})
+
+        def write(self, rows: list[dict[str, Any]], ctx: Any) -> None:
+            raise NotImplementedError
+
+        def flush(self) -> None:
+            raise NotImplementedError
+
+    plugin = SinkPlugin()
 
     assert (
         run_boundary_checks(
@@ -234,3 +278,5 @@ def test_run_boundary_checks_skips_source_contract_for_sink_plugin() -> None:
         )
         is None
     )
+    assert _CountingSourceGuaranteedFieldsContract.invoked == 0
+    assert _CountingSinkRequiredFieldsContract.invoked == 1

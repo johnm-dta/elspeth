@@ -180,6 +180,77 @@ def test_diagnostics_summary_counts_share_main_read_snapshot(tmp_path, monkeypat
         db.close()
 
 
+def test_diagnostics_surfaces_latest_failed_operation_as_failure_detail(tmp_path) -> None:
+    """When a run has a failed operation, failure_detail must point at it.
+
+    Regression test for run 8294aab2 (2026-05-13): a preflight HTTP 400
+    killed the pipeline; ``operations.error_message`` had the full chain
+    (including provider body after the Task #2 wrap-site change) but the
+    UI rendered only the sanitized class-name from ``runs.error``. The
+    diagnostics endpoint must surface the failed operation directly so the
+    frontend doesn't have to scan the (paged) operations list.
+    """
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
+    try:
+        web_run_id = "web-run-1"
+        factory = RecorderFactory(db)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=web_run_id)
+        _register_node(factory, web_run_id, "transform", NodeType.TRANSFORM, "llm")
+
+        ok_op = factory.execution.begin_operation(web_run_id, "transform", "runtime_preflight")
+        factory.execution.complete_operation(ok_op.operation_id, "completed", duration_ms=10.0)
+
+        bad_op = factory.execution.begin_operation(web_run_id, "transform", "runtime_preflight")
+        factory.execution.complete_operation(
+            bad_op.operation_id,
+            "failed",
+            error=(
+                "pre_flight_failed: llm provider openrouter failed runtime preflight: "
+                "LLMClientError: HTTP 400 | body: "
+                '{"error":{"message":"max_output_tokens below minimum"}}'
+            ),
+            duration_ms=995.0,
+        )
+
+        diagnostics = load_run_diagnostics_from_db(
+            db,
+            run_id=web_run_id,
+            landscape_run_id=web_run_id,
+            run_status="failed",
+            limit=50,
+        )
+
+        assert diagnostics.failure_detail is not None
+        assert diagnostics.failure_detail.operation_id == bad_op.operation_id
+        assert diagnostics.failure_detail.node_id == "transform"
+        assert diagnostics.failure_detail.operation_type == "runtime_preflight"
+        assert "max_output_tokens below minimum" in diagnostics.failure_detail.error_message
+        assert "HTTP 400" in diagnostics.failure_detail.error_message
+    finally:
+        db.close()
+
+
+def test_diagnostics_failure_detail_none_when_no_failed_operations(tmp_path) -> None:
+    """failure_detail must be None for runs without failed operations."""
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
+    try:
+        web_run_id = "web-run-1"
+        _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
+
+        diagnostics = load_run_diagnostics_from_db(
+            db,
+            run_id=web_run_id,
+            landscape_run_id=web_run_id,
+            run_status="completed",
+            limit=50,
+        )
+
+        assert diagnostics.failure_detail is None
+
+    finally:
+        db.close()
+
+
 def test_diagnostics_empty_when_landscape_run_has_not_started(tmp_path) -> None:
     db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
     try:

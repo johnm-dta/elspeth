@@ -6,6 +6,7 @@ from typing import Any, ClassVar, TypedDict
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BoundaryInputs,
@@ -53,6 +54,7 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 
 class _TestSourcePlugin(BaseSource):
     name = "SourceGuaranteedFieldsSource"
+    determinism = Determinism.IO_READ
     output_schema = object
 
     def __init__(
@@ -98,6 +100,7 @@ class _SecondaryBoundaryViolation(DeclarationContractViolation):
 class _SecondaryBoundaryContract(DeclarationContract):
     name: ClassVar[str] = "secondary_source_boundary_test"
     payload_schema: ClassVar[type] = _SecondaryPayload
+    violation_class: ClassVar[type[_SecondaryBoundaryViolation]] = _SecondaryBoundaryViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_guaranteed_fields)
@@ -153,6 +156,7 @@ def test_applies_to_true_for_inherited_declared_guaranteed_fields() -> None:
 
     class _DeclaredSourceBase(BaseSource):
         name = "declared-source-base"
+        determinism = Determinism.IO_READ
         output_schema = object
         declared_guaranteed_fields = frozenset({"customer_id"})
 
@@ -170,6 +174,7 @@ def test_applies_to_true_for_inherited_declared_guaranteed_fields() -> None:
             pass
 
     class _InheritedDeclaredSource(_DeclaredSourceBase):
+        determinism = Determinism.IO_READ
         pass
 
     assert contract.applies_to(_InheritedDeclaredSource()) is True

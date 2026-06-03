@@ -24,6 +24,7 @@ from elspeth.contracts.call_data import CallPayload
 from elspeth.contracts.errors import ContractViolation, TransformErrorReason
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOps
+from elspeth.core.landscape.auth_audit_repository import AuthAuditRepository
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -77,6 +78,9 @@ class _PluginAuditWriterAdapter:
     def allocate_call_index(self, state_id: str) -> int:
         return self._execution.allocate_call_index(state_id)
 
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return self._execution.allocate_operation_call_index(operation_id)
+
     def record_call(
         self,
         state_id: str,
@@ -90,6 +94,7 @@ class _PluginAuditWriterAdapter:
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         return self._execution.record_call(
             state_id,
@@ -102,6 +107,7 @@ class _PluginAuditWriterAdapter:
             latency_ms,
             request_ref=request_ref,
             response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def record_operation_call(
@@ -114,9 +120,25 @@ class _PluginAuditWriterAdapter:
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
+        if call_index is not None:
+            return self._execution.record_operation_call(
+                operation_id,
+                call_type,
+                status,
+                request_data,
+                response_data,
+                error,
+                latency_ms,
+                call_index=call_index,
+                request_ref=request_ref,
+                response_ref=response_ref,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
+            )
         return self._execution.record_operation_call(
             operation_id,
             call_type,
@@ -127,6 +149,7 @@ class _PluginAuditWriterAdapter:
             latency_ms,
             request_ref=request_ref,
             response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def get_node_state(self, state_id: str) -> NodeState | None:
@@ -273,6 +296,7 @@ class RecorderFactory:
 
         # Composed repository for run lifecycle
         self._run_lifecycle = RunLifecycleRepository(db, ops, run_loader)
+        self._auth_audit = AuthAuditRepository(ops)
 
         # Composed repository for execution recording
         self._execution = ExecutionRepository(
@@ -316,6 +340,10 @@ class RecorderFactory:
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
         return self._run_lifecycle
+
+    @property
+    def auth_audit(self) -> AuthAuditRepository:
+        return self._auth_audit
 
     @property
     def execution(self) -> ExecutionRepository:

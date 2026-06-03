@@ -1,0 +1,39 @@
+{
+  "extends": ["stylelint-config-standard"],
+  "rules": {
+    "comment-empty-line-before": null,
+    "declaration-empty-line-before": null,
+    "rule-empty-line-before": null,
+    "color-function-notation": null,
+    "alpha-value-notation": null,
+    "selector-class-pattern": null,
+    "no-descending-specificity": null,
+    "declaration-block-no-redundant-longhand-properties": null,
+    "shorthand-property-no-redundant-values": null,
+    "media-feature-range-notation": null,
+    "selector-not-notation": null,
+    "value-keyword-case": null,
+    "color-function-alias-notation": null,
+    "color-hex-length": null,
+    "declaration-property-value-keyword-no-deprecated": null,
+    "function-no-unknown": null,
+    "length-zero-no-unit": null,
+    "no-empty-source": null,
+    "import-notation": null,
+    "at-rule-empty-line-before": null,
+    "selector-pseudo-class-no-unknown": null,
+    "custom-property-empty-line-before": null,
+    "property-no-deprecated": null,
+
+    "declaration-property-value-disallowed-list": [
+      {
+        "min-height": ["/^(36|40|44|48)px$/"],
+        "font-size": ["/^\\d+(\\.\\d+)?px$/"],
+        "border-radius": ["/^\\d+(\\.\\d+)?px$/"]
+      },
+      {
+        "message": "Raw pixel literals are forbidden in min-height (touch targets), font-size, and border-radius. Compose the design-system tokens: .btn / .btn-compact for touch targets, var(--font-size-*) for type, var(--radius-*) for corners. If you genuinely need a value the scale doesn't cover, add a new token to the :root block — do not introduce a literal."
+      }
+    ]
+  }
+}

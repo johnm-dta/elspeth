@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -13,6 +14,7 @@ class StubSink(BaseSink):
     """Minimal concrete sink for testing diversion infrastructure."""
 
     name = "stub_sink"
+    determinism = Determinism.IO_WRITE
 
     def write(self, rows, ctx):
         for i, row in enumerate(rows):

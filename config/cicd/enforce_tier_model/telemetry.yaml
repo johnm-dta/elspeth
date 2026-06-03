@@ -32,75 +32,289 @@ per_file_rules:
   reason: PluginValidationError discrimination for cleanup logic
   expires: null
   max_hits: 1
-- pattern: telemetry/manager.py
-  rules:
-  - R5
-  reason: TELEMETRY_TRANSPORT_ERRORS isinstance guards for inverted exception pattern
-  expires: null
-  max_hits: 4
 allow_hits:
-- key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=ff397de66d5f4424
-  owner: architecture
-  reason: Queue.get() is stdlib API, not dict access
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=32610a7c35236337
-  owner: architecture
-  reason: TelemetryExporterError stored for re-raise on flush() — not silently swallowed
-  safety: Stored exception re-raised on main thread via flush()/close()
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=dab16ec747e74f86
-  owner: architecture
-  reason: Inverted transport-error pattern — only transport errors swallowed, all others re-raise
-  safety: Non-transport exceptions stored and re-raised on main thread
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=ffa2333c72f0c3ed
-  owner: architecture
-  reason: Counter increment with dict.get() default — standard Python counter pattern
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=8d294302ec31bc67
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=fa4b085fe4c0cf82
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=30098fd13284c047
-  owner: architecture
-  reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=eeff63a9135513fd
-  owner: architecture
-  reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=540532928ce6fbfe
-  owner: architecture
-  reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=45deae25e428a8e9
-  owner: architecture
-  reason: Sentinel reinsertion loop handles bounded queue contention
-  safety: Full queue retries with bounded drain then explicit RuntimeError fail-fast
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=64a767e1a6835af2
-  owner: architecture
-  reason: Sentinel reinsertion loop handles bounded queue contention
-  safety: Empty queue during contention is a race retry path only; loop continues and fails loudly if unresolved
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=aec2c28bc46bcb13
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=bd4e524c30614a5a
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
+- key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=30047980e068a453
+  owner: john
+  reason: |-
+    At telemetry/manager.py:176 in `_export_loop`, the flagged `.get()` is `self._queue.get()`, the blocking dequeue method of the `queue.Queue` instance constructed at line 150 (`self._queue: queue.Queue[...] = queue.Queue(maxsize=queue_size)`), not a dict-style defensive `.get(key, default)` on external data. R1 targets silent defensive dict access that papers over a missing key; this call takes no key and no default — it blocks the export thread until an event (or the shutdown sentinel `None`) arrives. Different semantics entirely (blocking concurrency primitive), no Tier-1/Tier-2 typed-object access, no data loss. The existing rationale still accurately describes the current code; it is a correctly-identified false positive.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:43:38.491514+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.98
+  judge_rationale: |-
+    RULE MISFIRES. The flagged `.get()` at line 176 is `self._queue.get()` — the blocking dequeue method on a `queue.Queue` instance constructed at line 150 (`self._queue: queue.Queue[TelemetryEvent | None] = queue.Queue(maxsize=queue_size)`). It is a concurrency primitive that blocks until an event or the shutdown sentinel `None` arrives; it takes no key and no default, and has nothing to do with R1's concern (silent defensive dict access that papers over missing keys). No Tier-1/Tier-2/Tier-3 data access is involved, no value is fabricated, and the visible code (typed `queue.Queue`, sentinel-checked loop body with `task_done()` in `finally`) is consistent with the rationale. The rule's premise — that this is a dict-style `.get(key, default)` — is false here.
+  judge_signature_version: 2
+  scope_fingerprint: 3485f417387afdcd5f7b7bac11b7ea60c90b84f7eda2f27b8af9e2fcaab7ccef
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[3]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:159522b0d78786f15d236ae4884e07de2f450f36fbded7629d858da2e26197cb'
+- key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=05590f539280dce7
+  owner: john
+  reason: |-
+    At telemetry/manager.py:181 in `_export_loop`, `except TelemetryExporterError as e:` does not silently swallow: it stores the exception in `self._stored_exception` (line 184), which `flush()` re-raises at lines 521-524 when `fail_on_total_exporter_failure=True`. This is the documented cross-thread propagation boundary — a background (non-main) thread cannot raise directly into the main thread, so the error is parked for re-raise on the next `flush()`/`close()`. The `logger.error` is supplementary; the re-raise path preserves the failure as a surfaced fact, not a discarded one. This is a legitimate thread-handoff control pattern, not defensive Tier-3 suppression, and R6's swallow-without-re-raise concern is not met (the re-raise exists, just deferred to the synchronization point). The existing rationale matches the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:44:10.749908+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 forbids except handlers that swallow without re-raise or an explicit error result; this handler does the latter and the re-raise is real. Verified at telemetry/manager.py:521-524 that flush() re-raises self._stored_exception via try/finally (clearing the marker only after the raise), so the line-181 handler parks the TelemetryExporterError for the next synchronization point rather than discarding it. The logger.error call is supplementary; the failure is preserved as a surfaced fact on flush()/close(). Cross-thread propagation legitimately requires this park-and-re-raise pattern because a background thread cannot raise directly into the main thread. R6 not in the decorator's suppressible set (R1/R5) and the function takes no external parameter, so no decorator nudge applies.
+  judge_signature_version: 2
+  scope_fingerprint: 3485f417387afdcd5f7b7bac11b7ea60c90b84f7eda2f27b8af9e2fcaab7ccef
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[3]/body[2]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:fc7427fd6fa4769520a75865aad2f3d2d5c1edc276edb98ce3dff82db0f3fd45'
+- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=0a1bb9f3fb968fdf
+  owner: john
+  reason: |-
+    At telemetry/manager.py:362 in `handle_event`, `except queue.Full:` catches the bounded-queue overflow signal raised by `put_nowait()` (line 361) under `BackpressureMode.DROP` (gated at line 359). This is the documented EAFP control-flow idiom for a `queue.Queue` at capacity, not an error to propagate. The handler dispatches to `_drop_oldest_and_enqueue_newest()` (line 363), which evicts the oldest item and increments `_events_dropped` under `_dropped_lock` — drops are accounted, never silently lost. Telemetry is best-effort per the audit>telemetry>logger primacy order, so enacting the explicit DROP policy here (with counting) is the prescribed behaviour, not silent suppression. The existing rationale accurately describes the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:44:30.675892+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.93
+  judge_rationale: |-
+    PRESCRIBED FORM. The `except queue.Full:` at line 362 is the documented EAFP control-flow idiom for a bounded `queue.Queue` at capacity, gated explicitly by `BackpressureMode.DROP` at line 359. The handler does not swallow — it dispatches to `_drop_oldest_and_enqueue_newest()` which evicts the oldest item and increments `_events_dropped` under `_dropped_lock` (visible at lines 379-385), so drops are accounted, not lost. Telemetry sits below audit in the primacy order and is best-effort, so enacting the configured DROP policy with counted eviction is the prescribed behaviour at this site; the contrasting BLOCK branch immediately below also counts its timeout drops, confirming the pattern. The rationale states the policy, the accounting, and the primacy-order rationale, and the visible code supports each claim.
+  judge_signature_version: 2
+  scope_fingerprint: 094d3ff656bc4e4b3afd033402997316881d3e695052ba27356adfd7495f401c
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[5]/body[7]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:4c0f7e72e9f2b9f7ab32c1950025253e4d48d00bfa93623a54400500d6c6ee4d'
+- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=64535719a1fd4215
+  owner: john
+  reason: |-
+    At telemetry/manager.py:368 in `handle_event`, `except queue.Full:` catches the timeout from the BLOCK-mode `queue.put(event, timeout=30.0)` (line 367). A 30-second timeout means the export thread is likely dead or severely stuck; raising into pipeline code would crash the pipeline over a telemetry-subsystem failure, which the audit>telemetry>logger primacy order explicitly forbids. The catch records the drop in `_events_dropped` under `_dropped_lock` (lines 371-372) and emits a `logger.error` (line 370) — a sanctioned last-resort channel because telemetry itself is the broken subsystem here. The event is counted as dropped, not silently discarded; no pipeline rows or audit writes are affected. This is the telemetry layer protecting pipeline continuity, not defensive data coercion. The existing rationale matches the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:44:48.022447+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The catch is at the telemetry layer, narrowly scoped to queue.Full from a bounded 30s timeout on a BLOCK-mode put — i.e. the telemetry subsystem itself is the broken thing here (export thread stuck or dead). Per the primacy-order policy, audit fires first and crashes loud, telemetry is best-effort, and logger is the sanctioned last-resort channel precisely when telemetry is the failing subsystem — raising would crash the pipeline over a telemetry fault, which the policy forbids. The drop is recorded in _events_dropped under _dropped_lock (lines 371-372), not silently swallowed, so the event count remains auditable. The rationale speaks directly to R6's concern (swallowing without explicit error result) and shows the explicit accounting that satisfies it.
+  judge_signature_version: 2
+  scope_fingerprint: 094d3ff656bc4e4b3afd033402997316881d3e695052ba27356adfd7495f401c
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[5]/body[7]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:6d35a87d12906b4ba9aff250bb8499728d9ed5624853a806ed7f03b0d9164d0a'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=1c75bf1b3c8e4241
+  owner: john
+  reason: |-
+    At telemetry/manager.py:383 in `_drop_oldest_and_enqueue_newest`, `except queue.Empty:` catches the case where `self._queue.get_nowait()` (line 381) finds no item to evict — a benign race where a concurrent consumer drained the queue between the overflow detection and this compensating get. The handler sets `evicted = None; had_evicted = False` and proceeds to attempt enqueue of the newest event; this is EAFP control flow on a `queue.Queue` primitive, not suppression of a data error. No fabrication, no typed-object defensive access, and queue unfinished-task accounting stays balanced (the `task_done()` in the `finally` only fires when `had_evicted`). This entry was previously unjudged (existing_rationale null); the existing_reason is accurate and the code supports the suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:45:08.326764+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The `except queue.Empty:` at line 383 catches the documented control-flow signal from `queue.Queue.get_nowait()` — `Empty` is the stdlib primitive's typed way of saying 'no item available right now', not an error being swallowed. The handler explicitly sets `evicted = None; had_evicted = False` and the function continues with correct accounting (the `task_done()` in `finally` is gated on `had_evicted`, preserving unfinished-task balance on the race where a concurrent consumer drained the queue between overflow detection and this compensating get). No data is fabricated, no typed-contract shape is being defensively re-checked, and no Tier-1/Tier-2 invariant is at stake — this is canonical EAFP on a concurrency primitive. The rationale identifies the specific race and the accounting invariant it preserves, which is exactly the level of specificity an auditor needs.
+  judge_signature_version: 2
+  scope_fingerprint: c69f0e357b62664db574ed6665b4c3bfb6bfab5eb7de14e58f54d818b8d9ff40
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[6]/body[1]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c0442c66f9c55778e657ca71c4d7d1fca22d4809d384071c5f95283f5f511006'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=7b8c10be497703d4
+  owner: john
+  reason: |-
+    At telemetry/manager.py:405 in `_drop_oldest_and_enqueue_newest`, `except queue.Full:` catches a documented concurrency race where the bounded queue refilled between the eviction and the `put_nowait(event)` at line 404. Per the audit>telemetry>logger primacy order telemetry is best-effort and must never propagate exceptions to pipeline code; the handler increments `_events_dropped` and calls `_log_drops_if_needed()` (lines 408-409, under `_dropped_lock` held by the caller) before returning — the drop is counted, not silently swallowed. This is offensive handling of a known queue-primitive race via EAFP, not defensive coercion of typed data. The existing rationale accurately describes the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:46:33.542043+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The except catches queue.Full from a bounded-queue put_nowait — a recoverable concurrency-primitive race, not an error on first-party typed data. The handler is not silent: it increments self._events_dropped (line 408) and calls self._log_drops_if_needed() (line 409) before returning, so the drop is recorded as an explicit telemetry outcome. This conforms to the audit>telemetry>logger primacy order: telemetry is best-effort and must never propagate exceptions to pipeline code, and the surrounding docstring at lines 423-427 confirms that contract. R6's concern (swallowing without re-raise or explicit result) does not hold here because the explicit result is the dropped-event counter that downstream observers consume.
+  judge_signature_version: 2
+  scope_fingerprint: c69f0e357b62664db574ed6665b4c3bfb6bfab5eb7de14e58f54d818b8d9ff40
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[6]/body[1]/body[1]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:0c55db4327b639d07812ef47afa8ad3b14473330ffb48c194d43473fca6c2b65'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=79190bde3fa222f5
+  owner: john
+  reason: |-
+    At telemetry/manager.py:582 in `close`, `except queue.Full:` catches the backpressure signal from the bounded `self._queue.put(None, timeout=0.1)` (line 579), which must guarantee shutdown-sentinel insertion to prevent the export thread from hanging. The catch implements the sentinel-guarantee invariant documented in the method docstring: drain one item with `get_nowait()` + `task_done()` for queue unfinished-task accounting (lines 585-586), then retry within the bounded `maxsize + 10` loop (line 577). This is concurrency-primitive control flow, not a silent swallow: if all drain attempts exhaust without sending the sentinel, `logger.error` surfaces it at line 597 and the export-thread join-timeout report at lines 601-603 surfaces the hang to the operator (logger use sanctioned here since telemetry cannot telemeter its own shutdown failure). Raising `queue.Full` would defeat the sentinel guarantee. The existing rationale accurately describes the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:46:54.525881+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. `queue.Full` is the documented concurrency-primitive signal from `Queue.put(timeout=...)` — it is the control-flow channel for the bounded API, not an error to swallow. The handler is the documented drain-and-retry pattern for guaranteeing sentinel insertion: bounded by `maxsize + 10` (line 577), each Full event drains one item via `get_nowait()` + `task_done()` (lines 585-586), and exhaustion is surfaced explicitly via `logger.error` at line 597 with a second observable signal at the join timeout (lines 602-603). Use of logger rather than telemetry is correct under the primacy order: telemetry itself is shutting down here, so the audit/telemetry channels are unavailable — logger as last resort is policy-compliant for this specific case. Raising `queue.Full` would break the documented sentinel-guarantee invariant and cause the export thread to hang. Rationale plainly states the invariant and the failure-surfacing path, consistent with the visible code.
+  judge_signature_version: 2
+  scope_fingerprint: 64d154ee514ec2b2f728cf6b0de887dbc92494c4cdae00634dd3830ad767c45a
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[11]/body[3]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:feda886ad68cbdb5eea40cc459e37c74978b608b1aaf1f46cfdc8a9e115bf810'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=c87058caa78a1776
+  owner: john
+  reason: |-
+    At telemetry/manager.py:592 in `close`, `except queue.Empty: pass` catches a benign shutdown race: `get_nowait()` (line 585) found the queue already drained by the export thread between the `put(None, ...)`-that-raised-Full and this compensating get. The in-source comment at line 593 documents the exact race ("Queue became empty between put and get - try put again"), and `pass` correctly enacts the protocol response — retry the sentinel `put` on the next bounded outer-loop iteration. This is not swallowing a result: `Empty` IS the expected outcome of the race, the `sentinel_sent` flag (line 576) tracks protocol success, and the ultimate failure path (sentinel not sent after `maxsize + 10` attempts) surfaces via `logger.error` at line 597. Narrow exception type, concurrency-primitive EAFP control flow, no Tier-3 boundary, no fabrication. The existing rationale accurately describes the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:47:23.545091+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The rule fires by shape (silent-except: pass) but the code is the canonical EAFP pattern for a bounded concurrency race in a shutdown protocol, not error suppression. The rationale correctly identifies the race (queue.Full on put → queue drained by export thread → queue.Empty on the compensating get) and the visible code substantiates it: narrow exception type queue.Empty, in-source comment naming the race (line 593), bounded outer loop (maxsize+10 at line 577), explicit sentinel_sent flag (line 576), and a real failure surface via logger.error (line 597) when the protocol ultimately fails. The data is internal concurrency state in our own queue — not Tier-3 — and Empty is the expected outcome that signals 'retry the put,' not a swallowed defect. logger.error is policy-acceptable here because this IS the telemetry manager shutting itself down, and the surrounding docstring already states close failures log rather than raise.
+  judge_signature_version: 2
+  scope_fingerprint: 64d154ee514ec2b2f728cf6b0de887dbc92494c4cdae00634dd3830ad767c45a
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[11]/body[3]/body[0]/handlers[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:5f5eaf3b20d629dddace126ea15a7f907f9158ee086c2ac3ea7e9295a818038a'
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel:fp=9a2e20048626df2b
+  owner: john
+  reason: |-
+    The flagged line is now `except queue.Full:` at telemetry/manager.py:436 inside `_requeue_shutdown_sentinel` (the method the entry calls `_requeue_shutdown_sentinel_or_raise` has been renamed and no longer raises). Inside a bounded retry loop (`max_attempts = self._queue.maxsize + 10`, line 429) that reinserts the shutdown sentinel `None` via `put_nowait(None)`, `queue.Full` is the expected signal that an in-flight producer refilled the bounded queue; the handler evicts one displaced item with `get_nowait()` and retries within the bounded budget. On exhaustion the method returns `False` (line 452), and the caller at line 390 degrades gracefully — logs and drops the incoming event, never propagating to pipeline code (lines 394-398). This is EAFP concurrency control on a `queue.Queue` primitive at shutdown, not defensive data suppression; no Tier-3 boundary, no fabrication, displaced-item task-done accounting is balanced in the `finally` (lines 447-450).
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T05:02:12.699421+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. R6's concern is silent swallowing without re-raise or explicit error result; this site uses the standard EAFP pattern on a `queue.Queue` primitive where `queue.Full` is the documented control-flow signal from `put_nowait`, not an error to be hidden. The except branch is not silent — it performs explicit recovery (evict one displaced item via `get_nowait`, account `pending_task_done` for balanced `task_done()` in the `finally`, retry within a bounded budget of `maxsize + 10`), and on exhaustion returns an explicit `False` result (line 452). The caller at manager.py:390-398 verifies the contract: it inspects the boolean return, logs degradation, and drops the incoming event so telemetry never propagates failures to pipeline code — consistent with the docstring at lines 423-426 and the telemetry-best-effort primacy order. No Tier-3 boundary, no fabrication, and the recovery path is itself an audit-recorded drop event.
+  judge_signature_version: 2
+  scope_fingerprint: 0d1863b0be3165a0269bdaa75e20d18ca46cba84e2b3e41ea59e7656912dbe66
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[7]/body[3]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:93c47b67903b169666d69a57d25ed2817bea951777c894791bbc3dad44032c62'
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel:fp=c7e62874628e94d1
+  owner: john
+  reason: |-
+    The flagged line is `except queue.Empty: continue` at telemetry/manager.py:441-442 inside `_requeue_shutdown_sentinel` (the method the entry names `_requeue_shutdown_sentinel_or_raise` has been renamed). It sits in the bounded sentinel-reinsertion loop: after `put_nowait(None)` raised `Full`, the compensating `get_nowait()` (line 439) finds the queue already drained by a racing producer, so `Empty` is the expected signal and `continue` correctly retries `put_nowait(None)` on the next iteration within the bounded `maxsize + 10` budget. This is concurrency-primitive EAFP control flow, not defensive programming against bad data; the Empty case is the normal race outcome, not a hidden error. The existing rationale's mechanism description still holds, but its claim that the loop "raises RuntimeError on exhaustion" is STALE — the current method returns `False` on exhaustion (line 452) and the caller degrades gracefully (lines 390-398), which is a stronger legitimacy story (telemetry never propagates to pipeline code). No trust boundary, no fabrication, displaced-item accounting balanced in the `finally`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T05:02:34.152823+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 fires on shape (`except: continue`), but `queue.Empty` from `get_nowait()` on a stdlib `queue.Queue` is a concurrency-primitive race signal, not a swallowed error — another producer drained the queue between this loop's `put_nowait(None)` raising `Full` and the compensating `get_nowait()` running, and retrying the put on the next iteration is the correct EAFP response. The loop is bounded by `maxsize + 10` (line 429), the `finally` keeps `task_done()` accounting balanced for displaced items (lines 447-450), and exhaustion returns `False` (line 452) for callers to degrade gracefully — telemetry never propagates to pipeline code. No external data, no trust boundary, no fabrication; the rationale correctly identifies the race mechanism and explicitly flags and corrects the stale 'raises RuntimeError' wording from the prior entry, which is site-specific analysis rather than copied boilerplate.
+  judge_signature_version: 2
+  scope_fingerprint: 0d1863b0be3165a0269bdaa75e20d18ca46cba84e2b3e41ea59e7656912dbe66
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[16]/body[7]/body[3]/body[0]/body[0]/handlers[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c0dc19f9c22c3cf1c64f9ab02fca1a39d15fcc778548b90ed380c4d37df9b86d'
+- key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=605944aae05ff00a
+  owner: john
+  reason: |-
+    At telemetry/manager.py:185 in `_export_loop`, `except TELEMETRY_TRANSPORT_ERRORS as e:` is the export-thread-level transport safety net. TELEMETRY_TRANSPORT_ERRORS is a narrow, deliberate tuple — `(ConnectionError, TimeoutError, OSError)` (telemetry/errors.py:17-21, documented "safe to swallow during telemetry export; everything else is a programming error that must crash"). The handler records the failure via `logger.error("Export loop failed unexpectedly", error=str(e))` (line 187) and continues the loop so the non-daemon `telemetry-export` thread (constructed at lines 153-158) survives a transient transport/IO blip. This is not a silent swallow: the failure is recorded on the sanctioned last-resort channel — logger is correct here precisely because the telemetry export subsystem is itself the failing component and cannot telemeter its own transport failure (audit>telemetry>logger primacy order). Re-raising would kill the export thread on a transient network error, silently stopping ALL telemetry and (since a thread exception does not propagate to main) leaving no surfaced fact — the opposite of the best-effort contract that telemetry must never crash the pipeline. The three-way split in this loop is intentional design: line 181 (`TelemetryExporterError`) parks for re-raise on flush; line 185 (transport) logs-and-continues because transport blips are isolated; line 188 (unexpected/programming error) stores-and-breaks. R6 fires on "no re-raise," but the recorded-and-continue outcome is the prescribed behaviour for a transport fault in a best-effort subsystem, not error suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T21:20:37.047399+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The except clause catches a narrow, deliberately-defined tuple (ConnectionError, TimeoutError, OSError) — not bare Exception — and the surrounding three-way split shows intentional triage: TelemetryExporterError parks for re-raise on flush (line 181), transport errors log-and-continue (line 185), and unexpected Exception stores-and-breaks (line 188). Per the telemetry primacy order, telemetry is best-effort and must not crash the pipeline; logger is the correct last-resort channel precisely because the telemetry subsystem itself is the failing component and cannot telemeter its own transport failure. Re-raising in a non-daemon background thread would silently kill all telemetry on a transient blip, which is the worse outcome the rule is trying to prevent. The rationale plainly names the narrow tuple, the channel-of-last-resort reasoning, and the structural triage visible in the excerpt.
+  judge_signature_version: 2
+  scope_fingerprint: 3485f417387afdcd5f7b7bac11b7ea60c90b84f7eda2f27b8af9e2fcaab7ccef
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[3]/body[2]/body[1]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:ed9ba7ddb9cde393fedc0a53ec83cea3fe0014ece54958711062551c2ec3d999'
+- key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=6647cee4585b4dfb
+  owner: john
+  reason: |-
+    At telemetry/manager.py:188 in `_export_loop`, `except Exception as e:` is the deliberate catch-all for an unanticipated programming error inside the background `telemetry-export` thread (a non-daemon thread, constructed at lines 153-158). It is NOT a swallow and the breadth is required, for three reasons. (1) Thread boundary: an uncaught exception in a worker thread dies silently — Python does not propagate a thread's exception to the main thread — so a broad catch is the only way to avoid LOSING a programming error that occurs off the main thread. (2) It stores rather than discards: `self._stored_exception = e` (line 191), which `flush()` re-raises at lines 520-526 via try/finally (clearing the marker only after the raise). The crash is RELOCATED to the main thread at the next synchronization point, not suppressed — the same park-and-re-raise pattern already accepted for the sibling `TelemetryExporterError` handler at line 181 (entry fp=05590f539280dce7), here broadened to the catch-all because an unexpected error class cannot be enumerated in advance. (3) It `break`s the loop (line 192) to halt processing, because once an unexpected error has occurred the export thread's integrity is compromised and continuing could corrupt further events. R4's prescribed fix ("narrow the except") would DEFEAT the handler's purpose: narrowing to known exception types would let an unanticipated programming error vanish silently in the background thread with no surfaced fact. This is the inverse of the line-185 transport handler — that one continues on EXPECTED transport blips; this one catches the UNexpected and escalates it across the thread boundary to a thread that can raise. Broad catch is intentional, the exception is preserved and re-raised, and processing stops on integrity compromise; R4's silent-broad-catch concern is not met.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T21:20:44.620707+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. R4's concern is silent broad-except swallowing bugs; here the catch-all is the prescribed park-and-re-raise pattern at a thread boundary: Python doesn't propagate worker-thread exceptions to the main thread, so narrowing would cause an unanticipated programming error to vanish silently. The handler stores the exception (self._stored_exception = e), breaks the loop to halt further processing on integrity compromise, and the visible sibling handlers plus the rationale's reference to flush() re-raising at 520-526 establish the relocation-to-main-thread mechanism. The breadth is load-bearing because the whole point is to catch the unenumerable 'unexpected'; this is offensive escalation across a thread boundary, not suppression.
+  judge_signature_version: 2
+  scope_fingerprint: 3485f417387afdcd5f7b7bac11b7ea60c90b84f7eda2f27b8af9e2fcaab7ccef
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[3]/body[2]/body[1]/handlers[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:aa9ee84727eafe88b519e6ddb9c1fffe6362e35ae50d4e32efbee7c8b90253a6'
+- key: telemetry/manager.py:R6:TelemetryManager:_dispatch_to_exporters:fp=98d72e0c9b262f6a
+  owner: john
+  reason: |-
+    At telemetry/manager.py:245 in `_dispatch_to_exporters`, `except TELEMETRY_TRANSPORT_ERRORS as e:` implements per-exporter failure isolation via circuit breakers. TELEMETRY_TRANSPORT_ERRORS is the narrow tuple `(ConnectionError, TimeoutError, OSError)` (telemetry/errors.py:17-21); the in-source comment at lines 246-247 states the contract: "Transport/IO failure — isolate this exporter, don't crash. Any other exception is a programming error and propagates." The handler is explicitly NOT silent — it records the failure in three places: `breaker.record_failure()` (line 248, which drives the open-breaker skip at line 220 on subsequent events), the `self._exporter_failures[exporter.name]` operational counter (line 250), and `logger.warning` with the exporter name and circuit state (lines 251-257). The surrounding loop (line 216) then continues to the remaining exporters, so one exporter's transport failure never blocks dispatch to the others — the failure-isolation design the method docstring (lines 199-204) describes. A programming error (anything outside the narrow tuple) is deliberately left to propagate, consistent with the audit>telemetry>logger primacy order and the rule that telemetry must never crash the pipeline over a transport fault. R6 fires on "swallow without re-raise or explicit error result," but the explicit recorded outcome here — tripped breaker state plus the per-exporter failure counter that downstream health metrics consume — is exactly the explicit result R6 requires.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T21:20:51.243531+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except catches a narrow, named tuple of transport errors (ConnectionError/TimeoutError/OSError), not bare Exception, and records an explicit outcome on every path: circuit breaker failure recorded, per-exporter failure counter incremented, and a warning logged with exporter and circuit state. This is the prescribed failure-isolation pattern for telemetry per the primacy-order policy (telemetry is best-effort, must not crash the pipeline on transport faults), and programming errors outside the narrow tuple deliberately propagate. R6's concern — silent swallow without explicit error result — is met by the recorded breaker state and failure counter that downstream health metrics consume.
+  judge_signature_version: 2
+  scope_fingerprint: 508828efb1a0622b175675e9fe1587815a94cab6916b1ad1f7563aa960c592e4
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[4]/body[4]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:894aa1bebc15ef80996046979c639f0000ff50a60002e2c8d074706fc7436452'
+- key: telemetry/manager.py:R6:TelemetryManager:flush:fp=9ee78a139bcba493
+  owner: john
+  reason: |-
+    At telemetry/manager.py:540 in `flush`, `except TELEMETRY_TRANSPORT_ERRORS as e:` isolates a per-exporter transport/IO failure while flushing each exporter's internal buffer. TELEMETRY_TRANSPORT_ERRORS is the narrow tuple `(ConnectionError, TimeoutError, OSError)` (telemetry/errors.py:17-21); the in-source comment at lines 541-542 states "Transport/IO failure — log, don't crash. Other exceptions are programming errors and propagate." The handler records the failure via `logger.warning("Exporter flush failed", exporter=..., error=...)` (lines 543-547) on the sanctioned last-resort channel (the telemetry subsystem is the failing component; audit>telemetry>logger primacy order) and continues the loop (line 528) so the remaining exporters are still flushed — one stuck exporter must not abandon the others' buffered events. This catch is NOT a blanket swallow of flush failures: the genuine all-exporters-failed condition is surfaced separately and loudly — `flush()` re-raises the stored background-thread exception at lines 520-526 (try/finally) when `fail_on_total_exporter_failure=True`, and the handled `result is False` failure path records the breaker failure and counter at lines 531-538. This per-exporter transport catch only isolates a transient transport blip during a best-effort buffer flush, consistent with the docstring contract at lines 510-511 ("Exporter flush failures are logged but don't raise - telemetry should not crash the pipeline"). It is the direct sibling of the already-accepted close-path transport catches (entries fp=79190bde3fa222f5, fp=c87058caa78a1776). R6's swallow-without-explicit-result concern is not met: the recorded slog event plus the separate hard-failure re-raise path are the explicit outcomes.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T21:20:59.749795+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The except clause catches a narrow tuple (ConnectionError, TimeoutError, OSError) — not a blanket Exception — at the telemetry transport boundary, which is itself an external I/O boundary (Tier-3 network/IO). Per the policy's primacy order, telemetry is best-effort and logger is the sanctioned last-resort channel when the telemetry subsystem is the failing component, which is exactly the case here. The handler records via slog.warning and continues so one stuck exporter doesn't abandon the others' buffers; the total-failure condition is surfaced loudly via the re-raise at lines 520–526 and the handled-failure circuit-breaker path at 531–538. R6's 'swallow without explicit result' concern is therefore answered: the explicit outcome is the recorded slog event plus the separate hard-failure re-raise path, and non-transport exceptions still propagate.
+  judge_signature_version: 2
+  scope_fingerprint: c291a2e0416d9aac89aec9b90d23145b27bd6a6f9d448a46f79757763d0fc415
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[10]/body[3]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:7c9a442b4552c4133dfa98aa1a264e64ae8cab687bbc44fc17a6045ffa23a632'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=83252d9752278059
+  owner: john
+  reason: |-
+    At telemetry/manager.py:610 in `close`, `except TELEMETRY_TRANSPORT_ERRORS as e:` isolates a per-exporter transport/IO failure during the final exporter-close step of shutdown (step 4, lines 605-617). TELEMETRY_TRANSPORT_ERRORS is the narrow tuple `(ConnectionError, TimeoutError, OSError)` (telemetry/errors.py:17-21); the in-source comment at lines 611-612 states "Transport/IO failure — log, don't crash. Other exceptions are programming errors and propagate." The handler records via `logger.warning("Exporter close failed", exporter=..., error=...)` (lines 613-617) and continues the loop (line 607) so every exporter still receives a `close()` attempt — raising on the first failing exporter would leak the remaining exporters' resources at shutdown. logger is the correct channel here: this IS the telemetry manager shutting itself down, so the audit and telemetry channels are unavailable and logger-as-last-resort is policy-compliant (audit>telemetry>logger primacy order). The method docstring already states the contract at lines 563-565 ("Close failures are logged but don't raise"). A programming error (outside the narrow tuple) is deliberately left to propagate. This is the direct sibling of the already-accepted close-path concurrency catches (entries fp=79190bde3fa222f5, fp=c87058caa78a1776) and the flush-path transport catch. R6 fires on "swallow without re-raise," but a recorded slog warning plus guaranteed resource-release across all exporters is the prescribed best-effort shutdown behaviour, not error suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T21:21:07.947005+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The except clause catches a narrow, named tuple of transport/IO errors (ConnectionError, TimeoutError, OSError) — not bare Exception — during the telemetry manager's own shutdown, where audit and telemetry channels are by definition unavailable so logger-as-last-resort is policy-compliant under the primacy order. The handler records the failure via slog.warning with exporter identity and continues the loop so every remaining exporter still gets its close() call (guaranteed resource release); programming errors outside the narrow tuple deliberately propagate. R6's concern (silent swallow) is addressed: the failure IS recorded, and the alternative — raising on first failure — would leak resources at shutdown. Decorator nudge does not apply (R6, no external parameter).
+  judge_signature_version: 2
+  scope_fingerprint: 64d154ee514ec2b2f728cf6b0de887dbc92494c4cdae00634dd3830ad767c45a
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[11]/body[8]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f3301ec7c27ce116d5b29843dad4db0bf1209b201695f45238a30de814c15843'

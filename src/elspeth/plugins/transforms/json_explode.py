@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
@@ -174,8 +175,9 @@ class JSONExplode(BaseTransform):
     """
 
     name = "json_explode"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fba11b274580fc9a"
+    source_file_hash: str | None = "sha256:6b8ffd45b12ab18f"
     config_model = JSONExplodeConfig
     creates_tokens = True  # CRITICAL: enables new token creation for deaggregation
 
@@ -235,6 +237,17 @@ class JSONExplode(BaseTransform):
     ) -> PluginAssistance | None:
         from elspeth.contracts.plugin_assistance import PluginAssistance
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="json_explode",
+                issue_code=None,
+                summary="Deaggregate a list-valued field — emits one row per array element, preserving sibling fields and optionally adding an item_index.",
+                composer_hints=(
+                    "array_field MUST hold a real list (value_type=list). A JSON-looking string does NOT count — insert a parser first.",
+                    "Single-query LLM responses are strings. Do not wire response_field directly to json_explode; explode after parsing.",
+                    "Sibling fields are duplicated onto every emitted row — that's by design for fan-out lineage.",
+                ),
+            )
         if issue_code != "json_explode.array_field.list":
             return None
         return PluginAssistance(

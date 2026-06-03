@@ -392,7 +392,7 @@ class TestRecordRoutingEventsRowcount:
                 def patched_execute(stmt, *args: Any, **kwargs: Any):
                     result = original_execute(stmt, *args, **kwargs)
                     # Intercept INSERT results to simulate zero rowcount
-                    if hasattr(stmt, "is_insert") and stmt.is_insert:
+                    if stmt.is_insert:
                         mock_result = MagicMock()
                         mock_result.rowcount = 0
                         return mock_result

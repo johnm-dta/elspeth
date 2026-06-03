@@ -30,7 +30,8 @@ First match wins. If no match, ask for help — do not guess.
 | Pattern | Tier | Action |
 |---------|------|--------|
 | `landscape.*`, `recorder.*`, `query_repository.*` | T1 | Direct access. No try/except. No `.get()`. Crash on anomaly. |
-| `checkpoint_data[...]`, `json.loads(stored_audit_json)` | T1 | Direct access. Crash on anomaly. Serialization doesn't change tier. |
+| `source.options[...]`, `spec.options`, composer/user-authored config read back from our DB | **T3-origin** | We wrote the *container*; the user/composer-LLM wrote the *values*. Re-validate on read. Wrap, quarantine / return a diagnostic on failure. "Validated once" does **not** promote it to T1. Matches above the checkpoint row deliberately. |
+| `checkpoint_data[...]`, `json.loads(stored_audit_json)` | T1 | Direct access. Crash on anomaly. Serialization doesn't change tier — **but only because we authored the values**, not merely the container. |
 | `app.state.config.*`, `app.state.settings.*`, `self._config.*` | T2 | Direct access. No `getattr()` defaults. Crash on bug. |
 | `row["field"]` in a transform | T2 type, T2 value | Direct key access (trust type). Wrap arithmetic/parsing (value may fail). |
 | `validated_dict["field"]` after boundary validation | T2 | Direct access. Already validated — trust it. |
@@ -110,6 +111,71 @@ except Exception:
 
 **CRITICAL:** Trust tiers are about **data flows**, not plugin types. **Any data crossing from an external system is Tier 3**, regardless of which plugin makes the call.
 
+### The provenance-laundering trap
+
+The most common way this rule gets violated is an intuition error, not a coding
+error. The output of an LLM transform (or any external-fronting plugin) **feels
+Tier 2** because it came out of *our* plugin — a component we wrote, tested, and
+own. The instinct is "it came from a trusted component, therefore it's trusted
+data." **That instinct is wrong, and acting on it launders external data into the
+Tier 2 space unchecked.**
+
+The plugin did not *author* the data — it is a **courier**. The bytes originated
+on someone else's GPU, behind someone else's API, shaped by a non-deterministic
+model that can return malformed JSON, a refusal, a truncated body, a hallucinated
+field, or a 200-status response that is actually an error. The plugin's
+trustworthiness does not transfer to its payload. **Trust attaches to the author
+of the data, and the author is the external system — not the courier that carried
+it.**
+
+So the tier boundary does **not** sit at the plugin's edge. It sits at the point
+where *we* validate the response:
+
+```text
+row enters (T2) ─► [our LLM plugin] ─► llm_response (STILL T3) ─► validate/parse ─► output (NOW T2)
+                        ▲                      ▲                         ▲
+                   our code              external author           the real boundary
+```
+
+The "feels T2" intuition puts the boundary one box too early. The data is **T3 for
+the entire span** between the API returning and us validating it — and a transform
+is therefore not uniformly one tier: it is **T2 → T3 → T2**, dipping back down to
+zero-trust mid-method even though the row arrived as T2 and will leave as T2.
+
+This generalizes to **any plugin that reaches out to code we did not author** — and
+"external" here means *non-authored*, not *networked*. The obvious cases are
+network-fronting: LLM APIs, HTTP scrape responses, database query results,
+message-queue payloads, Azure blob contents. But the principle is broader and the
+non-network cases are the ones that slip through, because there is no network in
+sight to trigger the "this is external" reflex:
+
+- **Local subprocesses / system commands** — `subprocess.run(["date"])` and parsing
+  the third field. The `date` command's output is authored by coreutils, the OS, and
+  the active locale — not by us — and its format can shift under us (locale,
+  timezone, `LC_TIME`, a coreutils version bump). Positional parsing of a local
+  command's stdout is a T3 boundary that feels T1/T2 precisely because it's local.
+- **OS / environment surfaces** — clock, filesystem contents, environment variables,
+  anything whose value the OS or another process authored.
+- **Third-party library outputs at their external edge** — a value a dependency
+  computed from *its* external input is still data we did not author.
+
+The plugin being ours is irrelevant; so is whether a socket was involved. If the
+*data* was authored by code outside our control, it is T3 until validated — no
+matter how trusted the courier, and no matter how local the source. The test is
+never "did this come over the network?" It is **"did we author the contract that
+guarantees this value's shape?"** If not, validate it at the boundary.
+
+The inverse error is the same confusion running backwards: treating
+**genuinely-our-data** (a checkpoint, an audit row — a value *we authored*) as if it
+needed re-validation because it arrived through an external-*looking* transport like
+`json.loads()`. This carve-out applies **only when we authored the values.** Do not
+stretch it to "don't re-validate anything that came out of our DB" — config the user
+or composer-LLM authored is external-origin no matter how many times it round-trips
+through our storage, and re-reading it *is* a fresh boundary (see the persistence
+rule under "Operation Wrapping Rules"). Provenance is the only thing that sets the
+tier — **"who authored this value?"**, never "what component handed it to me," never
+"what format did it arrive in," and never "which database did I read it from."
+
 Transforms that make external calls (LLM APIs, HTTP requests, database queries) create **mini Tier 3 boundaries** within their implementation:
 
 ```python
@@ -144,6 +210,41 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 - Don't carry raw external data — passing `llm_response` to helper methods without validation
 - Don't defer validation — "I'll check it later when I use it"
 - Don't validate multiple times — if it's validated once, trust it
+
+#### Recording the raw payload is not "carrying" it
+
+"Minimize the distance before validation" governs *use* — operating on, parsing,
+trusting, or passing along the value. It does **not** forbid *recording* the raw
+payload verbatim before you clean it. Those are two different acts, and the audit
+trail sometimes **requires** the raw capture:
+
+- **Recording is preserving evidence; using is acting on it.** Persisting the exact
+  bytes the external system returned — to the Landscape, a call record, or the
+  payload store — is a valid and often mandatory audit act. It is not a trust-tier
+  violation, because you are not trusting the data; you are recording *that this is
+  what we received*. ("Record what we got" is core auditability doctrine — see the
+  `model_dump()` example below, which records the raw response before re-raising.)
+- **Why you'd want it:** if our parse is later questioned, the raw payload proves
+  what the external system actually said versus what we turned it into. An auditor
+  asking "did the LLM really return that category, or did our parser invent it?"
+  can only be answered if the raw output was captured *before* cleaning. The raw
+  record is the ground truth that makes the T3→T2 transformation itself auditable.
+
+The discipline that keeps this from becoming a laundering loophole:
+
+1. **Capture raw, then validate — don't skip the validation.** Recording the raw
+   payload does not promote it. Everything downstream still consumes the *validated*
+   T2 value, never the raw capture.
+2. **Store it tagged as what it is.** The raw payload goes into a field/record that
+   is unambiguously "unvalidated external output" (e.g. a `raw`/`request_data`/
+   payload-store entry), never blended into the validated T2 output fields where a
+   later reader would mistake it for cleaned data.
+3. **Capture is read-only.** You write the raw value to the audit trail and move on;
+   you never read it back and operate on it as if recording had validated it.
+
+So the full shape is: **call → record raw (optional, for audit) → validate →
+trust the validated value.** The raw capture is a branch to the audit trail, not a
+step on the path the pipeline data travels.
 
 **Common external boundaries in transforms:**
 
@@ -188,6 +289,28 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 
 **Serialization does not change trust tier.** Data we wrote to our own database or checkpoint file is still Tier 1 when we read it back, even though it passes through `json.loads()` or SQLAlchemy deserialization. The trust boundary is about *who authored the data*, not the transport format. Checkpoints, audit records, and Landscape tables are all our data — we defined the schema, we wrote the values, we own the invariants. If a deserialized checkpoint is missing a `"tokens"` key or a `"row_id"` field, that is corruption in our system, not a data quality issue to handle gracefully. Crash immediately.
 
+**Persistence does not change trust tier *the other way* either.** The mirror of the rule above is the one that bites more often, because the reasoning feels stronger: *external-origin* data that we validated once, persisted to our own DB, and read back is **still Tier 3** on read-back. Storing it in a column, or hydrating it into one of our typed dataclasses (`SourceSpec.options`, a Pydantic config model), does **not** launder it into Tier 1 — we authored the *container and the schema*, but the user / operator / composer-LLM authored the *values*. Two independent reasons the "validated once, therefore trusted forever" reasoning is unsound:
+
+1. **The store is mutable.** Audit DBs and config stores can be hand-edited, restored from a stale backup, or tampered with between write and read. A value that was valid when written may not be valid when read.
+2. **The validating contract can drift.** The Pydantic model / schema that validated the value at write time can change shape by the next read (a field renamed, a type tightened). What passed then may not parse now.
+
+This is the classic **second-order / stored-input trust boundary** in security terms: input that was trusted on the way in becomes dangerous on the way back out because the surrounding assumptions changed. Treat re-reading persisted external-origin data as a **fresh Tier 3 boundary** — wrap the read, catch the specific parse/validation error, and **quarantine or return a diagnostic** (never crash the tool/pipeline over data we never authored). Concretely: reading `source.options` back to recompute a diagnostic is *not* a Tier-1 invariant check, so "already validated, so a `ValueError` is an invariant break" is the wrong frame — a `ValueError` there is recoverable bad external input, exactly like a malformed source row.
+
+Validation is a **one-time, in-flight** promotion (T3 → T2 for the value you just checked), **not a permanent re-stamping of the origin.** The promoted value is trustworthy for the rest of *that* code path; the next time the data crosses a boundary — including being read back from storage — it is external-origin again.
+
+### The unifying rule: chain of custody, not storage
+
+The two rules above can read as a contradiction — a checkpoint read back from our DB is **Tier 1**, but `source.options` read back from our DB is **Tier 3**, *through the same serialization and storage layers*. The deciding factor is **not** the database, the format, or even "did this touch disk." It is **chain of custody**: whose *statement* does this value represent, and has trusted custody of that statement been continuously held since we last established its integrity?
+
+Think of it as evidence handling. A sealed envelope is trusted while it stays in the hands of someone inside our trust domain. The moment it is left unattended — written to disk, parked in a DB, handed off to the storage subsystem — custody is interrupted, and whoever picks it up next **must check the tamper seal**. Writing a value to storage and reading it back has effectively *left it with someone we don't fully control* (the filesystem, the DB engine, the serialization layer, backup/restore). So *every* read-back must surface anomalies rather than silently propagate them. What differs between tiers is **what a broken seal means**:
+
+- **Our own statement** (checkpoint, audit row — *we* authored the values): a broken seal is **tampering with / corruption of our own evidence**. Response: **crash**. **Critically, the "seal check" here is NOT an added guard** — it is the *natural* crash of direct access (`checkpoint["row_id"]` raising `KeyError`, or an explicit `AuditIntegrityError` where we parse a serialized blob). Adding a defensive `try/except`/`.get()`/`isinstance` to a Tier-1 read to "handle" a missing field is still the forbidden defensive pattern — Tier 1 surfaces anomalies *by crashing on direct access*, never by guarding. We do not quietly substitute a default for a missing `row_id`; we let it crash and we investigate.
+- **Someone else's statement** (user / operator / composer-LLM config — *they* authored the values): a broken seal is **a damaged delivery of external material**. Response: **quarantine / diagnostic**, via an *explicit* boundary guard (wrap, catch the specific error, record). Record the problem, divert the unit, keep the run alive.
+
+The difference is therefore *procedural*, not technical: identical storage path, identical `json.loads`, but one case is "our evidence locker was disturbed" and the other is "the incoming parcel arrived dented." Persistence does not change *whose statement* the value is — it only interrupts custody. So "re-check the seal on every read-back" does **not** mean "add a guard to every read." It means: Tier-1 reads stay direct (the crash *is* the check); Tier-3 reads get the explicit boundary guard. The valence of "guard" flips by tier — required at Tier 3, forbidden at Tier 1 — even though both surface the anomaly.
+
+The mnemonic `effective_tier = max(author_tier, custodian_tier)` is a useful first approximation — nothing ever *lowers* the classification — but it is imprecise: storage-as-custodian does not unconditionally force Tier 3 (or checkpoints would be Tier 3 too). The precise rule is the custody one: **internal authorship survives persistence (stays Tier 1); external authorship survives persistence (stays Tier 3).** What never survives a custody handoff is the *assumption that a past validation still holds* — re-established at Tier 3 by the explicit boundary guard, and at Tier 1 by the unguarded direct access that crashes on anomaly.
+
 ## Wrapping Discipline at Tier 3 Boundaries
 
 Wrapping at a Tier 3 boundary involves **two independent decisions**. Conflating them is a common mistake:
@@ -200,6 +323,68 @@ Wrapping at a Tier 3 boundary involves **two independent decisions**. Conflating
 **Never resolve a "broad except" warning by removing the try/except.** The wrapping is correct — the catch clause is lazy. Fix the catch, not the wrap.
 
 **Never resolve a "silent except" warning by swallowing to a default.** The catch should record what happened and re-raise, not silently degrade.
+
+### The `@trust_boundary(tier=3)` behavioral contract
+
+A function annotated `@trust_boundary(tier=3)` declares: *"I am the boundary where
+this external-origin parameter is checked before anyone downstream trusts it."* Its
+obligation on malformed input is **never to pass a half-trusted value forward** — and
+it satisfies that in one of three honest ways:
+
+- **Coerce-and-record** into the known shape (recording absence as `None`, never a fabricated default); or
+- **Quarantine** — return an error/diagnostic result that the caller handles; or
+- **Fail loudly with a *typed* error** declared in the decorator's `invariant` (e.g. `invariant="raises ToolArgumentError on shape mismatch; never coerces silently"`). The companion CI gate requires a `test_ref` whose test *asserts that raise*, so **raising is not merely allowed — for many boundaries it is the canonical, test-pinned behaviour.**
+
+The single forbidden path is the silent middle one: swallow the bad shape, substitute
+a default, and proceed (fabrication / silent recovery). **Raising a typed error is not
+a violation of the tier-3 contract — it is one of the three ways to satisfy it.**
+
+**`raise` is not a synonym for *crash*.** Whether a raise is a crash or a quarantine
+depends entirely on *who catches it*. At a Tier-3 boundary the normal quarantine
+mechanism *is* a raise: a typed exception that an outer handler — the row processor,
+the orchestrator, the tool dispatcher — catches, records as a quarantine, and recovers
+from by moving to the next row/unit. The pipeline keeps processing the other 10,000
+rows; one bad unit was diverted, not the run. That **same `raise` statement** becomes a
+"crash" only when *nothing* catches it and it propagates to the top of the run.
+
+**And deciding that fate is not the raising code's job.** The code at the point of
+detection has exactly one responsibility: notice the invalid state and raise a
+*meaningful, correctly-typed* exception (with `from exc`). It must **not** branch on
+"should this crash or quarantine?" — that coupling is what produces defensive
+`try/except → default` smell. The routing is **structural**: the exception *type* plus
+where handlers sit determine the outcome. Audit / Tier-1 integrity errors are typed so
+that *nothing* catches them — they bubble to the top and abort the run, which is the
+correct response to corruption of our own data. Recoverable Tier-3 failures are typed so
+that an outer per-unit handler *peels them off* — quarantine the row, continue. The
+detecting site picks the right **type**; the architecture decides crash-vs-quarantine by
+catch placement. So the judge/reviewer question is never "does this raise?" but **"does
+this raise the right *type* for how the surrounding structure routes it — bubble-to-top
+for our-data corruption, peel-off-and-quarantine for recoverable external input?"** (This
+is why the two failure shapes in the table below behave oppositely with the *same*
+`raise`: one bubbles uncaught and kills the tool, while the other is a type an outer
+handler peels off into a quarantine.)
+
+So the two failure modes that actually show up are **not** "it raises." They are:
+
+| Symptom | Real defect | Fix |
+|---|---|---|
+| A `tier=3`-decorated function operates on data with **no external origin** (e.g. a typed `bool` out of `SchemaConfig.from_dict()`) and raises like an offensive internal invariant check | **Tier mislabel.** Our authored values wearing an external-boundary badge — a category error (the decorator only accepts `tier=3`, asserting an external boundary that isn't there). | **Remove the decorator.** *Keep* the offensive raise — crashing on a broken Tier-1/2 invariant is correct for *our* values — and document the invariant inline. *(Operator-gated — the decorator is signed.)* |
+| A genuine external-origin read (e.g. `source.options` reread from our DB) lets a **raw, unhandled** `ValueError` escape and crash the whole tool/pipeline | **Unhandled boundary.** The raise is neither a declared typed invariant the caller catches nor a quarantine — it just kills the run over recoverable external input. | **Handle it** into the project's quarantine/diagnostic path (the same `try/except ValueError → diagnostic` the neighbouring call already uses). |
+
+The frequent mistake is choosing `tier=3` (or omitting it) by the *parameter name* or
+*call site* rather than by where the values come from. **Trace the values the function
+receives at runtime to their origin** — not their variable name, and not whatever
+returned the object. External-origin → it is a boundary; do one of the three honest
+things. Our authored values → it is not a boundary; an offensive crash is correct, and
+a `tier=3` badge is a category error.
+
+> **Note:** The `@trust_boundary` decorator in source is **not** itself HMAC-signed —
+> it is runtime metadata the linter reads, so adding/removing it is an ordinary code
+> edit. But the decorator *suppresses* R1/R5 findings; removing it re-exposes those
+> findings, which then need either a code fix or a **signed allowlist entry**
+> (`justify`) — and that write is HMAC-key, operator-only (an agent may propose, only
+> an operator signs). The signing custody applies to the cicd-judge allowlist metadata,
+> not to the decorator. See CLAUDE.md "CICD Judge Gate: HMAC Key Custody."
 
 ### The resolution ladder for CI warnings
 
@@ -278,8 +463,8 @@ or could compromise pipeline execution.
 | Trust Tier | What It Covers | Handling |
 |-----------|---------------|----------|
 | **Tier 1 (full trust)** | Nothing directly — the web component doesn't write to Landscape. It reads audit data via `query_repository` (read-only). | N/A |
-| **Tier 2 (elevated trust)** | Server config values after validation, session state, authenticated user identity, pipeline YAML constructed by the composer. These passed our validators — if they're wrong, that's a bug in our code. | Expect correctness. Crash on type violations. |
-| **Tier 3 (zero trust)** | User uploads, user-submitted pipeline YAML, HTTP request bodies, OIDC tokens from external IdPs, LLM responses in the composer, query parameters, form data. | Validate at boundary, reject on failure. |
+| **Tier 2 (elevated trust)** | Server config values after validation, session state, authenticated user identity, and the **validated result** of composer construction (a value our validators have *already run on*, for the duration of that code path). If such a value is wrong *after* validation, that's a bug in our code. | Expect correctness. Crash on type violations. |
+| **Tier 3 (zero trust)** | User uploads, user-submitted pipeline YAML, HTTP request bodies, OIDC tokens from external IdPs, LLM responses in the composer, query parameters, form data — **and composer-authored pipeline YAML / source / node options, which are LLM-authored and therefore external-origin until validated.** A composer-produced value is T3 until our validators run, and **T3 again when read back from persistence** (the validation was in-flight, not permanent — see "Operation Wrapping Rules"). | Validate at boundary, reject on failure. |
 | **Tier 1-equivalent** | Two specific paths: (1) Secret handling — `ServerSecretStore`, `secret_key`, passphrase resolution. A corrupted or leaked secret is catastrophic. (2) Anything that feeds into `load_settings_from_yaml_string()` for actual execution — once we hand config to the engine, it must be correct. | Crash immediately on any anomaly. No coercion, no fallbacks. |
 
 ### Web Tier Boundary Map
@@ -432,6 +617,15 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 ```
 
 **Key distinction:** We don't coerce (that would hide the problem). We don't crash (that would kill the pipeline for one bad row). We quarantine and record what happened.
+
+### What "type-valid" actually guarantees: declared type, not semantic format
+
+There is a real question lurking in the `"not-a-date"` example: if a Source is supposed to *validate* external data, isn't a non-date string in a date field a **leaky Source**, i.e. an upstream contract break we should crash on — not a row hazard to wrap? The answer turns on what the Source's schema **declared**, and it is the line that decides wrap-vs-crash:
+
+- **Source validation guarantees the declared *type*, not arbitrary *semantic formats*.** A field declared `str` is guaranteed to be a `str`. It is **not** guaranteed to be a parseable ISO date, a valid UUID, or a well-formed email — those are *semantic* properties the `str` type does not carry. So parsing the *content* of a `str` field inside a transform (`datetime.fromisoformat(row["date"])`) is a genuine Tier-2 value hazard: type-valid, operation-unsafe → **wrap and quarantine**.
+- **But if the schema declared the stronger type** (the field's schema type is `date`/`datetime`/`uuid` and the Source coerced/validated it to that), then a parse failure downstream is **not** a row hazard — it is a Source contract break (the Source promised a `datetime` and shipped something else). That is a bug in our code → **let it crash**, and fix the Source.
+
+So the rule is mechanical: **match the operation to what the field's declared schema type actually promises.** Parsing a `str`'s content = Tier-2 hazard (wrap). Re-parsing a value the schema already declared as the parsed type = trusting a first-party contract (don't re-guard; if it's wrong, crash and fix the plugin). The hazard table above assumes the common case — fields declared as primitive `str`/`int` whose *semantic* validity is not part of the type.
 
 ## Web Component Code Examples
 

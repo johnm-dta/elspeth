@@ -184,6 +184,14 @@ class SecretInventoryItem:
             raise ValueError(f"{type(self).__name__}: reason must be one of {sorted(_ALLOWED_UNAVAILABILITY_REASONS)}, got {self.reason!r}")
 
 
+@dataclass(frozen=True, slots=True)
+class SecretRefPlacementViolation:
+    """A deferred secret marker appeared outside a credential-bearing field."""
+
+    field_path: str
+    secret_name: str
+
+
 @runtime_checkable
 class WebSecretResolver(Protocol):
     """Protocol for web-facing secret resolution and inventory."""

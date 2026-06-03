@@ -18,10 +18,33 @@ from types import MappingProxyType
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
+from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.blobs_inline import ResolvedBlobContent
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationKind,
+    InterpretationSource,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
-ChatMessageRole = Literal["user", "assistant", "system", "tool"]
+ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
+ComposerTrustMode = Literal["explicit_approve", "auto_commit"]
+ComposerDensityDefault = Literal["high", "medium", "low"]
+ProposalLifecycleStatus = Literal["pending", "committed", "rejected"]
+ProposalEventType = Literal[
+    "proposal.created",
+    "proposal.accepted",
+    "proposal.rejected",
+    "trust_mode.changed",
+]
+# ``audit`` is an internal-only role for breadcrumb rows that have no real
+# OpenAI tool-response or assistant parent (LLM-call audit envelopes,
+# pre-flight redaction failures, etc.). They MUST be filtered out of any
+# user-facing chat response and any composer prompt-history rebuild —
+# enforced at ``_is_composer_audit_tool_message`` /
+# ``_composer_conversation_messages`` and the public messages route.
 # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
 # `completed_with_failures` and `empty` join the previous three so an
 # operator scanning `/api/runs/{rid}` can distinguish "ran cleanly" from
@@ -32,7 +55,65 @@ SessionRunStatus = Literal["pending", "running", "completed", "completed_with_fa
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
 
+# Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
+# constraint in ``web/sessions/models.py``. The Python Literal and the SQL
+# CHECK are paired contracts: extending one without the other lets the
+# dataclass validator pass while the DB rejects the row (or vice versa).
+# The order here mirrors the CHECK declaration (models.py L116) for visual
+# diff clarity. Adding a value is a governance action — see the
+# closed-list-of-permitted-writers comment block at the
+# ``audit_access_log_table`` definition for the same posture.
+ChatMessageWriterPrincipal = Literal[
+    "compose_loop",
+    "route_user_message",
+    "route_system_message",
+    "admin_tool",
+    "session_fork",
+]
+
+# Closed enum mirroring the ``ck_composition_states_provenance`` CHECK
+# constraint in ``web/sessions/models.py``. Same paired-contract posture as
+# ``ChatMessageWriterPrincipal``: extending one without the other lets the
+# Python writer pass while the DB rejects the row (or vice versa). Order
+# mirrors the CHECK declaration (models.py L257) for visual diff clarity.
+# Adding a value is a governance action — see the dormant-value friction
+# block at the ``composition_states_table`` definition for the activation
+# contract (spec amendment + integration test + Filigree ticket).
+CompositionStateProvenance = Literal[
+    "tool_call",
+    "convergence_persist",
+    "plugin_crash_persist",
+    "preflight_persist",
+    # System-initiated: pre-execution template normalization for the
+    # first-run tutorial pipeline (replaces a previous misuse of
+    # ``convergence_persist`` which is reserved for the validator-failure
+    # writer in routes.py). See ``models.py`` CHECK constraint and
+    # spec amendment in
+    # ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md``.
+    "tutorial_normalization",
+    "session_seed",
+    "session_fork",
+    "interpretation_resolve",
+]
+
+AUDIT_GRADE_VIEW_WRITER_PRINCIPAL = "audit_grade_view"
+AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "include_tool_rows",
+        "include_llm_audit",
+        "include_raw_content",
+        "limit",
+        "offset",
+    }
+)
+
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
+COMPOSER_TRUST_MODE_VALUES: frozenset[str] = frozenset(get_args(ComposerTrustMode))
+COMPOSER_DENSITY_DEFAULT_VALUES: frozenset[str] = frozenset(get_args(ComposerDensityDefault))
+PROPOSAL_LIFECYCLE_STATUS_VALUES: frozenset[str] = frozenset(get_args(ProposalLifecycleStatus))
+PROPOSAL_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(ProposalEventType))
+CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
+COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
@@ -99,12 +180,129 @@ class SessionRecord:
 
     id: UUID
     user_id: str
-    auth_provider_type: str
+    auth_provider_type: AuthProviderType
     title: str
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
     forked_from_session_id: UUID | None = None
     forked_from_message_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposerSessionPreferencesRecord:
+    """Represents composer preferences stored on the sessions row."""
+
+    session_id: UUID
+    trust_mode: ComposerTrustMode
+    density_default: ComposerDensityDefault
+    interpretation_review_disabled: bool
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.trust_mode not in COMPOSER_TRUST_MODE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: sessions.trust_mode is {self.trust_mode!r}, expected one of {sorted(COMPOSER_TRUST_MODE_VALUES)}"
+            )
+        if self.density_default not in COMPOSER_DENSITY_DEFAULT_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: sessions.density_default is {self.density_default!r}, expected one of {sorted(COMPOSER_DENSITY_DEFAULT_VALUES)}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ComposerSessionPreferencesTransition:
+    """Result of a per-session composer-preferences PATCH.
+
+    Carries both the value the PATCH overwrote (``prior``) and the value
+    the PATCH wrote (``current``). Both are loaded inside the same write
+    transaction as the audit + state update, so there is no TOCTOU
+    window between read and write — see Phase 8 plan §"Service signature
+    precondition (B2 — load-bearing)" for the rationale and the
+    explicitly-rejected route-handler read-before-write alternative.
+
+    The Phase 8b telemetry consumer reads ``prior.trust_mode`` to
+    compute the ``from_mode`` attribute on
+    ``composer.session.switched_total``; the B1 audit-payload extension
+    records ``prior.trust_mode`` into ``proposal_events_table.payload``
+    so the telemetry counter remains a strict subset of audit-recorded
+    reality (audit-primacy superset rule, CLAUDE.md
+    §"Telemetry and Logging").
+
+    Both fields hold immutable frozen dataclass instances; no container
+    fields here, so no ``__post_init__`` deep-freeze guard is required
+    (per CLAUDE.md §"Frozen Dataclass Immutability"; scalar/frozen-
+    dataclass wrappers do not need guards).
+    """
+
+    prior: ComposerSessionPreferencesRecord
+    current: ComposerSessionPreferencesRecord
+
+
+@dataclass(frozen=True, slots=True)
+class CompositionProposalRecord:
+    """Represents a durable pending/committed/rejected composer proposal."""
+
+    id: UUID
+    session_id: UUID
+    tool_call_id: str
+    user_message_id: UUID | None
+    composer_model_identifier: str | None
+    composer_model_version: str | None
+    composer_provider: str | None
+    composer_skill_hash: str | None
+    tool_arguments_hash: str | None
+    tool_name: str
+    status: ProposalLifecycleStatus
+    summary: str
+    rationale: str
+    affects: Sequence[str]
+    arguments_json: Mapping[str, Any]
+    arguments_redacted_json: Mapping[str, Any]
+    base_state_id: UUID | None
+    committed_state_id: UUID | None
+    audit_event_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.status not in PROPOSAL_LIFECYCLE_STATUS_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: composition_proposals.status is {self.status!r}, expected one of {sorted(PROPOSAL_LIFECYCLE_STATUS_VALUES)}"
+            )
+        composer_provenance = (
+            self.composer_model_identifier,
+            self.composer_model_version,
+            self.composer_provider,
+            self.composer_skill_hash,
+            self.tool_arguments_hash,
+        )
+        if any(value is None for value in composer_provenance) and any(value is not None for value in composer_provenance):
+            raise AuditIntegrityError("Tier 1: composition_proposals composer provenance fields must be all populated or all NULL")
+        freeze_fields(self, "affects", "arguments_json", "arguments_redacted_json")
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalEventRecord:
+    """Represents an immutable composer proposal lifecycle event."""
+
+    id: UUID
+    session_id: UUID
+    proposal_id: UUID | None
+    event_type: ProposalEventType
+    # Actor format is originator:role:id for request-scoped actors
+    # (composer-web:user:{user_id}, user:{user_id}); system actors use
+    # system:{component}.
+    actor: str
+    payload: Mapping[str, Any]
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.event_type not in PROPOSAL_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: proposal_events.event_type is {self.event_type!r}, expected one of {sorted(PROPOSAL_EVENT_TYPE_VALUES)}"
+            )
+        freeze_fields(self, "payload")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -138,13 +336,32 @@ class ChatMessageRecord:
     role: ChatMessageRole
     content: str
     created_at: datetime
+    writer_principal: ChatMessageWriterPrincipal
+    sequence_no: int | None = None
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None
+    tool_call_id: str | None = None
+    parent_assistant_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.role not in CHAT_MESSAGE_ROLE_VALUES:
             raise AuditIntegrityError(f"Tier 1: chat_messages.role is {self.role!r}, expected one of {sorted(CHAT_MESSAGE_ROLE_VALUES)}")
+        # Tier-1 read guard: ``writer_principal`` mirrors the
+        # ``ck_chat_messages_writer_principal`` CHECK constraint. Reading a
+        # value outside the closed enum from our own session DB means
+        # something catastrophic happened (constraint disabled, direct SQL
+        # write, schema drift). Crash with a Tier-1 audit-integrity error
+        # rather than letting a Literal-typed field carry a wider str at
+        # runtime — same posture as the role guard above.
+        if self.writer_principal not in CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: chat_messages.writer_principal is {self.writer_principal!r}, "
+                f"expected one of {sorted(CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES)}"
+            )
+        # tool_call_id / parent_assistant_id are scalar fields and need no
+        # freeze guard (CLAUDE.md "Scalar-Only Fields Need No Guard"). Only
+        # ``tool_calls`` carries mutable contents.
         if self.tool_calls is not None:
             freeze_fields(self, "tool_calls")
 
@@ -233,6 +450,28 @@ class CompositionStateRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditAccessLogRecord:
+    """Represents a row from the audit_access_log table.
+
+    ``query_args`` is a privacy-gated, closed allowlist mapping captured
+    at the audit-grade messages route boundary. It may contain mutable
+    JSON structures after SQLAlchemy deserialisation, so freeze it.
+    """
+
+    id: str
+    timestamp: datetime
+    session_id: str
+    requesting_principal: str
+    request_path: str
+    query_args: Mapping[str, str]
+    ip_address: str | None
+    writer_principal: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "query_args")
+
+
+@dataclass(frozen=True, slots=True)
 class RunRecord:
     """Represents a row from the runs table.
 
@@ -310,6 +549,20 @@ class InvalidForkTargetError(Exception):
         super().__init__(f"Can only fork from user messages, got role '{role}' for message {message_id}")
 
 
+class SessionNotFoundError(ValueError):
+    """Raised when a session id has no matching sessions row.
+
+    Subclasses ``ValueError`` so older callers that still catch
+    ``ValueError`` retain compatibility. New IDOR-sensitive route helpers
+    catch this narrower type so unrelated value-construction failures do
+    not collapse into not-found responses.
+    """
+
+    def __init__(self, session_id: UUID) -> None:
+        self.session_id = session_id
+        super().__init__(f"Session not found: {session_id}")
+
+
 class IllegalRunTransitionError(ValueError):
     """Raised when ``update_run_status`` receives a transition forbidden by
     ``LEGAL_RUN_TRANSITIONS``.
@@ -348,6 +601,71 @@ class RunAlreadyActiveError(Exception):
         super().__init__(f"Session {session_id} already has an active run")
 
 
+class StaleComposeStateError(RuntimeError):
+    """Compose result was based on a no-longer-current composition state.
+
+    Raised by ``SessionServiceProtocol.persist_compose_turn_async`` (and
+    its concrete implementation ``SessionServiceImpl.persist_compose_turn``)
+    when the session's current composition state changed between the LLM
+    call and the persist attempt. Defined here on the protocol module so
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract, not an
+    implementation detail.
+
+    Mirrors :class:`elspeth.contracts.errors.AuditIntegrityError`'s
+    placement on the contracts layer: protocol-level error shapes belong
+    on the abstraction, not on the concrete service module.
+    """
+
+
+class AuditAccessLogWriteError(RuntimeError):
+    """Audit-grade transcript access could not be recorded.
+
+    ``include_tool_rows=true`` exposes audit-grade transcript rows. If
+    that access cannot be written to ``audit_access_log`` first, callers
+    must fail closed and return no transcript rows.
+    """
+
+
+class ToolCallIDMismatchError(RuntimeError):
+    """Assistant ``tool_calls`` and persisted tool rows disagreed on
+    the set of tool-call IDs for one compose turn.
+
+    Carries the four mutually-exclusive failure axes (missing, extra,
+    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
+    string identifies WHICH violation fired without forcing the
+    caller to re-derive it.
+
+    Defined on the protocol module alongside
+    :class:`StaleComposeStateError` because both are pre-DB exceptions
+    referenced by ``SessionServiceProtocol.persist_compose_turn_async``.
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: frozenset[str],
+        extra: frozenset[str],
+        duplicates_in_assistant: frozenset[str],
+        duplicates_in_rows: frozenset[str],
+    ) -> None:
+        self.missing = missing
+        self.extra = extra
+        self.duplicates_in_assistant = duplicates_in_assistant
+        self.duplicates_in_rows = duplicates_in_rows
+        super().__init__(
+            "persist_compose_turn: assistant tool_calls and tool rows "
+            "disagree on the tool-call ID set "
+            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
+            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
+            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
+            "Refusing to persist a turn that would leave the audit "
+            "trail with an asymmetric assistant/tool transcript."
+        )
+
+
 @runtime_checkable
 class SessionServiceProtocol(Protocol):
     """Protocol for session persistence operations."""
@@ -356,31 +674,258 @@ class SessionServiceProtocol(Protocol):
         self,
         user_id: str,
         title: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         forked_from_session_id: UUID | None = None,
         forked_from_message_id: UUID | None = None,
     ) -> SessionRecord: ...
 
     async def get_session(self, session_id: UUID) -> SessionRecord: ...
 
+    async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord: ...
+
     async def list_sessions(
         self,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[SessionRecord]: ...
 
     async def archive_session(self, session_id: UUID) -> None: ...
+
+    async def get_composer_preferences(
+        self,
+        session_id: UUID,
+    ) -> ComposerSessionPreferencesRecord: ...
+
+    async def update_composer_preferences(
+        self,
+        session_id: UUID,
+        *,
+        trust_mode: ComposerTrustMode,
+        density_default: ComposerDensityDefault,
+        actor: str,
+    ) -> ComposerSessionPreferencesTransition: ...
+
+    async def create_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        tool_call_id: str,
+        tool_name: str,
+        summary: str,
+        rationale: str,
+        affects: Sequence[str],
+        arguments_json: Mapping[str, Any],
+        arguments_redacted_json: Mapping[str, Any],
+        base_state_id: UUID | None,
+        actor: str,
+        user_message_id: UUID | None = None,
+        composer_model_identifier: str | None = None,
+        composer_model_version: str | None = None,
+        composer_provider: str | None = None,
+        composer_skill_hash: str | None = None,
+        tool_arguments_hash: str | None = None,
+    ) -> CompositionProposalRecord: ...
+
+    async def list_composition_proposals(
+        self,
+        session_id: UUID,
+        *,
+        status: ProposalLifecycleStatus | None = None,
+    ) -> list[CompositionProposalRecord]: ...
+
+    async def reject_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord: ...
+
+    async def mark_composition_proposal_committed(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        committed_state_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord: ...
+
+    async def list_proposal_events(
+        self,
+        session_id: UUID,
+    ) -> list[ProposalEventRecord]: ...
+
+    async def create_pending_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        composition_state_id: UUID,
+        affected_node_id: str,
+        tool_call_id: str,
+        user_term: str,
+        kind: InterpretationKind,
+        llm_draft: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Insert a PENDING interpretation event.
+
+        ``kind`` must be supplied explicitly by the caller. Implementations
+        MUST validate the affected component in the parent composition state
+        before INSERT (writer-boundary check per CLAUDE.md offensive
+        programming): ``invented_source`` targets the synthetic ``source``
+        component and requires persisted source-authoring metadata;
+        ``pipeline_decision`` targets the node that implements the reviewed
+        shape decision; prompt/vague transform kinds target real LLM nodes in
+        ``composition_states.nodes``. Raises
+        ``ValueError`` on a missing state, malformed target, unknown node, or
+        non-``InterpretationKind`` kind.
+        """
+        ...
+
+    async def resolve_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        event_id: UUID,
+        choice: InterpretationChoice,
+        amended_value: str | None,
+        actor: str,
+        resolved_at: datetime | None = None,
+        runtime_model_identifier: str | None = None,
+        runtime_model_version: str | None = None,
+    ) -> tuple[InterpretationEventRecord, CompositionStateRecord]:
+        """Commit a resolution and update the affected interpretation surface.
+
+        F-14: ``accepted_value`` is computed internally — implementations
+        read ``llm_draft`` from the pending row when ``choice`` is
+        ``ACCEPTED_AS_DRAFTED``, and use ``amended_value`` when ``choice``
+        is ``AMENDED``.
+
+        Single transaction. Raises ``ValueError`` for no pending event
+        (TOCTOU / IDOR), missing composition state or affected node,
+        or any prompt-template patch failure.
+        """
+        ...
+
+    async def list_interpretation_events(
+        self,
+        session_id: UUID,
+        *,
+        status: Literal["pending", "all"] = "all",
+        composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
+    ) -> list[InterpretationEventRecord]:
+        """Read-back of interpretation events for the session.
+
+        Returns rows ordered by ``created_at, id``. ``status='pending'``
+        filters to ``choice='pending'`` rows; ``status='all'`` returns
+        every row.
+
+        ``sources``: when set, filters to rows whose
+        ``interpretation_source`` is in the supplied sequence. Used by
+        the opt-out audit-summary surface
+        (``GET /interpretations/opt_out_summary``) to retrieve only
+        ``auto_interpreted_opt_out`` and ``auto_interpreted_no_surfaces``
+        rows. ``None`` (default) imposes no source filter.
+        """
+        ...
+
+    async def record_session_interpretation_opt_out(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        opted_out_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Mark the session as 'don't surface interpretations any more'.
+
+        F-29: idempotent. If an opted-out row already exists for this
+        session, returns the existing record without inserting a duplicate;
+        the sessions boolean stays true. Atomic single transaction
+        (interpretation_events INSERT + sessions UPDATE inside one
+        write lock).
+        """
+        ...
+
+    async def upsert_skill_markdown_history(
+        self,
+        *,
+        skill_hash: str,
+        filename: str,
+        content: str,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Best-effort INSERT-OR-IGNORE into ``skill_markdown_history`` (F-5c).
+
+        Captures the exact composer-skill markdown text the LLM was
+        prompted with so a forensic auditor can reconstruct it from the
+        ``composer_skill_hash`` recorded on later interpretation event
+        rows. Hash is the primary key; subsequent calls with the same
+        hash are no-ops.
+
+        Returns ``True`` when a row was inserted, ``False`` when it
+        already existed. Best-effort only — NOT transactional with the
+        interpretation-event row write.
+        """
+        ...
+
+    async def record_auto_interpreted_no_surfaces_event(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        kind: InterpretationKind,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Write an AUTO_INTERPRETED_NO_SURFACES row (Phase 5b Task 5, F-6).
+
+        Called by the compose loop when the per-term or per-day rate cap
+        is hit for ``request_interpretation_review``: the LLM is expected
+        to fall back to baking the interpretation directly into the prompt
+        template without surfacing it for review. This writer records the
+        fact in the audit trail so an auditor can distinguish "user opted
+        out" from "rate cap exhausted" via ``interpretation_source``.
+
+        Row shape (see ``ck_interpretation_events_no_surfaces_shape``):
+        * ``interpretation_source = 'auto_interpreted_no_surfaces'``
+        * ``choice = 'opted_out'`` (semantics: resolved-at-write — there
+          is no pending surface to acknowledge)
+        * Interpretation-surface fields are NULL: ``composition_state_id``,
+          ``affected_node_id``, ``tool_call_id``, ``user_term``,
+          ``llm_draft`` (the rejected request never produced a surface).
+        * ``kind`` and LLM provenance fields MUST be populated — the composer LLM
+          that triggered the rate cap is fully identifiable from the
+          compose-loop snapshot.
+        * ``arguments_hash`` is NULL because no user-visible surface was
+          created to resolve.
+        * ``resolved_at`` equals ``created_at`` (the rate-cap event is
+          itself a resolution).
+        """
+        ...
 
     async def add_message(
         self,
         session_id: UUID,
         role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: ChatMessageWriterPrincipal,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: UUID | None = None,
     ) -> ChatMessageRecord: ...
 
     async def get_messages(
@@ -390,11 +935,46 @@ class SessionServiceProtocol(Protocol):
         offset: int = 0,
     ) -> list[ChatMessageRecord]: ...
 
+    async def count_tool_responses_for_assistant_async(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Count persisted tool rows linked to an assistant message."""
+        ...
+
+    async def record_audit_grade_view_async(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Append one audit_access_log row before exposing tool rows."""
+        ...
+
     async def save_composition_state(
         self,
         session_id: UUID,
         state: CompositionStateData,
-    ) -> CompositionStateRecord: ...
+        *,
+        provenance: CompositionStateProvenance,
+    ) -> CompositionStateRecord:
+        """Save a new immutable composition state snapshot.
+
+        ``provenance`` MUST be one of the six values enumerated by the
+        ``ck_composition_states_provenance`` CHECK constraint and the
+        :data:`CompositionStateProvenance` Literal. It records WHY this row
+        was written and is the load-bearing discriminator for the
+        backward-direction INV-AUDIT-AHEAD invariant (§4.1.2). Implementations
+        MUST persist the value verbatim — no defaulting, no coercion: a
+        confident wrong attribution is evidence-tampering-class harm under
+        the auditability standard.
+        """
+        ...
 
     async def get_current_state(
         self,
@@ -484,6 +1064,16 @@ class SessionServiceProtocol(Protocol):
         """
         ...
 
+    async def record_blob_inline_resolutions(
+        self,
+        *,
+        run_id: UUID,
+        resolutions: Sequence[ResolvedBlobContent],
+        attempt: int = 1,
+    ) -> None:
+        """Write audit rows for inline-content blob refs before plugin construction."""
+        ...
+
     async def get_active_run(
         self,
         session_id: UUID,
@@ -508,7 +1098,7 @@ class SessionServiceProtocol(Protocol):
         fork_message_id: UUID,
         new_message_content: str,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
     ) -> tuple[SessionRecord, list[ChatMessageRecord], CompositionStateRecord | None]:
         """Fork a session from a specific user message.
 
@@ -562,5 +1152,34 @@ class SessionServiceProtocol(Protocol):
                 These are skipped even if they exceed max_age_seconds.
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
+        """
+        ...
+
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[Any, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: ChatMessageWriterPrincipal,
+        plugin_crash_pending: bool,
+    ) -> Any:
+        """Persist one compose turn (assistant + tool rows + per-tool
+        composition states) atomically.
+
+        Spec §5.2.2. The async dispatcher; the underlying sync work runs
+        in a worker thread under ``asyncio.shield`` (commit-wins
+        cancellation contract — see ``SessionServiceImpl
+        .persist_compose_turn_async``).
+
+        Raises :class:`StaleComposeStateError` when the session's current
+        composition state changed between the LLM call and the persist
+        attempt. Raises :class:`ToolCallIDMismatchError` when the
+        assistant ``tool_calls`` IDs and the tool rows'
+        ``tool_call_id`` values are not the same unique set.
         """
         ...

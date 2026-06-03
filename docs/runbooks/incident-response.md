@@ -121,8 +121,8 @@ Investigate and resolve production pipeline issues.
 3. **Check configuration:**
    ```bash
    sqlite3 runs/audit.db "
-     SELECT config FROM runs WHERE run_id = '<RUN_ID>';
-   " | python -m json.tool | grep -A10 "gates"
+     SELECT settings_json FROM runs WHERE run_id = '<RUN_ID>';
+   " | python -m json.tool
    ```
 
 4. **Compare with expected:**
@@ -172,8 +172,13 @@ Investigate and resolve production pipeline issues.
 
 2. **Check for bottlenecks:**
    ```bash
-   # External API response times (if logged)
-   grep "API_CALL" pipeline.log | tail -100
+   # External call timing from the audit database
+   sqlite3 runs/audit.db "
+     SELECT call_type, status, COUNT(*) AS calls, AVG(latency_ms) AS avg_latency_ms
+     FROM calls
+     GROUP BY call_type, status
+     ORDER BY avg_latency_ms DESC;
+   "
 
    # Database query times
    sqlite3 runs/audit.db "EXPLAIN QUERY PLAN SELECT * FROM node_states ns JOIN tokens t ON ns.token_id = t.token_id WHERE t.row_id = 'xxx';"

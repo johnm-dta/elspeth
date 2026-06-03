@@ -1247,15 +1247,19 @@ class ExecutionGraph:
                     # For transform branches with "continue" edges, match via producer node
                     for branch_name, _input_conn in coal_config.branches.items():
                         if branch_name in branch_schemas:
-                            # Try tracing to match this producer
-                            try:
-                                _first, last = self._trace_branch_endpoints(coalesce_nid, branch_name)
-                                if from_nid == last:
-                                    matched_branch = branch_name
-                                    break
-                            except (KeyError, GraphValidationError):
-                                # _branch_info not populated — can't trace, skip
-                                pass
+                            # branch_name ∈ branch_schemas guarantees it is also a key
+                            # in self._branch_info (branch_schemas is derived from it in
+                            # get_coalesce_branch_schemas), so the trace cannot KeyError
+                            # here. A GraphValidationError from the trace is an explicit
+                            # graph-construction-bug signal on first-party state (see
+                            # _trace_branch_endpoints docstring) and must surface — not be
+                            # swallowed, which would silently skip a branch match and
+                            # suppress a real audit-loss warning. This mirrors the
+                            # un-guarded trace call in get_branch_first_nodes.
+                            _first, last = self._trace_branch_endpoints(coalesce_nid, branch_name)
+                            if from_nid == last:
+                                matched_branch = branch_name
+                                break
 
                 if matched_branch is None or matched_branch not in branch_schemas:
                     continue

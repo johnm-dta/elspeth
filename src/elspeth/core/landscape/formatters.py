@@ -11,12 +11,9 @@ from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, overload
+from typing import Any, overload
 
 from elspeth.contracts.errors import AuditIntegrityError
-
-if TYPE_CHECKING:
-    from elspeth.core.landscape.lineage import LineageResult
 
 
 @overload
@@ -128,7 +125,7 @@ class JSONFormatter:
 class LineageTextFormatter:
     """Format LineageResult as human-readable text for CLI output."""
 
-    def format(self, result: "LineageResult | None") -> str:
+    def format(self, result: Any | None) -> str:
         """Format lineage result as text.
 
         Args:

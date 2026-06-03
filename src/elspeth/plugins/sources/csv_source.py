@@ -13,14 +13,21 @@ from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import (
+    AuditCharacteristic,
+    DeclaredAuditCharacteristics,
+    Determinism,
+    PluginSchema,
+    SourceRow,
+)
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import TabularSourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, resolve_field_names
+from elspeth.plugins.sources.field_normalization import ExternalHeaderError, FieldResolution, resolve_field_names
 
 
 class CSVSourceConfig(TabularSourceDataConfig):
@@ -31,9 +38,9 @@ class CSVSourceConfig(TabularSourceDataConfig):
     - columns, field_mapping (field normalization is mandatory)
     """
 
-    delimiter: str = ","
-    encoding: str = "utf-8"
-    skip_rows: int = Field(default=0, ge=0)
+    delimiter: str = Field(default=",", description="Single-character delimiter used to split CSV fields.")
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the CSV file.")
+    skip_rows: int = Field(default=0, ge=0, description="Number of leading physical rows to skip before reading headers or data.")
 
     @field_validator("delimiter")
     @classmethod
@@ -75,11 +82,54 @@ class CSVSource(BaseSource):
     """
 
     name = "csv"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c93b8b0f8bb509c6"
+    source_file_hash: str | None = "sha256:b6587ee1c0db70a4"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
+
+    # ── Reference content (Phase 7A canonical example) ──────────────────
+    # This block is the canonical pattern for future plugin authors.
+    # Copy this shape; replace the prose with your plugin's specifics.
+    # The catalog drawer renders these fields as a persona-facing
+    # reference card. Empty / None entries fall back to "see the technical
+    # description" rather than blocking display — but the goal for every
+    # plugin is to have these filled in eventually so the catalog is
+    # useful as orientation material (per docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md).
+
+    usage_when_to_use: str | None = (
+        "A reasonably large dataset (more than ~20 rows) that already "
+        "exists as a CSV file. The source validates and coerces types "
+        "at the boundary and quarantines malformed rows to a sink so the "
+        "rest of the pipeline keeps running on the clean rows."
+    )
+
+    usage_when_not_to_use: str | None = (
+        "Small inline data — type it into chat instead (the composer "
+        "creates a one-row source from your message). Streaming data — "
+        "CSV is batch-only; no row is emitted until the full file is "
+        "read. Data that arrives over HTTP — fetch it first, then point "
+        "the CSV source at the downloaded file."
+    )
+
+    example_use: str | None = "source:\n  plugin: csv\n  options:\n    path: data/input.csv\n    on_validation_failure: quarantine"
+
+    capability_tags: tuple[str, ...] = ("csv", "file", "batch", "tabular")
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset({AuditCharacteristic.COERCE, AuditCharacteristic.QUARANTINE})
+    # "io_read" is *inferred* by the catalog service from
+    # determinism=IO_READ. "coerce" and "quarantine" are declared here:
+    #   - "coerce" describes the CSV source's Tier-3 boundary behaviour
+    #     (string cells -> typed columns) and cannot be inferred from
+    #     determinism alone.
+    #   - "quarantine" describes the runtime behaviour configured via
+    #     `on_validation_failure`. The catalog service cannot infer this
+    #     from the class because `_on_validation_failure` is a
+    #     per-instance attribute set in `__init__`, not a class
+    #     attribute. Authors of sources that support non-discard
+    #     quarantine routing must declare `"quarantine"` themselves.
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -275,15 +325,25 @@ class CSVSource(BaseSource):
                     )
                 return  # Don't continue with corrupted parser state
 
-        def next_nonblank_record() -> list[str]:
-            """Return the next nonblank CSV record.
+        def next_nonblank_record() -> list[str] | None:
+            """Return the next nonblank CSV record, or None at end of file.
 
             csv.reader yields [] for blank physical lines. We apply the same
             skip rule before header discovery and during data iteration so a
             leading blank line cannot become a zero-column header.
+
+            Returns None when the reader is exhausted (end-of-file). We use the
+            ``next(reader, None)`` sentinel form rather than catching
+            StopIteration: the StopIteration here is an iteration-protocol
+            signal (normal EOF), not a Tier-3 data error to record. csv.Error
+            (malformed external CSV) still propagates — the ``None`` default
+            only suppresses StopIteration — so the boundary catches below still
+            see and quarantine genuine parse failures.
             """
             while True:
-                values = next(reader)
+                values = next(reader, None)
+                if values is None:
+                    return None  # End of file
                 if values:
                     return values
 
@@ -295,23 +355,6 @@ class CSVSource(BaseSource):
             # Read header row from file
             try:
                 raw_headers = next_nonblank_record()
-            except StopIteration:
-                # File exhausted after skip_rows — no header row remains.
-                # Record so the audit trail shows skip_rows consumed all content.
-                if self._skip_rows > 0:
-                    error_msg = (
-                        f"CSV file has no header row after skipping {self._skip_rows} row(s); skip_rows may exceed available content"
-                    )
-                    ctx.record_validation_error(
-                        row={
-                            "file_path": str(self._path),
-                            "skip_rows": self._skip_rows,
-                        },
-                        error=error_msg,
-                        schema_mode="parse",
-                        destination=self._on_validation_failure,
-                    )
-                return
             except csv.Error as e:
                 # Header parse failure at source boundary (Tier 3): record and quarantine/discard
                 physical_line = reader.line_num if reader.line_num > 0 else self._skip_rows + 1
@@ -336,13 +379,61 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return
-        # Resolve field names (normalization + mapping)
-        # This may raise ValueError on collision
-        self._field_resolution = resolve_field_names(
-            raw_headers=raw_headers,
-            field_mapping=self._field_mapping,
-            columns=self._columns,
-        )
+
+            if raw_headers is None:
+                # File exhausted after skip_rows — no header row remains.
+                # (next_nonblank_record() returns None at EOF.) This is distinct
+                # from headerless mode, which set raw_headers=None above without
+                # reading the file; here we are in the headered branch, so None
+                # means the file ran out of content before a header appeared.
+                # Record so the audit trail shows skip_rows consumed all content.
+                if self._skip_rows > 0:
+                    error_msg = (
+                        f"CSV file has no header row after skipping {self._skip_rows} row(s); skip_rows may exceed available content"
+                    )
+                    ctx.record_validation_error(
+                        row={
+                            "file_path": str(self._path),
+                            "skip_rows": self._skip_rows,
+                        },
+                        error=error_msg,
+                        schema_mode="parse",
+                        destination=self._on_validation_failure,
+                    )
+                return
+        # Resolve field names (normalization + mapping).
+        # External-header faults (normalization collision, empty/duplicate headers) are
+        # Tier 3 (the source's own header bytes are bad): record + quarantine/discard
+        # like a malformed data row — a collision means no rows are parseable. Config
+        # faults (a bad field_mapping) raise plain ValueError and crash; they are ours.
+        try:
+            self._field_resolution = resolve_field_names(
+                raw_headers=raw_headers,
+                field_mapping=self._field_mapping,
+                columns=self._columns,
+            )
+        except ExternalHeaderError as e:
+            # ExternalHeaderError is only raised on the normalization path, which
+            # resolve_field_names takes exclusively when raw_headers is not None.
+            assert raw_headers is not None, "ExternalHeaderError implies raw_headers was present"
+            raw_row = {
+                "file_path": str(self._path),
+                "__raw_line__": self._delimiter.join(raw_headers),
+            }
+            error_msg = f"CSV header could not be resolved: {e}"
+            ctx.record_validation_error(
+                row=raw_row,
+                error=error_msg,
+                schema_mode="parse",
+                destination=self._on_validation_failure,
+            )
+            if self._on_validation_failure != "discard":
+                yield SourceRow.quarantined(
+                    row=raw_row,
+                    error=error_msg,
+                    destination=self._on_validation_failure,
+                )
+            return
         headers = self._field_resolution.final_headers
         expected_count = len(headers)
 
@@ -360,10 +451,10 @@ class CSVSource(BaseSource):
         row_num = 0  # Logical row number (data rows only)
         while True:
             try:
-                # Try to read next row - csv.Error raised here for malformed rows
+                # Try to read next row - csv.Error raised here for malformed rows.
+                # next_nonblank_record() returns None at EOF (iteration-protocol
+                # signal, not a Tier-3 data error); csv.Error still propagates.
                 values = next_nonblank_record()
-            except StopIteration:
-                break  # End of file
             except csv.Error as e:
                 # CSV parsing error (bad quoting, unmatched quotes, etc.)
                 # CRITICAL: csv.Error can leave the parser in a corrupted state where
@@ -397,6 +488,9 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return  # Don't continue with corrupted parser state
+
+            if values is None:
+                break  # End of file
 
             row_num += 1
             # reader.line_num tracks physical file line position (including multiline fields)
@@ -513,3 +607,51 @@ class CSVSource(BaseSource):
             self._field_resolution.resolution_mapping,
             self._field_resolution.normalization_version,
         )
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="csv",
+                issue_code=None,
+                summary="Load tabular data from a CSV file. Coerces strings to declared types at the Tier-3 boundary; quarantines malformed rows.",
+                composer_hints=(
+                    "Default schema.mode to 'observed' unless the user explicitly asked to project to a smaller schema.",
+                    "Call inspect_source before declaring schema.mode: 'fixed' — fixed mode silently drops rows that don't match.",
+                    "Decide whether the CSV is headered: without columns CSVSource treats the first non-skipped row as headers; for headerless data set columns=[...] so the first data row stays data. Do not copy a header row into inline source data unless it is real headered CSV.",
+                    "If you have been asked to generate CSV rows yourself (the invented_source path): always emit a header row as the first non-skipped line of the generated CSV, and always leave the `columns` option unset so CSVSource treats your first row as headers.",
+                    "When generating CSV rows yourself, declare those generated column names in `schema.fields` (or `schema.guaranteed_fields`).",
+                    "When generating CSV rows yourself, the header row, the `columns` decision, and the schema must all agree. Never generate headerless CSV — the audit trail and downstream contracts need the header to be self-describing.",
+                    "columns tells CSVSource how to parse headerless rows, but downstream DAG validation still needs a schema guarantee. If transforms consume a CSV column, declare it in schema.guaranteed_fields or explicit schema fields.",
+                    "CSV source options do not have url_field; if a downstream web_scrape needs URLs, keep the URL column in the CSV schema and set url_field on the web_scrape node.",
+                    "If you authored CSV rows or chose source values for this CSV, bind the exact artifact as a blob-backed source and stage invented_source on source.options.interpretation_requirements.",
+                    "After staging invented_source for an authored CSV, call request_interpretation_review with affected_node_id='source' and llm_draft equal to the exact CSV text.",
+                    "For source-level interpretation reviews, source is not a transform node; do not search nodes[] for source before calling the review tool.",
+                    "Excel-exported CSVs are often cp1252 or have a UTF-16 BOM — verify encoding before pinning schema.",
+                    "Set on_validation_failure to a sink name for quarantine/review, or 'discard' to drop with audit. Default is 'discard'.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        # Trigger: operator/LLM declared a fixed schema without first
+        # observing the actual columns. The validator can't catch this
+        # because the schema is *structurally* valid — it's just likely
+        # to be wrong.
+        if "schema" not in config_snapshot:
+            return ()
+        schema = config_snapshot["schema"]
+        if not isinstance(schema, Mapping):
+            return ()
+        if "mode" in schema and schema["mode"] == "fixed":
+            return (
+                "You declared schema.mode: 'fixed'. Did you call inspect_source first? "
+                "Fixed mode drops every row whose columns don't exactly match the declared fields.",
+            )
+        return ()

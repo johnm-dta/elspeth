@@ -33,7 +33,7 @@ The defect is not that `CompositionState.validate()` needs more local rules. It 
 - Existing execution-service tests have concrete patch-target pairs to migrate from `elspeth.web.execution.service.*` to `elspeth.web.execution.preflight.*`; enumerate them and add a persistent pytest guard so future stale patch sites are not missed.
 - Add tests for all `_runtime_preflight_failure_message()` branches, the authoring-only `preview_pipeline` default, and reuse of preview runtime preflight when the state is unchanged at finalization.
 - Forked sessions must preserve `chat_messages.raw_content` for copied historical messages; this keeps raw assistant provenance attached to the conversation history after fork.
-- Adding `chat_messages.raw_content` is a schema-bootstrap change. Existing dev/staging `sessions.db` files must be reset through `docs/guides/session-db-reset.md`; before staging rollout, re-confirm Landscape has no `session_id`, `chat_message_id`, or `composition_state_id` references so deleting the session DB cannot orphan audit rows.
+- Adding `chat_messages.raw_content` is a schema-bootstrap change. Existing dev/staging `sessions.db` files must be reset through `docs/runbooks/staging-session-db-recreation.md`; before staging rollout, re-confirm Landscape has no `session_id`, `chat_message_id`, or `composition_state_id` references so deleting the session DB cannot orphan audit rows.
 - Low-priority hardening: avoid kwargs-fragile loader spies, assert final-gate structural contracts rather than message copy substrings, test Tier 1 `state.to_dict()` propagation, document raw-content retention, and track deferred frontend-copy/runtime-dispatch follow-ups.
 - Runtime graph check names must use named constants plus an explicit order assertion; never unpack `RUNTIME_GRAPH_VALIDATION_CHECKS` positionally into `_CHECK_*` names.
 - Audit-integrity coverage must prove exported composer YAML does not contain resolved secret values.
@@ -2499,7 +2499,7 @@ git commit -m "fix(composer): gate final responses on runtime preflight"
 - Modify: `src/elspeth/web/sessions/service.py`
 - Modify: `src/elspeth/web/sessions/schemas.py`
 - Modify: `src/elspeth/web/sessions/routes.py`
-- Read: `docs/guides/session-db-reset.md`
+- Read: `docs/runbooks/staging-session-db-recreation.md`
 - Test: `tests/unit/web/sessions/test_routes.py`
 - Test: `tests/unit/web/sessions/test_fork.py`
 
@@ -2507,7 +2507,7 @@ git commit -m "fix(composer): gate final responses on runtime preflight"
 
 This task adds `chat_messages.raw_content`. `initialize_session_schema()` intentionally validates exact table schemas and raises `SessionSchemaError` for stale DB files; there is no migration path in this project. Before running backend tests against persistent dev data, and before restarting `elspeth.foundryside.dev`, delete or archive existing session DB files so they are recreated with the new column.
 
-Do not duplicate the systemd/restart/env-file checklist in this implementation plan. Use the operational runbook at `docs/guides/session-db-reset.md`.
+Do not duplicate the systemd/restart/env-file checklist in this implementation plan. Use the operational runbook at `docs/runbooks/staging-session-db-recreation.md`.
 
 Before any staging reset, run the runbook's Landscape reference gate:
 
@@ -3495,7 +3495,7 @@ async def test_get_state_yaml_validates_exact_state_snapshot(tmp_path) -> None:
 async def test_get_state_yaml_does_not_export_resolved_secret_values(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
-    resolved_secret = "__RESOLVED_SECRET_CANARY_DO_NOT_EXPORT__"
+    resolved_secret = "__RESOLVED_SECRET_CANARY_DO_NOT_EXPORT__"  # secret-scan: allow-this-line
 
     class FakeResolvedSecretService:
         resolved_value = resolved_secret
@@ -3826,7 +3826,7 @@ Spec coverage:
 - Raw LLM content retention is documented as chat-message/session lifecycle, with separate tracker follow-up for dedicated retention policy: Tasks 5 and 8.
 - Persisted state truthfulness across all composer write paths: Task 5.
 - Tier 1 propagation from `state.to_dict()` is tested instead of relying only on prose: Task 5.
-- Existing session DB files are an operator-handled bootstrap boundary for the `raw_content` schema change: Task 5 Step 0 delegates operational details to `docs/guides/session-db-reset.md`, including the pre-rollout Landscape reference gate that prevents orphaning audit rows.
+- Existing session DB files are an operator-handled bootstrap boundary for the `raw_content` schema change: Task 5 Step 0 delegates operational details to `docs/runbooks/staging-session-db-recreation.md`, including the pre-rollout Landscape reference gate that prevents orphaning audit rows.
 - YAML export truthfulness without a double-read race: Task 6.
 - YAML export secret safety is negative-tested: resolved secret canaries stay out of exported YAML and `secret_ref` markers remain intact: Task 6.
 - Runtime patch-target drift is enforced by persistent pytest coverage under `tests/unit/scripts/cicd/`, not by a one-shot grep: Task 2.

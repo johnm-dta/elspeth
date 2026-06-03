@@ -17,11 +17,12 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.value_source import DerivedFromSiblingValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, ContentPolicyError, LLMClientError
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, parse_finish_reason
 from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, TracingConfig
@@ -67,6 +68,11 @@ class AzureOpenAIConfig(LLMConfig):
         default=None,
         description="Tier 2 tracing configuration (azure_ai, langfuse, or none)",
     )
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint_url(cls, value: str) -> str:
+        return validate_credential_safe_https_url(value, field_name="endpoint")
 
     @model_validator(mode="before")
     @classmethod
@@ -118,6 +124,7 @@ class AzureLLMProvider:
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._api_key: str | None = api_key
@@ -127,6 +134,10 @@ class AzureLLMProvider:
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
+        # Phase 5b Task 9 — cross-DB hash anchor. Forwarded to every
+        # ``client.chat_completion`` call so the Landscape ``calls`` row
+        # carries the matching SHA-256.
+        self._resolved_prompt_template_hash = resolved_prompt_template_hash
 
         # Client caches — lock ordering: _llm_clients_lock → _underlying_client_lock
         # (always acquire _llm_clients_lock first to prevent deadlock)
@@ -178,6 +189,7 @@ class AzureLLMProvider:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
 
             # Extract finish_reason from raw_response.
@@ -218,6 +230,33 @@ class AzureLLMProvider:
             # Uses snapshot (not state_id parameter) to avoid evicting wrong entry.
             with self._llm_clients_lock:
                 self._llm_clients.pop(snapshot_state_id, None)
+
+    def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+        """Run a minimal audited Azure OpenAI call under an operation parent."""
+        client = AuditedLLMClient(
+            execution=self._recorder,
+            state_id=None,
+            operation_id=operation_id,
+            run_id=self._run_id,
+            telemetry_emit=self._telemetry_emit,
+            underlying_client=self._get_underlying_client(),
+            provider="azure",
+            limiter=self._limiter,
+        )
+        try:
+            client.chat_completion(
+                model=model,
+                messages=[{"role": "user", "content": "Respond with OK only."}],
+                temperature=0.0,
+                # Azure OpenAI requires max_output_tokens >= 16. Values below
+                # the floor return HTTP 400 with "integer_below_min_value"
+                # before any model work, killing the entire pipeline at
+                # preflight. 32 gives margin without materially affecting
+                # smoke-test cost.
+                max_tokens=32,
+            )
+        finally:
+            client.close()
 
     def _get_underlying_client(self) -> Any:
         """Get or create the underlying AzureOpenAI SDK client (thread-safe)."""

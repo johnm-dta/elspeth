@@ -9,9 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
-from elspeth.web.auth.oidc import OIDCAuthProvider
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
+from elspeth.web.auth.oidc import JWKSTokenValidator, OIDCAuthProvider
 from tests.unit.web.auth.conftest import build_rsa_jwk, make_rs256_token, make_rsa_token
 
 ISSUER = "https://login.example.com"
@@ -434,7 +435,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -488,7 +489,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -573,7 +574,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -633,6 +634,68 @@ class TestOIDCJWKSShapeValidation:
             pytest.raises(AuthenticationError, match="non-empty string 'jwks_uri'"),
         ):
             await provider.authenticate("some-token")
+
+    @pytest.mark.asyncio
+    async def test_discovery_jwks_uri_cross_host_raises_before_jwks_fetch(self) -> None:
+        """Discovery jwks_uri must not redirect key fetches away from the issuer origin."""
+        provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
+        requested_urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            requested_urls.append(str(url))
+            response = MagicMock()
+            response.raise_for_status = lambda: None
+            if ".well-known/openid-configuration" in str(url):
+                response.json.return_value = {
+                    "jwks_uri": "https://metadata.google.internal/computeMetadata/v1/keys",
+                    "issuer": ISSUER,
+                }
+                return response
+            raise AssertionError(f"unexpected JWKS fetch to {url}")
+
+        client_mock = AsyncMock()
+        client_mock.get = mock_get
+        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+        client_mock.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
+            pytest.raises(AuthenticationError, match="same origin as issuer"),
+        ):
+            await provider.authenticate("some-token")
+
+        assert requested_urls == [f"{ISSUER}/.well-known/openid-configuration"]
+
+    @pytest.mark.asyncio
+    async def test_discovery_jwks_uri_http_scheme_raises_before_jwks_fetch(self) -> None:
+        """Discovery jwks_uri must be HTTPS even when the host matches the issuer."""
+        provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
+        requested_urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            requested_urls.append(str(url))
+            response = MagicMock()
+            response.raise_for_status = lambda: None
+            if ".well-known/openid-configuration" in str(url):
+                response.json.return_value = {
+                    "jwks_uri": "http://login.example.com/keys",
+                    "issuer": ISSUER,
+                }
+                return response
+            raise AssertionError(f"unexpected JWKS fetch to {url}")
+
+        client_mock = AsyncMock()
+        client_mock.get = mock_get
+        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+        client_mock.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
+            pytest.raises(AuthenticationError, match="HTTPS URL"),
+        ):
+            await provider.authenticate("some-token")
+
+        assert requested_urls == [f"{ISSUER}/.well-known/openid-configuration"]
 
     @pytest.mark.asyncio
     async def test_jwks_json_array_raises_auth_error_and_does_not_poison_cache(self) -> None:
@@ -826,6 +889,88 @@ class TestOIDCStaleCacheBackoff:
             await provider.authenticate(token)  # should attempt fetch again
 
         assert attempt_count == 2
+
+
+@pytest.mark.asyncio
+class TestOIDCJWKSFailureLogRedaction:
+    """JWKS fetch-failure logs must carry exception class, not exception text."""
+
+    async def test_stale_cache_fetch_failure_logs_exc_class_without_exception_message(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        private_key, _ = rsa_keypair
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=60,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+
+        with mock_httpx_discovery:
+            await provider.authenticate(token)
+
+        sensitive_uri = "https://login.example.com/keys?client_secret=super-secret"
+
+        async def failing_get(url, **kwargs):
+            raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
+
+        failing_client = AsyncMock()
+        failing_client.get = failing_get
+        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
+        failing_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
+            capture_logs() as cap_logs,
+        ):
+            identity = await provider.authenticate(token)
+
+        assert identity.user_id == "user-123"
+        events = [entry for entry in cap_logs if entry.get("event") == "JWKS fetch failed, serving stale cache"]
+        assert len(events) == 1, cap_logs
+        event = events[0]
+        assert event["exc_class"] == "InvalidURL"
+        assert "error" not in event
+        assert sensitive_uri not in repr(event)
+
+    async def test_cold_start_fetch_failure_logs_exc_class_without_exception_message(
+        self,
+        rsa_keypair,
+    ) -> None:
+        private_key, _ = rsa_keypair
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=3600,
+            jwks_failure_retry_seconds=60,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+        sensitive_uri = "https://login.example.com/keys?client_secret=super-secret"
+
+        async def failing_get(url, **kwargs):
+            raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
+
+        failing_client = AsyncMock()
+        failing_client.get = failing_get
+        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
+        failing_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
+            capture_logs() as cap_logs,
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable: InvalidURL"),
+        ):
+            await provider.authenticate(token)
+
+        events = [entry for entry in cap_logs if entry.get("event") == "JWKS cold-start fetch failed; throttling retry"]
+        assert len(events) == 1, cap_logs
+        event = events[0]
+        assert event["exc_class"] == "InvalidURL"
+        assert "error" not in event
+        assert sensitive_uri not in repr(event)
 
 
 class TestOIDCShapeFailureBackoff:
@@ -1332,14 +1477,14 @@ class TestOIDCColdStartBackoff:
         failing_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
-            # First call: attempts fetch, has no stale cache, raises AuthenticationError.
-            with pytest.raises(AuthenticationError):
+            # First call: attempts fetch, has no stale cache, raises AuthProviderUnavailable.
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
             # Second and third calls within the 60s backoff window:
             # MUST fail fast WITHOUT re-entering the httpx client.
-            with pytest.raises(AuthenticationError):
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
-            with pytest.raises(AuthenticationError):
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
 
         # The fix: only one network attempt during the backoff window.
@@ -1381,7 +1526,7 @@ class TestOIDCColdStartBackoff:
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
-            pytest.raises(AuthenticationError),
+            pytest.raises(AuthProviderUnavailable),
         ):
             await provider.authenticate(token)
 
@@ -1400,7 +1545,7 @@ class TestOIDCColdStartBackoff:
         rsa_keypair,
     ) -> None:
         """Concurrent cold-start requests during an IdP outage: exactly
-        one fetch attempt; all requests raise AuthenticationError; none
+        one fetch attempt; all requests raise AuthProviderUnavailable; none
         block on the httpx timeout in sequence."""
         private_key, _ = rsa_keypair
         provider = OIDCAuthProvider(
@@ -1433,7 +1578,7 @@ class TestOIDCColdStartBackoff:
             )
 
         # All five requests failed.
-        assert all(isinstance(r, AuthenticationError) for r in results), results
+        assert all(isinstance(r, AuthProviderUnavailable) for r in results), results
         # Exactly one attempt — the first acquired the lock and ran, the
         # other four hit the cold-start throttle fast-path and never
         # touched the network.
@@ -1452,3 +1597,47 @@ class TestOIDCProtocolConformance:
 
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
         assert isinstance(provider, AuthProvider)
+
+
+class TestJWKSValidatorBoundaryRaises:
+    """Direct-call boundary tests for the @trust_boundary-decorated JWKS validators.
+
+    These tests invoke each validator with the malformed external value passed
+    DIRECTLY as the decorator's ``source_param`` (no httpx mock indirection) so
+    the trust_boundary.tests honesty gate can prove the raising invariant
+    against the named parameter. The IdP-driven shape-failure paths are also
+    exercised end-to-end through ``authenticate`` in
+    ``TestOIDCJWKSShapeValidation`` above; these direct-call tests pin the
+    boundary contract at the function granularity the decorator attests.
+    """
+
+    @staticmethod
+    def _validator() -> JWKSTokenValidator:
+        return JWKSTokenValidator(issuer=ISSUER, audience=AUDIENCE)
+
+    def test_validate_discovery_document_non_dict_raises(self) -> None:
+        """A non-object discovery payload is rejected at the boundary, not coerced."""
+        validator = self._validator()
+        with pytest.raises(AuthenticationError, match="not a JSON object"):
+            validator._validate_discovery_document(discovery=["not", "a", "dict"])
+
+    def test_validate_jwks_document_missing_keys_raises(self) -> None:
+        """A JWKS document without a 'keys' list is rejected at the boundary."""
+        with pytest.raises(AuthenticationError, match="missing 'keys' list"):
+            JWKSTokenValidator._validate_jwks_document(jwks={"not_keys": []})
+
+    def test_get_token_algorithm_missing_alg_raises(self) -> None:
+        """A token header without a non-empty string 'alg' is rejected at the boundary."""
+        with pytest.raises(AuthenticationError, match="non-empty string 'alg'"):
+            JWKSTokenValidator._get_token_algorithm(header={"kid": "k1"})
+
+    def test_get_jwk_algorithm_invalid_alg_raises(self) -> None:
+        """A matched JWK with a non-string 'alg' is rejected at the boundary.
+
+        The no-match / missing-alg paths return None (honest absence); the
+        boundary only RAISES when a matched key advertises an invalid 'alg'
+        value, which is the invariant the decorator attests.
+        """
+        jwks = {"keys": [{"kid": "k1", "alg": 42}]}
+        with pytest.raises(AuthenticationError, match="invalid non-empty string 'alg'"):
+            JWKSTokenValidator._get_jwk_algorithm(jwks=jwks, kid="k1")

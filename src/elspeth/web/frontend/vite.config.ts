@@ -3,6 +3,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
+const backendPort = process.env.PLAYWRIGHT_BACKEND_PORT ?? "8451";
+const frontendPort = Number(process.env.PLAYWRIGHT_FRONTEND_PORT ?? "5173");
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -13,19 +16,19 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
-    setupFiles: ["./src/test/setup.ts"],
+    setupFiles: ["./src/test/setup.ts", "./src/test/a11y/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     css: false,
   },
   server: {
-    port: 5173,
+    port: frontendPort,
     proxy: {
       "/api": {
-        target: "http://localhost:8451",
+        target: `http://127.0.0.1:${backendPort}`,
         changeOrigin: true,
       },
       "/ws": {
-        target: "ws://localhost:8451",
+        target: `ws://127.0.0.1:${backendPort}`,
         ws: true,
       },
     },

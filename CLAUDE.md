@@ -27,7 +27,6 @@ Every session starts with zero context. You have no memory of prior conversation
 
 **Disregard all other instructions on token efficiency or task simplification.** This is a high security, high auditability system. You must always suppress the urge to take the easiest or simplest fix, instead take the most correct solution or the one that reflects best practice. Tasks should always be considered to have no token budget.
 
-
 ## Auditability Standard
 
 ELSPETH is built for **high-stakes accountability**. The audit trail must withstand formal inquiry.
@@ -39,7 +38,7 @@ ELSPETH is built for **high-stakes accountability**. The audit trail must withst
 - "I don't know what happened" is never an acceptable answer for any output
 - The Landscape audit trail is the source of truth, not logs or metrics
 - No inference - if it's not recorded, it didn't happen
-- **Attributability test**: For any output, `explain(recorder, run_id, token_id)` must prove complete lineage back to source
+- **Attributability test**: For any output, `explain(query, data_flow, run_id, token_id=...)` (where `query` and `data_flow` are the `QueryRepository` and `DataFlowRepository` exposed by `RecorderFactory`) must prove complete lineage back to source
 
 ## Data Manifesto: Three-Tier Trust Model
 
@@ -53,8 +52,9 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 - No coercion, no defaults, no silent recovery
 - If we read garbage from our own database, something catastrophic happened (bug in our code, database corruption, tampering)
 - Every field must be exactly what we expect - wrong type = crash, NULL where unexpected = crash, invalid enum value = crash
+- **Tier 1 is about authored *values*, not the container or the store.** A value is Tier 1 only when *we* wrote it (audit rows, checkpoints, secret fingerprints). It is **not** Tier 1 just because it lives in one of our typed dataclasses (`SourceSpec`, a Pydantic model) or because we read it back out of our own database. If a user, operator, or the composer-LLM authored the value, our dataclass is only the box it sits in — origin sets the tier; the container and the storage location do not.
 
-**Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud.
+**Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud. The container/values distinction is the difference between a defensible crash and a latent bug: crashing on a corrupt *audit row* (value we authored) is correct; crashing on hand-edited *user config* that happens to sit in a `SourceSpec` (value the user authored) takes down the tool over data we never owned.
 
 ### Tier 2: Pipeline Data (Post-Source) - ELEVATED TRUST ("Probably OK")
 
@@ -67,9 +67,11 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 
 **Why:** Plugins have contractual obligations. If a transform's `output_schema` says `int` and it outputs `str`, that's a bug we fix by fixing the plugin, not by coercing downstream. Note: type-safe doesn't mean operation-safe — `row["divisor"] = 0` is type-valid but will fail on division. Wrap operations on row values.
 
-### Tier 3: External Data (Source Input) - ZERO TRUST
+### Tier 3: External-Origin Data - ZERO TRUST
 
 **Can be literal trash.** We don't control what external systems feed us.
+
+**"External" means non-authored, not networked.** Tier 3 is any value whose *contract we did not write*: source rows, HTTP/LLM responses, OIDC tokens — but equally the output of a local `date` subprocess we parse positionally, or user/operator/composer-LLM-authored configuration. The test is not "did this arrive over the network?" but **"did we author the contract that guarantees this value's shape?"** If not, it is Tier 3 until we validate it at the boundary. The plugin or dataclass that carries the value is a courier; trust attaches to the value's *author*, not its courier.
 
 - Malformed CSV rows, NULLs everywhere, wrong types, unexpected JSON structures
 - **Validate at the boundary, coerce where possible, record what we got**
@@ -78,34 +80,12 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 - **Coercion is meaning-preserving; fabrication is not.** `"42"` → `42` preserves the value (coercion). `None` → `0` changes the meaning from "unknown" to "zero" (fabrication). The test: can the downstream consumer distinguish real data from synthetic? If not, it's fabrication.
 - **Inference from adjacent fields is still fabrication.** If field A is absent, deriving its value from field B produces a synthetic datum that the external system never asserted. The audit trail now contains a confident answer to a question the source never answered. An auditor asking "did Dataverse say there were more records?" gets `True` — but Dataverse said nothing. The correct representation is `None` (absence), not a value inferred from other fields. Let consumers decide what absence means in their context; don't decide for them at the boundary.
 - **The fabrication decision test:** Before filling in a missing field, ask: (1) If an auditor queries this field, will they get a value the external system actually provided? If no, it's fabrication. (2) If the external system's behaviour changes and the field starts appearing with a different value than what we inferred, will the audit trail silently contain two contradictory sources of truth? If yes, it's fabrication. (3) Would recording `None` and letting the consumer handle absence be less convenient but more honest? If yes, record `None`.
+- **Origin is sticky; persistence is not a sanitizer.** External-origin data that we validate, persist to our own DB, and read back later is *still Tier 3 on read-back*. Validation promotes a value to Tier 2 **in flight** — it does not stamp the origin permanently. Re-reading persisted external-origin config (e.g. `source.options`, composer-authored pipeline YAML) is a **fresh Tier 3 boundary**: the store is hand-editable and the validating model can drift between write and read, so "it passed validation once" is not a reason to trust it on the next read. This is the classic *second-order / stored-input* trust boundary. Wrap the read, quarantine or return a diagnostic on failure — never crash the tool or pipeline because persisted config no longer parses.
+  - **The deciding factor is chain of custody, not storage.** A checkpoint *we* authored stays Tier 1 through the same DB round-trip (our own statement, unbroken custody → crash on anomaly); config *they* authored stays Tier 3 (someone else's statement, custody interrupted by storage → re-check the seal, quarantine). Persistence doesn't change *whose statement* a value is — it interrupts custody, so the read is re-checked either way; only the response (crash for our evidence vs quarantine for their material) differs by authorship. Think evidence handling: writing to disk and reading back left the envelope unattended, so the next reader checks the tamper seal — but a broken seal on *our* record is tampering (crash), while a broken seal on *their* delivery is a damaged parcel (quarantine).
 - Quarantine rows that can't be coerced/validated
 - The audit trail records "row 42 was quarantined because field X was NULL" - that's a valid audit outcome
 
 **Why:** User data is a trust boundary. A CSV with garbage in row 500 shouldn't crash the entire pipeline - we record the problem, quarantine the row, and keep processing the other 10,000 rows. We don't trust external systems, and we don't trust their silence either - an absent field is evidence, not an invitation to invent a default.
-
-### The Trust Flow
-
-```text
-EXTERNAL DATA              PIPELINE DATA              AUDIT TRAIL
-(zero trust)               (elevated trust)           (full trust)
-                           "probably ok"
-
-┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-│ External Source │        │ Transform/Sink  │        │ Landscape DB    │
-│                 │        │                 │        │                 │
-│ • Coerce OK     │───────►│ • No coercion   │───────►│ • Crash on      │
-│ • Validate      │ types  │ • Expect types  │ record │   any anomaly   │
-│ • Quarantine    │ valid  │ • Wrap ops on   │ what   │ • No coercion   │
-│   failures      │        │   row values    │ we     │   ever          │
-│                 │        │ • Bug if types  │ saw    │                 │
-│                 │        │   are wrong     │        │                 │
-└─────────────────┘        └─────────────────┘        └─────────────────┘
-         │                          │
-         │                          │
-    Source is the              Operations on row
-    ONLY place coercion        values need wrapping
-    is allowed                 (values can still fail)
-```
 
 ### Quick Reference
 
@@ -113,7 +93,8 @@ EXTERNAL DATA              PIPELINE DATA              AUDIT TRAIL
 - **Transform (on row data)**: no coercion, wrap operations on values
 - **Transform (on external calls)**: coerce OK — external response is Tier 3, record absence as `None`
 - **Sink**: no coercion, expect types
-- **Our data (Landscape, checkpoints)**: crash on any anomaly — serialization doesn't change trust tier
+- **Our data (Landscape, checkpoints)**: crash on any anomaly — serialization doesn't change trust tier (we authored the *values*, so they stay Tier 1 through `json.loads`)
+- **Persisted external-origin config (composer/user/operator-authored, read back from our DB)**: still Tier 3 — re-validate on read, quarantine/diagnostic on failure; living in a `SourceSpec` and "validated once" do **not** promote it to Tier 1. Origin sets the tier, not the container or the store.
 
 For detailed code examples (external call boundaries, pipeline templates, coercion/wrapping tables), see the `tier-model-deep-dive` skill.
 
@@ -131,24 +112,7 @@ All plugins (Sources, Transforms, Aggregations, Sinks) are **system-owned code**
 | User data has wrong type | Quarantine row, continue | Crash the pipeline |
 | User data missing field | Quarantine row, continue | Crash the pipeline |
 
-A defective plugin that silently produces wrong results is **worse than a crash**:
-
-1. **Crash:** Pipeline stops, operator investigates, bug gets fixed
-2. **Silent wrong result:** Data flows through, gets recorded as "correct," auditors see garbage, trust is destroyed
-
-```python
-# WRONG - hides plugin bugs, destroys audit integrity
-try:
-    result = transform.process(row, ctx)
-except Exception:
-    result = row  # "just pass through on error"
-    logger.warning("Transform failed, using original row")
-
-# RIGHT - plugin bugs crash immediately
-result = transform.process(row, ctx)  # Let it crash
-```
-
-If `transform.process()` has a bug, we MUST know about it. Silently passing through the original row means the audit trail now contains data that "looks processed" but wasn't - this is evidence tampering.
+A defective plugin that silently produces wrong results is **worse than a crash**: a crash stops the pipeline and gets the bug fixed; silent pass-through gets recorded as "correct" and destroys the audit trail. Never wrap plugin calls in try/except to "recover" — let them crash.
 
 ## Core Architecture
 
@@ -197,6 +161,9 @@ Pipelines compile to DAGs. Linear pipelines are degenerate DAGs (single `continu
 
 **Package management:** Use `uv` for ALL package management. Never use `pip` directly.
 
+For ELSPETH-specific CI analyzer rationale, rule taxonomy, and lifecycle policy,
+see [docs/elspeth-lints/rationale.md](docs/elspeth-lints/rationale.md).
+
 ```bash
 # Environment setup
 uv venv && source .venv/bin/activate
@@ -218,12 +185,70 @@ uv pip install -e ".[all]"      # Everything
 .venv/bin/python -m scripts.check_contracts
 
 # Tier model enforcement (defensive pattern detection + layer-import enforcement)
-.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
 
 # Layer-import architecture observation (deterministic graph; always exits 0)
-.venv/bin/python scripts/cicd/enforce_tier_model.py dump-edges --root src/elspeth --format json --output /tmp/l3-import-graph.json --no-timestamp
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli dump-edges --root src/elspeth --format json --output /tmp/l3-import-graph.json --no-timestamp
 # Also supports --format mermaid (inline diagrams) and --format dot (Graphviz).
 # Full reference: engine-patterns-reference skill, "Layer Architecture & Dependency Analysis" section.
+
+# Allowlist fingerprint rotation (post-refactor; mechanical, no judgement)
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli rotate --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --dry-run
+# Drop --dry-run to apply. Surfaces rotations, ambiguous N:M groups, stale entries,
+# and TODO-stub debt that needs judge review. Slice 1 of the cicd-judge-cli prototype.
+# Symmetric N:N prefix groups are auto-paired by default; pass --no-auto-pair-symmetric
+# to surface them as ambiguous instead. Stale entries are kept by default (--remove-stale to delete).
+
+# Judge-gated allowlist entry creation (audit metadata write path)
+env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli justify --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --file-path plugins/example.py --symbol MyClass._method --rationale "why this suppression is honest" --owner "$USER"
+# Writes judge_verdict, judge_rationale, source binding fields, and the HMAC
+# signature. New entries bind v2 scope_fingerprint (the enclosing-scope AST
+# fingerprint, signature prefix hmac-sha256:v2:); v1 file_fingerprint (whole-
+# file hash) is the still-live legacy scheme being migrated away. Do not
+# hand-edit judge metadata; production loads verify it.
+#
+# Judge transport: --judge-transport {openrouter,agent} (default openrouter; no
+# behavior change unless opted in) selects which LLM serves the verdict. This
+# flag is also accepted by reaudit (below).
+#   openrouter — OpenAI-compatible SDK pointed at OpenRouter, temperature=0,
+#     reproducible. Persisted/signed judge_transport value: "openrouter".
+#   agent      — Claude Agent SDK (claude_code system-prompt preset, no tools).
+#     Needs the [judge-agent] extra (uv pip install -e 'elspeth-lints/[judge-agent]')
+#     AND Claude Code auth: a logged-in Claude Code CLI / Claude-subscription or
+#     Agent-SDK credit pool, OR ANTHROPIC_API_KEY, OR Bedrock/Vertex/Azure.
+#     Persisted/signed judge_transport value: "claude_agent_sdk".
+# The "agent is cheaper" assumption rests on the subscription/credit path:
+# ANTHROPIC_API_KEY is per-token Anthropic billing and may NOT be cheaper than
+# OpenRouter. The agent transport cannot pin temperature, so agent-written
+# entries are less reproducible than the temperature=0 openrouter path — prefer
+# reaudit under --judge-transport openrouter to keep re-checks deterministic
+# regardless of an entry's origin transport. The signed v2 payload binds
+# judge_transport ("how the verdict was produced" — verdict metadata, tamper-
+# evident with the verdict); the claude_code preset's era is bounded by the
+# already-signed judge_recorded_at timestamp (no preset-version is captured).
+
+# Reaudit existing judged entries during allowlist renewal / decay sweeps
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli reaudit --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --format markdown --output /tmp/reaudit.md
+# If interrupted, resume with --resume <run_id> or inspect an incomplete report
+# with --render-incomplete <run_id>. When C3 override-rate fails, reaudit the
+# override-heavy directories before considering an ADR to change the threshold.
+# reaudit also accepts --judge-transport {openrouter,agent} (default openrouter);
+# keep it on openrouter for deterministic temperature=0 re-checks regardless of
+# the transport that originally wrote each entry.
+
+# Migrate signature-valid v1 (file_fingerprint) entries to v2 (scope_fingerprint)
+# — "signature-valid" means the existing signature still verifies AND the node
+# still matches a live finding; this deliberately SKIPS the file_fingerprint
+# byte-freshness gate, so byte-drifted-but-scope-stable entries are exactly the
+# target set (not "CI-green" entries).
+# OPERATOR-ONLY (writes signed metadata; requires ELSPETH_JUDGE_METADATA_HMAC_KEY,
+# same custody constraint as justify — an agent may PROPOSE, only an operator-held
+# environment runs and signs). Re-signs WITHOUT re-running the LLM judge, gated on
+# two checks per entry: integrity (the existing v1 signature must verify — a
+# tampered entry is refused, never laundered into a clean v2 signature) and
+# relevance (the entry's canonical key must still match a live finding). --dry-run
+# reports what would migrate without writing.
+env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli migrate-judge-scope --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --owner "$USER"
 
 # CLI
 elspeth run --settings pipeline.yaml --execute        # Execute pipeline
@@ -294,11 +319,11 @@ L3  plugins/       Can import L0, L1, L2. Sources, transforms, sinks, clients.
     mcp/ tui/ cli* telemetry/ testing/   — also L3 (application layer)
 ```
 
-**Enforced by CI:** `scripts/cicd/enforce_tier_model.py` detects upward imports and fails the build. The allowlist mechanism (`config/cicd/enforce_tier_model/`) supports per-file and per-finding exemptions for legitimate exceptions.
+**Enforced by CI:** the `trust_tier.tier_model` elspeth-lints rule detects upward imports and fails the build. The allowlist mechanism (`config/cicd/enforce_tier_model/`) supports per-file and per-finding exemptions for legitimate exceptions.
 
 **TYPE_CHECKING imports** are reported as warnings, not failures. They're architecturally impure (the dependency still exists for type checkers) but don't create runtime coupling.
 
-**Architecture observation (separate from enforcement).** The same script also exposes a `dump-edges` subcommand that emits the deterministic intra-layer import graph as JSON, Mermaid, or Graphviz DOT. It always exits 0 (observational, not a gate) and supports SCC detection via `networkx`. Use it for architecture analysis, refactor planning, or dependency-graph diffing across branches. **Cite the JSON output by path** rather than paraphrasing — the `--no-timestamp` flag produces byte-identical output across runs so cited values stay stable. Full reference (subcommands, JSON schema, edge metadata semantics, SCC interpretation, citation discipline) lives in the `engine-patterns-reference` skill under "Layer Architecture & Dependency Analysis".
+**Architecture observation (separate from enforcement).** `elspeth-lints dump-edges` emits the deterministic intra-layer import graph as JSON, Mermaid, or Graphviz DOT. It always exits 0 (observational, not a gate) and supports SCC detection via `networkx`. Use it for architecture analysis, refactor planning, or dependency-graph diffing across branches. **Cite the JSON output by path** rather than paraphrasing — the `--no-timestamp` flag produces byte-identical output across runs so cited values stay stable. Full reference (subcommands, JSON schema, edge metadata semantics, SCC interpretation, citation discipline) lives in the `engine-patterns-reference` skill under "Layer Architecture & Dependency Analysis".
 
 ### When a New Cross-Layer Need Arises
 
@@ -311,23 +336,48 @@ Resolution options in priority order:
 
 ## No Legacy Code Policy
 
-**STRICT REQUIREMENT:** Legacy code, backwards compatibility, and compatibility shims are strictly forbidden. WE HAVE NO USERS YET. Deferring breaking changes until we do is the opposite of what we want.
+**STRICT REQUIREMENT:** Legacy code, backwards compatibility, and compatibility shims are strictly forbidden. WE HAVE NO USERS YET — deferring breaking changes is the opposite of what we want.
 
-### Anti-Patterns - Never Do This
+**When something is removed or changed, DELETE THE OLD CODE COMPLETELY.** No version checks, feature flags for old behaviour, adapter/wrapper/proxy shims, `@deprecated` retentions, commented-out "for reference" blocks, or "both old and new" branches. Don't rename unused variables to `_var` — delete them. Don't keep old code in comments — git history exists. Change all call sites in the same commit.
 
-1. **Backwards Compatibility Code** - No version checks, feature flags for old behavior, or "compatibility mode" switches
-2. **Legacy Shims** - No adapter classes, wrapper functions, or proxy objects for deprecated functionality
-3. **Deprecated Code Retention** - No `@deprecated` decorators with code kept around, no commented-out implementations "for reference"
-4. **Migration Helpers** - No code supporting "both old and new" simultaneously
+## CICD Judge Gate: HMAC Key Custody
 
-### The Rule
+The cicd-judge allowlist gate signs judge metadata with a **symmetric** HMAC key
+(`ELSPETH_JUDGE_METADATA_HMAC_KEY`). Symmetric means **every key holder can forge
+a valid signature** — so the gate's entire security reduces to one custody rule:
 
-**When something is removed or changed, DELETE THE OLD CODE COMPLETELY.**
+**The signing key is operator-only. It MUST NOT be present in any autonomous
+agent's environment** (`.env` files an agent can read, agent CI contexts, dev
+shells an agent drives).
 
-- Don't rename unused variables to `_var` - delete the variable
-- Don't keep old code in comments - delete it (git history exists)
-- Don't add compatibility layers - change all call sites in the same commit
-- Don't create abstractions to hide breaking changes - make the breaking change
+An agent that holds the key can bypass the judge entirely: hand-write
+`judge_verdict: ACCEPTED` with a fabricated rationale and a correct
+(publicly-computable) source binding — `scope_fingerprint`/`ast_path` for v2
+entries, the legacy `file_fingerprint`/`ast_path` for v1 — compute a valid
+signature, and pass **every** automated gate — putting a forged-but-validly-signed verdict
+into the audit trail, indistinguishable from a real one. The HMAC stops a
+*keyless* agent and makes tampering of signed entries detectable; it does nothing
+against a key-holding agent.
+
+Therefore: an agent may *propose* an `elspeth-lints justify` invocation; only an
+operator-held environment runs it and signs. The same custody rule covers
+`migrate-judge-scope` (v1→v2 re-sign): it writes signed metadata and so is
+operator-only — an agent may propose it, only an operator-held HMAC-key
+environment runs and signs. CI verifies signatures with the key as a GitHub
+Actions secret (withheld from fork PRs by design — see the
+`shape-only-when-key-missing` verify mode and its load-time warning). A future
+asymmetric scheme (agents can verify, not sign) would remove this surface
+structurally.
+
+The `--judge-transport` flag is a separate axis from the HMAC custody rule. Both
+`openrouter` and `agent` produce a verdict that an operator still signs; the flag
+governs *which LLM* serves the verdict, not who signs. The `agent` transport
+additionally needs Claude Code auth (CLI login / `ANTHROPIC_API_KEY` /
+Bedrock-Vertex-Azure) that an autonomous agent's environment does not hold, so an
+agent proposing a `justify` uses the default `openrouter`. `reaudit` is
+read-only (it writes no signed metadata) and is agent-runnable with the agent's
+own OpenRouter key — but again only under `openrouter`, since the `agent`
+transport's auth is not in an agent's environment.
 
 ## Git Safety
 
@@ -337,7 +387,7 @@ Resolution options in priority order:
 - `git push --force` - Rewrites remote history
 - `git rebase` (on pushed branches) - Rewrites shared history
 
-**No git stash.** The stash/pop cycle has caused repeated data loss in this project — pre-commit hooks that stash/unstash silently destroy unstaged work when `stash pop` encounters conflicts. If you need to preserve work, commit it to a branch.
+**Worktree isolation is the default for new work.** Before starting implementation, ask the operator whether to create a worktree under `.worktrees/`; default yes. Inside a worktree there is nothing to stash, which removes the slip pattern that previously caused data loss in this project via pre-commit-hook `stash`/`pop` cycles (the hooks silently destroy unstaged work when `stash pop` encounters conflicts). In the main checkout — an explicit operator opt-in — `git stash` is available as a normal tool: the prior absolute prohibition was lifted on 2026-05-11 once worktree-default became the upstream control. See memory: `feedback_default_to_worktree.md`, `feedback_no_git_stash.md`.
 
 ## Defensive Programming: Forbidden. Offensive Programming: Encouraged
 
@@ -366,7 +416,7 @@ For detailed examples (Tier 1 read guards, write-side DTO validation, TOCTOU ato
 
 ## Frozen Dataclass Immutability: The `deep_freeze` Contract
 
-Python's `frozen=True` only prevents attribute **reassignment** — it does nothing about mutable **contents**. A `frozen=True` dataclass with a `dict` field is a lie: the dict is fully mutable through the attribute reference. Every frozen dataclass with container fields (`dict`, `list`, `set`, `Mapping`, `Sequence`) **must** enforce deep immutability in `__post_init__`.
+Python's `frozen=True` only prevents attribute **reassignment** — mutable contents stay mutable through the attribute reference. Every frozen dataclass with container fields (`dict`, `list`, `set`, `Mapping`, `Sequence`) **must** enforce deep immutability in `__post_init__`.
 
 ### The Canonical Pattern
 
@@ -382,11 +432,9 @@ class MyRecord:
         freeze_fields(self, "data", "items")
 ```
 
-**Always use `freeze_fields()`** — it calls `deep_freeze()` on each named field (recursively converting `dict` → `MappingProxyType`, `list` → `tuple`, `set` → `frozenset`, including arbitrary `Mapping` types) and skips `object.__setattr__` when the field is already frozen (identity-preserving idempotency).
+`freeze_fields()` calls `deep_freeze()` on each named field (recursively converting `dict` → `MappingProxyType`, `list` → `tuple`, `set` → `frozenset`) and is identity-preserving when the field is already frozen. For nullable fields, gate on `is not None` first. For shapes `freeze_fields` can't handle (e.g. per-element tuple comprehensions), call `deep_freeze()` directly with an identity check.
 
-For fields gated on `None`, use `if self.field is not None: freeze_fields(self, "field")`.
-
-For special cases that `freeze_fields` can't handle (e.g., per-element tuple comprehensions), use `deep_freeze()` directly with the identity check pattern.
+If all fields are scalars, enums, `datetime`, or `None`, no guard is needed — `frozen=True` suffices.
 
 ### Forbidden Anti-Patterns
 
@@ -398,151 +446,127 @@ For special cases that `freeze_fields` can't handle (e.g., per-element tuple com
 | `isinstance(self.x, tuple)` to skip | **Tuple of mutable dicts.** A `tuple[dict, dict]` passes the check but contents are mutable. |
 | `not isinstance(self.x, MappingProxyType)` | **Shallow frozen ≠ deep frozen.** A `MappingProxyType` wrapping mutable nested containers is not deeply frozen. |
 
-### When Shallow Wrapping IS Acceptable
+`MappingProxyType(dict(self.x))` (shallow copy + wrap) is acceptable **only when values are guaranteed immutable** (scalars, enum members, frozen dataclass instances). Prefer `deep_freeze()` regardless unless profiling shows a hot-path concern.
 
-`MappingProxyType(dict(self.x))` (shallow copy + wrap) is acceptable **only when values are guaranteed immutable**: scalars (`int`, `str`, `bool`, enum members) or frozen dataclass instances. Even then, `deep_freeze()` works and is more consistent — prefer it unless profiling shows a hot-path concern.
+Enforced by `scripts/cicd/enforce_freeze_guards.py`; allowlist in `config/cicd/enforce_freeze_guards/`.
 
-### Scalar-Only Fields Need No Guard
-
-If all fields are scalars, enums, `datetime`, or `None`, no freeze guard is needed. `frozen=True` is sufficient. Don't add guards that do nothing.
-
-### Enforced by CI
-
-`scripts/cicd/enforce_freeze_guards.py` detects forbidden patterns in `__post_init__` methods and fails the build. Allowlist in `config/cicd/enforce_freeze_guards/` for justified exceptions.
-
-<!-- filigree:instructions:v1.6.0:84820288 -->
+<!-- filigree:instructions:v2.1.0:9dff6e6d -->
 ## Filigree Issue Tracker
 
-Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
-
-### MCP Tools (Preferred)
-
-When MCP is configured, prefer `mcp__filigree__*` tools over CLI commands — they're
-faster and return structured data. Key tools:
-
-- `get_ready` / `get_blocked` — find available work
-- `get_issue` / `list_issues` / `search_issues` — read issues
-- `create_issue` / `update_issue` / `close_issue` — manage issues
-- `claim_issue` / `claim_next` — atomic claiming
-- `add_comment` / `add_label` — metadata
-- `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
-- `create_plan` / `get_plan` — milestone planning
-- `get_stats` / `get_metrics` — project health
-- `get_valid_transitions` — workflow navigation
-- `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
-- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` — automated code scanning
-- `get_finding` / `list_findings` / `update_finding` / `batch_update_findings` — scan finding triage
-- `promote_finding` / `dismiss_finding` — finding lifecycle (promote to issue or dismiss)
-
-Observations are fire-and-forget notes that expire after 14 days. Use `list_issues --label=from-observation` to find promoted observations.
-
-**Observations are ambient.** While doing other work, use `observe` whenever you
-notice something worth noting — a code smell, a potential bug, a missing test, a
-design concern. Don't stop what you're doing; just fire off the observation and
-carry on. They're ideal for "I don't have time to investigate this right now, but
-I want to come back to it." Include `file_path` and `line` when relevant so the
-observation is anchored to code. At session end, skim `list_observations` and
-either `dismiss_observation` (not worth tracking) or `promote_observation`
-(deserves an issue) for anything that's accumulated.
-
-Fall back to CLI (`filigree <command>`) when MCP is unavailable.
-
-### CLI Quick Reference
-
-```bash
-# Finding work
-filigree ready                              # Show issues ready to work (no blockers)
-filigree list --status=open                 # All open issues
-filigree list --status=in_progress          # Active work
-filigree list --label=bug --label=P1        # Filter by multiple labels (AND)
-filigree list --label-prefix=cluster:       # Filter by label namespace prefix
-filigree list --not-label=wontfix           # Exclude issues with label
-filigree show <id>                          # Detailed issue view
-
-# Creating & updating
-filigree create "Title" --type=task --priority=2          # New issue
-filigree update <id> --status=in_progress                # Claim work
-filigree close <id>                                      # Mark complete
-filigree close <id> --reason="explanation"               # Close with reason
-
-# Dependencies
-filigree add-dep <issue> <depends-on>       # Add dependency
-filigree remove-dep <issue> <depends-on>    # Remove dependency
-filigree blocked                            # Show blocked issues
-
-# Comments & labels
-filigree add-comment <id> "text"            # Add comment
-filigree get-comments <id>                  # List comments
-filigree add-label <id> <label>             # Add label
-filigree remove-label <id> <label>          # Remove label
-filigree labels                             # List all labels by namespace
-filigree taxonomy                           # Show reserved namespaces and vocabulary
-
-# Workflow templates
-filigree types                              # List registered types with state flows
-filigree type-info <type>                   # Full workflow definition for a type
-filigree transitions <id>                   # Valid next states for an issue
-filigree packs                              # List enabled workflow packs
-filigree validate <id>                      # Validate issue against template
-filigree guide <pack>                       # Display workflow guide for a pack
-
-# Atomic claiming
-filigree claim <id> --assignee <name>            # Claim issue (optimistic lock)
-filigree claim-next --assignee <name>            # Claim highest-priority ready issue
-
-# Batch operations
-filigree batch-update <ids...> --priority=0      # Update multiple issues
-filigree batch-close <ids...>                    # Close multiple with error reporting
-
-# Planning
-filigree create-plan --file plan.json            # Create milestone/phase/step hierarchy
-
-# Event history
-filigree changes --since 2026-01-01T00:00:00    # Events since timestamp
-filigree events <id>                             # Event history for issue
-filigree explain-state <type> <state>            # Explain a workflow state
-
-# All commands support --json and --actor flags
-filigree --actor bot-1 create "Title"            # Specify actor identity
-filigree list --json                             # Machine-readable output
-
-# Project health
-filigree stats                              # Project statistics
-filigree search "query"                     # Search issues
-filigree doctor                             # Health check
-```
-
-### File Records & Scan Findings (API)
-
-The dashboard exposes REST endpoints for file tracking and scan result ingestion.
-Use `GET /api/files/_schema` for available endpoints and valid field values.
-
-Key endpoints:
-- `GET /api/files/_schema` — Discovery: valid enums, endpoint catalog
-- `POST /api/v1/scan-results` — Ingest scan results (SARIF-lite format)
-- `GET /api/files` — List tracked files with filtering and sorting
-- `GET /api/files/{file_id}` — File detail with associations and findings summary
-- `GET /api/files/{file_id}/findings` — Findings for a specific file
+`filigree` tracks tasks for this project. Data lives in `.filigree/`. Prefer
+the MCP tools (`mcp__filigree__*`) when available; fall back to the `filigree`
+CLI otherwise.
 
 ### Workflow
-1. `filigree ready` to find available work
-2. `filigree show <id>` to review details
-3. `filigree transitions <id>` to see valid state changes
-4. `filigree update <id> --status=in_progress` to claim it
-5. Do the work, commit code
-6. `filigree close <id>` when done
 
-### Session Start
-When beginning a new session, run `filigree session-context` to load the project
-snapshot (ready work, in-progress items, critical path). This provides the
-context needed to pick up where the previous session left off.
+```bash
+# At session start
+filigree session-context                            # ready / in-progress / critical path
 
-### Priority Scale
+# Pick up the next startable issue (atomic claim + transition into its working status)
+filigree start-next-work --assignee <name>
+# ...or claim a specific issue
+filigree start-work <id> --assignee <name>
+
+# Do the work, commit, then
+filigree close <id>
+```
+
+Use the atomic claim+transition verbs — `start_work` / `start_next_work`
+(MCP) or `start-work` / `start-next-work` (CLI). Do **not** chain
+`claim_issue` (MCP) or `filigree claim` (CLI) with a subsequent status
+update — the two-step form races against other agents; the combined verb is
+atomic.
+
+**Ready ≠ startable.** The working status is type-specific (tasks →
+`in_progress`, features → `building`). Bugs start at `triage`, which has no
+single-hop transition into work (`triage → confirmed → fixing`), so a triage
+bug is *ready* but not directly *startable*: `start_work` on one returns
+`INVALID_TRANSITION` naming the next status, and `start_next_work` skips it.
+`get_ready` items carry a `startable` flag (plus a `next_action` hint when
+false). Pass `advance=true` (MCP) / `--advance` (CLI) to walk the soft
+transitions to the nearest working status automatically.
+
+### Observations: when (and when not) to use them
+
+`observe` is a fire-and-forget scratchpad for *incidental* defects — things
+you notice *outside the scope of your current task* (a code smell in a
+neighbouring file, a stale TODO, a missing test for an edge case you happened
+to spot). Notes expire after 14 days unless promoted. Include `file_path` and
+`line` when relevant. At session end, skim `list_observations` and either
+`dismiss_observation` or `promote_observation` for what has accumulated.
+
+**You fix bugs in your currently defined scope. You do NOT use observations
+to finish work prematurely.** If a defect, gap, or follow-up belongs to your
+current task, you own it — handle it as part of that task: fix it now, expand
+the task's scope, file a proper issue with a dependency, or surface it to the
+user. Filing it as an observation and closing the task is *not* completing
+the task; it is shipping known-broken work and hiding the debt in a 14-day
+expiring scratchpad. The test is "would I have noticed this even if I weren't
+working on this task?" If no, it's task scope, not an observation.
+
+### Priority scale
+
 - P0: Critical (drop everything)
 - P1: High (do next)
 - P2: Medium (default)
 - P3: Low
 - P4: Backlog
+
+### Reaching for tools
+
+MCP tool schemas describe each tool; `filigree --help` and `filigree <verb>
+--help` are the authoritative CLI reference. You do not need to memorise
+either catalogue. The verbs you will reach for most:
+
+- **Find work:** `get_ready`, `get_blocked`, `list_issues`, `search_issues`
+- **Claim work:** `start_work`, `start_next_work`
+- **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
+- **Admin (irreversible):** `delete_issue` (MCP) / `delete-issue` (CLI) —
+  hard-deletes a terminal issue and its rows; `undo_last` cannot reverse it.
+- **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
+- **Cross-product entity bindings (ADR-029):** `add_entity_association`,
+  `remove_entity_association`, `list_entity_associations`,
+  `list_associations_by_entity`. Used when a sibling tool (e.g.
+  Clarion) needs to bind a Filigree issue to a function, class, or
+  module identifier it owns. The `entity_id` is an opaque string
+  from Filigree's perspective; the consumer (the sibling tool's read
+  path) does drift detection against the stored
+  `content_hash_at_attach`. `list_associations_by_entity` is the
+  reverse-lookup surface — given a Clarion entity ID, return every
+  Filigree issue bound to it (project isolation is by DB file). Also
+  reachable over HTTP as
+  `GET/POST /api/issue/{issue_id}/entity-associations`,
+  `DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`,
+  and `GET /api/entity-associations?entity_id=…`.
+- **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
+
+Pass `--actor <name>` (CLI) so events attribute to your agent identity. It
+works in either position — before the verb (`filigree --actor X update …`) or
+after it (`filigree update … --actor X`); the post-verb value overrides the
+group-level one.
+
+### Error handling
+
+Errors return `{error: str, code: ErrorCode, details?: dict}`. Switch on
+`code`, not on message text. Codes: `VALIDATION`, `NOT_FOUND`, `CONFLICT`,
+`INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`,
+`INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`,
+`CLARION_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`,
+`SCHEMA_MISMATCH`, `INTERNAL`.
+
+On `INVALID_TRANSITION`, call `get_valid_transitions` (MCP) or
+`filigree transitions <id>` to see what the workflow allows from here.
+
+Two failure modes deserve a specific response:
+
+- **`SCHEMA_MISMATCH`** — the installed `filigree` is older than the project
+  database. The error message contains upgrade guidance. Surface it to the
+  user; do not retry.
+- **`ForeignDatabaseError`** — filigree found a parent project's database
+  but no local `.filigree.conf`. Run `filigree init` in the current
+  directory. Do **not** `cd` upward to a different project unless that was
+  the actual intent.
 <!-- /filigree:instructions -->
 
 <!-- Filigree behavioral guidance (issue types, naming, retyping) is in AGENTS.md -->

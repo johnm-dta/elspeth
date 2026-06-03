@@ -9,6 +9,7 @@ This is the ONLY place in the pipeline where coercion is allowed.
 from __future__ import annotations
 
 import csv
+import enum
 import io
 import itertools
 import json
@@ -19,17 +20,24 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import CallStatus, CallType, PluginSchema, SourceRow
+from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, normalize_field_name, resolve_field_names
+from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
+    FieldResolution,
+    normalize_field_name,
+    resolve_field_names,
+)
 from elspeth.plugins.sources.json_source import (
     _contains_surrogateescape_chars,
     _reject_nonfinite_constant,
@@ -40,6 +48,17 @@ if TYPE_CHECKING:
     from azure.storage.blob import BlobClient
 
 logger = structlog.get_logger(__name__)
+
+
+# Sentinel distinguishing "iterator exhausted" from a real CSV row when peeking
+# with next(it, _ROW_EXHAUSTED). Lets us treat end-of-file as ordinary control
+# flow instead of catching StopIteration, while csv.Error still propagates. An
+# Enum member (not a bare object()) so mypy narrows the union on `is` checks.
+class _RowSentinel(enum.Enum):
+    EXHAUSTED = enum.auto()
+
+
+_ROW_EXHAUSTED = _RowSentinel.EXHAUSTED
 
 
 class CSVOptions(BaseModel):
@@ -265,7 +284,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -273,7 +292,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="blob_path")
 
     @field_validator("on_validation_failure")
     @classmethod
@@ -320,9 +339,29 @@ class AzureBlobSource(BaseSource):
     """
 
     name = "azure_blob"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:525397539f159571"
+    source_file_hash: str | None = "sha256:cc423ddf05e26ab8"
     config_model = AzureBlobSourceConfig
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Loads CSV, JSON, or JSONL rows from Azure Blob Storage.",
+                composer_hints=(
+                    "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
+                    "Choose format explicitly; csv uses csv_options, while json/jsonl use json_options and optional data_key.",
+                    "For headerless CSV set csv_options.has_header=false and provide columns; columns is invalid for headered CSV or non-CSV blobs.",
+                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`.",
+                    "Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
+                    "Use field_mapping only to override normalized field names at the source boundary.",
+                    "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -552,27 +591,9 @@ class AzureBlobSource(BaseSource):
         # Determine headers
         if has_header:
             try:
-                raw_headers = next(reader)
-            except StopIteration:
-                # Empty file — quarantine as structural failure (Tier 3)
-                raw_row = {
-                    "__raw_blob_preview__": text_data[:200],
-                    "__encoding__": encoding,
-                }
-                error_msg = "CSV parse error: empty file contains no header row"
-                ctx.record_validation_error(
-                    row=raw_row,
-                    error=error_msg,
-                    schema_mode="parse",
-                    destination=self._on_validation_failure,
-                )
-                if self._on_validation_failure != "discard":
-                    yield SourceRow.quarantined(
-                        row=raw_row,
-                        error=error_msg,
-                        destination=self._on_validation_failure,
-                    )
-                return
+                # next(..., sentinel) turns end-of-file into ordinary control
+                # flow (no StopIteration handler); csv.Error still propagates.
+                raw_headers = next(reader, _ROW_EXHAUSTED)
             except csv.Error as e:
                 # Header parse failure at source boundary (Tier 3)
                 raw_row = {
@@ -594,11 +615,56 @@ class AzureBlobSource(BaseSource):
                     )
                 return
 
-            self._field_resolution = resolve_field_names(
-                raw_headers=raw_headers,
-                field_mapping=self._field_mapping,
-                columns=None,
-            )
+            if raw_headers is _ROW_EXHAUSTED:
+                # Empty file — quarantine as structural failure (Tier 3)
+                raw_row = {
+                    "__raw_blob_preview__": text_data[:200],
+                    "__encoding__": encoding,
+                }
+                error_msg = "CSV parse error: empty file contains no header row"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
+
+            # External-header faults (normalization collision, empty/duplicate headers)
+            # are Tier 3 (the blob's own header bytes are bad): record + quarantine/
+            # discard like the sibling csv.Error header path above. Config faults (a bad
+            # field_mapping) raise plain ValueError and crash — they are ours.
+            try:
+                self._field_resolution = resolve_field_names(
+                    raw_headers=raw_headers,
+                    field_mapping=self._field_mapping,
+                    columns=None,
+                )
+            except ExternalHeaderError as e:
+                raw_row = {
+                    "__raw_blob_preview__": text_data[:200],
+                    "__encoding__": encoding,
+                }
+                error_msg = f"CSV header could not be resolved: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
             headers = self._field_resolution.final_headers
         elif self._columns is not None:
             self._field_resolution = resolve_field_names(
@@ -619,10 +685,11 @@ class AzureBlobSource(BaseSource):
                 headers = self._field_resolution.final_headers
             else:
                 # No headers, no columns, no schema — peek at first row
-                # to generate numeric column names (matching pandas behavior)
-                try:
-                    first_row = next(reader)
-                except StopIteration:
+                # to generate numeric column names (matching pandas behavior).
+                # next(..., sentinel) makes end-of-file ordinary control flow;
+                # csv.Error still propagates (matching prior behavior).
+                first_row = next(reader, _ROW_EXHAUSTED)
+                if first_row is _ROW_EXHAUSTED:
                     return  # Empty headerless file — no data to process
                 numeric_names = [str(i) for i in range(len(first_row))]
                 headers = tuple(numeric_names)
@@ -651,9 +718,9 @@ class AzureBlobSource(BaseSource):
         row_count = 0
         while True:
             try:
-                values = next(row_source)
-            except StopIteration:
-                break
+                # next(..., sentinel) makes end-of-file ordinary control flow;
+                # the csv.Error boundary handler below still fires on bad CSV.
+                values = next(row_source, _ROW_EXHAUSTED)
             except csv.Error as e:
                 # csv.Error can leave parser in corrupted state — stop processing
                 row_count += 1
@@ -680,6 +747,9 @@ class AzureBlobSource(BaseSource):
                         error=error_msg,
                         destination=self._on_validation_failure,
                     )
+                break
+
+            if values is _ROW_EXHAUSTED:
                 break
 
             # Skip blank lines
@@ -896,7 +966,15 @@ class AzureBlobSource(BaseSource):
         try:
             row_items = list(row.items())
         except AttributeError:
-            raise ValueError(f"Expected JSON object, got {type(row).__name__}") from None
+            # A JSON/JSONL element that is not an object (e.g. a bare primitive
+            # in an array) is Tier-3 bad source data, not an our-code fault.
+            # Raise the external-field-boundary marker (ExternalHeaderError, a
+            # ValueError subclass) so _validate_and_yield can discriminate this
+            # quarantine-worthy data fault from the plain ValueErrors that
+            # resolve_field_names raises for config/our-code faults, which must
+            # crash. Mirrors the CSV header path's ExternalHeaderError vs plain
+            # ValueError split (see _load_csv and field_normalization.py).
+            raise ExternalHeaderError(f"Expected JSON object, got {type(row).__name__}") from None
 
         raw_keys = [key for key, _ in row_items]
 
@@ -949,7 +1027,15 @@ class AzureBlobSource(BaseSource):
         """
         try:
             row_to_validate = self._normalize_row_keys(row) if self._format in ("json", "jsonl") else row
-        except ValueError as e:
+        except ExternalHeaderError as e:
+            # Tier-3 data faults only: a non-object row (ExternalHeaderError from
+            # _normalize_row_keys) or a collision in the external row's own keys
+            # (ExternalHeaderError from resolve_field_names). Config/our-code faults
+            # — a bad field_mapping (plain ValueError: keys-not-found / creates-
+            # collision) or a normalization-algorithm bug (plain ValueError) — are
+            # ours and must crash, so they are NOT caught here. This mirrors the CSV
+            # header path (_load_csv catches ExternalHeaderError, lets plain
+            # ValueError propagate; see the comment there and field_normalization.py).
             error_msg = f"Field normalization failed: {e}"
             ctx.record_validation_error(
                 row=row,

@@ -1,0 +1,152 @@
+{
+  "round": 2,
+  "verdict": "CHANGES_REQUESTED",
+  "prior_round_verdict": "CHANGES_REQUESTED",
+  "review_date": "2026-05-16",
+  "plans_reviewed": [
+    "docs/composer/ux-redesign-2026-05/14-phase-2-audit-readiness-panel.md",
+    "docs/composer/ux-redesign-2026-05/14a-phase-2a-backend.md",
+    "docs/composer/ux-redesign-2026-05/14b-phase-2b-frontend.md",
+    "docs/composer/ux-redesign-2026-05/14c-phase-2c-frontend-integration.md"
+  ],
+  "fix_commits_reviewed": [
+    "4e7f751c6 (14a fix-up)",
+    "aa037c6f8 (14b fix-up)",
+    "5d631fa0a (14c scope-shrink)"
+  ],
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "summary": "Three fix-up commits genuinely closed every prior blocker (5 reality + 2 architecture + 2 systems + 3 quality = all 11 first-round issues resolved at file:line). Two new blockers landed during the fix-up itself: Task 8.5's CI gate is a describe.skip wrapper (a skipped test cannot fail red — Phase 3A can merge without unskipping) and 14a Task 1 Step 3's git-add template enumerates 7 files while the No-Legacy prose mandates same-commit updates to ~6 additional files (~20 legacy ValidationCheck/ValidationError call sites). Both new blockers represent the same pattern — the prose specifies the right thing, the implementation mechanism (describe.skip / partial git add) does not realize it. Both fixes are trivial: delete .skip and expand the git-add enumeration. Nine warnings remain, none blocking.",
+  "prior_blockers_resolution": {
+    "B1_NodeSpec_TypeError": "FIXED — make_node_spec() factory covers all 13 required NodeSpec fields; imported by sibling tests (14a Tasks 3 line 733 area)",
+    "B2_OutputSpec_TypeError": "FIXED — make_output_spec() passes on_write_failure='discard' explicitly (14a:733)",
+    "B3_compat_shim_defaults": "FIXED — affected_nodes and error_code declared without Python defaults; plan states 'no compat-shim defaults' (14a Task 1 Step 2b)",
+    "B4_phantom_preferences_ts": "FIXED — references real api/client.ts:407-425 instead of phantom api/preferences.ts (14b Task 2 Step 1)",
+    "B5_phantom_plugin_names": "FIXED — EXTERNAL_BOUNDARY_TRANSFORMS contents verified at plugin source paths; phantom names (web_fetch, web_scrape_extraction, dataverse_query) removed",
+    "C1_affected_nodes_producer": "FIXED — validation.py:1248 identity_node_advisory site co-updated in same commit; integration guard test asserts component_ids non-empty",
+    "C2_loadSnapshot_race": "FIXED — AbortController per session + monotonic write guard + clearSession aborts in-flight; all three race scenarios covered",
+    "C3_handleValidate_deletion": "FIXED via scope-shrink — only standalone Validate button removed; handleValidate/injectSystemMessage/sendValidationFeedback retained in InspectorPanel.tsx",
+    "C4_scoped_secret_resolver": "FIXED — Protocol drops auth_provider_type; app.state.scoped_secret_resolver wiring explicit with 'DO NOT use app.state.secret_service' note",
+    "BLOCK1_secret_service_wiring": "FIXED — convergence with C4",
+    "BLOCK3_mypy_ruff_gates": "FIXED — every 14a Task commit checklist includes mypy + ruff check + ruff format --check; every 14b Task includes typecheck + lint"
+  },
+  "new_blocking_issues": [
+    {
+      "id": "R2-B1",
+      "sources": ["architecture", "systems", "quality (informational)"],
+      "issue": "Task 8.5 describe.skip is not a CI gate — plan claims mechanical enforcement but test never runs",
+      "evidence": "14c Task 8.5 Step 2 explicitly says 'Expected output: 1 skipped — it does NOT fail red in this state.' describe.skip is unconditionally excluded from CI. 14c Task 8 rationale and risk table claim 'mechanical CI gate that fails red until Phase 3A Task 8 lands the relocation' — a skipped test cannot fail red. Phase 3A can merge without unskipping it.",
+      "priority_score": 60,
+      "resolution": "Remove the .skip wrapper. The test body inside describe.skip(...) is already complete and correct. Removing .skip causes it to fail-red today (because Phase 3A's subscription wiring isn't present) and pass when Phase 3A lands — which is the actual mechanical gate the plan claims to deliver."
+    },
+    {
+      "id": "R2-B2",
+      "sources": ["reality", "systems"],
+      "issue": "14a Task 1 Step 3 git-add template omits ~6 files containing ~20 legacy ValidationCheck/ValidationError construction sites",
+      "evidence": "Task 1 Step 2b prose mandates same-commit update of every call site (CLAUDE.md No-Legacy). Step 3's explicit git-add lists 7 files but omits: src/elspeth/web/execution/service.py (657, 664), src/elspeth/web/composer/service.py (1071, 1073-1079), validation.py:1242 identity_node_advisory site (needs affected_nodes=(identity_finding.node_id,) — this is the load-bearing site for the provenance row), tests/unit/web/execution/test_schemas.py (9+ sites), tests/unit/web/execution/test_routes.py (2 sites), tests/unit/web/composer/test_service.py (5+ sites), tests/unit/web/sessions/test_routes.py (4 sites), tests/unit/web/composer/test_route_integration.py (1 site). New required fields without Python defaults TypeError at every un-updated site.",
+      "priority_score": 60,
+      "resolution": "Expand Step 3's git-add enumeration to include all files surfaced by the prescribed grep audit. Or change the instruction to 'git add $(git diff --name-only)' after the grep-and-update pass. Additionally extend the mypy check in Step 3 to cover execution/service.py, composer/service.py, and the modified test files."
+    }
+  ],
+  "new_warnings": [
+    {
+      "id": "R2-W1",
+      "sources": ["architecture"],
+      "issue": "handleValidate scope-shrink leaves it operationally orphaned if no keyboard shortcut exists",
+      "evidence": "Task 9 Step 4 prescribes a ShortcutsHelp.tsx grep to confirm whether a keyboard shortcut invokes handleValidate. If the grep returns empty, scope-shrink doesn't eliminate the regression window — injectSystemMessage and sendValidationFeedback become operationally unreachable until Phase 3A lands.",
+      "resolution": "After Task 9 Step 4's grep: if result is empty, either rewire handleValidate to the panel's Validation row trigger or pull Phase 3A Task 8 into this PR. Don't ship Phase 2C with handlers that have no UI trigger."
+    },
+    {
+      "id": "R2-W2",
+      "sources": ["quality", "systems"],
+      "issue": "loadSnapshot AbortError catch arm doesn't reset isLoading — panel hangs at 'Checking audit readiness…' after session navigation during in-flight fetch",
+      "evidence": "auditReadinessStore.ts loadSnapshot catch arm (14b lines 749-754): 'if ((err as { name?: string }).name === \"AbortError\") return;'. Early return leaves isLoading=true. clearSession aborts the controller but its set() payload does not reset isLoading. isLoading is global (not per-session), so all subsequent panel renders show the loading indicator until a new successful fetch completes.",
+      "resolution": "AbortError branch: set({isLoading: false}); return;. Also add isLoading: false to clearSession's set() payload as belt-and-suspenders."
+    },
+    {
+      "id": "R2-W3",
+      "sources": ["quality"],
+      "issue": "'concurrent-fetch test' awaits first to complete before starting second — tests monotonic write guard but not AbortController cancellation path",
+      "evidence": "14b auditReadinessStore.test.ts lines 616-643: test awaits loadSnapshot(SESSION_ID, 2) to full completion before starting loadSnapshot(SESSION_ID, 1). This is sequential, not concurrent. AbortController abort-on-new-fetch is never exercised because there's never a second in-flight fetch when the first starts.",
+      "resolution": "Start both fetches without await; assert AbortController.signal.aborted is true after second fetch starts; assert isLoading resets cleanly. Keep the existing sequential test as well — it correctly exercises the monotonic guard."
+    },
+    {
+      "id": "R2-W4",
+      "sources": ["systems"],
+      "issue": "'Audit ready ✓' collapse misleads when multiple rows are not_applicable on an incomplete pipeline",
+      "evidence": "Phase 2 rendering: Retention, LLM interpretations, and (no-secrets case) Secrets rows all return not_applicable. Collapsed state shows 'Audit ready ✓' which a demo audience or auditor may interpret as 'pipeline fully audit-ready' rather than 'three checks have deferred evaluation'.",
+      "resolution": "Either: (a) don't collapse to 'Audit ready ✓' when any row is not_applicable — require explicit ok-or-empty state; (b) add a secondary label 'Audit ready — N checks not configured'; (c) rename collapsed label to neutral 'No issues'. Decision should be product-level."
+    },
+    {
+      "id": "R2-W5",
+      "sources": ["systems"],
+      "issue": "ValidationCheck/ValidationError schema change rollout coordination not documented",
+      "evidence": "error_code and affected_nodes are added without defaults. Backend must ship before frontend widens types (or co-ship). guided/audit.py:249 persists dict(validation_result) — old persisted records won't have the new fields. Plan does not document deployment ordering or DB wipe coordination (project policy is operator deletes the old DB).",
+      "resolution": "Add a rollout note to the umbrella plan: 'Backend (Phase 2A) MUST ship before frontend (Phase 2B) widens types, OR they co-ship in a single deploy. Operator must delete sessions DB on staging per project DB migration policy.'"
+    },
+    {
+      "id": "R2-W6",
+      "sources": ["architecture"],
+      "issue": "makeComposition() frontend fixture duplicated between 14b and 14c test files (14a backend factories correctly single-sourced)",
+      "evidence": "14b AuditReadinessPanel.test.tsx defines makeComposition() locally; 14c ReadinessRowDetail.test.tsx defines its own. Both will need independent updates if CompositionState interface changes. Backend make_node_spec/make_output_spec correctly co-located in test_service.py and imported by test_explain.py.",
+      "resolution": "Extract to frontend/src/test-utils/composerFixtures.ts. Low priority — cosmetic."
+    },
+    {
+      "id": "R2-W7",
+      "sources": ["reality"],
+      "issue": "canValidate/isValidating become TypeScript dead-code variables after Validate button removal; eslint-disable doesn't help tsc noUnusedLocals",
+      "evidence": "14c Task 8 Step 5 prescribes eslint-disable-next-line with TODO. canValidate (line 381-386) and isValidating (line 361) are only used inside handleValidate's guard and the deleted button's disabled/aria-label. If tsconfig.json has noUnusedLocals enabled, tsc fails. Plan only addresses eslint case.",
+      "resolution": "Check tsconfig noUnusedLocals setting. If enabled, either delete the variables or annotate with @ts-expect-error / underscore-prefix and document the Phase 3A cleanup contract."
+    },
+    {
+      "id": "R2-W8",
+      "sources": ["architecture"],
+      "issue": "trust.py Phase 7 deletion commitment still absent from docstring — W2 carried over unfixed",
+      "evidence": "Grep for 'When Phase 7', 'delete this module', 'data_trust_tier', 'ClassVar' across revised 14a returns empty. Without the commitment, Phase 7 can add data_trust_tier ClassVar without removing the allowlist, creating two sources of truth.",
+      "resolution": "Add to trust.py docstring: 'When Phase 7 adds data_trust_tier: ClassVar to plugin base classes, delete this module entirely and replace classify_plugin() callers with direct attribute lookup. CLAUDE.md No-Legacy requires same-commit replacement.' File a filigree dependency from Phase 7A backend to this deletion."
+    },
+    {
+      "id": "R2-W9",
+      "sources": ["systems"],
+      "issue": "Explain-fetch AbortController asymmetry — snapshot fetches abort on version advance, explain fetches don't",
+      "evidence": "loadSnapshot has AbortController; loadExplain does not. fetchAuditReadinessExplain receives no signal. clearSession only aborts the controller in abortControllers[sessionId] which is set only by loadSnapshot. Navigation during explain in-flight writes to explainsBySession[oldSessionId]; re-entry shows stale cached narrative because cached.composition_version === compositionVersion short-circuits reload.",
+      "resolution": "Mirror the AbortController pattern in loadExplain, or document the asymmetry as acceptable (explain is lazy user-triggered, narrative is explanatory not load-bearing). Operator/architect call."
+    }
+  ],
+  "carried_warnings": [
+    {
+      "id": "carry-W2-reality",
+      "issue": "executionStore.getInitialState false-pattern claim in 14b prose (executionStore uses module-internal initialExecutionState, not exported getInitialState). Documentation-only.",
+      "resolution": "Edit prose to say 'similar shape to executionStore's reset() pattern' rather than 'same pattern.'"
+    },
+    {
+      "id": "carry-W4-reality",
+      "issue": "client_with_session fixture name in 14a Task 5 Step 2b is phantom; real name is composer_test_client",
+      "resolution": "Replace client_with_session references with composer_test_client throughout 14a Task 5 Step 2b."
+    },
+    {
+      "id": "carry-W3-quality",
+      "issue": "test_trust.py registers full plugin manifest from tests/unit/ (subset-of-catalog tests mislabelled as unit). Severity unchanged.",
+      "resolution": "Optional: relocate to tests/integration/. Tests serve a genuine build-gate function; classification only."
+    }
+  ],
+  "reviewer_verdicts_r2": {
+    "reality": "APPROVED_WITH_WARNINGS",
+    "architecture": "CHANGES_REQUESTED",
+    "quality": "APPROVED_WITH_WARNINGS",
+    "systems": "CHANGES_REQUESTED"
+  },
+  "conflicts_resolved": [
+    {
+      "issue": "Task 8.5 describe.skip classification",
+      "architecture_view": "BLOCKING — plan claims mechanical gate but test never runs",
+      "systems_view": "WARNING — underlying hazard structurally closed by scope-shrink, so skip is acceptable documentation device",
+      "quality_view": "Informational — design is sound, review-history prose overstates",
+      "resolution": "Classified BLOCKING per architecture. The plan's review-history text and risk table make a factual claim ('mechanical CI gate that fails red') that the implementation cannot deliver. Fix is trivial (remove .skip). Systems is correct that B2's underlying hazard is closed; but the secondary contract (mechanical Phase 3A gate) is still claimed and undelivered. Fix the prose-vs-mechanism gap rather than accept the softer guarantee."
+    },
+    {
+      "issue": "Pattern across two new blockers",
+      "resolution": "Both R2-B1 and R2-B2 fit the same class: plan prose specifies the right behaviour (No-Legacy co-update; mechanical gate) but the chosen mechanism (partial git-add list; describe.skip) doesn't realize it. Worth flagging as a class for future fix-up cycles — convergence check should test the mechanism's enforcement, not just the prose's correctness."
+    }
+  ],
+  "next_step": "Two-edit fix. Edit 1: 14c Task 8.5 — remove the .skip from describe.skip(...). Edit 2: 14a Task 1 Step 3 — expand git-add enumeration to include the ~6 omitted files. Both edits scoped to existing prose blocks. After those edits, plan is APPROVED_WITH_WARNINGS — remaining 9 warnings are recommended improvements but not blockers."
+}

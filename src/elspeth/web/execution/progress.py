@@ -30,7 +30,6 @@ create_app(), because it depends on the broadcaster instance.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -105,7 +104,12 @@ class ProgressBroadcaster:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
         state = _SubState(queue=queue)
         with self._lock:
-            self._subscribers.setdefault(run_id, {})[queue] = state
+            # Lazy-init the per-run queue→state map on first subscription. The
+            # run_id key legitimately may not exist yet; create the empty map
+            # explicitly rather than via setdefault so the intent is visible.
+            if run_id not in self._subscribers:
+                self._subscribers[run_id] = {}
+            self._subscribers[run_id][queue] = state
         return queue
 
     def unsubscribe(self, run_id: str, queue: asyncio.Queue[RunEvent]) -> None:
@@ -119,8 +123,11 @@ class ProgressBroadcaster:
         Always called from a finally block to ensure cleanup.
         """
         with self._lock:
-            if run_id in self._subscribers:
-                self._subscribers[run_id].pop(queue, None)
+            # Idempotent remove: the queue may already be absent because the
+            # WS handler removed it, cleanup_run raced ahead, or the run entry
+            # was never created. Test membership explicitly, then delete.
+            if run_id in self._subscribers and queue in self._subscribers[run_id]:
+                del self._subscribers[run_id][queue]
 
     def broadcast(self, run_id: str, event: RunEvent) -> None:
         """Thread-safe broadcast — callable from background threads.
@@ -148,7 +155,12 @@ class ProgressBroadcaster:
                 return
             if event.event_type in self._TERMINAL_EVENT_TYPES:
                 self._terminalized.add(run_id)
-            sub_map = self._subscribers.get(run_id)
+            # Absence of the run_id key, or an empty map, both mean "no
+            # subscribers for this run" — nothing to deliver. Test membership
+            # explicitly, then subscript directly.
+            if run_id not in self._subscribers:
+                return
+            sub_map = self._subscribers[run_id]
             if not sub_map:
                 return
             states_to_schedule: list[_SubState] = []
@@ -214,26 +226,39 @@ class ProgressBroadcaster:
         """
         is_terminal = event.event_type in _TERMINAL_EVENT_TYPES
 
-        try:
+        # This method runs on the event loop thread (scheduled via
+        # call_soon_threadsafe / call_soon) and contains no ``await`` — it runs
+        # to completion without yielding, so no consuming coroutine can drain
+        # the queue mid-method. ``queue.full()`` / ``queue.empty()`` are
+        # therefore exact predicates here: if ``full()`` is False the
+        # subsequent ``put_nowait`` cannot raise QueueFull, and a queue that
+        # was full cannot be empty for the drop-oldest ``get_nowait``. We branch
+        # on these predicates rather than catching QueueFull/QueueEmpty so the
+        # backpressure policy is explicit control flow, not exception handling.
+        if not queue.full():
             queue.put_nowait(event)
-        except asyncio.QueueFull:
-            if is_terminal:
-                # Terminal events MUST be delivered. Drain queue to make room.
-                drained = 0
-                while not queue.empty():
-                    with contextlib.suppress(asyncio.QueueEmpty):
-                        queue.get_nowait()
-                        drained += 1
-                if drained > 0:
-                    slog.info("subscriber_queue_drained_for_terminal", run_id=run_id, drained=drained)
-                queue.put_nowait(event)  # Queue is empty — this cannot fail
-            else:
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    queue.get_nowait()  # Drop oldest
-                try:
-                    queue.put_nowait(event)
-                except asyncio.QueueFull:
-                    slog.warning("subscriber_queue_drop", run_id=run_id)
+            return
+
+        if is_terminal:
+            # Terminal events MUST be delivered. Drain queue to make room.
+            drained = 0
+            while not queue.empty():
+                queue.get_nowait()
+                drained += 1
+            if drained > 0:
+                slog.info("subscriber_queue_drained_for_terminal", run_id=run_id, drained=drained)
+            queue.put_nowait(event)  # Queue is now empty — this cannot fail
+            return
+
+        # Non-terminal event on a full queue: drop the oldest event to make
+        # room, then enqueue the new one. The queue is full (hence non-empty),
+        # so get_nowait cannot raise; dropping one from a positive-maxsize queue
+        # leaves room, so the put cannot raise either. The drop is the intended
+        # backpressure policy for a slow client — record it as a best-effort
+        # drop so the loss is observable rather than silent.
+        queue.get_nowait()
+        slog.warning("subscriber_queue_drop_oldest", run_id=run_id)
+        queue.put_nowait(event)
 
     def cleanup_run(self, run_id: str) -> None:
         """Remove subscriber mapping for a completed/failed/cancelled run.
@@ -250,5 +275,9 @@ class ProgressBroadcaster:
         retaining run_id in ``_terminalized`` only leaks memory.
         """
         with self._lock:
-            self._subscribers.pop(run_id, None)
+            # Idempotent cleanup: the run entry may already be absent because
+            # unsubscribe removed the last subscriber, or cleanup_run was
+            # already called for this run. Test membership explicitly.
+            if run_id in self._subscribers:
+                del self._subscribers[run_id]
             self._terminalized.discard(run_id)

@@ -287,7 +287,7 @@ def _extract_errors(
         field_path = ".".join(str(loc) for loc in err["loc"]) or "__model__"
         message = err["msg"]
 
-        if tuple(err["loc"]) == ("schema",) and err.get("type") == "missing":
+        if tuple(err["loc"]) == ("schema",) and err["type"] == "missing":
             message = _SCHEMA_REQUIRED_GUIDANCE
 
         # Pydantic error dict includes failing input value.

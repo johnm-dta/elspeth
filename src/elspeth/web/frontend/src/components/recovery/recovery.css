@@ -1,0 +1,145 @@
+/* recovery.css — Recovery panel, diff viewer, and transcript rendering.
+   Owners: .recovery-panel*, .recovery-diff*, .recovery-transcript* + media query. */
+
+/* ---------------------------------------------------------------------------
+   Composer Recovery Panel
+   --------------------------------------------------------------------------- */
+.recovery-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
+
+.recovery-panel {
+  position: fixed;
+  inset: 32px;
+  z-index: var(--z-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--space-xl);
+  overflow: hidden;
+  background-color: var(--color-surface-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.recovery-panel-header,
+.recovery-panel-evidence,
+.recovery-panel-actions,
+.recovery-panel-confirm-actions,
+.recovery-diff-group-header,
+.recovery-diff-row-title,
+.recovery-transcript-tool-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.recovery-panel-header,
+.recovery-panel-actions,
+.recovery-diff-group-header {
+  justify-content: space-between;
+}
+
+.recovery-panel-header h2,
+.recovery-panel-header p,
+.recovery-panel-body h3,
+.recovery-panel-body h4,
+.recovery-panel-body p {
+  margin-top: 0;
+}
+
+.recovery-panel-reason {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  color: var(--color-warning);
+  background-color: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.recovery-panel-evidence {
+  flex-wrap: wrap;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.recovery-panel-evidence span,
+.recovery-diff-summary span {
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.recovery-panel-confirm {
+  padding: var(--space-md);
+  background-color: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.recovery-panel-confirm-actions {
+  justify-content: flex-end;
+}
+
+.recovery-panel-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  gap: var(--space-lg);
+  min-height: 0;
+  overflow: auto;
+}
+
+.recovery-panel-transcript-controls {
+  grid-column: 2;
+}
+
+.recovery-diff-summary,
+.recovery-diff-list,
+.recovery-transcript-tools ul,
+.recovery-transcript-tool-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.recovery-diff-list,
+.recovery-transcript-tools ul,
+.recovery-transcript-tool-rows {
+  padding-left: 0;
+  list-style: none;
+}
+
+.recovery-diff-row,
+.recovery-transcript-tool-call {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.recovery-transcript-tool-rows pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .recovery-panel {
+    inset: 16px;
+  }
+
+  .recovery-panel-body {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-panel-transcript-controls {
+    grid-column: auto;
+  }
+}

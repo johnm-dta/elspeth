@@ -22,14 +22,17 @@ class AuthProvider(Protocol):
         """Validate a token and return the authenticated identity.
 
         Raises AuthenticationError if the token is invalid, expired,
-        or otherwise unacceptable.
+        or otherwise unacceptable. Raises AuthProviderUnavailable when
+        upstream provider availability prevents validation.
         """
         ...
 
     async def get_user_info(self, token: str) -> UserProfile:
         """Get full user profile from a valid token.
 
-        Raises AuthenticationError if the token is invalid.
+        Raises AuthenticationError if the token is invalid. Raises
+        AuthProviderUnavailable when upstream provider availability prevents
+        profile lookup.
         """
         ...
 
@@ -50,14 +53,15 @@ class CredentialAuthProvider(AuthProvider, Protocol):
         """
         ...
 
-    async def refresh(self, user_id: str, username: str, *, original_iat: int | None = None) -> str:
+    async def refresh(self, user_id: str, username: str, *, original_iat: int) -> str:
         """Issue a new JWT for an already-authenticated user.
 
         Args:
             original_iat: The ``iat`` claim from the token being refreshed.
-                Carried forward to enforce a maximum refresh chain lifetime.
+                Required and carried forward to enforce a maximum refresh
+                chain lifetime.
 
-        Raises AuthenticationError if the user no longer exists or the
-        refresh chain has expired.
+        Raises AuthenticationError if the token is missing ``iat``, the
+        user no longer exists, or the refresh chain has expired.
         """
         ...

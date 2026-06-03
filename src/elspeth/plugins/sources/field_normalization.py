@@ -31,6 +31,24 @@ _NON_IDENTIFIER_CHARS = re.compile(r"[^\w]+")
 _CONSECUTIVE_UNDERSCORES = re.compile(r"_+")
 
 
+class ExternalHeaderError(ValueError):
+    """Raised when EXTERNAL header data (Tier 3) cannot be resolved to valid,
+    collision-free field names.
+
+    This is distinct from configuration errors (a bad ``field_mapping`` key, a
+    mapping that creates a collision, a non-identifier mapping value) which are
+    Tier-1 faults in code/config we own and MUST crash the run. ExternalHeaderError
+    marks failures *caused by the external source's own header bytes* — empty
+    headers, headers that collide after normalization, duplicate raw headers —
+    which a source catches at the header boundary to record + quarantine/discard
+    per ``on_validation_failure``, exactly as it does for a malformed data row.
+
+    Subclasses ``ValueError`` so existing broad ``except ValueError`` callers keep
+    working; sources catch ``ExternalHeaderError`` *specifically* so config
+    ``ValueError``s still propagate and crash.
+    """
+
+
 def normalize_field_name(raw: str) -> str:
     """Normalize messy header to valid Python identifier.
 
@@ -81,8 +99,9 @@ def normalize_field_name(raw: str) -> str:
         normalized = f"{normalized}_"
 
     # Step 9: Validate non-empty result
+    # Tier 3: an external header that normalizes away to nothing is bad source data.
     if not normalized:
-        raise ValueError(f"Header '{raw}' normalizes to empty string")
+        raise ExternalHeaderError(f"Header '{raw}' normalizes to empty string")
 
     # Defense-in-depth: verify result is valid identifier
     if not normalized.isidentifier():
@@ -117,7 +136,7 @@ def check_normalization_collisions(raw_headers: list[str], normalized_headers: l
             source_desc = ", ".join(f"column {i} ('{raw}')" for i, raw in sources)
             details.append(f"  '{norm}' <- {source_desc}")
 
-        raise ValueError("Field name collision after normalization:\n" + "\n".join(details))
+        raise ExternalHeaderError("Field name collision after normalization:\n" + "\n".join(details))
 
 
 def check_mapping_collisions(
@@ -174,7 +193,7 @@ def check_duplicate_raw_headers(raw_headers: list[str]) -> None:
         for header, positions in sorted(duplicates.items()):
             source_desc = ", ".join(f"column {index} ('{raw_headers[index]}')" for index in positions)
             details.append(f"  '{header}' <- {source_desc}")
-        raise ValueError("Duplicate raw header names:\n" + "\n".join(details))
+        raise ExternalHeaderError("Duplicate raw header names:\n" + "\n".join(details))
 
 
 @dataclass(frozen=True, slots=True)

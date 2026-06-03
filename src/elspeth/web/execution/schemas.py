@@ -9,7 +9,7 @@ values or dropping unknown fields.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, ClassVar, Literal, Self, get_args
+from typing import Any, ClassVar, Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -18,6 +18,31 @@ from elspeth.web.sessions.protocol import (
     SessionRunStatus,
     TerminalSessionRunStatus,
 )
+
+# Closed enum mirroring the ``ck_run_events_type`` CHECK constraint in
+# ``web/sessions/models.py`` (L429). The Python Literal and the SQL CHECK
+# are paired contracts: extending one without the other lets the
+# pydantic writer pass while the DB rejects the row, or vice versa.
+# Order mirrors the CHECK declaration for visual diff clarity. Adding a
+# value is a governance action — see the closed-list-of-permitted-writers
+# comment block at ``audit_access_log_table`` for the same posture.
+RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
+RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
+
+ValidationCheckOutcomeCode = Literal[
+    "secret_refs.no_refs",
+    "secret_refs.resolved",
+    "secret_refs.unresolved",
+    "secret_refs.skipped_no_service",
+    "validation.skipped_after_failure",
+]
+VALIDATION_CHECK_OUTCOME_CODE_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckOutcomeCode))
+
+CHECK_OUTCOME_SECRET_REFS_NO_REFS: Final[ValidationCheckOutcomeCode] = "secret_refs.no_refs"
+CHECK_OUTCOME_SECRET_REFS_RESOLVED: Final[ValidationCheckOutcomeCode] = "secret_refs.resolved"
+CHECK_OUTCOME_SECRET_REFS_UNRESOLVED: Final[ValidationCheckOutcomeCode] = "secret_refs.unresolved"
+CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE: Final[ValidationCheckOutcomeCode] = "secret_refs.skipped_no_service"
+CHECK_OUTCOME_SKIPPED_AFTER_FAILURE: Final[ValidationCheckOutcomeCode] = "validation.skipped_after_failure"
 
 
 class _StrictResponse(BaseModel):
@@ -40,9 +65,35 @@ class _StrictResponse(BaseModel):
 class ValidationCheck(_StrictResponse):
     """Individual check result from dry-run validation."""
 
+    _SECRET_REFS_CHECK_NAME: ClassVar[str] = "secret_refs"
+    _SECRET_REFS_OUTCOME_CODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            CHECK_OUTCOME_SECRET_REFS_NO_REFS,
+            CHECK_OUTCOME_SECRET_REFS_RESOLVED,
+            CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
+            CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+            CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+        }
+    )
+
     name: str
     passed: bool
     detail: str
+    # Structured field: node ids affected by this check (e.g. identity-node
+    # advisories). Populated by the producer (validation.py) in the same
+    # commit that adds this field — no compat-shim default per CLAUDE.md
+    # No-Legacy policy.
+    affected_nodes: tuple[str, ...]
+    # Machine-readable producer signal for checks whose detail is display prose.
+    # Required-but-nullable: every construction site must either record a
+    # structured outcome or explicitly say this check has none.
+    outcome_code: ValidationCheckOutcomeCode | None
+
+    @model_validator(mode="after")
+    def _check_secret_refs_outcome_code(self) -> Self:
+        if self.name == self._SECRET_REFS_CHECK_NAME and self.outcome_code not in self._SECRET_REFS_OUTCOME_CODES:
+            raise ValueError("secret_refs checks must carry a secret_refs.* outcome_code or validation.skipped_after_failure")
+        return self
 
 
 class ValidationError(_StrictResponse):
@@ -52,6 +103,11 @@ class ValidationError(_StrictResponse):
     component_type: str | None
     message: str
     suggestion: str | None
+    # Structured discriminant for semantic error routing (e.g.
+    # "missing_secret_ref", "fabricated_secret"). Populated at every
+    # construction site — no compat-shim default per CLAUDE.md No-Legacy
+    # policy. Sites that have no semantic code pass None explicitly.
+    error_code: str | None
 
 
 class SemanticEdgeContractResponse(_StrictResponse):
@@ -71,12 +127,38 @@ class SemanticEdgeContractResponse(_StrictResponse):
     requirement_code: str
 
 
+class ValidationReadinessBlocker(_StrictResponse):
+    """Machine-readable readiness blocker.
+
+    ``code`` is the routing discriminant consumed by the frontend and composer
+    finalizer. ``detail`` is display-safe context, not raw prompt text.
+    """
+
+    code: str
+    component_id: str | None
+    component_type: str | None
+    detail: str
+
+
+class ValidationReadiness(_StrictResponse):
+    """Backend-owned readiness classification for a composition state."""
+
+    authoring_valid: bool
+    execution_ready: bool
+    completion_ready: bool
+    blockers: list[ValidationReadinessBlocker]
+
+
 class ValidationResult(_StrictResponse):
     """Result of dry-run validation against real engine code."""
 
     is_valid: bool
     checks: list[ValidationCheck]
     errors: list[ValidationError]
+    # Required: every producer must state which contract failed or passed.
+    # This prevents callers from reconstructing readiness heuristically from
+    # prose errors or parser side effects.
+    readiness: ValidationReadiness
     semantic_contracts: list[SemanticEdgeContractResponse] = []
 
 
@@ -355,7 +437,7 @@ class RunEvent(_StrictResponse):
     # NOTE: Fast pipelines may produce identical timestamps.
     # Event ordering is guaranteed by the asyncio.Queue FIFO, not by timestamp.
     # Frontend must NOT sort by timestamp — use arrival order instead.
-    event_type: Literal["progress", "error", "completed", "cancelled", "failed"]
+    event_type: RunEventType
     data: ProgressData | ErrorData | CompletedData | CancelledData | FailedData
 
     @field_validator("timestamp", mode="before")
@@ -425,6 +507,14 @@ if _mapping_keys != _literal_values:
 del _event_type_literal, _mapping_keys, _literal_values
 
 
+class DiscardStageSummary(_StrictResponse):
+    """Per-stage contribution to a virtual discard sink summary."""
+
+    stage: Literal["source_validation", "transform_validation", "sink_discard"]
+    node_id: str | None
+    count: int = Field(ge=1)
+
+
 class DiscardSummary(_StrictResponse):
     """Counts routed to the virtual ``discard`` sink.
 
@@ -434,12 +524,16 @@ class DiscardSummary(_StrictResponse):
     ``token_outcomes.sink_name='__discard__'`` rows for sink-write
     diversions.  ``total`` is stored explicitly in the response so clients
     can render the visible virtual sink without duplicating the arithmetic.
+    ``stages`` carries the node/stage attribution needed for operator-facing
+    copy; it is optional at construction time so older route-level tests that
+    inject prebuilt summaries remain focused on their endpoint contracts.
     """
 
     total: int = Field(ge=0)
     validation_errors: int = Field(ge=0)
     transform_errors: int = Field(ge=0)
     sink_discards: int = Field(ge=0)
+    stages: tuple[DiscardStageSummary, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _check_total(self) -> Self:
@@ -451,6 +545,28 @@ class DiscardSummary(_StrictResponse):
                 f"+ transform_errors({self.transform_errors}) "
                 f"+ sink_discards({self.sink_discards}) = {expected}"
             )
+        if self.stages:
+            stage_totals = {
+                "source_validation": 0,
+                "transform_validation": 0,
+                "sink_discard": 0,
+            }
+            for stage in self.stages:
+                stage_totals[stage.stage] += stage.count
+            if stage_totals["source_validation"] != self.validation_errors:
+                raise ValueError(
+                    "Discard source_validation stage count mismatch: "
+                    f"{stage_totals['source_validation']} != validation_errors({self.validation_errors})"
+                )
+            if stage_totals["transform_validation"] != self.transform_errors:
+                raise ValueError(
+                    "Discard transform_validation stage count mismatch: "
+                    f"{stage_totals['transform_validation']} != transform_errors({self.transform_errors})"
+                )
+            if stage_totals["sink_discard"] != self.sink_discards:
+                raise ValueError(
+                    f"Discard sink_discard stage count mismatch: {stage_totals['sink_discard']} != sink_discards({self.sink_discards})"
+                )
         return self
 
 
@@ -592,6 +708,27 @@ class RunDiagnosticSummary(_StrictResponse):
     latest_activity_at: datetime | None
 
 
+class RunDiagnosticFailureDetail(_StrictResponse):
+    """Focused pointer to the operation that caused a run to fail.
+
+    A run with hundreds of successful operations and one failure can hide the
+    cause in the (paged, limited) operations list. This model surfaces the
+    *latest* failed operation directly so the UI can render "what went wrong"
+    without scanning. None on the response when no failed operation exists.
+
+    ``error_message`` is the chain text persisted to ``operations.error_message``
+    in Landscape — it carries the wrapper error plus its cause(s) including any
+    truncated HTTP response body the provider returned. The full response body,
+    if relevant, lives in the audit DB under ``calls.response_ref``.
+    """
+
+    operation_id: str
+    node_id: str
+    operation_type: str
+    error_message: str = Field(min_length=1)
+    failed_at: datetime
+
+
 class RunDiagnosticsResponse(_StrictResponse):
     """REST response for run diagnostics."""
 
@@ -603,6 +740,7 @@ class RunDiagnosticsResponse(_StrictResponse):
     tokens: list[RunDiagnosticToken]
     operations: list[RunDiagnosticOperation]
     artifacts: list[RunDiagnosticArtifact]
+    failure_detail: RunDiagnosticFailureDetail | None = None
 
 
 class RunDiagnosticsWorkingView(_StrictResponse):

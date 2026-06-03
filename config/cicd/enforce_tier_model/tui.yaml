@@ -1,102 +1,36 @@
 allow_hits:
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=0c8875bc2c71e4db
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=ee0425bc5f347eae
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=23f69834cb64fd6f
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=4a7251df3fbe6431
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=d5c2e7d8373deb3e
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=4b2a5310d95389ea
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=188ee69c6b105bb9
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=83e115109081afe4
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=09842a4d7857f579
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=a6e3ee6dda9572a7
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=34da0c65534dd5b2
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=a8cbff8736583e6a
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=dc4b6bc5fbacf960
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=9dccdd3a6faffeac
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=74542bb35a120cb4
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
-- key: tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:fp=c72d0d70af705075
-  owner: architecture
-  reason: Optional field access on NodeStateInfo (total=False TypedDict) — fields are conditionally present
-  safety: Explicit None check before display, crash on required fields
-  expires: '2026-07-02'
 - key: tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:fp=60a7a8bf5283d1ba
-  owner: architecture
-  reason: Sparse token lookup — not all sinks have tokens attached
-  safety: Returns empty tuple on missing key; no silent coercion
-  expires: '2026-05-13'
+  owner: john
+  reason: |-
+    At src/elspeth/tui/widgets/lineage_tree.py line 108, `tokens_by_sink.get(sink_node_id, [])` reads a locally-built sparse grouping index, not a contract-bound typed object. `tokens_by_sink` is constructed in Step 1 (lines 86-100) keyed by each token's own terminal node (`path[-1]`), so its keyspace is by construction a subset of all sinks — a sink with zero tokens routed to it legitimately has no key. A bare `tokens_by_sink[sink_node_id]` would therefore raise KeyError on the normal, expected case (a sink that received no tokens), so the `.get(..., [])` is the correct group-by-with-empty-groups idiom (defaultdict-style), yielding an empty children tuple. This is meaning-preserving, not fabrication: no token is dropped (tokens are grouped by their own terminal node and sinks display whoever points at them), and the surrounding code accesses every genuinely-required field directly (`token["token_id"]`, `sink["name"]`), so this single `.get()` is a deliberate sparse-membership lookup rather than defensive access on a typed contract.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-31'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-02T04:39:25.481945+00:00'
+  judge_model: 'claude-opus-4-7[1m]'
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The flagged `.get()` is on `tokens_by_sink`, a dict built locally in this same method (lines 86-100) keyed by each token's terminal node, so its keyspace is by construction a sparse subset of all sinks — a sink with zero tokens has no key, and that absence carries the well-defined meaning 'no tokens routed here'. The lookup at line 108 is the standard group-by-with-empty-groups idiom (defaultdict-style), yielding an empty children tuple; substituting `[]` for absence is meaning-preserving, not fabrication. The same loop accesses `sink["name"]` and `sink["node_id"]` directly, confirming the author reserves `.get()` for the deliberate sparse-membership case and uses direct access for genuinely required fields. R1's concern (hiding missing keys in a typed contract) does not apply to a locally-built sparse index.
+  judge_signature_version: 2
+  scope_fingerprint: 78d15640842b729207bcd2eee5d078d6f7bfd45e28ca08c6c37e207a5792834e
+  judge_transport: claude_agent_sdk
+  ast_path: 'body[5]/body[2]/body[5]/body[2]/value/body/args[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:b6c57d4a7f176f2fd848f70773a84ac6d43efd4a52e56f637f92548d5aea9280'
 per_file_rules:
 - pattern: tui/screens/explain_screen.py
   rules:
   - R5
-  reason: Discriminated union pattern matching on ScreenState
+  reason: ScreenState and NodeState detail projection guards, including explicit selection-state checks for CodeQL-visible initialization
   expires: null
-  max_hits: 2
+  max_hits: 9
 - pattern: tui/widgets/node_detail.py
   rules:
   - R5
-  reason: Tier 1 audit data validation before JSON parse
+  reason: Tier 1 audit data validation and JSON object display checks before parse/render
   expires: null
-  max_hits: 3
+  max_hits: 5
 - pattern: tui/widgets/lineage_tree.py
   rules:
   - R5

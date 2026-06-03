@@ -1,0 +1,13 @@
+# Temporary source-symbol inventory allowlist.
+#
+# Keep this narrow: the inventory is meant to catch downstream consumers of
+# `is_terminal` and brittle outcome/path string checks that the RowOutcome lint
+# guard cannot see.
+
+per_file_rules:
+  - pattern: "src/elspeth/contracts/enums.py"
+    rules: ["manifest.symbol_inventory"]
+    reason: "ADR-019 migration window — defines RowOutcome until Stage 5 and defines the new two-axis enums."
+  - pattern: "src/elspeth/testing/__init__.py"
+    rules: ["manifest.symbol_inventory"]
+    reason: "ADR-019 migration window — testing pack re-exports RowOutcome until Stage 5 while adding TerminalOutcome and TerminalPath."

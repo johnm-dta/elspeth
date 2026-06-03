@@ -23,13 +23,20 @@ dependencies = [
     "textual>=7.5,<8",  # TUI framework with breaking changes in major versions
 
     # Configuration
-    "dynaconf>=3.2,<4",  # Configuration management
+    "dynaconf>=3.2.13,<4",  # Configuration management
     "pydantic>=2.13,<3",  # Data validation with v2 API
-    "python-dotenv>=1.2,<2",  # .env file loading
+    "python-dotenv>=1.2.2,<2",  # .env file loading
     "pyyaml>=6.0,<7",  # YAML parsing
 
     # Plugin system
     "pluggy>=1.6,<2",  # Plugin architecture (pytest uses this)
+
+    # JSON Schema validation — Draft 2020-12 meta-validation of composer
+    # tool argument schemas at declaration construction time
+    # (src/elspeth/web/composer/tools/declarations.py). Without this an
+    # invalid schema escapes to the LLM API edge and fails at compose time
+    # with a 400 response. Systems-thinker recommendation #3 (2026-05-23).
+    "jsonschema>=4.26,<5",
 
     # Data handling
     "numpy>=1.26,<3",  # Numeric types (pandas dependency, explicit for schema validation)
@@ -63,13 +70,30 @@ dependencies = [
     "pyrate-limiter>=3.9,<4",  # Rate limiting (requires max_delay parameter)
 
     # Diffing (for verify mode)
-    "deepdiff>=8.6,<9",  # Deep comparison for data structures
+    "deepdiff>=8.6.2,<9",  # Deep comparison for data structures
+
+    # === Plugin catalog dependencies ===
+    # These deps back plugin entries that appear in
+    # `src/elspeth/web/audit_readiness/boundary_expectations.py`'s
+    # EXPECTED_* frozensets. Those frozensets are the audit-readiness
+    # discoverability gesture: parity tests
+    # (tests/unit/web/audit_readiness/test_boundary_predicate_parity.py,
+    # tests/unit/web/catalog/test_knob_schema_golden.py,
+    # tests/unit/web/composer/test_skill_drift.py) assert the live
+    # builtin catalog matches the expected partition. Plugins that
+    # silently skip-on-missing-dep would make those tests pass with
+    # an incomplete catalog and let a Tier-3 crossing escape the audit
+    # PR-discoverability gesture. The rule: if a non-optional unit
+    # test references a plugin, that plugin's deps live here.
+    "chromadb>=1.5,<2",  # backs chroma_sink + rag_retrieval plugins
+    "html2text>=2024.2.26",  # backs web_scrape + web_scrape_extraction transforms
+    "beautifulsoup4>=4.14,<5",  # paired with html2text in web_scrape
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0,<10",  # Testing framework
-    "pytest-cov>=4.1,<6",  # Coverage plugin
+    "pytest>=9.0.3,<10",  # Testing framework
+    "pytest-cov>=7,<8",  # Coverage plugin
     "pytest-asyncio>=1.3,<2",  # Async test support
     "pytest-dotenv>=0.5,<1",  # Load .env for integration tests
     "pytest-timeout>=2.4,<3",  # Test timeouts for stress tests
@@ -87,11 +111,13 @@ dev = [
     # Mutation testing (Phase 3)
     "mutmut>=2.5,<3",  # Mutation testing
     # ChaosLLM test server
-    "errorworks>=0.1.1",  # Chaos testing servers (ChaosLLM, ChaosWeb)
-    "starlette>=0.52,<1",  # ASGI framework (needed for TestClient in fixtures)
+    "errorworks>=0.1.3,<1",  # Chaos testing servers (ChaosLLM, ChaosWeb); 0.1.3+ accepts starlette<2
+    "starlette>=1,<2",  # ASGI framework (needed for TestClient in fixtures); 1.x for PYSEC-2026-161 (starlette<1.0.1 vuln)
     "asgi-lifespan>=2.1,<3",  # FastAPI lifespan support for AsyncClient end-to-end tests
     # HTTP mocking
     "respx>=0.23,<1",  # httpx mocking for web scrape tests
+    "testcontainers[postgres]>=4.0,<5",  # Docker-backed Postgres for CL-PP-11 dialect-portability tests
+    "psycopg2-binary>=2.9,<3",  # Postgres DB-API driver for testcontainer lane (pre-built libpq wheel; testcontainers' default driver= is psycopg2)
 ]
 
 llm = [
@@ -99,7 +125,7 @@ llm = [
     "jinja2>=3.1,<4",  # Template engine for prompts
     "httpx>=0.28,<1",  # HTTP client (inherited from main deps)
     "openai>=2.36,<3",  # OpenAI SDK
-    "litellm>=1.83,<2",  # Multi-provider LLM interface
+    "litellm>=1.83.10,<2",  # Multi-provider LLM interface
 ]
 
 azure = [
@@ -110,17 +136,6 @@ azure = [
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error  # Azure Monitor / App Insights telemetry
     "azure-monitor-opentelemetry>=1.8,<2",  # Azure Monitor OpenTelemetry Distro — required for azure_ai tracing
     "jinja2>=3.1,<4",  # Template engine for path templating
-]
-
-web = [
-    # Web scraping and HTML processing
-    "html2text>=2024.2.26",  # HTML to markdown conversion
-    "beautifulsoup4>=4.14,<5",  # HTML parsing and element stripping
-]
-
-rag = [
-    # RAG retrieval plugin pack — ChromaDB provider
-    "chromadb>=1.5,<2",
 ]
 
 mcp = [
@@ -138,11 +153,14 @@ webui = [
     "fastapi>=0.136,<1",
     "uvicorn[standard]>=0.46,<1",
     "PyJWT[crypto]>=2.12,<3",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.27",
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
-    "litellm>=1.83,<2",
+    "litellm>=1.83.10,<2",
+    # Prometheus metrics exposition endpoint (B1-r3 MeterProvider precondition)
+    "opentelemetry-exporter-prometheus>=0.61b0,<0.62",
+    "prometheus_client>=0.21,<1",
 ]
 
 tracing-langfuse = [
@@ -161,11 +179,12 @@ tracing = [
 
 all = [
     # dev dependencies
-    "pytest>=9.0,<10",
-    "pytest-cov>=4.1,<6",
+    "pytest>=9.0.3,<10",
+    "pytest-cov>=7,<8",
     "pytest-asyncio>=1.3,<2",
     "pytest-dotenv>=0.5,<1",
     "pytest-timeout>=2.4,<3",
+    "pytest-xdist>=3.8,<4",
     "pytest-benchmark>=4.0,<5",
     "hypothesis>=6.152,<7",
     "mypy>=1.20,<2",
@@ -174,22 +193,23 @@ all = [
     "pandas-stubs>=2.3,<3",
     "types-networkx>=3.6,<4",
     "types-PyYAML>=6.0,<7",
+    "types-jsonschema>=4.26,<5",
     "mutmut>=2.5,<3",
-    "errorworks>=0.1.1",
-    "starlette>=0.52,<1",
+    "errorworks>=0.1.3,<1",
+    "starlette>=1,<2",
+    "asgi-lifespan>=2.1,<3",
     "respx>=0.23,<1",
+    "testcontainers[postgres]>=4.0,<5",
+    "psycopg2-binary>=2.9,<3",
     # llm dependencies
     "jinja2>=3.1,<4",
     "openai>=2.36,<3",
-    "litellm>=1.83,<2",
+    "litellm>=1.83.10,<2",
     # azure dependencies
     "azure-storage-blob>=12.28,<13",
     "azure-identity>=1.25,<2",
     "azure-keyvault-secrets>=4.11,<5",
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error
-    # web dependencies
-    "html2text>=2024.2.26",
-    "beautifulsoup4>=4.14,<5",
     # mcp dependencies
     "mcp>=1.27,<2",
     # tracing dependencies
@@ -197,16 +217,19 @@ all = [
     "langfuse>=3.14,<4",
     # security dependencies
     "sqlcipher3>=0.6.2,<1",
-    # rag dependencies
-    "chromadb>=1.5,<2",
     # webui dependencies
     "fastapi>=0.136,<1",
     "uvicorn[standard]>=0.46,<1",
     "PyJWT[crypto]>=2.12,<3",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.27",
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
+    # NOTE: opentelemetry-exporter-prometheus and prometheus_client are listed in
+    # the webui extra but intentionally omitted from the all extra because
+    # azure-monitor-opentelemetry-exporter pins opentelemetry-sdk==1.40 exactly.
+    # Keep webui's Prometheus exporter below the 0.62 line until Azure Monitor
+    # accepts opentelemetry-sdk>=1.41.
 ]
 
 [project.scripts]
@@ -234,7 +257,7 @@ packages = ["src/elspeth"]
 [tool.ruff]
 target-version = "py313"
 line-length = 140
-src = ["src", "tests"]
+src = ["src", "tests", "elspeth-lints/src"]
 
 [tool.ruff.lint]
 select = [
@@ -260,7 +283,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["elspeth"]
+known-first-party = ["elspeth", "elspeth_lints"]
 
 [tool.ruff.lint.flake8-bugbear]
 # typer.Option/Argument are immutable and safe in function defaults
@@ -269,6 +292,11 @@ extend-immutable-calls = ["typer.Option", "typer.Argument"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T20"]  # Allow print in tests
 "scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
+"notes/**/*.py" = ["T20"]  # Ad-hoc diagnostic scripts — print is the output channel
+"docs-archive/**/*.py" = ["T20"]  # Archived sources are frozen-as-of-relocation; not maintained against current lint rules
+"elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py" = [
+    "T20", # Ported CLI-compatible analyzer preserves the legacy text/error output boundary
+]
 "vulture_whitelist.py" = ["B018", "F821"]  # Vulture whitelist uses bare names
 # Package __init__ files use categorical __all__ grouping for readability
 "src/elspeth/contracts/__init__.py" = ["RUF022"]
@@ -283,23 +311,47 @@ warn_unreachable = true
 show_error_codes = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+# exclude is a list of regexes (mypy joins them with `|`).
+#   - rules/.../fixtures/: deliberately malformed lint-rule test fixtures.
+#   - examples/: standalone runnable demo scripts, not a type-checked surface.
+#     Some share module names across dirs (e.g. seed_collection.py), which
+#     collides hard under `mypy .` (exit 2, "errors prevented further
+#     checking") since they aren't packages. Excluding them stops that crash.
+# NOTE: the gated surface is `src/ elspeth-lints/src/` (see CI) and is
+# strict-clean. A bare `mypy .` still reports findings in tests/ and scripts/,
+# which are deliberately outside the gate and not held to the strict bar.
+exclude = [
+    "elspeth-lints/src/elspeth_lints/rules/.*/fixtures/",
+    "^examples/",
+]
 
 [[tool.mypy.overrides]]
+# Third-party modules without inline type information (no py.typed marker
+# in the installed distribution). mypy needs explicit permission to treat
+# imports of these as Any rather than failing on the import. Verified by
+# walking each package's installed directory in the worktree venv on
+# 2026-05-18. CI installs `.[all]`, so absence-from-extras is no longer a
+# justification — the only entries here are genuinely stubless packages
+# (or packages that may legitimately be missing because they require
+# system libraries that aren't always present in the build environment,
+# e.g. sqlcipher3 → libsqlcipher).
 module = [
-    "pluggy.*",
-    "rfc8785.*",
-    "pyrate_limiter.*",
-    "deepdiff.*",
-    "textual.*",
     "opentelemetry.*",
-    "hypothesis.*",
     "azure.*",
-    "mcp.*",
     "ddtrace.*",
     "sqlcipher3.*",
-    "langfuse.*",
-    "chromadb.*",
 ]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# claude_agent_sdk is the optional `judge-agent` extra of the elspeth-lints
+# subpackage — deliberately NOT installed in the base CI environment (the main
+# project's `.[all]` does not pull a subpackage's extras). judge.py imports it
+# lazily inside a `try/except ImportError` so the openrouter transport works
+# without it; mypy still resolves the import statement and would fail with
+# import-not-found. Unlike the stubless-but-installed block above, this entry IS
+# justified by absence-from-extras.
+module = ["claude_agent_sdk", "claude_agent_sdk.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -326,6 +378,18 @@ module = "elspeth.tui.*"
 disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
+module = "elspeth.web.*"
+# FastAPI's route decorators (@app.get, @router.post, @app.exception_handler,
+# etc.) are typed `Callable[..., Any]` in the upstream library, which strips
+# the signature of every decorated function. Our route handlers ARE properly
+# annotated — see web/app.py:708 (handle_validation_error -> JSONResponse),
+# web/auth/routes.py, etc. — but `disallow_untyped_decorators` flags them
+# regardless because the outer decorator returns Any. Same root cause as the
+# tests/* (hypothesis) and tui/* (textual) exemptions above: library-side
+# decorator typing the framework can't fix.
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
 module = "scripts.*"
 # Script modules may have relaxed type checking
 ignore_missing_imports = true
@@ -341,12 +405,12 @@ disallow_incomplete_defs = false
 # === Pytest Configuration ===
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "elspeth-lints/src"]
 addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "-m", "not slow and not stress and not performance",  # Skip slow/stress/performance tests by default
+    "-m", "not slow and not stress and not performance and not testcontainer",  # Skip slow/stress/performance/testcontainer tests by default
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -356,6 +420,8 @@ markers = [
     "stress: marks tests as stress tests requiring ChaosLLM HTTP server (deselect with '-m \"not stress\"')",
     "composer_llm_eval: characterization/replay tests for the 2026-04-28 composer LLM evaluation scenarios",
     "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
+    "testcontainer: marks tests requiring Docker via testcontainers-python (deselect with '-m \"not testcontainer\"')",
+    "fingerprint_baseline: Plan A baseline capture/verify across all elspeth-lints rules",
 ]
 # Load .env file for integration tests (API keys)
 env_files = [".env"]

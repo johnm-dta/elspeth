@@ -17,13 +17,17 @@ import userEvent from "@testing-library/user-event";
 import { ChatInput } from "./ChatInput";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
+import type { ChatMessage, CompositionState } from "@/types";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 describe("ChatInput — controlled-mode prefill listener", () => {
   beforeEach(() => {
     resetStore(useSessionStore);
     resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
   });
 
   function ControlledHarness() {
@@ -161,5 +165,269 @@ describe("ChatInput — controlled-mode prefill listener", () => {
     expect(textarea.value).toBe("");
 
     window.removeEventListener("error", errorListener);
+  });
+});
+
+// ============================================================================
+// ChatInput — empty-state placeholder (Phase 5a Task 1).
+//
+// Primes the user to type data directly into the chat when the session is
+// fresh (no messages, no composition state).  Reverts to the canonical
+// "Describe the pipeline you want to build..." wording the moment either
+// signal flips.  An explicit `placeholder` prop continues to win — Phase A
+// slice 4 (guided-mode per-step nudge) depends on that override semantics.
+// ============================================================================
+
+describe("ChatInput empty-state placeholder", () => {
+  const DATA_PRIMING =
+    "Describe your pipeline, paste a URL, or type a few rows of data to start...";
+  const STANDARD = "Describe the pipeline you want to build...";
+
+  function StandaloneHarness(props: { placeholder?: string }) {
+    const inputRef = useRef<HTMLTextAreaElement>(
+      null,
+    ) as RefObject<HTMLTextAreaElement>;
+    return (
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={false}
+        inputRef={inputRef}
+        placeholder={props.placeholder}
+      />
+    );
+  }
+
+  function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
+    return {
+      id: overrides.id ?? "m1",
+      session_id: overrides.session_id ?? "s1",
+      role: overrides.role ?? "user",
+      content: overrides.content ?? "hello",
+      tool_calls: overrides.tool_calls ?? null,
+      created_at: overrides.created_at ?? "2026-05-18T00:00:00Z",
+      ...overrides,
+    };
+  }
+
+  function makeCompositionState(version: number): CompositionState {
+    return {
+      id: "comp-1",
+      version,
+      source: null,
+      nodes: [],
+      edges: [],
+      outputs: [],
+      metadata: {} as CompositionState["metadata"],
+    };
+  }
+
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("shows the data-priming placeholder when the session has no messages and no composition state", () => {
+    // arrange: fresh store — messages=[], compositionState=null (version=0)
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(DATA_PRIMING);
+  });
+
+  it("reverts to the standard placeholder once the user has sent a message", () => {
+    useSessionStore.setState({ messages: [makeMessage({ role: "user" })] });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(STANDARD);
+  });
+
+  it("reverts to the standard placeholder once a composition state exists", () => {
+    useSessionStore.setState({ compositionState: makeCompositionState(1) });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(STANDARD);
+  });
+
+  it("respects an explicit `placeholder` prop override even in empty state", () => {
+    // Empty state — store untouched — but the prop must still win.
+    // This pins the Phase A slice 4 contract: guided-mode per-step nudges
+    // override the empty-state default.
+    render(<StandaloneHarness placeholder="custom" />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe("custom");
+  });
+});
+
+describe("ChatInput composing cancel", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("shows a stop button while composing and calls onCancel", async () => {
+    const user = userEvent.setup();
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+    const onCancel = vi.fn();
+
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={true}
+        onCancel={onCancel}
+        inputRef={inputRef}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stop composing" }));
+
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+});
+
+// ============================================================================
+// ChatInput — pending-interpretation placeholder cue (Phase 5b Task 8).
+//
+// When an InterpretationReviewTurn widget is awaiting the user's decision and
+// the underlying interpretation event has a non-null `user_term`, the
+// chat-input placeholder briefly cues the user toward the widget above.
+// Auto-baked rows (interpretation_source = auto_interpreted_*) have
+// user_term=null and MUST NOT trigger the cue — they have no term to echo.
+// The cue sits between the explicit `placeholder` prop (still wins) and
+// the empty-state / standard placeholders (both lose to the cue when present).
+// ============================================================================
+
+describe("ChatInput pending-interpretation placeholder cue", () => {
+  const EMPTY_STATE =
+    "Describe your pipeline, paste a URL, or type a few rows of data to start...";
+  const ACTIVE_SESSION_ID = "sess-1";
+
+  function StandaloneHarness(props: { placeholder?: string }) {
+    const inputRef = useRef<HTMLTextAreaElement>(
+      null,
+    ) as RefObject<HTMLTextAreaElement>;
+    return (
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={false}
+        inputRef={inputRef}
+        placeholder={props.placeholder}
+      />
+    );
+  }
+
+  function makePendingEvent(
+    overrides: Partial<InterpretationEvent> = {},
+  ): InterpretationEvent {
+    // Spread overrides last so explicit `null` (e.g. user_term=null for
+    // auto-baked rows) overrides the defaults.  `??` short-circuits on
+    // null/undefined and would silently drop intentional null overrides
+    // — spread semantics keep them.
+    const defaults: InterpretationEvent = {
+      id: "evt-1",
+      session_id: ACTIVE_SESSION_ID,
+      composition_state_id: "state-1",
+      affected_node_id: "node-1",
+      tool_call_id: "tool-1",
+      user_term: "cool",
+      kind: "vague_term",
+      llm_draft: "interesting and engaging",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-05-18T00:00:00Z",
+      resolved_at: null,
+      actor: "user:owner:u-1",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "20260518",
+      provider: "anthropic",
+      composer_skill_hash: "deadbeef",
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+    };
+    return { ...defaults, ...overrides };
+  }
+
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("shows the interpretation-review cue when a pending event with a user_term exists for the active session", () => {
+    // arrange: active session + one pending event with user_term="cool"
+    useSessionStore.setState({ activeSessionId: ACTIVE_SESSION_ID });
+    const event = makePendingEvent({ user_term: "cool" });
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [ACTIVE_SESSION_ID]: { [event.id]: event } },
+    });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(
+      'Reviewing your interpretation of "cool" above — pick Use mine or Change it to continue.',
+    );
+  });
+
+  it("does not show the cue when the pending event has user_term=null (auto-baked row)", () => {
+    // Auto-baked rows (auto_interpreted_opt_out / no_surfaces) have no term
+    // to echo.  Cue falls through to the empty-state placeholder.
+    useSessionStore.setState({ activeSessionId: ACTIVE_SESSION_ID });
+    const event = makePendingEvent({
+      user_term: null,
+      kind: null,
+      interpretation_source: "auto_interpreted_opt_out",
+      model_identifier: null,
+      model_version: null,
+      provider: null,
+    });
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [ACTIVE_SESSION_ID]: { [event.id]: event } },
+    });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(EMPTY_STATE);
+  });
+
+  it("does not show the cue when there is no active session", () => {
+    // Pending events keyed under a different session must not leak through
+    // when activeSessionId is null.
+    const event = makePendingEvent({ user_term: "cool" });
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [ACTIVE_SESSION_ID]: { [event.id]: event } },
+    });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(EMPTY_STATE);
+  });
+
+  it("respects an explicit `placeholder` prop override even when a pending cue would otherwise fire", () => {
+    // Pins the precedence contract: explicit prop > pending-interpretation
+    // cue > empty-state.  Guided-mode per-step nudges (Phase A slice 4)
+    // remain authoritative even when an interpretation review is open.
+    useSessionStore.setState({ activeSessionId: ACTIVE_SESSION_ID });
+    const event = makePendingEvent({ user_term: "cool" });
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [ACTIVE_SESSION_ID]: { [event.id]: event } },
+    });
+
+    render(<StandaloneHarness placeholder="step-specific nudge" />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe("step-specific nudge");
   });
 });

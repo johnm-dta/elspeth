@@ -11,7 +11,16 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightFailure,
     RuntimePreflightKey,
 )
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+
+
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
 
 
 @pytest.mark.asyncio
@@ -25,7 +34,7 @@ async def test_coordinator_deduplicates_concurrent_same_session_state_settings()
     calls = 0
     started = asyncio.Event()
     release = asyncio.Event()
-    expected = ValidationResult(is_valid=True, checks=[], errors=[])
+    expected = _passing_preflight()
 
     async def worker() -> ValidationResult:
         nonlocal calls
@@ -104,7 +113,7 @@ async def test_coordinator_evicts_inflight_entry_when_only_awaiter_is_cancelled(
     async def worker() -> ValidationResult:
         started.set()
         await release.wait()
-        return ValidationResult(is_valid=True, checks=[], errors=[])
+        return _passing_preflight()
 
     awaiter = asyncio.create_task(coordinator.run(key, worker))
     await started.wait()
@@ -133,7 +142,7 @@ async def test_coordinator_does_not_share_different_session_scopes() -> None:
     async def worker() -> ValidationResult:
         nonlocal calls
         calls += 1
-        return ValidationResult(is_valid=True, checks=[], errors=[])
+        return _passing_preflight()
 
     await asyncio.gather(
         coordinator.run(RuntimePreflightKey("session:http", 1, "settings"), worker),

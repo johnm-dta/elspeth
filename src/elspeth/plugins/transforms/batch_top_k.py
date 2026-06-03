@@ -8,7 +8,9 @@ from typing import Any, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -74,10 +76,27 @@ class BatchTopK(BaseTransform):
     """Report most frequent scalar values over a batch."""
 
     name = "batch_top_k"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6cbc512eaedbf136"
+    source_file_hash: str | None = "sha256:3f736dc3434a46f8"
     config_model = BatchTopKConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Reports the most frequent scalar values in a batch.",
+                composer_hints=(
+                    "Use batch_top_k under aggregations with a trigger; it summarizes a flushed batch.",
+                    "field must be scalar data such as str, int, float, bool, or None; arrays and objects are invalid.",
+                    "Set include_missing=True only when missing values should appear in top_values.",
+                    "Output is top-value summary row(s), not the original rows; group_by partitions the summary.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

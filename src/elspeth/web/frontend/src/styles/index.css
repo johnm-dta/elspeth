@@ -1,0 +1,41 @@
+/* =============================================================================
+   ELSPETH Web UX — Global Styles barrel.
+   Imports every per-area CSS file in cascade-preserving order.
+
+   Ordering rules — load-bearing, see inline notes at each constraint:
+     - tokens / base / animations / shared first (foundation layer).
+     - per-area component files next (utility-before-component convention).
+     - themes.css imports LAST so it overrides every selector defined above.
+
+   To add a new per-area CSS file, append it next to its sibling area imports
+   below, BEFORE the themes.css line. If your new file overrides selectors
+   from common.css (e.g. extends a modal primitive) keep it AFTER common.css.
+   ============================================================================= */
+
+/* Foundation layer (must come before any component or override file). */
+@import "./tokens.css";
+@import "./base.css";
+@import "./animations.css";
+@import "./shared.css";
+
+/* Per-area component files (utility before component). */
+@import "../components/recovery/recovery.css";
+@import "../components/header/header.css";
+@import "../components/sidebar/sidebar.css";
+@import "../components/audit/audit.css";
+@import "../components/tutorial/tutorial.css";
+
+@import "./common.css";  /* yaml-view, command-palette, markdown-body, modals, error-boundary */
+
+@import "../components/catalog/catalog.css";
+@import "../components/inspector/inspector.css";
+@import "../components/settings/settings.css";
+@import "../components/execution/execution.css";
+@import "../components/blobs/blobs.css";
+@import "../components/composer/composer.css";
+@import "../components/chat/chat.css";
+@import "../components/chat/guided/guided.css";
+
+/* Overrides: @media (prefers-contrast: more) and (forced-colors: active).
+   MUST import LAST so its rules apply on top of every component file above. */
+@import "./themes.css";

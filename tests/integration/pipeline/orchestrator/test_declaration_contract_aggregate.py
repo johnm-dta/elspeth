@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.declaration_contracts import AggregateDeclarationContractViolation
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -45,6 +46,7 @@ class _TwoContractViolatingTransform(BaseTransform):
     """Misdeclares both pass-through preservation and output-field emission."""
 
     name = "two-contract-violating-transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     plugin_version = "1.0.0"

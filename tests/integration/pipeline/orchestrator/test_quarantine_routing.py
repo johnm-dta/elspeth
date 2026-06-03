@@ -33,6 +33,9 @@ from elspeth.contracts import (
     TerminalPath,
 )
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.events import RowCreated
+from elspeth.contracts.hashing import repr_hash
+from elspeth.core.canonical import sanitize_for_canonical, stable_hash
 from elspeth.core.landscape.schema import (
     edges_table,
     node_states_table,
@@ -50,6 +53,19 @@ from tests.fixtures.plugins import CollectSink
 # ---------------------------------------------------------------------------
 # Test Sources
 # ---------------------------------------------------------------------------
+
+
+class CapturingTelemetryManager:
+    """Minimal telemetry manager double that records emitted events."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def handle_event(self, event: Any) -> None:
+        self.events.append(event)
+
+    def flush(self) -> None:
+        pass
 
 
 class QuarantineSource(_TestSourceBase):
@@ -300,8 +316,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
 
         # Query node_states for the quarantined token
@@ -337,8 +356,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # Query routing events
         with db.engine.connect() as conn:
@@ -381,8 +403,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
 
         # Verify the quarantine sink received the row
@@ -611,8 +636,11 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
 
@@ -650,3 +678,50 @@ class TestQuarantineNonCanonicalData:
         # Both valid and quarantined rows completed without crash
         assert len(default_sink.results) == 1
         assert len(quarantine_sink.results) == 1
+
+    def test_quarantined_nan_row_emits_single_semantics_content_hash(self, payload_store) -> None:
+        """The quarantine RowCreated content_hash has a single, deterministic semantics.
+
+        Offensive-programming contract: the quarantine path sanitizes Tier-3 data
+        (NaN/Infinity -> None) BEFORE hashing (orchestrator pre-hash sanitize), so the
+        emitted ``content_hash`` is always ``stable_hash(sanitize_for_canonical(row))``
+        — never a divergent ``repr_hash`` of the raw row under the same field name.
+
+        Pins the reified behaviour: removing the dead ``stable_hash``-then-``repr_hash``
+        fallback must not change the emitted hash for legitimate Tier-3 input, and the
+        hash must NOT silently switch to repr_hash semantics.
+        """
+        db = make_landscape_db()
+        nan_row = {"value": float("nan")}
+        source = QuarantineSource(
+            valid_rows=[],
+            quarantine_rows=[
+                (dict(nan_row), "NaN value not allowed"),
+            ],
+            quarantine_destination="quarantine",
+            on_validation_failure="quarantine",
+        )
+        default_sink = CollectSink("default")
+        quarantine_sink = CollectSink("quarantine")
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        telemetry = CapturingTelemetryManager()
+        orchestrator = Orchestrator(db, telemetry_manager=telemetry)
+        result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+        assert result.rows_quarantined == 1
+
+        row_created = [e for e in telemetry.events if isinstance(e, RowCreated)]
+        assert len(row_created) == 1, f"expected exactly one RowCreated, got {row_created}"
+        emitted_hash = row_created[0].content_hash
+
+        # Single semantics: hash of the sanitized row via stable_hash.
+        assert emitted_hash == stable_hash(sanitize_for_canonical(nan_row))
+        # Explicitly NOT the divergent repr_hash of the raw (unsanitized) row.
+        assert emitted_hash != repr_hash(nan_row)

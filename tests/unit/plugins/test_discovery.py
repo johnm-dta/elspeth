@@ -247,7 +247,7 @@ class TestDiscoverAllPlugins:
 
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = 25  # 21 standard transforms + 2 azure safety + llm + rag_retrieval
+        EXPECTED_TRANSFORM_COUNT = 26  # 22 standard transforms + 2 azure safety + llm + rag_retrieval
         EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()
@@ -575,14 +575,57 @@ class TestCreateDynamicHookimpl:
 class TestDiscoveryOptionalDependency:
     """Regression: missing optional extras should skip with warning, not crash."""
 
-    def test_import_error_skips_file(self, tmp_path: Path) -> None:
-        """A plugin file that fails with ImportError should be skipped."""
+    def test_allowlisted_optional_dependency_skips_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A plugin file missing an allowlisted optional dependency should be skipped."""
+        from elspeth.plugins.infrastructure import discovery
+
         plugin_file = tmp_path / "bad_plugin.py"
         plugin_file.write_text("import nonexistent_optional_package_xyz\n")
+        monkeypatch.setattr(
+            discovery,
+            "OPTIONAL_PLUGIN_IMPORT_MODULES",
+            frozenset({"nonexistent_optional_package_xyz"}),
+        )
 
         # Should not raise — skips the file with a warning
         result = discover_plugins_in_directory(tmp_path, BaseSource)
         assert result == []
+
+    def test_missing_internal_import_in_concrete_plugin_crashes(self, tmp_path: Path) -> None:
+        """A broken concrete system plugin must not disappear as an optional extra."""
+        plugin_file = tmp_path / "broken_internal_import.py"
+        plugin_file.write_text("""
+import definitely_missing_internal_helper
+
+from elspeth.plugins.infrastructure.base import BaseSource
+
+class BrokenInternalImportSource(BaseSource):
+    name = "broken_internal_import"
+    output_schema = None
+    node_id = None
+    determinism = "deterministic"
+    plugin_version = "1.0.0"
+
+    def __init__(self, config):
+        self.config = config
+        self.on_success = "continue"
+        self._on_validation_failure = "discard"
+
+    def load(self, ctx):
+        return iter([])
+
+    def close(self):
+        pass
+
+    def on_start(self, ctx):
+        pass
+
+    def on_complete(self, ctx):
+        pass
+""")
+
+        with pytest.raises(ModuleNotFoundError, match="definitely_missing_internal_helper"):
+            discover_plugins_in_directory(tmp_path, BaseSource)
 
     def test_syntax_error_still_crashes(self, tmp_path: Path) -> None:
         """Genuine code bugs (SyntaxError) must still crash."""

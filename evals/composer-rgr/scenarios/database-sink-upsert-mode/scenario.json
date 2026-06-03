@@ -1,0 +1,35 @@
+{
+  "scenario_id": "database_sink_upsert_mode",
+  "summary": "User asks the composer to write to a SQL table with 'append new, update existing' semantics — the canonical upsert shape. The database sink's composer_hints document the three write_modes (insert / upsert / replace) and the post_call_hint on write_mode='upsert' reminds the LLM that the target table needs a unique constraint. Hint-blind LLMs tend to default to write_mode='insert' (causing duplicate-key violations on re-runs) or, worse, write_mode='replace' (which destroys prior data on every run). Green-passes when write_mode is 'upsert'. Authored 2026-05-20 for composer-jit-hints Phase 1.",
+  "opening_prompt": "Process these inline customer rows and write them to a SQL database. The target table is 'customers' in a SQLite database at data/crm.db. The pipeline will run periodically — new customer rows should be appended, and rows for existing customers (matched by customer_id) should be updated in place.\n\nCustomer rows (CSV):\ncustomer_id,name,email,score\n1,Alice,alice@example.com,87\n2,Bob,bob@example.com,72\n3,Charlie,charlie@example.com,91",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "passivity_phrases_note": "Standard passivity catch-list.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true,
+    "must_be_valid_note": "Pipeline must be valid."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true,
+    "must_have_options_value_for_output": [
+      {
+        "sink_name": "customers",
+        "key": "write_mode",
+        "allowed_values": ["upsert"]
+      }
+    ],
+    "must_have_options_value_for_output_note": "The hint corpus tells the LLM that 'append new, update existing' is the upsert shape. write_mode='upsert' is the only correct response. write_mode='insert' (the SQLAlchemy default) causes duplicate-key violations on re-runs; write_mode='replace' drops the table on every run (destructive). Note that this asserter pins the sink name to 'customers' — the LLM is free to pick a different name; the scenario will still GREEN as long as some database sink uses upsert, since must_have_node_kinds enforces presence and this entry will skip-no-match when the sink name doesn't match (logged as an AMBER reason rather than silent pass)."
+  }
+}

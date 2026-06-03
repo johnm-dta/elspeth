@@ -1,0 +1,30 @@
+{
+  "scenario_id": "llm_unverified_model",
+  "summary": "User asks for a subjective rating from an LLM. The composer_hints on the llm transform tell the LLM operating the composer (1) to verify the model via list_models before pinning, and (2) to trigger request_interpretation_review when the prompt contains subjective terms. Hint-blind LLMs hardcode an unverified model name and skip interpretation review — the run ships with an opaque-to-the-operator interpretation of 'cool'. Green-passes when the LLM either invoked list_models OR triggered interpretation review (the post_call_hint also fires automatically because the prompt contains 'cool'). Authored 2026-05-20 for composer-jit-hints Phase 1.",
+  "opening_prompt": "Rate how cool each of these government websites is, on a 1-5 scale. Use a fast LLM. Write the rated rows to outputs/rated.jsonl.\n\nhttps://dta.gov.au\nhttps://www.digital.nsw.gov.au\nhttps://www.vic.gov.au/digital-strategy\nhttps://www.qld.gov.au/digital",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "passivity_phrases_note": "Standard passivity catch-list.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true,
+    "must_be_valid_note": "Pipeline must be valid before this scenario can score anything meaningful."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true,
+    "must_have_node_kinds_substring_any_of": [["llm"]],
+    "must_have_node_kinds_note": "The pipeline must contain an llm transform — without it, the rating step never happens.",
+    "_interpretation_review_note": "The llm transform's get_post_call_hints fires on subjective prompt terms like 'cool'; the LLM should respond by triggering request_interpretation_review. Detecting that call programmatically requires inspecting the tool-call message stream, which the persisted chat history does not preserve. The is_valid + llm-node-present asserts pin the structural floor; reviewer reads the final assistant content to confirm interpretation acknowledgement."
+  }
+}

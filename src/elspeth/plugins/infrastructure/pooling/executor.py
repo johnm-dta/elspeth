@@ -322,7 +322,7 @@ class PooledExecutor:
                 )
                 self._buffer.complete(buffer_idx, shutdown_result)
                 # Mark remaining contexts as shutdown errors too
-                for _remaining_ctx in contexts[contexts.index(ctx) + 1 :]:
+                for _ in contexts[contexts.index(ctx) + 1 :]:
                     remaining_idx = self._buffer.submit()
                     self._buffer.complete(
                         remaining_idx,
@@ -438,8 +438,14 @@ class PooledExecutor:
             "elapsed_seconds": elapsed,
             "max_seconds": self._max_capacity_retry_seconds,
         }
-        if isinstance(retryable_error, CapacityError):
-            error_data["status_code"] = retryable_error.status_code
+        # Both union arms expose ``status_code`` (CapacityError always carries
+        # an int; PluginRetryableError carries int | None). Record the value
+        # when present — absence stays absent (no fabricated default), so a
+        # NetworkError-style error with no HTTP status omits the field while a
+        # rate-limit error surfaces its code.
+        status_code = retryable_error.status_code
+        if status_code is not None:
+            error_data["status_code"] = status_code
         return TransformResult.error(error_data, retryable=False)
 
     def _build_interrupted_result(

@@ -33,6 +33,12 @@ def _valid_kwargs() -> dict[str, object]:
         "created_by": "user",
         "source_description": None,
         "status": "ready",
+        # Inline-blob provenance (Phase 5a Task 2.5).  The five
+        # ``creating_*`` fields default to None on the Pydantic model
+        # (the all-or-NULL invariant is enforced upstream at the DB CHECK
+        # ``ck_blobs_creating_llm_provenance_nullability``); only
+        # ``creation_modality`` is required at construction.
+        "creation_modality": "verbatim",
     }
 
 

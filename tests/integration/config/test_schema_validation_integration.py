@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from elspeth.contracts import Determinism
+
 if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.manager import PluginManager
 
@@ -176,6 +178,7 @@ def test_static_schema_validation(plugin_manager: PluginManager) -> None:
         """Transform with static class-level input/output schemas."""
 
         name = "static_transform"
+        determinism = Determinism.DETERMINISTIC
         input_schema = StaticSchema  # Class-level static schema
         output_schema = StaticSchema  # Class-level static schema
         on_success = "output"  # Terminal transform routes to output sink

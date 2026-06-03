@@ -34,6 +34,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
@@ -427,6 +428,7 @@ class TestTerminalStateAggregation:
             """Batch transform that sums values."""
 
             name = "sum_batch"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
             is_batch_aware = True

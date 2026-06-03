@@ -1,121 +1,208 @@
 /**
- * Hash-based router for session and tab deep linking.
+ * Hash-based router for session deep linking.
  *
- * Format: #/{sessionId}/{tab}
- *   - #/abc123          → select session abc123, default tab
- *   - #/abc123/graph    → select session abc123, switch to graph tab
- *   - # or empty        → no deep link
+ * Format: #/{sessionId}                 -> canonical
+ *         #/{sessionId}/graph           -> open graph modal, then rewrite
+ *         #/{sessionId}/yaml            -> open YAML modal, then rewrite
+ *         #/{sessionId}/{anything-else} -> silently strip the verb
+ *         #/shared/{token}              -> IGNORED — owned by useSharedToken
+ *                                          (Phase 6B Task 8); the hook below
+ *                                          short-circuits without touching the
+ *                                          hash so SharedInspectView keeps
+ *                                          control of the URL.
  *
- * Session changes push history entries (back button works).
- * Tab changes replace the current entry (don't clutter history).
- *
- * Race condition: on first load, sessions may not be loaded yet.
- * We apply the hash optimistically — selectSession will fetch data
- * from the API regardless. Once sessions load, we re-check.
+ * Phase 3B uses action fragments rather than steady-state view fragments.
+ * The fragment is an arrival action, not steady-state URL state.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
-import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
-
-/** Dispatched by InspectorPanel when the active tab changes. */
-export const TAB_CHANGED_EVENT = "elspeth-tab-changed";
 
 interface HashState {
   sessionId: string | null;
-  tab: string | null;
+  verb: string | null;
 }
 
-const VALID_TABS = new Set(["spec", "graph", "yaml", "runs"]);
+interface RedirectToast {
+  message: string;
+  dismiss: () => void;
+}
+
+const ACTION_VERBS: Record<string, string> = {
+  graph: OPEN_GRAPH_MODAL_EVENT,
+  yaml: OPEN_YAML_MODAL_EVENT,
+};
+
+/**
+ * Verbs that were valid tabs in earlier versions but have since been removed.
+ * When detected, a one-time dismissible toast is shown to the user.
+ * All other unrecognized verbs are silently stripped (backward compat).
+ */
+const RETIRED_VERBS: Record<string, string> = {
+  runs: "The Runs tab was removed in this update. Showing Graph instead.",
+  spec: "The Spec tab was removed in this update. Showing Graph instead.",
+};
+
+const TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
+
+const SHARED_HASH_PREFIX = "#/shared/";
+
+/** True when the current hash is a Phase 6B shared-inspect route. The
+ *  session router short-circuits on this so SharedInspectView keeps
+ *  control of the URL and the session store is not mutated. */
+function _isSharedRoute(hash: string): boolean {
+  return hash.startsWith(SHARED_HASH_PREFIX);
+}
 
 function parseHash(): HashState {
   const hash = window.location.hash;
+  if (_isSharedRoute(hash)) return { sessionId: null, verb: null };
   const match = hash.match(/^#\/([^/]+?)(?:\/([a-z]+))?$/);
-  if (!match) return { sessionId: null, tab: null };
-  const tab = match[2] && VALID_TABS.has(match[2]) ? match[2] : null;
-  return { sessionId: match[1], tab };
+  if (!match) return { sessionId: null, verb: null };
+  return { sessionId: match[1], verb: match[2] ?? null };
 }
 
-function buildHash(sessionId: string | null, tab: string | null): string {
-  if (!sessionId) return "";
-  return tab ? `#/${sessionId}/${tab}` : `#/${sessionId}`;
+function buildCanonicalHash(sessionId: string | null): string {
+  return sessionId ? `#/${sessionId}` : "";
 }
 
-export function useHashRouter(): void {
-  // Track what we last wrote to avoid reacting to our own updates
+interface UseHashRouterOptions {
+  enabled?: boolean;
+}
+
+export function useHashRouter(
+  options: UseHashRouterOptions = {},
+): { redirectToast: RedirectToast | null } {
+  const enabled = options.enabled ?? true;
   const lastWrittenHash = useRef<string>("");
-  // Track the current tab from hash (for preserving across session changes)
-  const currentTab = useRef<string | null>(null);
-  // Flag to suppress hash write during initial application
   const applying = useRef(false);
 
-  // ── Apply hash state to the app ──────────────────────────────────────
+  // Read dismissal flag once at mount. Using a ref rather than reading
+  // localStorage on every applyHash invocation avoids repeated storage reads.
+  const dismissedRef = useRef<boolean>(
+    typeof window !== "undefined" &&
+      window.localStorage.getItem(TOAST_DISMISSED_KEY) === "1",
+  );
+
+  const [redirectToast, setRedirectToast] = useState<RedirectToast | null>(
+    null,
+  );
+
   const applyHash = (state: HashState) => {
-    applying.current = true;
-
-    const { sessionId, tab } = state;
-    const store = useSessionStore.getState();
-
-    if (sessionId && sessionId !== store.activeSessionId) {
-      store.selectSession(sessionId);
+    // Phase 6B Task 8: when the live hash is a shared-inspect route the
+    // session router is dormant — SharedInspectView owns the URL. Apply
+    // is a no-op in that mode so the hash is preserved verbatim and the
+    // active session is not mutated by the (deliberately empty) parsed
+    // state we'd otherwise act on.
+    if (_isSharedRoute(window.location.hash)) {
+      return;
     }
+    applying.current = true;
+    try {
+      const { sessionId, verb } = state;
+      const store = useSessionStore.getState();
 
-    const resolvedTab = tab ?? "spec";
-    currentTab.current = resolvedTab;
-    window.dispatchEvent(
-      new CustomEvent(SWITCH_TAB_EVENT, { detail: resolvedTab }),
-    );
+      if (sessionId && sessionId !== store.activeSessionId) {
+        store.selectSession(sessionId);
+      }
 
-    applying.current = false;
+      // Fix A: use hasOwnProperty to avoid prototype-chain walk.
+      // The `in` operator walks the prototype chain: `"constructor" in ACTION_VERBS`
+      // is true even though "constructor" is not an own property of ACTION_VERBS.
+      // `ACTION_VERBS["constructor"]` returns the Object constructor function and
+      // `new CustomEvent(fn)` would coerce it to a garbage event name.
+      // Object.prototype.hasOwnProperty.call() is the ES2020-compatible guard.
+      const hasOwn = Object.prototype.hasOwnProperty;
+      if (verb && hasOwn.call(ACTION_VERBS, verb)) {
+        const eventName = ACTION_VERBS[verb];
+        queueMicrotask(() => window.dispatchEvent(new CustomEvent(eventName)));
+      }
+
+      // Fix C: retired-verb redirect toast. Only "runs" and "spec" trigger
+      // the toast; all other unrecognized verbs are silently stripped.
+      if (verb && hasOwn.call(RETIRED_VERBS, verb) && !dismissedRef.current) {
+        const message = RETIRED_VERBS[verb];
+        setRedirectToast({
+          message,
+          dismiss: () => {
+            dismissedRef.current = true;
+            window.localStorage.setItem(TOAST_DISMISSED_KEY, "1");
+            setRedirectToast(null);
+          },
+        });
+      }
+
+      const canonical = buildCanonicalHash(sessionId);
+      if (canonical !== window.location.hash) {
+        lastWrittenHash.current = canonical;
+        window.history.replaceState(
+          null,
+          "",
+          canonical || window.location.pathname,
+        );
+      }
+    } finally {
+      // Fix B: guarantee the flag is cleared even if selectSession throws.
+      // Without this, applying.current stays true permanently and the URL-echo
+      // subscription (useEffect #3) becomes a no-op until page reload.
+      applying.current = false;
+    }
   };
 
-  // ── On mount: apply initial hash ─────────────────────────────────────
   useEffect(() => {
+    if (!enabled) return;
     const initial = parseHash();
     if (initial.sessionId) {
-      // Pre-set lastWrittenHash so the session subscriber doesn't
-      // pushState on the initial load (we want the URL to stay as-is).
       lastWrittenHash.current = window.location.hash;
       applyHash(initial);
     } else {
-      // No hash — write current session to hash if one is already active
       const { activeSessionId } = useSessionStore.getState();
       if (activeSessionId) {
-        const hash = buildHash(activeSessionId, null);
+        const hash = buildCanonicalHash(activeSessionId);
         lastWrittenHash.current = hash;
-        window.history.replaceState(null, "", hash || window.location.pathname);
+        window.history.replaceState(
+          null,
+          "",
+          hash || window.location.pathname,
+        );
       }
     }
-  }, []);
+  }, [enabled]);
 
-  // ── Handle browser back/forward ──────────────────────────────────────
   useEffect(() => {
+    if (!enabled) return;
     function handleHashChange() {
       const newHash = window.location.hash;
-      // Skip if this was our own write
       if (newHash === lastWrittenHash.current) return;
-      // Pre-set so the session subscriber doesn't re-push this hash
       lastWrittenHash.current = newHash;
       applyHash(parseHash());
     }
 
-    // popstate fires on back/forward — more reliable than hashchange
-    // for history.pushState entries
     window.addEventListener("popstate", handleHashChange);
     window.addEventListener("hashchange", handleHashChange);
     return () => {
       window.removeEventListener("popstate", handleHashChange);
       window.removeEventListener("hashchange", handleHashChange);
     };
-  }, []);
+  }, [enabled]);
 
-  // ── Sync session changes → hash (pushState) ─────────────────────────
   useEffect(() => {
+    if (!enabled) return;
     const unsub = useSessionStore.subscribe((state, prevState) => {
       if (applying.current) return;
       if (state.activeSessionId === prevState.activeSessionId) return;
+      // Phase 6B Task 8: do not mutate the URL while a shared-inspect
+      // route is live — SharedInspectView owns the hash. The session
+      // store may legitimately change activeSessionId via background
+      // bootstrap while a reviewer is on the shared route; the change
+      // is irrelevant to the rendered view and must not strip the token.
+      if (_isSharedRoute(window.location.hash)) return;
 
-      const hash = buildHash(state.activeSessionId, currentTab.current);
+      const hash = buildCanonicalHash(state.activeSessionId);
       if (hash === lastWrittenHash.current) return;
       lastWrittenHash.current = hash;
 
@@ -126,35 +213,11 @@ export function useHashRouter(): void {
       }
     });
     return unsub;
-  }, []);
+  }, [enabled]);
 
-  // ── Sync tab changes → hash (replaceState) ──────────────────────────
   useEffect(() => {
-    function handleTabChanged(e: Event) {
-      if (applying.current) return;
-      const tab = (e as CustomEvent<string>).detail;
-      if (!VALID_TABS.has(tab)) return;
-      currentTab.current = tab;
-
-      const { activeSessionId } = useSessionStore.getState();
-      if (!activeSessionId) return;
-
-      const hash = buildHash(activeSessionId, tab);
-      if (hash === lastWrittenHash.current) return;
-      lastWrittenHash.current = hash;
-      window.history.replaceState(null, "", hash);
-    }
-
-    window.addEventListener(TAB_CHANGED_EVENT, handleTabChanged);
-    return () => window.removeEventListener(TAB_CHANGED_EVENT, handleTabChanged);
-  }, []);
-
-  // ── Re-check hash once sessions load ─────────────────────────────────
-  // On first load, selectSession may be called before sessions are in
-  // the store. Once they arrive, verify the hash session is valid.
-  useEffect(() => {
+    if (!enabled) return;
     const unsub = useSessionStore.subscribe((state, prevState) => {
-      // Only react to sessions list changing from empty to populated
       if (prevState.sessions.length > 0 || state.sessions.length === 0) return;
 
       const { sessionId } = parseHash();
@@ -162,12 +225,13 @@ export function useHashRouter(): void {
 
       const exists = state.sessions.some((s) => s.id === sessionId);
       if (!exists && state.activeSessionId === sessionId) {
-        // Session from hash doesn't exist — clear invalid hash and session
         lastWrittenHash.current = "";
         window.history.replaceState(null, "", window.location.pathname);
         useSessionStore.setState({ activeSessionId: null });
       }
     });
     return unsub;
-  }, []);
+  }, [enabled]);
+
+  return { redirectToast };
 }

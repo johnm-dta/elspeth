@@ -23,22 +23,23 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.contracts.schema_contract import SchemaContract
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
-    from elspeth.engine.processor import RowProcessor
 
 # Import protocols at runtime (not TYPE_CHECKING) because RowPlugin type alias
 # is used in runtime annotations and isinstance() checks
@@ -54,6 +55,63 @@ PendingTokenMap = dict[str, list[tuple["TokenInfo", "PendingOutcome | None"]]]
 # batch-aware transforms (is_batch_aware=True on TransformProtocol)
 RowPlugin = TransformProtocol
 """Row-processing plugin type for pipeline transforms list."""
+
+
+class RowProcessorHandle(Protocol):
+    """Orchestrator-facing processor contract stored in run/loop contexts."""
+
+    @property
+    def token_manager(self) -> Any:
+        raise NotImplementedError
+
+    def process_row(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def process_existing_row(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def process_token(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def check_aggregation_timeout(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def get_aggregation_buffer_count(self, *args: Any, **kwargs: Any) -> int:
+        raise NotImplementedError
+
+    def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
+        raise NotImplementedError
+
+    def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+        raise NotImplementedError
+
+    def resume_incomplete_token(
+        self,
+        spec: IncompleteTokenSpec,
+        row_data: PipelineRow,
+        ctx: PluginContext,
+        *,
+        resume_checkpoint_id: str,
+    ) -> list[RowResult]:
+        raise NotImplementedError
+
+    def resolve_sink_step(self) -> int:
+        raise NotImplementedError
+
+
+class TelemetryManagerProtocol(Protocol):
+    """Engine-facing telemetry sink surface."""
+
+    def handle_event(self, event: TelemetryEvent) -> None:
+        """Handle one telemetry event emitted by the engine."""
+        ...
+
+    def flush(self) -> None:
+        """Flush queued telemetry to exporters before returning control."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,7 +445,7 @@ class RunContext:
     """
 
     ctx: PluginContext
-    processor: RowProcessor
+    processor: RowProcessorHandle
     coalesce_executor: CoalesceExecutor | None
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     agg_transform_lookup: Mapping[str, AggNodeEntry]
@@ -418,7 +476,7 @@ class LoopContext:
     pending_tokens: PendingTokenMap
 
     # --- Read-only after construction (not reassigned) ---
-    processor: RowProcessor
+    processor: RowProcessorHandle
     ctx: PluginContext
     config: PipelineConfig
     agg_transform_lookup: Mapping[str, AggNodeEntry]
@@ -459,9 +517,20 @@ class ResumeState:
     restored_coalesce_state: CoalesceCheckpointState | None
     unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
     schema_contract: SchemaContract
+    # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
+    # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
+    # instead of whole-row restart (which re-emits completed branches).
+    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
+    # RecoveryManager needed by resume loop for reconstruct_token_row.
+    recovery_manager: RecoveryManager
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "restored_aggregation_state")
+        # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
+        # deep_freeze converts it to MappingProxyType[str, tuple[IncompleteTokenSpec, ...]].
+        # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
+        # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
+        # recovery_manager is a live service object (not a container) — NOT frozen here.
+        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

@@ -24,6 +24,8 @@ from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
+from opentelemetry import metrics
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import SecretResolutionInput
@@ -31,20 +33,44 @@ from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.core.blobs_inline import (
+    BLOB_INLINE_AGGREGATE_BYTE_CAP,
+    BLOB_INLINE_PER_REF_BYTE_CAP,
+    _discover_blob_content_refs,
+    _enforce_blob_content_ref_metadata,
+    _fetch_blob_contents,
+    _substitute_blob_content_refs,
+)
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
+from elspeth.web.blobs.protocol import (
+    AllowedMimeType,
+    BlobIntegrityError,
+    BlobNotFoundError,
+    BlobQuotaExceededError,
+    BlobRecord,
+    BlobServiceProtocol,
+    BlobStateError,
+)
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
+from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
-from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.errors import (
+    BlobSourcePathMismatchError,
+    MalformedBlobRefError,
+    PathAllowlistViolationError,
+    SemanticContractViolationError,
+    UnresolvedInterpretationPlaceholderError,
+)
 from elspeth.web.execution.failure_samples import format_failure_samples, load_top_failure_samples
 from elspeth.web.execution.fanout_guard import (
     ExecutionFanoutGuardRequired,
@@ -64,8 +90,11 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
+from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -75,38 +104,46 @@ from elspeth.web.sessions.protocol import (
     SessionRunStatus,
     SessionServiceProtocol,
 )  # B1: canonical definition
+from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 slog = structlog.get_logger()
+_meter = metrics.get_meter(__name__)
+_BLOB_INLINE_HASH_MISMATCH_TOTAL = _meter.create_counter(
+    name="composer.blob_inline.hash_mismatch_total",
+    description="composer-pinned hash did not match runtime-fetched blob content; SLO threshold = 0",
+)
+_BLOB_INLINE_AUDIT_ROW_TIER1_VIOLATION_TOTAL = _meter.create_counter(
+    name="composer.blob_inline.audit_row_tier1_violation_total",
+    description="resolved inline blob ref produced no audit row; SLO threshold = 0",
+)
 
 T = TypeVar("T")
-
-# Exception types whose str() is safe to expose to WebSocket clients and
-# persist in runs.error.  These produce user-actionable messages (config
-# errors, validation failures) without leaking internal paths or class
-# hierarchies.  Everything else gets a generic message — the full
-# exception is recorded in runs.error by _run_pipeline's except block.
-_CLIENT_SAFE_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    ValueError,  # config validation, illegal transitions
-    TypeError,  # type mismatches in config/YAML
-    # KeyError deliberately excluded: str(KeyError) exposes internal dict
-    # key names (e.g., '_SCOPE_TO_AUDIT_SOURCE') — the generic fallback
-    # message with the class name is safer for the client surface.
-)
 
 
 def _sanitize_error_for_client(exc: BaseException) -> str:
     """Return a client-safe error message for a pipeline failure.
 
-    Allowlists exception types that produce user-actionable messages.
-    All others are reduced to a generic message with the exception
-    class name (no internal details).  The full exception is recorded
-    in runs.error by _run_pipeline's except-BaseException block.
+    Only typed exceptions with purpose-built safe messages may expose
+    details. Broad built-ins such as ValueError, TypeError, and KeyError
+    are reduced to a generic class-name message because their str() output
+    can carry validation structure, function signatures, and internal keys.
+    The full exception is recorded in runs.error by _run_pipeline's
+    except-BaseException block.
     """
     if isinstance(exc, SecretResolutionError):
         return "One or more secret references could not be resolved. Check the Secrets panel."
-    if isinstance(exc, _CLIENT_SAFE_EXCEPTIONS):
-        return str(exc)
     return f"Pipeline execution failed ({type(exc).__name__})"
+
+
+def _schema_contract_violation_errors(exc: PydanticValidationError) -> list[dict[str, str]]:
+    """Extract field-level schema diagnostics without raw input values."""
+    return [
+        {
+            "loc": ".".join(str(part) for part in error["loc"]) or "<root>",
+            "type": str(error["type"]),
+        }
+        for error in exc.errors(include_url=False, include_input=False)
+    ]
 
 
 # Phase 2.2 (elspeth-0de989c56d): mapping from the engine's L0 RunStatus
@@ -245,6 +282,7 @@ class ExecutionServiceImpl:
         settings: WebSettings,
         session_service: SessionServiceProtocol,
         yaml_generator: YamlGenerator,
+        telemetry: _SessionsTelemetry,
         blob_service: BlobServiceProtocol | None = None,
         secret_service: WebSecretResolver | None = None,
     ) -> None:
@@ -253,6 +291,7 @@ class ExecutionServiceImpl:
         self._settings = settings
         self._session_service = session_service
         self._yaml_generator = yaml_generator
+        self._telemetry = telemetry
         self._blob_service = blob_service
         self._secret_service = secret_service
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
@@ -266,6 +305,36 @@ class ExecutionServiceImpl:
         # Keyed by session_id string; lazily created, cleaned up on session
         # deletion via cleanup_session_lock().
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # OpenRouter catalog snapshot id, populated by the lifespan after
+        # the boot probe via ``set_openrouter_catalog_snapshot()``. Both
+        # fields are required to be present before any pipeline executes
+        # — run-create writes them into the Landscape ``runs`` row.
+        # ``None`` here is a programmer bug (lifespan never set them) and
+        # crashes loudly at ``_run_pipeline`` rather than silently
+        # dropping the audit field.
+        self._openrouter_catalog_sha256: str | None = None
+        self._openrouter_catalog_source: str | None = None
+
+    def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
+        """Record the boot-time OpenRouter catalog snapshot id.
+
+        Called once from the FastAPI lifespan after
+        :func:`prime_openrouter_catalog_from_live` completes (success or
+        bundled fallback). Both arguments are required and concrete
+        (non-empty string) — the lifespan reads them from
+        :func:`elspeth.plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id`
+        which never returns ``None``.
+
+        Snapshot is invariant for the process lifetime: re-priming is
+        not supported (staging is restarted on deploys, and a restart
+        re-runs the lifespan).
+        """
+        if not is_valid_sha256_hex(sha256):
+            raise RuntimeError(f"openrouter_catalog_sha256 must be 64 lowercase hex chars, got {sha256!r}")
+        if source not in ("live", "bundled"):
+            raise RuntimeError(f"openrouter_catalog_source must be 'live' or 'bundled', got {source!r}")
+        self._openrouter_catalog_sha256 = sha256
+        self._openrouter_catalog_source = source
 
     def _call_async(self, coro: Coroutine[Any, Any, T]) -> T:
         """Bridge an async call from the background thread to the main event loop.
@@ -327,6 +396,7 @@ class ExecutionServiceImpl:
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Start a background pipeline run.
@@ -340,6 +410,7 @@ class ExecutionServiceImpl:
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            auth_provider_type: Auth provider namespace for Landscape run attribution.
             fanout_ack_token: Optional launch acknowledgement for high-fanout
                 LLM/provider-call risk.
 
@@ -352,7 +423,13 @@ class ExecutionServiceImpl:
         session_key = str(session_id)
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
-            return await self._execute_locked(session_id, state_id, user_id=user_id, fanout_ack_token=fanout_ack_token)
+            return await self._execute_locked(
+                session_id,
+                state_id,
+                user_id=user_id,
+                auth_provider_type=auth_provider_type,
+                fanout_ack_token=fanout_ack_token,
+            )
 
     async def _execute_locked(
         self,
@@ -360,6 +437,7 @@ class ExecutionServiceImpl:
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Inner execute — runs under the per-session asyncio.Lock."""
@@ -410,6 +488,36 @@ class ExecutionServiceImpl:
                 contracts=semantic_contracts,
             )
 
+        # F-17 / F-21 (Phase 5b Task 5 follow-on) — unresolved interpretation
+        # placeholder gate. Runs AFTER semantic-contract validation (the
+        # placeholder isn't a contract violation; the LLM transform's
+        # prompt_template is still a string) and BEFORE the path allowlist /
+        # YAML generation (we fail fast so the placeholder never reaches the
+        # runtime engine that would substitute the literal string into the
+        # LLM call). Operational telemetry counter emitted with non-content
+        # component metadata per unresolved site — explicitly NOT the
+        # prompt_template or user-authored term value.
+        #
+        # Operates under the operator-acknowledged assumption that 18a Task 0
+        # (empirical LLM gate ≥ 8/10 staging runs emit
+        # {{interpretation:<term>}}) passes; this detector is the
+        # runtime-safety net catching cases where the LLM under-fires.
+        materialized_state = materialize_state_for_execution(composition_state)
+        if isinstance(materialized_state, InterpretationReviewPending):
+            for site in materialized_state.sites:
+                self._telemetry.interpretation_placeholder_unresolved_at_runtime_total.add(
+                    1,
+                    attributes={
+                        "component_id": site.component_id,
+                        "component_type": site.component_type,
+                        "kind": site.kind.value,
+                    },
+                )
+            raise UnresolvedInterpretationPlaceholderError(
+                sites=tuple(materialized_state.sites),
+            )
+        composition_state = materialized_state
+
         # Path allowlist check — defense-in-depth. The validate endpoint also
         # checks this, but /execute does not require /validate first. An
         # authenticated user could skip validation and execute a state that
@@ -423,7 +531,7 @@ class ExecutionServiceImpl:
                 if value is not None:
                     resolved = resolve_data_path(value, str(self._settings.data_dir))
                     if not any(resolved.is_relative_to(d) for d in allowed_dirs):
-                        raise ValueError(f"Source {key}='{value}' resolves outside allowed directories")
+                        raise PathAllowlistViolationError(f"Source {key}='{value}' resolves outside allowed directories")
 
         # Sink path allowlist — prevents arbitrary file writes via sink options.
         # Without this, a client can set sink options.path to any absolute or
@@ -438,7 +546,9 @@ class ExecutionServiceImpl:
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))
                         if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
-                            raise ValueError(f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories")
+                            raise PathAllowlistViolationError(
+                                f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
+                            )
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 
@@ -461,7 +571,10 @@ class ExecutionServiceImpl:
         if composition_state.source is not None and self._blob_service is not None:
             blob_ref = composition_state.source.options.get("blob_ref")
             if blob_ref is not None:
-                parsed_blob_id = UUID(blob_ref)
+                try:
+                    parsed_blob_id = UUID(blob_ref)
+                except ValueError as exc:
+                    raise MalformedBlobRefError("blob_ref must be a UUID") from exc
                 # IDOR contract (mirrors the state_id branch above): the
                 # nonexistent-blob and cross-session-blob cases MUST be
                 # indistinguishable from the client's perspective.  Both
@@ -536,10 +649,22 @@ class ExecutionServiceImpl:
                 )
 
             # Submit to thread pool
-            future = self._executor.submit(self._run_pipeline, str(run_id), pipeline_yaml, shutdown_event, user_id)
+            future = self._executor.submit(
+                self._run_pipeline,
+                str(run_id),
+                pipeline_yaml,
+                shutdown_event,
+                user_id,
+                auth_provider_type,
+            )
         except BaseException as exc:
             with self._shutdown_events_lock:
-                self._shutdown_events.pop(str(run_id), None)
+                # Idempotent cleanup of an internal bookkeeping key. Access it
+                # directly (R9 remediation); the membership guard preserves the
+                # silent no-op when cleanup races or runs twice.
+                run_key = str(run_id)
+                if run_key in self._shutdown_events:
+                    del self._shutdown_events[run_key]
             # Transition run out of pending so the one-active-run constraint
             # doesn't permanently block this session.
             #
@@ -620,10 +745,6 @@ class ExecutionServiceImpl:
             session_id: Session whose current state to validate.
             user_id: Authenticated user's ID for scoped secret ref validation.
         """
-        from functools import partial
-
-        from elspeth.web.execution.validation import validate_pipeline
-
         state_record = await self._session_service.get_current_state(session_id)
         if state_record is None:
             return ValidationResult(
@@ -633,6 +754,8 @@ class ExecutionServiceImpl:
                         name="state_exists",
                         passed=False,
                         detail="No composition state exists for this session",
+                        affected_nodes=(),
+                        outcome_code=None,
                     )
                 ],
                 errors=[
@@ -641,21 +764,68 @@ class ExecutionServiceImpl:
                         component_type=None,
                         message="No composition state exists for this session",
                         suggestion="Use the composer to build a pipeline first.",
+                        error_code=None,
                     )
                 ],
+                readiness=ValidationReadiness(
+                    authoring_valid=False,
+                    execution_ready=False,
+                    completion_ready=False,
+                    blockers=[
+                        ValidationReadinessBlocker(
+                            code="state_exists",
+                            component_id=None,
+                            component_type=None,
+                            detail="No composition state exists for this session.",
+                        )
+                    ],
+                ),
             )
 
         composition_state = state_from_record(state_record)
+        return await self.validate_state(composition_state, user_id=user_id, session_id=session_id)
+
+    async def validate_state(
+        self,
+        state: CompositionState,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult:
+        """Dry-run validation for an already-read composition state.
+
+        Snapshot-style callers use this to keep every projected row on the
+        same ``CompositionState.version`` instead of re-reading mutable session
+        state between adjacent readiness calculations. When supplied,
+        ``session_id`` scopes inline-blob metadata lookups to the same session
+        boundary enforced by ``link_blob_to_run()`` at execution time.
+        """
+        from functools import partial
+
+        from elspeth.web.execution.validation import validate_pipeline
+
+        def _blob_get_metadata(blob_id: UUID) -> BlobRecord | None:
+            if self._blob_service is None:
+                return None
+            try:
+                record = self._call_async(self._blob_service.get_blob(blob_id))
+            except BlobNotFoundError:
+                return None
+            if session_id is not None and record.session_id != session_id:
+                return None
+            return record
+
         return cast(
             ValidationResult,
             await run_sync_in_worker(
                 partial(
                     validate_pipeline,
-                    composition_state,
+                    state,
                     self._settings,
                     self._yaml_generator,
                     secret_service=self._secret_service,
                     user_id=user_id,
+                    blob_get_metadata=_blob_get_metadata,
                 ),
             ),
         )
@@ -700,6 +870,7 @@ class ExecutionServiceImpl:
         pipeline_yaml: str,
         shutdown_event: threading.Event,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> None:
         """Execute a pipeline in the background thread.
 
@@ -787,51 +958,130 @@ class ExecutionServiceImpl:
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
             resolved_yaml = pipeline_yaml
+            resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
-            if self._secret_service is not None and user_id is not None:
+            inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
+            needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            if needs_config_tree:
                 import yaml as _yaml
 
-                from elspeth.core.secrets import resolve_secret_refs
-
                 config_dict = _yaml.safe_load(pipeline_yaml)
-                if not isinstance(config_dict, dict):
+                if type(config_dict) is not dict:
                     raise TypeError(
                         f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
                     )
-                env_ref_names = {item.name for item in self._secret_service.list_refs(user_id)}
-                resolved_dict, resolutions = resolve_secret_refs(
-                    config_dict,
-                    self._secret_service,
-                    user_id,
-                    env_ref_names=env_ref_names,
-                )
-                resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
+                resolved_dict = cast(dict[str, Any], config_dict)
 
-                # Map ResolvedSecret.scope (web domain) to
-                # SecretResolutionInput.source (audit domain).
-                # "server" secrets are env vars on the host → audit source "env".
-                _SCOPE_TO_AUDIT_SOURCE: dict[str, str] = {
-                    "user": "user",
-                    "server": "env",
-                }
-                for rs in resolutions:
-                    audit_source = _SCOPE_TO_AUDIT_SOURCE.get(rs.scope)
-                    if audit_source is None:
-                        raise ValueError(
-                            f"No audit source mapping for secret scope {rs.scope!r} "
-                            f"(secret: {rs.name!r}) — add mapping to _SCOPE_TO_AUDIT_SOURCE"
+                if self._secret_service is not None and user_id is not None:
+                    from elspeth.core.secrets import resolve_secret_refs
+
+                    env_ref_names = {item.name for item in self._secret_service.list_refs(user_id)}
+                    resolved_dict, resolutions = resolve_secret_refs(
+                        resolved_dict,
+                        self._secret_service,
+                        user_id,
+                        env_ref_names=env_ref_names,
+                    )
+
+                    # Map ResolvedSecret.scope (web domain) to
+                    # SecretResolutionInput.source (audit domain).
+                    # "server" secrets are env vars on the host → audit source "env".
+                    _SCOPE_TO_AUDIT_SOURCE: dict[str, str] = {
+                        "user": "user",
+                        "server": "env",
+                    }
+                    for rs in resolutions:
+                        # Offensive lookup against our own code-controlled
+                        # mapping: rs.scope is a typed SecretScope Literal, so
+                        # an unmapped scope (e.g. a valid "org" with no audit
+                        # mapping added yet) is a programmer coverage gap, not
+                        # external absence. Direct subscript surfaces it as a
+                        # KeyError, re-raised as a meaningful ValueError.
+                        try:
+                            audit_source = _SCOPE_TO_AUDIT_SOURCE[rs.scope]
+                        except KeyError as exc:
+                            raise ValueError(
+                                f"No audit source mapping for secret scope {rs.scope!r} "
+                                f"(secret: {rs.name!r}) — add mapping to _SCOPE_TO_AUDIT_SOURCE"
+                            ) from exc
+                        secret_resolution_inputs.append(
+                            SecretResolutionInput(
+                                env_var_name=rs.name,
+                                source=audit_source,
+                                vault_url=None,
+                                secret_name=None,
+                                timestamp=time.time(),
+                                resolution_latency_ms=0.0,
+                                fingerprint=rs.fingerprint,
+                            )
                         )
-                    secret_resolution_inputs.append(
-                        SecretResolutionInput(
-                            env_var_name=rs.name,
-                            source=audit_source,
-                            vault_url=None,
-                            secret_name=None,
-                            timestamp=time.time(),
-                            resolution_latency_ms=0.0,
-                            fingerprint=rs.fingerprint,
+
+                inline_refs = _discover_blob_content_refs(resolved_dict) if inline_blob_candidate else []
+                if inline_refs:
+                    if self._blob_service is None:
+                        raise RuntimeError("Inline-content blob refs require BlobServiceProtocol wiring")
+                    blob_service = self._blob_service
+
+                    unique_blob_ids: list[UUID] = []
+                    seen_blob_ids: set[UUID] = set()
+                    for ref in inline_refs:
+                        if ref.blob_id in seen_blob_ids:
+                            continue
+                        seen_blob_ids.add(ref.blob_id)
+                        unique_blob_ids.append(ref.blob_id)
+
+                    async def _link_inline_blobs_to_run() -> None:
+                        await asyncio.gather(
+                            *(
+                                blob_service.link_blob_to_run(
+                                    blob_id=blob_id,
+                                    run_id=run_uuid,
+                                    direction="input",
+                                )
+                                for blob_id in unique_blob_ids
+                            )
+                        )
+
+                    try:
+
+                        async def _gather_inline_blob_metadata() -> list[Any]:
+                            return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+
+                        metadata_records = self._call_async(_gather_inline_blob_metadata())
+                        records_by_blob_id: dict[UUID, BlobRecord] = {
+                            blob_id: cast(BlobRecord, record) for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
+                        }
+                        _enforce_blob_content_ref_metadata(
+                            inline_refs,
+                            records_by_blob_id,
+                            per_ref_byte_cap=BLOB_INLINE_PER_REF_BYTE_CAP,
+                            aggregate_byte_cap=BLOB_INLINE_AGGREGATE_BYTE_CAP,
+                        )
+                        self._call_async(_link_inline_blobs_to_run())
+                        fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
+                        blob_metadata: dict[UUID, tuple[AllowedMimeType, int]] = {
+                            blob_id: (cast(AllowedMimeType, record.mime_type), record.size_bytes)
+                            for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
+                        }
+                        resolved_dict, blob_resolutions = _substitute_blob_content_refs(
+                            resolved_dict,
+                            fetched,
+                            refs=inline_refs,
+                            blob_metadata=blob_metadata,
+                        )
+                    except BlobIntegrityError:
+                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1, {"run_id": run_id})
+                        raise
+                    self._call_async(
+                        self._session_service.record_blob_inline_resolutions(
+                            run_id=run_uuid,
+                            resolutions=blob_resolutions,
+                            attempt=1,
                         )
                     )
+
+                if secret_resolution_inputs or inline_refs:
+                    resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,
@@ -921,6 +1171,20 @@ class ExecutionServiceImpl:
             # signal.signal() from non-main threads)
             from elspeth.cli_helpers import _make_sink_factory
 
+            # Read the boot-time catalog snapshot. Direct attribute access
+            # (offensive programming): if the lifespan never called
+            # ``set_openrouter_catalog_snapshot()`` these are ``None`` and
+            # the assertions below crash loudly, surfacing the wiring bug
+            # rather than silently writing a NULL audit field.
+            catalog_sha = self._openrouter_catalog_sha256
+            catalog_source = self._openrouter_catalog_source
+            if catalog_sha is None or catalog_source is None:
+                raise RuntimeError(
+                    "ExecutionServiceImpl has no OpenRouter catalog snapshot. "
+                    "set_openrouter_catalog_snapshot() must be called from the "
+                    "lifespan before any pipeline executes; this is a wiring bug."
+                )
+
             result = orchestrator.run(
                 pipeline_config,
                 graph=graph,
@@ -930,6 +1194,10 @@ class ExecutionServiceImpl:
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
                 sink_factory=_make_sink_factory(settings),
                 run_id=run_id,
+                initiated_by_user_id=user_id,
+                auth_provider_type=auth_provider_type,
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
             )
 
             # Orchestrator.run() returns normally ONLY on completion.
@@ -962,19 +1230,24 @@ class ExecutionServiceImpl:
             if result.status in (RunStatus.FAILED, RunStatus.COMPLETED_WITH_FAILURES):
                 # Enrich the structural message with the top distinct per-row
                 # failures so the runs view shows the dominant cause inline.
-                # Tier-1 read: the helper raises on malformed audit JSON. We
-                # deliberately catch and degrade here because run-status
-                # persistence is more important than enrichment — a missing
-                # sample list still satisfies the failed-requires-error
-                # invariant via the bare message. Audit-DB shape violations
-                # are still observable via the slog warning (audit-system
-                # failure exemption per CLAUDE.md logging-telemetry-policy).
+                # Tier-1 read. Narrowed to the transient infrastructure
+                # failure modes (DB-layer errors, disk/filesystem errors)
+                # only: run-status persistence is more important than the
+                # optional sample enrichment, so a transient audit-system
+                # degradation degrades to the bare structural message (still
+                # satisfying the failed-requires-error invariant) and is
+                # recorded via the slog warning (audit-system failure
+                # exemption per CLAUDE.md logging-telemetry-policy).
+                # Malformed audit JSON (json.JSONDecodeError, a ValueError
+                # subclass raised by load_top_failure_samples) is Tier-1
+                # audit-data corruption and is DELIBERATELY not caught — it
+                # must crash per the tier model, not be silently degraded.
                 samples_text = ""
                 if landscape_db is not None:
                     try:
                         samples = load_top_failure_samples(landscape_db, result.run_id)
                         samples_text = format_failure_samples(samples)
-                    except Exception:
+                    except (SQLAlchemyError, OSError):
                         slog.warning(
                             "failure_sample_enrichment_failed",
                             run_id=run_id,
@@ -1160,6 +1433,14 @@ class ExecutionServiceImpl:
             self._finalize_output_blobs(run_id, success=False)
 
             client_msg = _sanitize_error_for_client(exc)
+            if type(exc) is PydanticValidationError:
+                slog.error(
+                    "run_schema_contract_violation",
+                    run_id=run_id,
+                    exc_class=type(exc).__name__,
+                    error_count=exc.error_count(),
+                    schema_errors=_schema_contract_violation_errors(exc),
+                )
 
             # elspeth-879f6de6bd: when an exception fires AFTER the success
             # path has already committed a terminal status (post-completion
@@ -1169,10 +1450,29 @@ class ExecutionServiceImpl:
             # terminal status outgoing-empty.  The pre-fix recovery let that
             # ValueError escape, losing the original ``exc`` into __context__.
             #
-            # Probe current run state first; if the audit row is already
-            # terminal, skip both the illegal status update AND the
-            # ``"failed"`` SSE broadcast (which would otherwise contradict
-            # the audit row's true terminal status — audit primacy).
+            # Recovery has three branches keyed on what we can learn about the
+            # audit row's current status:
+            #
+            #   1. Probe succeeds, row is terminal → skip the illegal status
+            #      update AND the ``"failed"`` SSE broadcast (which would
+            #      otherwise contradict the audit row's true terminal status —
+            #      audit primacy).
+            #
+            #   2. Probe succeeds, row is non-terminal → fall through to the
+            #      normal ``update_run_status("failed", ...)`` recovery
+            #      (e.g. a crash mid-orchestration with the row still in
+            #      ``running``).
+            #
+            #   3. Probe fails (SQLAlchemyError / OSError) AND the row is
+            #      actually terminal → fall-through update_run_status raises
+            #      IllegalRunTransitionError, caught narrowly below.  IRTE
+            #      carries ``current_status``, which is the validator's read
+            #      of ground truth immediately before it rejected the
+            #      transition — so IRTE is in-band proof of terminality and
+            #      promotes us into branch 1's audit-primacy stance (suppress
+            #      the failed-SSE broadcast).  This is the resolution of the
+            #      ambiguity that ``post_exception_run_state_probe_failed``
+            #      logged above.
             #
             # Probe is non-signal-only: signals (KeyboardInterrupt, SystemExit)
             # mean the event loop is shutting down — async calls including
@@ -1249,6 +1549,57 @@ class ExecutionServiceImpl:
                 else:
                     try:
                         self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))
+                    except IllegalRunTransitionError as irte:
+                        # elspeth-879f6de6bd recovery branch 3 (probe-failed
+                        # AND row-actually-terminal — see the comment block
+                        # at the top of this BaseException handler).
+                        #
+                        # IRTE here is the mechanical artefact of attempting
+                        # ``failed`` against a row whose true status is
+                        # terminal; ``irte.current_status`` is the validator's
+                        # authoritative read of that row, taken inside
+                        # SessionService.update_run_status immediately before
+                        # it rejected the transition.  That gives us the
+                        # ground truth the probe couldn't establish, so we
+                        # promote into the audit-primacy stance (suppress the
+                        # ``failed`` SSE that would otherwise contradict the
+                        # audit row).
+                        #
+                        # This is a distinct semantic from the established
+                        # IllegalRunTransitionError catches at the
+                        # ``"running"`` and terminal transitions earlier in
+                        # this method (see those sites' ``Cancelled-race
+                        # recovery`` comments and the IRTE class docstring):
+                        # those handle the cancelled-race artefact; this one
+                        # handles the post-completion + probe-failure
+                        # artefact.  The IRTE docstring's narrow-subclass
+                        # sanction ("never bare ValueError — Tier-1 invariant
+                        # breaches must propagate") applies the same way to
+                        # both: the other four ValueErrors update_run_status
+                        # can raise (run-not-found, landscape_run_id
+                        # overwrite, completed-without-landscape,
+                        # failed-without-error) are not subclasses of IRTE
+                        # and remain uncaught here.
+                        #
+                        # Offensive Tier-1 assert: if IRTE fires for a
+                        # non-terminal current_status, the SessionService
+                        # validator has a bug (it shouldn't reject a
+                        # non-terminal → failed transition).  Reraise so the
+                        # validator regression surfaces rather than being
+                        # silently absorbed; the original ``exc`` remains on
+                        # ``__context__`` via Python's implicit chaining and
+                        # the SRE-discoverable surface is identical to the
+                        # pre-fix bug — the right tradeoff for a validator
+                        # regression.
+                        if irte.current_status not in SESSION_TERMINAL_RUN_STATUS_VALUES:
+                            raise
+                        run_already_terminal = True
+                        slog.error(
+                            "post_exception_recovery_aborted_run_terminal",
+                            run_id=run_id,
+                            original_exc_class=type(exc).__name__,
+                            irte_current_status=irte.current_status,
+                        )
                     except (SQLAlchemyError, OSError) as status_err:
                         # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
                         # SQLAlchemyError family + OSError only. Programmer bugs in
@@ -1292,7 +1643,14 @@ class ExecutionServiceImpl:
         finally:
             # Always clean up, regardless of success or failure
             with self._shutdown_events_lock:
-                self._shutdown_events.pop(run_id, None)
+                # Idempotent cleanup of an internal bookkeeping key. Access it
+                # directly (R9 remediation); the membership guard preserves the
+                # silent no-op when cleanup races or runs twice, and matches the
+                # sibling submit-failure cleanup above. run_id is contractually
+                # registered (str key, synchronous, before submit) so a bare
+                # pop-with-default would mask a broken invariant.
+                if run_id in self._shutdown_events:
+                    del self._shutdown_events[run_id]
             if landscape_db is not None:
                 landscape_db.close()
             if rate_limit_registry is not None:

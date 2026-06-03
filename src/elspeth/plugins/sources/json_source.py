@@ -14,11 +14,12 @@ import json
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
-from pydantic import ValidationError, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
@@ -74,10 +75,19 @@ class JSONSourceConfig(SourceDataConfig):
     Supports field_mapping for overriding normalized field names.
     """
 
-    format: Literal["json", "jsonl"] | None = None
-    data_key: str | None = None
-    encoding: str = "utf-8"
-    field_mapping: dict[str, str] | None = None
+    format: Literal["json", "jsonl"] | None = Field(
+        default=None,
+        description="Input JSON format. When omitted, the source auto-detects JSONL from a .jsonl filename and JSON otherwise.",
+    )
+    data_key: str | None = Field(
+        default=None,
+        description="Optional top-level object key containing the array of records to read from a JSON document.",
+    )
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the JSON or JSONL file.")
+    field_mapping: dict[str, str] | None = Field(
+        default=None,
+        description="Optional mapping from observed JSON object keys to normalized pipeline field names.",
+    )
 
     @field_validator("encoding")
     @classmethod
@@ -135,8 +145,9 @@ class JSONSource(BaseSource):
     """
 
     name = "json"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ac27ba8d557f48a7"
+    source_file_hash: str | None = "sha256:aa88b98404585569"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -601,3 +612,41 @@ class JSONSource(BaseSource):
     def close(self) -> None:
         """Release resources (no-op for JSON source)."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="json",
+                issue_code=None,
+                summary="Load rows from a JSON file. Supports JSON-array and JSONL (newline-delimited) formats; can target a nested array via data_key.",
+                composer_hints=(
+                    "Format auto-detects from extension (.json vs .jsonl); set 'format' explicitly only if extension is misleading.",
+                    "JSON arrays nested under a key require 'data_key'; otherwise the top-level value must be an array.",
+                    "Same schema-mode rules as csv: default to 'observed' unless the user asked to project to a smaller schema.",
+                    "JSONL is resumable, line-by-line; JSON-array is loaded into memory in one pass — pick JSONL for large inputs.",
+                    "If you have been asked to generate JSON rows yourself (the invented_source path): emit a top-level JSON array of objects (or JSONL with one object per line). Every object must carry the same keys you intend downstream nodes to consume.",
+                    "When generating JSON rows yourself, declare those keys in `schema.fields` or `schema.guaranteed_fields`.",
+                    'When generating JSON rows yourself, do not wrap generated content in `{"results": [...]}` or any other envelope — emit the bare array so `data_key` is unnecessary.',
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        if "schema" not in config_snapshot:
+            return ()
+        schema = config_snapshot["schema"]
+        if not isinstance(schema, Mapping):
+            return ()
+        if "mode" in schema and schema["mode"] == "fixed":
+            return (
+                "You declared schema.mode: 'fixed'. Did you call inspect_source first? "
+                "Fixed mode drops every row whose keys don't exactly match the declared fields.",
+            )
+        return ()

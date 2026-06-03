@@ -9,12 +9,14 @@ B5: Pipeline diff/change summary tool
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, insert, select
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
@@ -31,10 +33,12 @@ from elspeth.web.composer.tools import (
     _ALLOWED_BLOB_MIME_TYPES,
     ToolResult,
     diff_states,
-    execute_tool,
+)
+from elspeth.web.composer.tools import (
+    execute_tool as _execute_tool,
 )
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 EXPECTED_REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
@@ -59,8 +63,78 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV source",
         json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
+        knob_schema={"fields": []},
     )
     return catalog
+
+
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Seed the route-level user message that verbatim blob provenance binds to."""
+
+    user_message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        sequence_no = (
+            int(
+                conn.execute(
+                    select(func.coalesce(func.max(chat_messages_table.c.sequence_no), 0)).where(
+                        chat_messages_table.c.session_id == session_id
+                    )
+                ).scalar_one()
+            )
+            + 1
+        )
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: Any,
+    data_dir: str | None = None,
+    session_engine: Any | None = None,
+    session_id: str | None = None,
+    **kwargs: Any,
+) -> ToolResult:
+    if (
+        tool_name in {"create_blob", "update_blob"}
+        and session_engine is not None
+        and session_id is not None
+        and "user_message_id" not in kwargs
+        and "user_message_content" not in kwargs
+    ):
+        content = arguments.get("content")
+        if isinstance(content, str):
+            user_message_content = f"Use this exact content:\n{content}"
+            kwargs["user_message_id"] = _insert_user_message(session_engine, session_id, user_message_content)
+            kwargs["user_message_content"] = user_message_content
+    return _execute_tool(
+        tool_name,
+        arguments,
+        state,
+        catalog,
+        data_dir=data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+        **kwargs,
+    )
 
 
 @pytest.fixture()

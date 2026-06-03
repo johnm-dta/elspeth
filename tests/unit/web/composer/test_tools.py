@@ -9,10 +9,13 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
@@ -39,9 +42,15 @@ from elspeth.web.composer.tools import (
     get_expression_grammar,
     get_tool_definitions,
 )
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    PROMPT_SHIELD_USER_TERM,
+    PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
+)
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 # Stub SHA-256 hex digest for test fixtures.  Must satisfy the
@@ -72,7 +81,7 @@ def _mock_catalog() -> MagicMock:
     AC #16: Tests must use real PluginSummary and PluginSchemaInfo instances,
     not plain dicts. Mock return types must match the CatalogService protocol.
     """
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
         PluginSummary(
             name="csv",
@@ -116,6 +125,7 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV file source",
         json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
+        knob_schema={"fields": []},
     )
     return catalog
 
@@ -144,6 +154,66 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Persist a user chat message for verbatim blob provenance tests."""
+    from datetime import UTC, datetime
+
+    user_message_id = str(uuid4())
+    with engine.begin() as conn:
+        latest = conn.execute(
+            select(chat_messages_table.c.sequence_no)
+            .where(chat_messages_table.c.session_id == session_id)
+            .order_by(chat_messages_table.c.sequence_no.desc())
+        ).first()
+        sequence_no = 1 if latest is None else latest.sequence_no + 1
+        conn.execute(
+            chat_messages_table.insert().values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[str, str]:
+    """Return execute_tool kwargs proving ``content`` came from a user message."""
+    user_message_content = f"Use this exact content:\n{content}"
+    user_message_id = _insert_user_message(engine, session_id, user_message_content)
+    return {
+        "user_message_id": user_message_id,
+        "user_message_content": user_message_content,
+    }
+
+
+def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> None:
+    engine, session_id = _session_engine_with_session()
+    result = execute_tool(
+        "create_blob",
+        {"filename": "too-large.txt", "mime_type": "text/plain", "content": "exceeds"},
+        _empty_state(),
+        _mock_catalog(),
+        data_dir=str(tmp_path),
+        session_engine=engine,
+        session_id=session_id,
+        max_blob_storage_per_session_bytes=3,
+        **_verbatim_blob_context(engine, session_id, "exceeds"),
+    )
+
+    assert result.success is False
+    assert "3 byte limit" in result.data["error"]
+    assert list((tmp_path / "blobs" / session_id).glob("*")) == []
 
 
 class TestToolResult:
@@ -314,10 +384,11 @@ class TestPreviewPipelineSemanticContracts:
 
     def test_summary_includes_semantic_contracts(self) -> None:
         from elspeth.web.composer.tools import _execute_preview_pipeline
+        from elspeth.web.composer.tools._common import ToolContext
         from tests.unit.web.composer.test_semantic_validator import _wardline_state
 
         state = _wardline_state(text_separator=" ")
-        result = _execute_preview_pipeline({}, state, catalog=_mock_catalog())
+        result = _execute_preview_pipeline({}, state, ToolContext(catalog=_mock_catalog()))
         assert "semantic_contracts" in result.data
         assert len(result.data["semantic_contracts"]) == 1
         assert result.data["semantic_contracts"][0]["outcome"] == "conflict"
@@ -432,6 +503,35 @@ class TestSetSource:
         assert result.success is False
         assert result.updated_state.source is None
         assert "set_source_from_blob" in result.data["error"]
+
+    def test_set_source_rejects_manual_source_authoring_in_options(self) -> None:
+        """Caller-supplied source_authoring must not bypass blob provenance stamping."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {
+                    "path": "/data/in.csv",
+                    "schema": {"mode": "observed"},
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.LLM_GENERATED.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                },
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert SOURCE_AUTHORING_KEY in result.data["error"]
 
 
 class TestVfDestinationAdvisory:
@@ -566,6 +666,71 @@ class TestUpsertNode:
         assert result.success is True
         assert len(result.updated_state.nodes) == 1
         assert "t1" in result.affected_nodes
+
+    def test_allows_llm_consuming_web_scrape_without_prompt_shield_as_advisory(self) -> None:
+        state = CompositionState(
+            source=None,
+            nodes=(
+                NodeSpec(
+                    id="fetch_pages",
+                    node_type="transform",
+                    plugin="web_scrape",
+                    input="rows",
+                    on_success="scraped_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "http": {
+                            "abuse_contact": "ops@example.com",
+                            "scraping_reason": "technical evaluation",
+                            "allowed_hosts": ["example.com"],
+                        },
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "summarise_pages",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped_rows",
+                "on_success": "summaries",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.content }}.",
+                    "schema": {"mode": "observed"},
+                },
+            },
+            state,
+            catalog,
+        )
+
+        # Advisory, not blocking (elspeth-abb2cb0931): the node is accepted because
+        # shield availability is not yet testable. The missing prompt-shield surfaces
+        # as a non-blocking validation warning rather than rejecting the upsert.
+        assert result.success is True
+        warning_text = " ".join(w.message for w in result.updated_state.validate().warnings)
+        assert PROMPT_SHIELD_USER_TERM in warning_text
+        assert "continuing without it is allowed" in warning_text
 
     def test_replaces_existing_node(self) -> None:
         state = _empty_state()
@@ -957,6 +1122,7 @@ class TestUpsertEdge:
                 "options": {
                     "path": "/data/outputs/magic_comp_rules_layers_failures.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -1122,12 +1288,22 @@ class TestUpsertEdge:
         assert "gate" in result.data["error"].lower()
 
     def test_edge_to_output_syncs_source_on_success(self) -> None:
-        """Edge from source to output updates source's on_success."""
+        """Edge from source to output updates source's on_success.
+
+        set_source is promoted to a Pydantic argument model with
+        extra='forbid'; all four required fields must be supplied
+        (Task 4).
+        """
         state = _empty_state()
         catalog = _mock_catalog()
         r1 = execute_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "old_stream", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "old_stream",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             state,
             catalog,
         )
@@ -1321,11 +1497,60 @@ class TestSetMetadata:
         assert result.affected_nodes == ()  # metadata doesn't affect nodes
 
     def test_missing_patch_key_raises(self) -> None:
-        """LLM omits required 'patch' key — KeyError propagates to service handler."""
+        """LLM omits required 'patch' key — route as Tier-3 argument error."""
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(KeyError):
+        with pytest.raises(ToolArgumentError):
             execute_tool("set_metadata", {"name": "Oops"}, state, catalog)
+
+
+class TestLegacyMutationArgumentGuards:
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("upsert_node", {}),
+            ("upsert_edge", {}),
+            ("remove_node", {}),
+            ("remove_edge", {}),
+            ("set_output", {}),
+            ("remove_output", {}),
+        ],
+    )
+    def test_missing_required_fields_raise_tool_argument_error(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(tool_name, arguments, _empty_state(), _mock_catalog())
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_upsert_node_rejects_unknown_node_type_before_state_mutation(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "upsert_node",
+                {"id": "x", "node_type": "bogus", "input": "in"},
+                _empty_state(),
+                _mock_catalog(),
+            )
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_upsert_gate_rejects_non_string_condition_as_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "upsert_node",
+                {"id": "gate1", "node_type": "gate", "input": "rows", "condition": 42},
+                _empty_state(),
+                _mock_catalog(),
+            )
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 class TestSetOutput:
@@ -1382,6 +1607,7 @@ class TestSetOutput:
                 "options": {
                     "path": "/data/outputs/out.csv",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -1464,6 +1690,32 @@ class TestSetOutput:
         )
         assert result.success is False
         assert result.updated_state.version == 1  # unchanged
+
+    def test_set_output_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {
+                    "path": {"secret_ref": "ANY_SECRET"},
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
 
 
 class TestRemoveOutput:
@@ -2185,43 +2437,54 @@ class TestToolRegistry:
     """Tests for the tool registry pattern — two dicts + cacheable frozenset."""
 
     def test_discovery_tools_membership(self) -> None:
-        from elspeth.web.composer.tools import _DISCOVERY_TOOLS
+        """``_DISCOVERY_TOOLS`` keys equal the DISCOVERY-kind declaration name set.
 
-        expected = {
-            "list_sources",
-            "list_transforms",
-            "list_sinks",
-            "get_plugin_schema",
-            "get_expression_grammar",
-            "explain_validation_error",
-            "get_plugin_assistance",
-            "list_models",
-            "get_audit_info",
-            "list_recipes",
-            "get_pipeline_state",
-            "preview_pipeline",
-            "diff_pipeline",
-        }
+        Step 6 falsification recovery (elspeth-6c9972ccbf, surface 1 of 2):
+        the literal name enumeration previously here was a per-tool growth
+        surface — every new discovery tool required updating this test in
+        addition to its declaration. The literal was vestigial: it had no
+        docstring framing it as a deliberate design-review gate and only
+        duplicated the derivation pipeline that ``_DISCOVERY_TOOLS`` already
+        runs at import time in ``_registry.py``.
+
+        Retargeted at ``derive_name_set_for(_REGISTERED_TOOLS,
+        ToolKind.DISCOVERY)`` so the assertion sources truth from the
+        declaration tuple. The test still smoke-checks that
+        ``_dispatch.py``'s consumed handler-map agrees with ``_registry.py``'s
+        derivation, but no longer re-enumerates the names. The
+        design-review gate for stateful discovery tools (the three
+        ``diff_pipeline`` / ``get_pipeline_state`` / ``preview_pipeline``
+        names) lives unchanged in
+        ``test_cacheable_discovery_is_opt_in_with_named_mutable_complement``
+        below, which retains its literal enumeration deliberately.
+        """
+        from elspeth.web.composer.tools import _DISCOVERY_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools.declarations import (
+            ToolKind,
+            derive_name_set_for,
+        )
+
+        expected = derive_name_set_for(_REGISTERED_TOOLS, ToolKind.DISCOVERY)
         assert set(_DISCOVERY_TOOLS.keys()) == expected
 
     def test_mutation_tools_membership(self) -> None:
-        from elspeth.web.composer.tools import _MUTATION_TOOLS
+        """``_MUTATION_TOOLS`` keys equal the MUTATION-kind declaration name set.
 
-        expected = {
-            "set_source",
-            "upsert_node",
-            "upsert_edge",
-            "remove_node",
-            "remove_edge",
-            "set_metadata",
-            "set_output",
-            "remove_output",
-            "patch_source_options",
-            "patch_node_options",
-            "patch_output_options",
-            "set_pipeline",
-            "clear_source",
-        }
+        See ``test_discovery_tools_membership`` for the rationale behind
+        retargeting away from a literal enumeration. The plain-mutation kind
+        has no design-review gate — every new mutation tool is just another
+        declaration, and the literal here served only as accidental
+        documentation that grew with every addition.
+        """
+        from elspeth.web.composer.tools import _MUTATION_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools.declarations import (
+            ToolKind,
+            derive_name_set_for,
+        )
+
+        expected = derive_name_set_for(_REGISTERED_TOOLS, ToolKind.MUTATION)
         assert set(_MUTATION_TOOLS.keys()) == expected
 
     def test_no_overlap_between_registries(self) -> None:
@@ -2230,30 +2493,62 @@ class TestToolRegistry:
         overlap = set(_DISCOVERY_TOOLS.keys()) & set(_MUTATION_TOOLS.keys())
         assert overlap == set(), f"Registry overlap: {overlap}"
 
-    def test_cacheable_discovery_excludes_stateful_tools(self) -> None:
-        """diff_pipeline, get_pipeline_state, and preview_pipeline are not cacheable.
+    def test_cacheable_discovery_is_opt_in_with_named_mutable_complement(self) -> None:
+        """Pin the *property* of the opt-in design, not the *result* of the
+        subtraction the production code abandoned.
 
-        - diff_pipeline and get_pipeline_state depend on mutable state.
-        - preview_pipeline incorporates runtime_preflight output that is externally
-          injected and may change between compose turns, so caching it would serve
-          stale validation results after a state mutation.
+        Three load-bearing invariants the discovery module enforces at
+        import time (``elspeth/web/composer/tools/discovery.py``):
+
+        1. ``_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES`` is a named, documented
+           constant — surfacing the forbidden set as data (not a comment)
+           so a future copy-paste edit can be mechanically rejected by the
+           import-time assertion rather than silently auto-caching a new
+           stateful discovery tool.
+        2. The cacheable opt-in set and the mutable forbidden set are
+           disjoint — the assertion at ``discovery.py:168-171`` would
+           crash import time on a violation, this test additionally pins
+           the runtime contract at the test layer.
+        3. The contents of the mutable set name the three stateful
+           discovery tools (``diff_pipeline``, ``get_pipeline_state``,
+           ``preview_pipeline``) explicitly — adding a fourth requires
+           updating this test, forcing a design-review checkpoint rather
+           than letting the new tool slip in via subtraction arithmetic.
+
+        Replaces the prior subtraction-shape assertion which mirrored
+        the opt-OUT pattern the production code deliberately moved away
+        from in commit e34f53c30.
         """
-        from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
+        from elspeth.web.composer.tools._registry import (
+            _CACHEABLE_DISCOVERY_TOOL_NAMES,
             _DISCOVERY_TOOLS,
+            _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES,
         )
 
-        assert (
-            frozenset(_DISCOVERY_TOOLS.keys()) - {"diff_pipeline", "get_pipeline_state", "preview_pipeline"} == _CACHEABLE_DISCOVERY_TOOLS
-        )
+        # Invariant 1: the forbidden set exists as named data.
+        assert isinstance(_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES, frozenset)
+
+        # Invariant 2: disjointness — a tool cannot be both cacheable and
+        # session-mutable. Belt-and-braces with the import-time assert.
+        assert not (_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
+
+        # Invariant 3: the forbidden set names exactly the three stateful
+        # tools. A fourth requires updating this test deliberately.
+        assert frozenset({"diff_pipeline", "get_pipeline_state", "preview_pipeline"}) == _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES
+
+        # Cross-check: every discovery tool is either cacheable or in the
+        # documented forbidden set — no tool may live in neither category
+        # by default (the opt-in regime requires an explicit classification
+        # decision per tool).
+        assert frozenset(_DISCOVERY_TOOLS.keys()) == (_CACHEABLE_DISCOVERY_TOOL_NAMES | _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
 
     def test_cacheable_is_subset_of_discovery(self) -> None:
         from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
+            _CACHEABLE_DISCOVERY_TOOL_NAMES,
             _DISCOVERY_TOOLS,
         )
 
-        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOLS
+        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOL_NAMES
 
     def test_is_discovery_tool(self) -> None:
         from elspeth.web.composer.tools import is_discovery_tool
@@ -2711,6 +3006,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is True
         assert "storage_path" not in result.data
@@ -2783,6 +3079,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
 
@@ -2797,6 +3094,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
         assert result.updated_state.source is not None
@@ -2820,6 +3118,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
 
         assert result.success is True
@@ -2843,6 +3142,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
 
         assert result.success is True
@@ -2879,6 +3179,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "should,proceed\n1,1"),
         )
 
         assert result.success is True
@@ -2915,6 +3216,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "would,corrupt,mid-run\n"),
         )
 
         assert result.success is True
@@ -3027,7 +3329,7 @@ class TestBlobTools:
         # Patch _check_blob_quota to raise inside the DB transaction
         with (
             patch(
-                "elspeth.web.composer.tools._check_blob_quota",
+                "elspeth.web.composer.tools.blobs._check_blob_quota",
                 side_effect=RuntimeError("simulated DB failure"),
             ),
             pytest.raises(RuntimeError, match="simulated DB failure"),
@@ -3040,6 +3342,7 @@ class TestBlobTools:
                 data_dir=data_dir,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "a,b\n1,2"),
             )
 
         # Storage file must have been cleaned up
@@ -3087,6 +3390,7 @@ class TestBlobTools:
         # Patch session_engine.begin() to raise AFTER the file is overwritten.
         # The update function reads old content, writes new content, THEN enters
         # the DB transaction.  We need the DB part to fail.
+        provenance_context = _verbatim_blob_context(self.engine, self.session_id, "new,content\n3,4")
         with (
             patch.object(
                 self.engine,
@@ -3102,6 +3406,7 @@ class TestBlobTools:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **provenance_context,
             )
 
         # File must contain the ORIGINAL content after rollback
@@ -3222,6 +3527,10 @@ class TestDeleteBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -3267,7 +3576,15 @@ class TestDeleteBlobActiveRunGuard:
         if source is None:
             source = {
                 "plugin": "csv",
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
                 "options": {"blob_ref": self.blob_id, "path": str(self.storage_path)},
+            }
+        else:
+            source = {
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
+                **source,
             }
 
         now = datetime.now(UTC)
@@ -3279,12 +3596,16 @@ class TestDeleteBlobActiveRunGuard:
                     session_id=self.session_id,
                     version=1,
                     source=source,
-                    nodes=None,
-                    edges=None,
-                    outputs=None,
-                    metadata_=None,
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -3590,6 +3911,7 @@ class TestUpdateBlobQuota:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "slightly larger content"),
         )
         assert result.success is True
 
@@ -3599,7 +3921,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # Set quota to a tiny value so any growth exceeds it
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},
@@ -3607,6 +3929,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
         assert result.success is False
         assert "quota" in result.data["error"].lower()
@@ -3616,7 +3939,7 @@ class TestUpdateBlobQuota:
 
         state = _empty_state()
         catalog = _mock_catalog()
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},
@@ -3624,6 +3947,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
         assert self.storage_path.read_bytes() == self.original_content
 
@@ -3640,11 +3964,12 @@ class TestUpdateBlobQuota:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "a" * 200),
         )
         assert result.success is True
 
         # Now set quota very low — shrinking should still succeed
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "tiny"},
@@ -3652,6 +3977,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "tiny"),
             )
         assert result.success is True
 
@@ -3696,7 +4022,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # New content: 15 bytes. Delta = 15 - 5 = 10. Total after = 490 + 10 = 500.
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 500):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 500):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 15},
@@ -3704,6 +4030,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 15),
             )
         assert result.success is True, f"Delta-based quota check should pass at boundary: {result.data}"
 
@@ -3714,7 +4041,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # Quota exactly matches current total (5 bytes)
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", len(self.original_content)):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", len(self.original_content)):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x"},  # 1 byte < 5 bytes
@@ -3722,6 +4049,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x"),
             )
         assert result.success is True
 
@@ -3739,12 +4067,11 @@ class TestUpdateBlobQuota:
 
         from sqlalchemy import update as sa_update
 
-        from elspeth.web.sessions.models import blobs_table
-
         # Simulate concurrent writer: bump DB size_bytes to 50 *after*
         # _sync_get_blob() has already read 5.  We hook _sync_get_blob to
         # perform the concurrent write immediately after returning.
-        original_get = __import__("elspeth.web.composer.tools", fromlist=["_sync_get_blob"])._sync_get_blob
+        from elspeth.web.composer.tools.blobs import _sync_get_blob as original_get
+        from elspeth.web.sessions.models import blobs_table
 
         def _get_then_concurrent_write(*args, **kwargs):
             result = original_get(*args, **kwargs)
@@ -3761,8 +4088,8 @@ class TestUpdateBlobQuota:
         # (But _check_blob_quota reads SUM which already includes the 50,
         #  so stale delta of 55 → 50 + 55 = 105 > 70 → wrongly rejected.)
         with (
-            patch("elspeth.web.composer.tools._sync_get_blob", side_effect=_get_then_concurrent_write),
-            patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 70),
+            patch("elspeth.web.composer.tools.blobs._sync_get_blob", side_effect=_get_then_concurrent_write),
+            patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 70),
         ):
             result = execute_tool(
                 "update_blob",
@@ -3771,6 +4098,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 60),
             )
         assert result.success is True, f"Quota check used stale snapshot instead of current DB size: {result.data}"
 
@@ -3893,16 +4221,21 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
         catalog = _mock_catalog()
 
         with (
-            patch("elspeth.web.composer.tools._check_blob_quota", side_effect=_raise_primary),
+            patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
+            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
+
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                catalog,
-                session_engine=self.engine,
-                session_id=self.session_id,
+                _UpdateBlobCtx(
+                    catalog=catalog,
+                    session_engine=self.engine,
+                    session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
+                ),
             )
 
         # Headline is the primary RuntimeError.
@@ -3942,15 +4275,20 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
         catalog = _mock_catalog()
 
         with (
-            patch("elspeth.web.composer.tools._check_blob_quota", side_effect=_raise_primary),
+            patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
+            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
+
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                catalog,
-                session_engine=self.engine,
-                session_id=self.session_id,
+                _UpdateBlobCtx(
+                    catalog=catalog,
+                    session_engine=self.engine,
+                    session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
+                ),
             )
 
         assert self.storage_path.read_bytes() == self.original_content
@@ -4137,6 +4475,7 @@ class TestUpdateBlobSessionLockSerialisation:
                     _mock_catalog(),
                     session_engine=self.engine,
                     session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "new-content-from-worker"),
                 )
                 result_holder.append(result)
             finally:
@@ -4281,7 +4620,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
 
         # Quota 10 bytes; new content 100 bytes → delta 85 exceeds quota.
         with (
-            patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10),
+            patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10),
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
         ):
             result = execute_tool(
@@ -4291,6 +4630,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
 
         # Clean failure result — no exception, no divergence.
@@ -4318,7 +4658,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
         state = _empty_state()
         catalog = _mock_catalog()
 
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},
@@ -4326,6 +4666,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
 
         assert result.success is False, "Quota-exceeded must return failure, not success"
@@ -4454,6 +4795,125 @@ class TestSecretTools:
         assert opts["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
         # Original options preserved
         assert opts["path"] == "/data/in.csv"
+
+    def test_wire_secret_ref_rejects_source_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce the same placement policy as set_source."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "source",
+                "option_key": "path",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+
+    def test_wire_secret_ref_rejects_node_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce placement policy for node options."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "upsert_node",
+            {
+                "id": "classify",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "node",
+                "target_id": "classify",
+                "option_key": "template",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "llm" in result.data["error"]
+        assert "template" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+
+    def test_wire_secret_ref_rejects_output_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce placement policy for output options."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "output",
+                "target_id": "main",
+                "option_key": "path",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
 
     def test_wire_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()
@@ -4612,6 +5072,116 @@ class TestSecretTools:
         assert delta_fresh == delta_threaded
 
 
+class TestSecretToolsArgumentValidation:
+    """Tier-3 shape contract for the secret-ref handlers.
+
+    Pairs with ``TestSecretTools`` (semantic / state-mutation paths).  These
+    tests exercise the Pydantic argument-model layer that converts shape
+    failures into :class:`ToolArgumentError` — the same dispatch-layer
+    contract sources/blobs/outputs/sessions already satisfy.  Without this
+    layer, a malformed LLM call (wrong type, extra field, unknown ``target``
+    enum) would escape ``execute_tool`` as a bare exception and be
+    laundered by the compose loop's catch-all into
+    :class:`ComposerPluginCrashError` → HTTP 500, denying the LLM the
+    recoverable ARG_ERROR payload it needs to self-correct.
+    """
+
+    def _svc(self) -> MagicMock:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        svc = MagicMock()
+        svc.list_refs.return_value = [
+            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
+        ]
+        svc.has_ref.return_value = True
+        return svc
+
+    def test_validate_secret_ref_wrong_type_for_name(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "validate_secret_ref",
+                {"name": 42},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_validate_secret_ref_rejects_extra_field(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "validate_secret_ref",
+                {"name": "OPENROUTER_API_KEY", "bogus": "value"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_wrong_type_for_name(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {"name": 42, "target": "source", "option_key": "api_key"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_unknown_target_enum(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_rejects_extra_field(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {
+                    "name": "OPENROUTER_API_KEY",
+                    "target": "source",
+                    "option_key": "api_key",
+                    "bogus": "value",
+                },
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+
 # ---------------------------------------------------------------------------
 # Merge-patch helper tests
 # ---------------------------------------------------------------------------
@@ -4628,6 +5198,14 @@ class TestMergePatch:
 
     def test_merge_patch_deletes_null(self) -> None:
         result = _apply_merge_patch({"a": 1, "b": 2}, {"b": None})
+        assert result == {"a": 1}
+        assert "b" not in result
+
+    def test_merge_patch_null_for_absent_key_is_noop(self) -> None:
+        # Delete-if-present semantics: setting an absent key to None must be a
+        # silent no-op, never a KeyError. This pins the edge case that
+        # distinguishes the delete-if-present idiom from an unguarded ``del``.
+        result = _apply_merge_patch({"a": 1}, {"b": None})
         assert result == {"a": 1}
         assert "b" not in result
 
@@ -5124,6 +5702,7 @@ class TestPatchOutputPathSecurity:
                 "sink_name": "main",
                 "patch": {
                     "path": "outputs/result.csv",
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
             },
@@ -5142,6 +5721,7 @@ class TestPatchOutputPathSecurity:
                 "sink_name": "main",
                 "patch": {
                     "path": "/data/outputs/subdir/out.csv",
+                    "mode": "write",
                     "collision_policy": "fail_if_exists",
                 },
             },
@@ -5216,7 +5796,7 @@ def _llm_options_with_api_key(api_key: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "model": "openai/gpt-4o-mini",
         "api_key": api_key,
-        "template": "Classify the current row.",
+        "prompt_template": "Classify the current row.",
         "schema": {"mode": "observed"},
     }
 
@@ -5406,6 +5986,7 @@ class TestSetPipelineSchemaShape:
             "options": {
                 "path": "outputs/results.json",
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "on_write_failure": "discard",
@@ -5516,6 +6097,7 @@ class TestSetPipeline:
                 "options": {
                     "path": str(tmp_path / "outputs" / "main.json"),
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5526,6 +6108,7 @@ class TestSetPipeline:
                 "options": {
                     "path": str(tmp_path / "outputs" / "failures.json"),
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5564,6 +6147,40 @@ class TestSetPipeline:
             field="code_themes:api_key",
         )
 
+    def test_set_pipeline_rejects_placeholder_database_table_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="database",
+                description="Database sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        args = _valid_pipeline_args()
+        args["outputs"][0] = {
+            "sink_name": "main",
+            "plugin": "database",
+            "options": {
+                "url": {"secret_ref": "DATABASE_URL"},
+                "table": "<OPERATOR_REQUIRED>",
+                "schema": {"mode": "observed"},
+            },
+            "on_write_failure": "discard",
+        }
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        error = result.data["error"]
+        assert "Output 'main'" in error
+        assert "table" in error
+        assert "placeholder" in error
+
     def test_set_pipeline_accepts_wired_secret_ref_marker(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -5584,6 +6201,71 @@ class TestSetPipeline:
         assert result.success is True
         node = result.updated_state.nodes[0]
         assert node.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+
+    def test_set_pipeline_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "scrape_pages",
+            "node_type": "transform",
+            "plugin": "web_scrape",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "url_field": "url",
+                "http": {
+                    "abuse_contact": {"secret_ref": "ANY_SECRET"},
+                    "scraping_reason": "research",
+                    "allowed_hosts": ["example.com"],
+                },
+            },
+        }
+        args["edges"][0]["to_node"] = "scrape_pages"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "web_scrape" in result.data["error"]
+        assert "http.abuse_contact" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+        assert "api_key" in result.data["error"]
+
+    def test_upsert_node_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "scrape_pages",
+                "node_type": "transform",
+                "plugin": "web_scrape",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {
+                    "url_field": "url",
+                    "http": {
+                        "scraping_reason": {"secret_ref": "ANY_SECRET"},
+                        "abuse_contact": "ops@example.com",
+                        "allowed_hosts": ["example.com"],
+                    },
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "web_scrape" in result.data["error"]
+        assert "http.scraping_reason" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
 
     def test_upsert_node_rejects_literal_credential_value_without_mutating_state(self) -> None:
         state = _empty_state()
@@ -5611,6 +6293,55 @@ class TestSetPipeline:
             literal_value=literal,
             field="code_themes:api_key",
         )
+
+    def test_upsert_node_llm_prevalidation_ignores_review_metadata(self) -> None:
+        """LLM plugin validation strips web-only prompt review metadata but keeps it in state."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Classify pending interpretation: {{ row.text }}",
+                    "schema": {"mode": "observed"},
+                    PROMPT_TEMPLATE_PARTS_KEY: [
+                        {"kind": "text", "text": "Classify "},
+                        {"kind": "interpretation_ref", "requirement_id": "prompt_review"},
+                        {"kind": "text", "text": ": {{ row.text }}"},
+                    ],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_review",
+                            "kind": "llm_prompt_template",
+                            "user_term": "llm_prompt_template:code_themes",
+                            "status": "pending",
+                            "draft": "Classify pending interpretation: {{ row.text }}",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is True, result.data
+        node = result.updated_state.nodes[0]
+        assert PROMPT_TEMPLATE_PARTS_KEY in node.options
+        assert INTERPRETATION_REQUIREMENTS_KEY in node.options
 
     def test_set_pipeline_rejects_manual_blob_ref_in_source_options(self) -> None:
         """Manual blob_ref must not bypass the blob-backed source binding tools."""
@@ -5695,6 +6426,7 @@ class TestSetPipeline:
             "on_validation_failure": "quarantine",
         }
         args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
         args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
 
         result = execute_tool(
@@ -5758,6 +6490,7 @@ class TestSetPipeline:
             "on_validation_failure": "quarantine",
         }
         args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
         args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
 
         result = execute_tool(
@@ -5768,6 +6501,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
         )
 
         assert result.success is False
@@ -5794,7 +6528,13 @@ class TestSetPipeline:
         def selective_schema(plugin_type: Literal["source", "transform", "sink"], name: str) -> PluginSchemaInfo:
             if plugin_type == "transform" and name == "badplugin":
                 raise ValueError(f"Unknown plugin: {name}")
-            return PluginSchemaInfo(name=name, plugin_type=plugin_type, description="", json_schema={})
+            return PluginSchemaInfo(
+                name=name,
+                plugin_type=plugin_type,
+                description="",
+                json_schema={},
+                knob_schema={"fields": []},
+            )
 
         catalog.get_schema.side_effect = selective_schema
         args = _valid_pipeline_args()
@@ -5812,7 +6552,13 @@ class TestSetPipeline:
         def selective_schema(plugin_type: Literal["source", "transform", "sink"], name: str) -> PluginSchemaInfo:
             if plugin_type == "sink" and name == "badsink":
                 raise ValueError(f"Unknown plugin: {name}")
-            return PluginSchemaInfo(name=name, plugin_type=plugin_type, description="", json_schema={})
+            return PluginSchemaInfo(
+                name=name,
+                plugin_type=plugin_type,
+                description="",
+                json_schema={},
+                knob_schema={"fields": []},
+            )
 
         catalog.get_schema.side_effect = selective_schema
         args = _valid_pipeline_args()
@@ -5822,14 +6568,35 @@ class TestSetPipeline:
         assert "sink" in result.data["error"].lower()
 
     def test_set_pipeline_missing_required_field_fails(self) -> None:
+        """Missing required field is now a Tier-3 ToolArgumentError.
+
+        Post Task 14 (set_pipeline manifest promotion):
+        :class:`SetPipelineArgumentsModel` / :class:`_SetPipelineSourceModel`
+        require ``source.on_success``; absence raises a structured
+        :class:`pydantic.ValidationError` that the handler re-raises as
+        :class:`ToolArgumentError` BEFORE any handler-side spec
+        construction.  Previously the omission fell through to the
+        ``try: SourceSpec(...)``/``except KeyError`` branch and was
+        reported via ``"Invalid pipeline spec"`` in ``result.data["error"]``;
+        that branch was removed in Task 14 because Pydantic now catches
+        the type errors upstream.
+
+        The compose-loop ARG_ERROR routing at ``service.py:2480`` builds
+        the LLM-facing error payload from the captured
+        :class:`ToolArgumentError`.  This unit-level test reaches the
+        handler directly via ``execute_tool``, so it observes the bare
+        exception class — not the wrapped LLM payload.
+        """
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
         args = _valid_pipeline_args()
         # Remove on_success from source — required field
         del args["source"]["on_success"]
-        result = execute_tool("set_pipeline", args, state, catalog)
-        assert result.success is False
-        assert "Invalid pipeline spec" in result.data["error"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool("set_pipeline", args, state, catalog)
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_set_pipeline_replaces_entire_state(self) -> None:
         # Build a state with 3 nodes first
@@ -5898,6 +6665,20 @@ class TestSetPipeline:
         # The orphan node has no reachable input — validation should flag it
         assert result.validation.is_valid is False
         assert len(result.validation.errors) > 0
+
+    def test_set_pipeline_unknown_node_type_invalidates_state(self) -> None:
+        """set_pipeline keeps enum parsing recoverable but Stage 1 must reject unknown node types."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0]["node_type"] = "bogus"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.validation is not None
+        assert result.validation.is_valid is False
+        assert any("unknown node_type 'bogus'" in error.message for error in result.validation.errors)
 
     def test_set_pipeline_gate_injection_rejected(self) -> None:
         """set_pipeline rejects gate nodes with injection in condition."""
@@ -6034,6 +6815,7 @@ class TestSetPipeline:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -6050,6 +6832,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "hello"),
         )
 
         assert result.success is True
@@ -6110,14 +6893,27 @@ class TestFailedMutationVersionStable:
 # ---------------------------------------------------------------------------
 
 
-class TestServiceKeyError:
-    """Tool raises KeyError on missing required argument — execute_tool propagates."""
+class TestServiceMissingArgToolArgumentError:
+    """Tool raises ToolArgumentError on missing required argument.
 
-    def test_missing_required_arg_raises_key_error(self) -> None:
+    Post Task 4 (set_source manifest promotion), missing required
+    arguments are caught at the Tier-3 boundary by
+    :class:`SetSourceArgumentsModel`; the handler re-raises
+    :class:`pydantic.ValidationError` as :class:`ToolArgumentError` so
+    the compose loop's ARG_ERROR routing at ``service.py:2480`` receives
+    the right exception class.  A bare ``KeyError`` (the prior shape) is
+    a plugin-bug indicator and would be routed to ``PLUGIN_CRASH`` —
+    that disposition is wrong for Tier-3 input.
+    """
+
+    def test_missing_required_arg_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
-        # set_source requires "plugin" — omitting it should raise KeyError
-        with pytest.raises(KeyError):
+        # set_source requires "plugin" — omitting it must raise
+        # ToolArgumentError (no longer KeyError) per Task 4.
+        with pytest.raises(ToolArgumentError):
             execute_tool("set_source", {}, state, catalog)
 
 
@@ -6410,6 +7206,58 @@ class TestListModels:
         # Must not contain the non-round-trippable "(no provider)" label
         assert "(no provider)" not in providers
 
+    def test_list_models_openrouter_reads_live_catalog(self) -> None:
+        """``provider="openrouter/"`` returns the live-catalog slice, not the bundled litellm slice.
+
+        Closes the loop between composer discovery and validator preflight:
+        the validator (``CatalogValueSource`` on ``OpenRouterLLMProviderConfig``)
+        rejects model identifiers absent from ``get_catalog_values(MODEL_CATALOG_OPENROUTER)``,
+        so the discovery tool MUST advertise the exact same set. A
+        regression here re-opens the
+        ``ValueSourceValidationError`` class of tutorial-run failure.
+        """
+        from elspeth.contracts.value_source import get_catalog_values
+        from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        live = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if not live:
+            pytest.skip("OpenRouter catalog empty; cannot verify wiring")
+        result = execute_tool(
+            "list_models",
+            {"provider": "openrouter/", "limit": 1000},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        returned = set(result.data["models"])
+        # Sample-correctness: every advertised model exists in the live catalog.
+        assert returned <= live, (
+            "list_models advertised openrouter slugs absent from the live catalog "
+            f"(strays={returned - live!r}) — composer discovery and validator preflight drifted apart"
+        )
+
+    def test_list_models_openrouter_count_reflects_live_catalog(self) -> None:
+        """The unfiltered summary advertises the live-catalog count for openrouter.
+
+        Prevents the regression where the summary's ``providers["openrouter"]``
+        count came from the stale bundled litellm list while a follow-up
+        ``provider="openrouter/"`` filter returned the live (smaller) set.
+        """
+        from elspeth.contracts.value_source import get_catalog_values
+        from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        live = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if not live:
+            pytest.skip("OpenRouter catalog empty; cannot verify wiring")
+        result = execute_tool("list_models", {}, state, catalog)
+        assert result.success is True
+        providers = result.data["providers"]
+        assert providers.get("openrouter") == len(live)
+
 
 # ---------------------------------------------------------------------------
 # get_audit_info tool tests
@@ -6517,6 +7365,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "web_scrape",
                 "issue_code": "web_scrape.content.compact_text",
             },
@@ -6527,6 +7376,7 @@ class TestGetPluginAssistance:
         # ToolResult.to_dict deep-thaws ``data`` for LLM consumption; tests
         # exercise the wire shape rather than the frozen in-memory form.
         payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "transform"
         assert payload["plugin_name"] == "web_scrape"
         assert payload["issue_code"] == "web_scrape.content.compact_text"
         assert "summary" in payload
@@ -6550,6 +7400,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "line_explode",
                 "issue_code": "line_explode.source_field.line_framed_text",
             },
@@ -6569,6 +7420,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "batch_distribution_profile",
                 "issue_code": "batch_distribution_profile.value_field.numeric",
             },
@@ -6591,6 +7443,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "web_scrape",
                 "issue_code": "web_scrape.unrecognized.code",
             },
@@ -6612,6 +7465,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "no_such_plugin_xyz",
                 "issue_code": "anything",
             },
@@ -6620,6 +7474,296 @@ class TestGetPluginAssistance:
         )
         assert result.success is False
         assert "no_such_plugin_xyz" in result.data["error"]
+
+    def test_invalid_plugin_type_returns_failure(self) -> None:
+        """plugin_type is validated up-front; mistyped value surfaces as failure."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transformer",  # typo
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "transformer" in result.data["error"]
+
+    def test_dispatches_to_source_family(self) -> None:
+        """plugin_type='source' looks up the plugin via get_source_by_name."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "source",
+                "plugin_name": "csv",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "source"
+        assert payload["plugin_name"] == "csv"
+
+    def test_csv_discovery_explains_generated_source_review_handoff(self) -> None:
+        """CSV guidance should make source-level invented-source review mechanics explicit."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "source",
+                "plugin_name": "csv",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "columns tells CSVSource how to parse headerless rows" in hints
+        assert "downstream DAG validation still needs a schema guarantee" in hints
+        assert "schema.guaranteed_fields" in hints
+        assert "CSV source options do not have url_field" in hints
+        assert "set url_field on the web_scrape node" in hints
+        assert "If you authored CSV rows or chose source values" in hints
+        assert "blob-backed source" in hints
+        assert "stage invented_source on source.options.interpretation_requirements" in hints
+        assert "request_interpretation_review" in hints
+        assert "affected_node_id='source'" in hints
+        assert "llm_draft equal to the exact CSV text" in hints
+        assert "source is not a transform node" in hints
+        assert "do not search nodes[] for source" in hints
+
+    def test_dispatches_to_sink_family(self) -> None:
+        """plugin_type='sink' looks up the plugin via get_sink_by_name."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "sink",
+                "plugin_name": "json",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "sink"
+        assert payload["plugin_name"] == "json"
+
+    def test_json_sink_discovery_explains_that_sink_names_do_not_clean_rows(self) -> None:
+        """JSON sink guidance should point row cleanup back to field_mapper."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "sink",
+                "plugin_name": "json",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "JSON sink writes the row it receives" in hints
+        assert "schema, format, sink name, and output name do not drop fields" in hints
+        assert "Use field_mapper before the sink" in hints
+        assert "web_scrape results saved without raw page bodies" in hints
+        assert "field_mapper(select_only=true)" in hints
+        assert "a sink named cleanup is not a cleanup transform" in hints
+
+    def test_omitting_issue_code_returns_discovery_payload(self) -> None:
+        """Discovery-time mode: ``issue_code`` may be omitted entirely."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+        assert "transform" in hints
+        assert "not a source" in hints
+        assert "url_field" in hints
+        assert "Unknown source plugin: web_scrape" in hints
+        assert "surface prompt-injection shielding as an important recommendation" in hints
+        assert "recommendation is not permission to add a node" in hints
+        assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
+        assert "do not substitute azure_content_safety" in hints
+        assert "do not insert it automatically" in hints
+        assert "route through azure_content_safety first" not in hints
+
+    def test_web_scrape_discovery_explains_pass_through_url_contract(self) -> None:
+        """web_scrape should guide downstream nodes to use guaranteed URL fields."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "passes through upstream row fields" in hints
+        assert "fetch_url_final" in hints
+        assert "Do not make downstream LLM templates require a URL field" in hints
+        assert "unless the upstream source schema or web_scrape schema guarantees that field" in hints
+        assert "do not patch web_scrape guaranteed_fields by guess" in hints
+        assert "schema is required" in hints
+        assert "For raw HTML, set format to raw" in hints
+        assert "not html" in hints
+        assert "If the user-facing output should exclude raw scraped content" in hints
+        assert "route the final path through field_mapper with select_only: true" in hints
+        assert "a sink name or output name is not cleanup" in hints
+        assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
+        assert "If scraped public internet content flows into an LLM" in hints
+        assert "azure_prompt_shield" in hints
+        assert "prompt_injection_shield_recommendation" in hints
+
+    def test_field_mapper_discovery_explains_cleanup_whitelist_semantics(self) -> None:
+        """field_mapper hints should make utility-cleanup behavior explicit."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "field_mapper",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+
+        assert "Use select_only: true" in hints
+        assert "whitelist exactly the saved output fields" in hints
+        assert "only utility transform that actually removes raw fields" in hints
+        assert "source -> web_scrape -> llm -> field_mapper(cleanup) -> sink" in hints
+        assert "A JSON sink named cleanup is not a cleanup transform" in hints
+        assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
+        assert "A cleanup stream name is not a cleanup node" in hints
+        assert "do not offer to repair it later" in hints
+        assert "set the upstream LLM or scraper on_success to the cleanup mapper" in hints
+        assert "set the cleanup mapper on_success to the sink" in hints
+        assert "If an LLM routes directly to a JSON sink whose name sounds like cleanup" in hints
+        assert "the LLM passes through raw scrape fields until this field_mapper whitelists them" in hints
+        assert "route the mapper directly to the existing sink" in hints
+        assert "do not remove the cleanup mapper or output" in hints
+        assert "before raw scraped fields exist cannot satisfy scraped-content cleanup" in hints
+        assert "preserve requested enrichment, extraction, scoring, or LLM response fields" in hints
+        assert "stage a pipeline_decision interpretation requirement" in hints
+        assert "request its review after mutation succeeds" in hints
+        assert "naming a sink or output" in hints
+        assert "does not clean data" in hints
+        assert "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields" in hints
+        assert "that request is the authorization and requirement to add the cleanup field_mapper" in hints
+        assert "do not ask whether to add cleanup later" in hints
+        assert "use user_term 'drop_raw_html_fields'" in hints
+        assert "not permission to omit the cleanup node" in hints
+
+    def test_llm_discovery_recommends_prompt_shield_for_internet_content(self) -> None:
+        """LLM plugin hints recommend prompt shield without silently changing topology."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "llm",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+        assert "internet content" in hints
+        assert "prompt-injection shielding is important" in hints
+        assert "azure_prompt_shield" in hints
+        assert "surface this to the user as a strong recommendation" in hints
+        assert "recommendation is not permission to add a node" in hints
+        assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
+        assert "copying it verbatim" in hints
+        assert "llm_prompt_template" in hints
+        assert "scoring scale" in hints
+        assert "Measurable adjectives are not exempt" in hints
+        assert "over 6 ft" in hints
+        assert "top quartile" in hints
+        assert "Prompt-template review is not enough" in hints
+        assert "put both interpretation_requirements in the LLM node options before set_pipeline" in hints
+        assert "When repairing or upserting an LLM node, repeat the review preflight" in hints
+        assert (
+            "carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements"
+            in hints
+        )
+        assert "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result" in hints
+        assert "that output shape is authored judgement semantics when you chose the scale" in hints
+        assert "stable user_term preserving the user's criterion phrase" in hints
+        assert "not the whole task phrase" in hints
+        assert "use the adjective or noun phrase that names the criterion" in hints
+        assert "For how <adjective> phrasing, use the adjective itself as user_term" in hints
+        assert "only an llm_prompt_template review is incomplete" in hints
+        assert "Do not stop by saying the rubric is part of the reviewed prompt" in hints
+        assert "downstream cleanup, sink, mapper, or transform needs the LLM response" in hints
+        assert "guarantee the response_field by name" in hints
+        assert "also guarantee pass-through fields" in hints
+        assert "Single-query LLM output is written to response_field" in hints
+        assert "Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them" in hints
+        assert "preserve response_field through cleanup" in hints
+        assert "preserves upstream row fields while adding response_field" in hints
+        assert "does not remove raw scrape fields" in hints
+        assert "put a field_mapper cleanup node between the LLM and the sink" in hints
+        assert "rate how cool they are" not in hints
+        assert "vague_term" in hints
+        assert "good, bad" not in hints
+        assert "Subjective user terms" not in hints
+        assert "do not insert it automatically" in hints
+        assert "prompt_injection_shield_recommendation" in hints
+        assert "LLM-node reviews stack" in hints
+        assert "Interpretation reviews are not transform stages" in hints
+        assert "Do not create passthrough, review, recommendation, or placeholder nodes" in hints
+        assert "route through azure_content_safety first" not in hints
+
+    def test_llm_post_call_hints_do_not_keyword_scan_subjective_terms(self) -> None:
+        """Plugin hints must not decide arbitrary/vague terms by backend word list."""
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        hints = LLMTransform.get_post_call_hints(
+            tool_name="upsert_node",
+            config_snapshot={
+                "prompt_template": "Rate how cool this public web page is on a 1-10 scale.",
+                "response_field": "cool_assessment",
+            },
+        )
+
+        assert hints == ()
 
 
 # ---------------------------------------------------------------------------
@@ -6882,6 +8026,8 @@ class TestPreviewPipeline:
                         name="settings_load",
                         passed=False,
                         detail="Forbidden name: 'end_of_source'",
+                        affected_nodes=(),
+                        outcome_code=None,
                     )
                 ],
                 errors=[
@@ -6890,8 +8036,10 @@ class TestPreviewPipeline:
                         component_type="aggregation",
                         message="Forbidden name: 'end_of_source'",
                         suggestion="Omit trigger for end-of-source-only aggregation.",
+                        error_code=None,
                     )
                 ],
+                readiness=ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[]),
             )
         )
 
@@ -7094,6 +8242,35 @@ class TestPrevalidatePluginOptions:
         assert "model" in result
         assert "api_key" in result
         assert "template" in result
+
+    def test_llm_openrouter_invalid_model_surfaces_list_models_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Composer prevalidation must reject unknown OpenRouter models with a repair hint.
+
+        Catalog membership is now enforced via the value-source walker
+        (check_config_value_sources), so patch the catalog at the walker's lookup
+        site rather than the (removed) construction-time validator's.
+        """
+        monkeypatch.setattr(
+            "elspeth.engine.orchestrator.preflight.get_catalog_values",
+            lambda catalog_id: frozenset({"openai/gpt-4o"}),
+        )
+
+        result = _prevalidate_plugin_options(
+            "transform",
+            "llm",
+            {
+                "provider": "openrouter",
+                "api_key": "sk-test-key",
+                "model": "anthropic/claude-3-opus",
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": {"mode": "observed"},
+                "required_input_fields": [],
+            },
+        )
+        assert result is not None
+        assert result.startswith("Invalid options for transform 'llm':")
+        assert "list_models" in result
+        assert "anthropic/claude-3-opus" in result
 
     def test_unreachable_plugin_type_raises_assertion(self) -> None:
         """Passing an invalid plugin_type triggers the unreachable-branch assertion (not silent bypass)."""
@@ -7429,7 +8606,7 @@ class TestPrevalidatePluginOptions:
                 "provider": "openrouter",
                 "model": "openai/gpt-4o",
                 "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
-                "template": "Classify: {{text}}",
+                "prompt_template": "Classify: {{text}}",
                 "schema": {"mode": "observed"},
             },
         )
@@ -7469,6 +8646,19 @@ class TestCreateBlobTypeGuard:
     test_service.py) patch execute_tool at the seam and cannot prove the
     real handler raises the right class. This test drives the handler
     end-to-end through execute_tool() dispatch.
+
+    Post Task 13 (Wave 2 — ``create_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`CreateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  The handler
+    catches :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'content' must be a string, got int"`` assertion pinned the
+    legacy ``_prepare_blob_create`` message; the new boundary fires
+    earlier with a leak-safe shell.
     """
 
     @pytest.fixture(autouse=True)
@@ -7505,12 +8695,20 @@ class TestCreateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
         state = _empty_state()
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'create_blob arguments' must be object conforming to CreateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "create_blob",
                 {
@@ -7524,6 +8722,10 @@ class TestCreateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail
+        # (rev-2 BLOCKER_A leak discipline: full detail audit-side,
+        # leak-safe shell LLM-side).
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -7537,6 +8739,15 @@ class TestUpdateBlobTypeGuard:
     The fixture is deliberately copy-pasted from TestCreateBlobTypeGuard
     rather than factored into a shared helper: the two guards are
     independent raise sites and one should be moveable without the other.
+
+    Post Task 13 (Wave 2 — ``update_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`UpdateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  Identical
+    discipline to :class:`TestCreateBlobTypeGuard` — the same locked-in
+    legacy assertion (``"'content' must be a string, got int"``) is
+    updated to the new ToolArgumentError shape; the file-mutation
+    critical section is never entered on a pure argument-validation
+    failure (handler docstring pins this precedence).
     """
 
     @pytest.fixture(autouse=True)
@@ -7573,6 +8784,8 @@ class TestUpdateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7589,11 +8802,18 @@ class TestUpdateBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'update_blob arguments' must be object conforming to UpdateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "update_blob",
                 {"blob_id": blob_id, "content": 42},
@@ -7603,6 +8823,8 @@ class TestUpdateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -7611,7 +8833,22 @@ class TestUpdateBlobTypeGuard:
 
 
 class TestSetSourceFromBlobTypeGuard:
-    """Malformed `options` must stay a retryable tool-argument failure."""
+    """Malformed `options` must stay a retryable tool-argument failure.
+
+    Post Task 13 (Wave 2 — ``set_source_from_blob`` manifest promotion):
+    the Tier-3 type guard now lives in
+    :class:`SetSourceFromBlobArgumentsModel` via Pydantic's strict
+    ``options: dict[str, Any]`` validation.  The handler catches
+    :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'options' must be an object, got str"`` assertion pinned the
+    legacy in-handler isinstance guard; the new boundary fires earlier
+    with a leak-safe shell.
+    """
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path: Path) -> None:
@@ -7647,6 +8884,8 @@ class TestSetSourceFromBlobTypeGuard:
             )
 
     def test_non_object_options_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7660,11 +8899,18 @@ class TestSetSourceFromBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "hello"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'options' must be an object, got str"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value (the string
+        # "column=text") and its type ("got str") are not echoed.
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'set_source_from_blob arguments' must be object conforming to SetSourceFromBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "set_source_from_blob",
                 {
@@ -7678,6 +8924,8 @@ class TestSetSourceFromBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -8039,6 +9287,10 @@ class TestUpdateBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -8074,7 +9326,15 @@ class TestUpdateBlobActiveRunGuard:
         if source is None:
             source = {
                 "plugin": "csv",
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
                 "options": {"blob_ref": self.blob_id, "path": str(self.storage_path)},
+            }
+        else:
+            source = {
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
+                **source,
             }
 
         now = datetime.now(UTC)
@@ -8086,12 +9346,16 @@ class TestUpdateBlobActiveRunGuard:
                     session_id=self.session_id,
                     version=1,
                     source=source,
-                    nodes=None,
-                    edges=None,
-                    outputs=None,
-                    metadata_=None,
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -8117,9 +9381,108 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"new,content\n9,9"
+
+    def test_update_without_authoring_context_fails_closed(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            execute_tool(
+                "update_blob",
+                {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+                state,
+                catalog,
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+        assert self.storage_path.read_bytes() == self.original_content
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == _STUB_SHA256
+
+    def test_update_rejected_when_blob_is_current_source_blob_ref(self) -> None:
+        """A blob-backed source locks the blob content hash stamped in source_authoring."""
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="output",
+                options={
+                    "blob_ref": self.blob_id,
+                    "path": str(self.storage_path),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
+        )
+
+        assert result.success is False
+        assert "source" in result.data["error"].lower()
+        assert self.storage_path.read_bytes() == self.original_content
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == _STUB_SHA256
+
+    def test_unbound_update_recomputes_composer_provenance(self) -> None:
+        """Unbound blob updates that author new bytes refresh blob provenance."""
+        from elspeth.web.blobs.service import content_hash
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        user_message_content = "Generate a replacement CSV for the current scratch blob."
+        user_message_id = _insert_user_message(self.engine, self.session_id, user_message_content)
+        new_content = "name,score\nada,42\n"
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": new_content},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash="sha256:update-arguments",
+        )
+
+        assert result.success is True
+        assert self.storage_path.read_bytes() == new_content.encode("utf-8")
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == content_hash(new_content.encode("utf-8"))
+        assert row.creation_modality == CreationModality.LLM_GENERATED.value
+        assert row.created_from_message_id == user_message_id
+        assert row.creating_model_identifier == "openai/gpt-5-mini"
+        assert row.creating_model_version == "gpt-5-mini-2026-05-01"
+        assert row.creating_provider == "openai"
+        assert row.creating_composer_skill_hash == "sha256:composer-skill"
+        assert row.creating_arguments_hash == "sha256:update-arguments"
 
     def test_update_rejected_when_pending_run_linked(self) -> None:
         self._insert_run_and_link("pending")
@@ -8132,6 +9495,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -8148,6 +9512,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -8165,6 +9530,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"post,run\n1,1"
@@ -8181,6 +9547,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -8201,6 +9568,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -8221,6 +9589,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "should,proceed\n1,1"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"should,proceed\n1,1"
@@ -8333,6 +9702,10 @@ class TestUpdateBlobAtomicWrite:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -8364,6 +9737,7 @@ class TestUpdateBlobAtomicWrite:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "would,corrupt,mid-run\n"),
         )
         assert result.success is False
         assert self.storage_path.read_bytes() == self.original_content
@@ -8386,6 +9760,7 @@ class TestUpdateBlobAtomicWrite:
 
         state = _empty_state()
         catalog = _mock_catalog()
+        provenance_context = _verbatim_blob_context(self.engine, self.session_id, "new")
 
         # Force a DB failure by making begin() raise.  This fires
         # BEFORE any UPDATE / os.replace, so no file mutation can
@@ -8405,6 +9780,7 @@ class TestUpdateBlobAtomicWrite:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **provenance_context,
             )
 
         assert self.storage_path.read_bytes() == self.original_content
@@ -8758,7 +10134,7 @@ class TestPreviewProofStep:
         self,
         *,
         schema_mode: str = "fixed",
-        fields: tuple[str, ...] = (),
+        fields: tuple[object, ...] = (),
         on_validation_failure: str = "discard",
     ):
         """Build a state with a CSV blob source via the composer tool API."""
@@ -8794,6 +10170,7 @@ class TestPreviewProofStep:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -8866,6 +10243,7 @@ class TestPreviewProofStep:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -8942,6 +10320,28 @@ class TestPreviewProofStep:
             session_engine=self.engine,
             session_id=self.session_id,
         )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_fixed_csv_with_structured_fields_does_not_crash_or_block(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=(
+                {"name": "order_id", "field_type": "str"},
+                {"name": "customer", "field_type": "str"},
+                {"name": "price", "field_type": "float"},
+            ),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
         codes = [d["code"] for d in result.data["proof_diagnostics"]]
         assert "csv_fixed_schema_omits_observed_columns" not in codes
 
@@ -9097,6 +10497,209 @@ class TestPreviewProofStep:
         codes = [d["code"] for d in result.data["proof_diagnostics"]]
         assert "csv_duplicate_headers" not in codes
 
+    def test_observed_csv_numeric_gate_type_mismatch_blocks(self) -> None:
+        """Observed CSV leaves values stringy; numeric gate predicates must
+        fail preview before runtime hits ExpressionEvaluationError.
+        """
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "price_gate",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "rows",
+                "condition": "row['price'] >= 100",
+                "routes": {"true": "out", "false": "out"},
+                "options": {},
+            },
+            state,
+            _mock_catalog(),
+        )
+        assert result.success, result.data
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            result.updated_state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "gate_expression_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "price_gate"
+        assert mismatch[0]["evidence_locator"]["field"] == "price"
+        assert result.data["is_valid"] is False
+
+    def test_observed_csv_batch_stats_string_value_field_blocks_through_transform(self) -> None:
+        """Observed CSV strings must not reach numeric batch_stats at runtime.
+
+        This mirrors the hard-mode p2_t2_edge failure: a string-ish field
+        survives an observed-schema value_transform and batch_stats rejects it
+        only when the aggregation executes.
+        """
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        state = (
+            self._state_with_csv_source(schema_mode="observed")
+            .with_node(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_only", "expression": "row['financial_barrier']"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="classified_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "aggregation_numeric_value_field_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "summarize"
+        assert mismatch[0]["evidence_locator"]["field"] == "financial_barrier"
+        assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
+        assert result.data["is_valid"] is False
+
+    def test_observed_csv_numeric_aggregation_does_not_block_after_field_overwrite(self) -> None:
+        """The proof step abstains once an upstream transform overwrites the field."""
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        state = (
+            self._state_with_csv_source(schema_mode="observed")
+            .with_node(
+                NodeSpec(
+                    id="coerce_flag",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="rows",
+                    on_success="coerced_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_barrier", "expression": "1"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="coerced_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "aggregation_numeric_value_field_type_mismatch_against_source_schema" not in codes
+
     def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
         """Registry membership ripples — the constructor would crash if the
         emission site used an unregistered code, so this test pins the
@@ -9104,6 +10707,7 @@ class TestPreviewProofStep:
         from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES
 
         assert "csv_duplicate_headers" in _BLOCKING_DIAGNOSTIC_CODES
+        assert "csv_source_field_resolution_error" in _BLOCKING_DIAGNOSTIC_CODES
 
     # -- missing/unreadable blob --------------------------------------------
 
@@ -9145,6 +10749,85 @@ class TestPreviewProofStep:
         from collections.abc import Mapping as _Mapping
 
         assert isinstance(result.data["authoring_validation"], _Mapping)
+
+    # -- Tier-3 persisted-option boundaries: malformed source.options ---------
+    # ``source.options`` is composer/operator-authored config re-read from
+    # persisted session state — Tier-3 origin. A drifted / hand-edited / stale
+    # store can carry a malformed value that the helpers re-validate on read,
+    # raising ``ValueError``. ``compute_proof_diagnostics`` is called UNWRAPPED
+    # from the preview tool and the dispatcher only catches ``ToolArgumentError``,
+    # so an unhandled ``ValueError`` would crash the tool. These pin the boundary
+    # at the ``compute_proof_diagnostics`` level: each malformed option must yield
+    # a blocking diagnostic and NO exception may escape. The tampered options are
+    # injected via ``dataclasses.replace`` to model persisted state that drifted
+    # after the set_source_from_blob write-time validation that originally
+    # produced it (the "validated once is not validated forever" T3 read-back).
+
+    def _state_with_tampered_source_options(self, options: dict[str, object]):
+        """Build a valid CSV blob state, then overwrite source.options.
+
+        Models persisted external-origin options that drifted between the
+        write-time validation and this read.
+        """
+        import dataclasses
+
+        state = self._state_with_csv_source(schema_mode="observed")
+        assert state.source is not None
+        tampered = dataclasses.replace(state.source, options=options)
+        return state.with_source(tampered)
+
+    def test_proof_malformed_schema_block_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``schema`` block (get_raw_schema_config raises) blocks,
+
+        does not crash the tool.
+        """
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # schema.mode is not a recognised mode → get_raw_schema_config raises
+        # ValueError. blob_ref must survive so the proof step inspects the blob.
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "schema": {"mode": "not_a_real_mode"}})
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
+        # The schema-block builder's repair text must point at the schema knob,
+        # not at header/field_mapping resolution.
+        schema_diag = next(d for d in blocking if d["code"] == "csv_source_field_resolution_error")
+        assert "schema" in schema_diag["suggested_repair"]
+        assert "schema.mode" in schema_diag["suggested_repair"]
+
+    def test_proof_malformed_columns_option_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``columns`` option (inspect wrap raises) blocks, no crash."""
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # columns must be a sequence of str; an int member raises ValueError
+        # inside _csv_source_columns, surfaced by the inspect-call wrap.
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "columns": ["order_id", 123]})
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
+
+    def test_proof_malformed_delimiter_option_yields_blocking_diagnostic(self) -> None:
+        """A malformed ``delimiter`` option (inspect wrap raises) blocks, no crash."""
+        from elspeth.web.composer.tools import compute_proof_diagnostics
+
+        # delimiter must be a single character; a multi-char string raises
+        # ValueError inside _csv_source_delimiter, surfaced by the inspect wrap.
+        state = self._state_with_tampered_source_options({"blob_ref": self.csv_blob_id, "delimiter": "||"})
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert any(d["code"] == "csv_source_field_resolution_error" for d in blocking), diagnostics
 
     # -- proof step integrity verification -----------------------------------
     # The proof step reads blob bytes through the same Tier-1 invariants as
@@ -9257,3 +10940,66 @@ class TestBlockingDiagnosticRegistry:
             assert d["message"] == "msg"
             assert d["suggested_repair"] == "repair"
             assert d["evidence_locator"] == {"source": "blob", "blob_id": "abc"}
+
+
+class TestToolContextSecretServiceTyping:
+    """Type-contract tests for ``ToolContext.secret_service``.
+
+    Prior to elspeth-d017c958e9 the field was ``Any | None``, which
+    silently accepted any object — including the wrong production
+    surface (``WebSecretService``, which requires ``auth_provider_type``)
+    or a misnamed kwarg. The field now annotates ``WebSecretResolver``
+    (L0 protocol from ``elspeth.contracts.secrets``), and production
+    wiring passes ``ScopedSecretResolver``.
+
+    These tests pin the structural contract so the dispatch boundary
+    stays typed.
+    """
+
+    def test_scoped_secret_resolver_satisfies_protocol(self) -> None:
+        """Production ``ScopedSecretResolver`` must satisfy the protocol."""
+        from elspeth.contracts.secrets import WebSecretResolver
+        from elspeth.web.secrets.service import ScopedSecretResolver
+
+        # ScopedSecretResolver only depends on its inner service for
+        # delegation; structural-typing checks need only the methods,
+        # not a live DB.
+        class _ServiceStub:
+            def list_refs(self, user_id: str, *, auth_provider_type: str) -> list[Any]:
+                return []
+
+            def has_ref(self, user_id: str, name: str, *, auth_provider_type: str) -> bool:
+                return False
+
+            def resolve(self, user_id: str, name: str, *, auth_provider_type: str) -> None:
+                return None
+
+        resolver = ScopedSecretResolver(_ServiceStub(), auth_provider_type="local")  # type: ignore[arg-type]
+        assert isinstance(resolver, WebSecretResolver)
+
+    def test_tool_context_accepts_protocol_implementor(self) -> None:
+        """ToolContext.secret_service must accept any WebSecretResolver."""
+        from elspeth.web.composer.tools._common import ToolContext
+
+        class _ResolverStub:
+            def list_refs(self, user_id: str) -> list[Any]:
+                return []
+
+            def has_ref(self, user_id: str, name: str) -> bool:
+                return False
+
+            def resolve(self, user_id: str, name: str) -> None:
+                return None
+
+        ctx = ToolContext(catalog=MagicMock(spec=CatalogService), secret_service=_ResolverStub())
+        # Field is reachable, typed, and forwards the structural surface.
+        assert ctx.secret_service is not None
+        assert ctx.secret_service.has_ref("u1", "missing") is False
+        assert ctx.secret_service.list_refs("u1") == []
+
+    def test_tool_context_secret_service_defaults_to_none(self) -> None:
+        """Non-secret-aware callers (legacy direct tests) construct with None."""
+        from elspeth.web.composer.tools._common import ToolContext
+
+        ctx = ToolContext(catalog=MagicMock(spec=CatalogService))
+        assert ctx.secret_service is None

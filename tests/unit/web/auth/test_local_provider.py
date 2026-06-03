@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from contextlib import closing
+from typing import Any
 
+import jwt as pyjwt
 import pytest
 
 from elspeth.web.auth.local import LocalAuthProvider
@@ -18,6 +22,17 @@ def provider(tmp_path):
         secret_key="test-secret-key-for-unit-tests",
         token_expiry_hours=24,
     )
+
+
+def _signed_local_token(provider: LocalAuthProvider, claims: dict[str, Any]) -> str:
+    """Create a signed local JWT for boundary-shape tests."""
+    return pyjwt.encode(claims, provider._secret_key, algorithm="HS256")
+
+
+def _delete_user(provider: LocalAuthProvider, user_id: str) -> None:
+    """Delete a test user without leaking sqlite3's transaction-only context manager."""
+    with closing(sqlite3.connect(str(provider._db_path))) as conn, conn:
+        conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
 
 
 class TestCreateUser:
@@ -112,14 +127,11 @@ class TestAuthenticate:
     @pytest.mark.asyncio
     async def test_authenticate_deleted_user_rejected(self, provider) -> None:
         """A deleted user's JWT must be rejected by authenticate()."""
-        import sqlite3
-
         provider.create_user("alice", "pw", display_name="Alice")
         token = await provider.login("alice", "pw")
 
         # Delete the user behind the provider's back
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.authenticate(token)
@@ -127,8 +139,6 @@ class TestAuthenticate:
     @pytest.mark.asyncio
     async def test_authenticate_wrong_secret_key(self, tmp_path) -> None:
         """Token signed with a different key should fail."""
-        import jwt as pyjwt
-
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
             secret_key="correct-key",
@@ -141,6 +151,66 @@ class TestAuthenticate:
         bad_token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.authenticate(bad_token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_username_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens without username must not escape as KeyError."""
+        provider.create_user("alice", "pw", display_name="Alice")
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_sub_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens without sub must not escape as KeyError."""
+        token = _signed_local_token(
+            provider,
+            {
+                "username": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_non_string_username_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens with non-string username must not reach UserIdentity."""
+        provider.create_user("alice", "pw", display_name="Alice")
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": "alice",
+                "username": {"name": "alice"},
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_non_string_sub_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens with non-string sub must not reach the user lookup."""
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": {"id": "alice"},
+                "username": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
 
 
 class TestGetUserInfo:
@@ -182,10 +252,7 @@ class TestGetUserInfo:
         token = await provider.login("alice", "pw")
 
         # Access _db_path directly — no public API to delete users by design
-        import sqlite3
-
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.get_user_info(token)
@@ -236,19 +303,16 @@ class TestRefresh:
     @pytest.mark.asyncio
     async def test_refresh_deleted_user_raises(self, provider) -> None:
         """A deleted user cannot obtain fresh tokens via refresh."""
-        import sqlite3
-
         provider.create_user("alice", "pw", display_name="Alice")
         # Access _db_path directly — no public API to delete users by design
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
         with pytest.raises(AuthenticationError, match="User not found"):
-            await provider.refresh("alice", "alice")
+            await provider.refresh("alice", "alice", original_iat=int(time.time()))
 
     @pytest.mark.asyncio
     async def test_refresh_valid_user_returns_jwt(self, provider) -> None:
         provider.create_user("alice", "pw", display_name="Alice")
-        token = await provider.refresh("alice", "alice")
+        token = await provider.refresh("alice", "alice", original_iat=int(time.time()))
         assert isinstance(token, str)
         assert len(token.split(".")) == 3
 
@@ -282,12 +346,8 @@ class TestRefresh:
         assert claims["iat"] == original_iat
 
     @pytest.mark.asyncio
-    async def test_refresh_without_iat_gets_fresh_timestamp(self, provider) -> None:
-        """Refresh with no original_iat (legacy token) gets a current iat."""
-        import jwt
-
+    async def test_refresh_without_iat_raises(self, provider) -> None:
+        """Refresh without original_iat must not start a fresh chain."""
         provider.create_user("alice", "pw", display_name="Alice")
-        before = int(time.time())
-        token = await provider.refresh("alice", "alice", original_iat=None)
-        claims = jwt.decode(token, "test-secret-key-for-unit-tests", algorithms=["HS256"])
-        assert claims["iat"] >= before
+        with pytest.raises(AuthenticationError, match="Token missing iat"):
+            await provider.refresh("alice", "alice", original_iat=None)

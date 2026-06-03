@@ -592,7 +592,7 @@ class TestOutputSchemaConfigDoesNotPropagateInputContract:
     def test_runtime_verify_passes_for_failing_eval_reproducer(self) -> None:
         """End-to-end: the eval-S2-v2 failing config must clear ``verify_schema_config_mode``.
 
-        Reproduced from notes/composer-llm-eval-2026-05-01.md S2 v2: the
+        Reproduced from docs/composer/evidence/composer-llm-eval-2026-05-01.md S2 v2: the
         composer accepted the config but runtime rejected with
         SchemaConfigModeViolation. After the fix, the runtime check must
         pass for the same simulated emission.

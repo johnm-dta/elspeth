@@ -396,6 +396,122 @@ class TestValidateSemanticContracts:
         assert contracts[0].producer_plugin == "web_scrape"
 
 
+class TestLLMJsonExplodeRegression:
+    def _llm_to_json_explode_state(self) -> CompositionState:
+        return CompositionState(
+            metadata=PipelineMetadata(name="llm-json-explode"),
+            version=1,
+            edges=(),
+            source=SourceSpec(
+                plugin="csv",
+                on_success="raw_rows",
+                options={
+                    "path": "data/responses.csv",
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["wave: int", "community: str", "response: str"],
+                    },
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="classify_barrier",
+                    node_type="transform",
+                    plugin="llm",
+                    input="raw_rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["wave: int", "community: str", "response: str"],
+                        },
+                        "required_input_fields": ["wave", "community", "response"],
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-3.7-sonnet",
+                        "api_key": "sk-test-key",
+                        "prompt_template": "Classify {{ row['response'] }}",
+                        "temperature": 0,
+                        "response_field": "llm_response",
+                        "pool_size": 1,
+                        "max_tokens": 300,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+                NodeSpec(
+                    id="parse_classification",
+                    node_type="transform",
+                    plugin="json_explode",
+                    input="classified_rows",
+                    on_success="parsed_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "array_field": "llm_response",
+                        "output_field": "item",
+                        "include_index": False,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(
+                OutputSpec(
+                    name="sink",
+                    plugin="json",
+                    options={"path": "out.json"},
+                    on_write_failure="discard",
+                ),
+            ),
+        )
+
+    def test_llm_response_field_cannot_feed_json_explode_array_field(self) -> None:
+        """Pin p2_t4_stress: LLM response_field is a string, not a list."""
+        state = self._llm_to_json_explode_state()
+
+        errors, contracts = validate_semantic_contracts(state)
+
+        assert len(errors) == 1
+        assert errors[0].component == "node:parse_classification"
+        assert "json_explode.array_field.list" in errors[0].message
+        assert "value_type=str" in errors[0].message
+        assert "LLM response_field is str" in errors[0].message
+
+        assert len(contracts) == 1
+        contract = contracts[0]
+        assert contract.from_id == "classify_barrier"
+        assert contract.to_id == "parse_classification"
+        assert contract.producer_plugin == "llm"
+        assert contract.consumer_plugin == "json_explode"
+        assert contract.outcome is SemanticOutcome.CONFLICT
+        assert contract.producer_facts is not None
+        assert contract.producer_facts.fact_code == "llm.response_field.string"
+        assert contract.requirement.requirement_code == "json_explode.array_field.list"
+
+    def test_llm_response_field_to_json_explode_is_blocked_by_full_validate(self) -> None:
+        state = self._llm_to_json_explode_state()
+
+        result = state.validate()
+
+        assert result.is_valid is False
+        assert any(
+            entry.component == "node:parse_classification"
+            and "json_explode.array_field.list" in entry.message
+            and "value_type=str" in entry.message
+            for entry in result.errors
+        )
+
+
 class TestWardlineRegressionPin:
     """Exact options shape from the original Wardline regression YAML.
 

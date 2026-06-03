@@ -878,6 +878,9 @@ class DeclarationContract(ABC):
     Subclasses MUST:
       * Declare a unique ``name: ClassVar[str]``.
       * Declare a purpose-built ``payload_schema: ClassVar[type]`` (TypedDict).
+      * Declare ``violation_class: ClassVar[type[DeclarationContractViolation]]``
+        as a purpose-built, non-base DCV subclass whose ``payload_schema`` is
+        the exact same object as the contract's ``payload_schema``.
       * Implement ``applies_to(plugin) -> bool``.
       * Implement ``negative_example(cls) -> ExampleBundle``.
       * Implement ``positive_example_does_not_apply(cls) -> ExampleBundle``.
@@ -893,6 +896,7 @@ class DeclarationContract(ABC):
 
     name: ClassVar[str]
     payload_schema: ClassVar[type]
+    violation_class: ClassVar[type[DeclarationContractViolation]]
 
     @abstractmethod
     def applies_to(self, plugin: Any) -> bool:
@@ -1183,6 +1187,33 @@ def register_declaration_contract(contract: DeclarationContract) -> None:
             raise TypeError(f"Contract {contract.name!r} missing required payload_schema attribute") from exc
         if not isinstance(payload_schema, type):
             raise TypeError(f"Contract {contract.name!r} payload_schema must be a type (TypedDict subclass)")
+
+        try:
+            violation_class = contract.violation_class
+        except AttributeError as exc:
+            raise TypeError(f"Contract {contract.name!r} missing required violation_class attribute") from exc
+        # No explicit ``isinstance(violation_class, type)`` gate: the identity
+        # check below is non-type-safe (returns False on a non-type) and the
+        # ``issubclass(violation_class, ...)`` check two lines down raises
+        # ``TypeError`` natively on any non-type. A non-type ``violation_class``
+        # is a framework bug; letting ``issubclass`` crash it offensively is the
+        # correct Tier-1 response (no redundant pre-guard required).
+        if violation_class is DeclarationContractViolation:
+            raise TypeError(
+                f"Contract {contract.name!r} violation_class must be a purpose-built "
+                f"DeclarationContractViolation subclass, not the bare base class"
+            )
+        if not issubclass(violation_class, DeclarationContractViolation):
+            raise TypeError(
+                f"Contract {contract.name!r} violation_class must inherit DeclarationContractViolation; got {violation_class.__name__}"
+            )
+        if violation_class.payload_schema is not payload_schema:
+            raise TypeError(
+                f"Contract {contract.name!r} payload_schema must be the exact same "
+                f"TypedDict object declared by its violation_class: contract has "
+                f"{payload_schema.__name__}, violation has "
+                f"{violation_class.payload_schema.__name__}"
+            )
 
         # Example-classmethod callability — N2 Layer A / B harnesses require both.
         for method_name in ("negative_example", "positive_example_does_not_apply"):

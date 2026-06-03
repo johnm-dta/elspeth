@@ -535,11 +535,11 @@ class TestExcepthookSuppression:
         # Acquire to ensure leaker thread is active
         limiter.acquire()
 
-        # Get leaker ident before close (framework boundary — private attr)
-        try:
-            leaker = limiter._limiter.bucket_factory._leaker
-        except AttributeError:
-            leaker = None
+        # Get leaker ident before close. pyrate-limiter declares _leaker as a
+        # class-level attribute (Optional[Leaker] = None), so it is always
+        # present on the pinned version — access it directly, matching the
+        # production close() path.
+        leaker = limiter._limiter.bucket_factory._leaker
         leaker_ident = leaker.ident if leaker is not None else None
 
         # Close the limiter - this should clean up thread idents

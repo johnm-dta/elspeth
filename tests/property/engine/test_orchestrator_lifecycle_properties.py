@@ -113,8 +113,8 @@ def completed_row_counter_shapes(draw: st.DrawFn) -> dict[str, int]:
     """Counters valid for COMPLETED / completed API response construction.
 
     elspeth-5069612f3c — for property tests that construct a validated
-    terminal model (``RunResult(status=COMPLETED...)``, ``CompletedData``,
-    ``RunStatusResponse``, or any path invoking ``_validate_row_decomposition``).
+    terminal model (``RunResult(status=COMPLETED...)``, ``CompletedData``, or
+    ``RunStatusResponse``).
     Drawing ``rows_routed_success`` / ``rows_routed_failure`` independently
     is forbidden in those paths because ``rows_processed < sum_terminal``
     can crash the harness at model construction.  This composite ensures

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import PipelineRow
+from elspeth.contracts import Determinism, PipelineRow
 from elspeth.testing import make_contract, make_pipeline_row
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
@@ -22,6 +22,7 @@ class TestBaseTransform:
 
         class SimpleTransform(BaseTransform):
             name = "simple"
+            determinism = Determinism.DETERMINISTIC
             input_schema = None  # type: ignore[assignment]  # Not needed for this test
             output_schema = None  # type: ignore[assignment]
 
@@ -39,6 +40,7 @@ class TestBaseTransform:
 
         class ExpandingTransform(BaseTransform):
             name = "expander"
+            determinism = Determinism.DETERMINISTIC
             creates_tokens = True  # Deaggregation transform
             input_schema = None  # type: ignore[assignment]
             output_schema = None  # type: ignore[assignment]
@@ -64,6 +66,7 @@ class TestBaseTransform:
         # Create a minimal concrete subclass that doesn't override process()
         class IncompleteTransform(BaseTransform):
             name = "incomplete"
+            determinism = Determinism.DETERMINISTIC
             input_schema = None  # type: ignore[assignment]
             output_schema = None  # type: ignore[assignment]
 
@@ -93,6 +96,7 @@ class TestBaseTransform:
 
         class DoubleTransform(BaseTransform):
             name = "double"
+            determinism = Determinism.DETERMINISTIC
             input_schema = InputSchema
             output_schema = OutputSchema
 
@@ -130,6 +134,7 @@ class TestBaseTransform:
 
         class SimpleTransform(BaseTransform):
             name = "simple_lifecycle"
+            determinism = Determinism.DETERMINISTIC
             input_schema = None  # type: ignore[assignment]
             output_schema = None  # type: ignore[assignment]
 
@@ -170,6 +175,7 @@ class TestBaseSink:
 
         class MemorySink(BaseSink):
             name = "memory"
+            determinism = Determinism.IO_WRITE
             input_schema = InputSchema
             idempotent = True
             _on_write_failure: str | None = "discard"
@@ -228,6 +234,7 @@ class TestBaseSink:
 
         class BatchMemorySink(BaseSink):
             name = "batch_memory"
+            determinism = Determinism.IO_WRITE
             input_schema = InputSchema
             idempotent = True
             _on_write_failure: str | None = "discard"
@@ -285,6 +292,7 @@ class TestBaseSource:
 
         class ListSource(BaseSource):
             name = "list"
+            determinism = Determinism.IO_READ
             output_schema = OutputSchema
 
             def __init__(self, config: dict[str, Any]) -> None:
@@ -362,6 +370,7 @@ class TestNoValidationEnforcement:
 
         class NoValidationTransform(BaseTransform):
             name = "no_validation"
+            determinism = Determinism.DETERMINISTIC
             input_schema = TestSchema
             output_schema = TestSchema
 

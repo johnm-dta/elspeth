@@ -753,7 +753,10 @@ jobs:
     needs:
       - static-analysis
       - test
-      - test-postgres-testcontainer
+      # test-postgres-testcontainer is intentionally NOT a gate: Postgres is
+      # deferred (SQLite-only stance) and the session-DB schema is not yet
+      # PG-portable. The job's tests are skipped; re-add this here when PG
+      # portability lands — tracked in filigree elspeth-f18d996d71.
       - supply-chain-audit
       - e2e-frontend
       - frontend-unit
@@ -767,10 +770,6 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
-            echo "Postgres testcontainer test job failed"
             exit 1
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then

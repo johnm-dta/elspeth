@@ -1632,6 +1632,55 @@ class TestAuditedHTTPClientGet:
         assert recorded_request["params"]["api_key"] != "PARAM_SECRET"
         assert str(recorded_request["params"]["api_key"]).startswith("<fingerprint:")
 
+    def test_request_ssrf_safe_post_passes_query_params_to_httpx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SSRF-safe POST must preserve explicit query params on the network request."""
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        safe_request = SSRFSafeRequest(
+            original_url="https://api.example.com/search",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/search",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        shared_client = MagicMock()
+        ssrf_context = MagicMock()
+        ssrf_client = MagicMock()
+        ssrf_context.__enter__.return_value = ssrf_client
+        ssrf_client.post.return_value = mock_response
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.side_effect = [shared_client, ssrf_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+
+            client.request_ssrf_safe(
+                "POST",
+                safe_request,
+                json={"ok": True},
+                params={"api_key": "PARAM_SECRET", "q": "hello"},
+            )
+
+        ssrf_client.post.assert_called_once()
+        assert ssrf_client.post.call_args[1]["params"] == {"api_key": "PARAM_SECRET", "q": "hello"}
+
     def test_redirect_hop_fingerprints_sensitive_query_params_in_audit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Redirect hop audit records fingerprint sensitive query params."""
         from elspeth.core.security.web import SSRFSafeRequest

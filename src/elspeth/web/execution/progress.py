@@ -180,10 +180,14 @@ class ProgressBroadcaster:
                     states_to_schedule.append(state)
         if self._loop.is_closed() is True:
             with self._lock:
-                for state in states_to_schedule:
+                if run_id in self._subscribers:
+                    states_to_drop = list(self._subscribers[run_id].values())
+                else:
+                    states_to_drop = []
+                for state in states_to_drop:
                     state.pending.clear()
                     state.drain_scheduled = False
-            return BroadcastResult(dropped_count=len(states_to_schedule), drop_reason="loop_closed")
+            return BroadcastResult(dropped_count=len(states_to_drop), drop_reason="loop_closed")
         for state in states_to_schedule:
             self._loop.call_soon_threadsafe(self._drain_pending, run_id, state)
         return BroadcastResult(scheduled_count=len(states_to_schedule))

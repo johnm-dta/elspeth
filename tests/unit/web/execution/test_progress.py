@@ -541,6 +541,32 @@ class TestProgressBroadcasterCallbackBacklogBound:
             "the async queue."
         )
 
+    def test_loop_closed_clears_already_scheduled_subscriber_pending(self) -> None:
+        """Loop-closed cleanup must reset subscribers with an existing scheduled drain.
+
+        If a first broadcast schedules a drain and the loop closes before it
+        runs, the next broadcast appends into pending without adding the state
+        to states_to_schedule. The loop-closed path must still clear that stale
+        pending buffer and reset drain_scheduled.
+        """
+        mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        mock_loop.is_closed.side_effect = [False, True]
+        broadcaster = ProgressBroadcaster(mock_loop)
+        broadcaster.subscribe("run-1")
+
+        broadcaster.broadcast("run-1", _make_event())
+        sub_map = broadcaster._subscribers["run-1"]
+        state = next(iter(sub_map.values()))
+        assert state.drain_scheduled is True
+        assert len(state.pending) == 1
+
+        result = broadcaster.broadcast("run-1", _make_event())
+
+        assert result.drop_reason == "loop_closed"
+        assert result.dropped_count == 1
+        assert len(state.pending) == 0
+        assert state.drain_scheduled is False
+
 
 class TestProgressBroadcasterCleanup:
     def test_cleanup_run_removes_all_subscribers(self) -> None:

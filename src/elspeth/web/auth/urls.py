@@ -56,7 +56,7 @@ def validate_oidc_authorization_endpoint(endpoint: str, *, issuer: str) -> str:
 
 
 def validate_oidc_issuer(issuer: str) -> str:
-    """Return a network-safe OIDC issuer URL for discovery and JWKS fetches."""
+    """Return an HTTPS OIDC issuer URL after syntax and literal-IP SSRF checks."""
     issuer_value = issuer.strip().rstrip("/")
     issuer_url = _parse_https_url(issuer_value, field_name="issuer")
 

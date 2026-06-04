@@ -535,6 +535,7 @@ class AuditedHTTPClient(AuditedClientBase):
             return client.post(
                 connection_url,
                 json=json,
+                params=params,
                 headers=headers,
                 extensions=extensions,
             )
@@ -570,7 +571,7 @@ class AuditedHTTPClient(AuditedClientBase):
             request: SSRFSafeRequest from validate_url_for_ssrf()
             headers: Additional headers for this request
             json: JSON body for POST requests.
-            params: Query parameters for GET requests.
+            params: Query parameters for the request.
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
             allowed_ranges: IP networks that may bypass the default SSRF

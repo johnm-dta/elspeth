@@ -1218,6 +1218,30 @@ class TestContentSafetyInternalProcessing:
             mock_client_class.return_value = mock_instance
             yield mock_instance
 
+    def test_parse_external_json_response_converts_recursion_error_to_malformed_response(self) -> None:
+        """Deeply nested external JSON must fail closed as malformed provider data."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+        from elspeth.plugins.transforms.azure.errors import MalformedResponseError
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"mode": "observed"},
+            }
+        )
+        response = _create_mock_http_response_body("[[[", json_fallback={})
+
+        with (
+            patch(
+                "elspeth.plugins.transforms.azure.base.parse_json_strict", side_effect=RecursionError("maximum recursion depth exceeded")
+            ),
+            pytest.raises(MalformedResponseError, match="Invalid JSON in Content Safety response"),
+        ):
+            transform._parse_external_json_response(response, label="Content Safety response")
+
     def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: MagicMock) -> None:
         """Rate limit errors retry locally before producing the row result."""
         import httpx

@@ -175,7 +175,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bb0aa7295b1f55e8"
+    source_file_hash: str | None = "sha256:4886bfa5435cf9de"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -412,6 +412,23 @@ class ChromaSink(BaseSink):
 
         start_time = time.perf_counter()
         try:
+            if self._config.on_duplicate == "error":
+                # Preflight the FULL logical batch for duplicates before ANY
+                # external add. A mixed batch splits into a metadata sub-batch
+                # and a no-metadata sub-batch; checking per sub-batch inside the
+                # loop below would add the first sub-batch to ChromaDB and only
+                # then raise on a later sub-batch's duplicate, leaving a partial
+                # external write with no success audit (elspeth-f56603c31a).
+                preflight_ids = [id_ for sub_ids, _docs, _metas in sub_batches for id_ in sub_ids]
+                existing = collection.get(ids=preflight_ids)
+                existing_ids = set(existing["ids"])
+                duplicates = [id_ for id_ in preflight_ids if id_ in existing_ids]
+                if duplicates:
+                    raise DuplicateDocumentError(
+                        collection=self._config.collection,
+                        duplicate_ids=duplicates,
+                    )
+
             for batch_ids, batch_docs, batch_metadatas in sub_batches:
                 write_ids = batch_ids
                 write_documents = batch_docs
@@ -455,14 +472,8 @@ class ChromaSink(BaseSink):
                         write_metadatas = None
                         rows_written = 0
                 elif self._config.on_duplicate == "error":
-                    existing = collection.get(ids=batch_ids)
-                    existing_ids = set(existing["ids"])
-                    duplicates = [id_ for id_ in batch_ids if id_ in existing_ids]
-                    if duplicates:
-                        raise DuplicateDocumentError(
-                            collection=self._config.collection,
-                            duplicate_ids=duplicates,
-                        )
+                    # Duplicates were already rejected by the full-batch preflight
+                    # above, so every sub-batch here is known-new — add directly.
                     try:
                         collection.add(
                             ids=batch_ids,

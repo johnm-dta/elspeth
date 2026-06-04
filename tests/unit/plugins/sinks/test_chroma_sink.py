@@ -291,6 +291,33 @@ class TestChromaSinkWriteError:
         assert "d3" in exc_info.value.duplicate_ids
         mock_collection.add.assert_not_called()
 
+    def test_error_mode_preflights_full_batch_no_partial_add(self) -> None:
+        """Error mode must preflight the full logical batch before any add.
+
+        Regression for elspeth-f56603c31a: a batch that splits into a metadata
+        sub-batch (d1, new) and a no-metadata sub-batch (d2, duplicate) must not
+        add d1 to ChromaDB before discovering d2's duplicate in the next
+        sub-batch — that would leave a partial external write with no success
+        audit. The full batch is duplicate-checked before any collection.add().
+        """
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {"ids": ["d2"]}  # d2 already exists
+        sink = _make_sink_with_collection(mock_collection, on_duplicate="error", schema={"mode": "observed"})
+
+        ctx = _make_sink_ctx()
+
+        rows = [
+            {"doc_id": "d1", "text": "A", "topic": "t"},  # metadata -> meta sub-batch (new)
+            {"doc_id": "d2", "text": "B"},  # no metadata -> no-metadata sub-batch (duplicate)
+        ]
+
+        with pytest.raises(DuplicateDocumentError) as exc_info:
+            sink.write(rows, ctx)
+
+        assert "d2" in exc_info.value.duplicate_ids
+        # No partial write: d1 (the new metadata row) must NOT have been added.
+        mock_collection.add.assert_not_called()
+
     def test_error_mode_succeeds_when_no_duplicates(self) -> None:
         mock_collection = MagicMock()
         mock_collection.get.return_value = {"ids": []}

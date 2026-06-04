@@ -182,8 +182,27 @@ class ChromaSearchProvider:
         state_id: str,
         token_id: str | None,
     ) -> list[RetrievalChunk]:
+        count_start = time.monotonic()
         collection_count = self._collection.count()
         if collection_count == 0:
+            # The corpus is empty: no query() is issued and zero chunks are
+            # returned. This is still an auditable retrieval decision — the
+            # external count() call ran and its outcome shaped the pipeline
+            # result. Recording it (rather than exiting silently) lets an
+            # auditor distinguish "retrieval ran against an empty corpus" from
+            # "retrieval never ran"; collection_count=0 further distinguishes
+            # it from a populated query that simply matched nothing.
+            empty_elapsed_ms = (time.monotonic() - count_start) * 1000
+            call_index = self._execution.allocate_call_index(state_id)
+            self._execution.record_call(
+                state_id=state_id,
+                call_index=call_index,
+                call_type=CallType.VECTOR,
+                status=CallStatus.SUCCESS,
+                request_data=RawCallPayload({"query": query, "top_k": 0, "collection": self._config.collection}),
+                response_data=RawCallPayload({"result_count": 0, "skipped_count": 0, "top_score": None, "collection_count": 0}),
+                latency_ms=round(empty_elapsed_ms),
+            )
             return []
         effective_top_k = min(top_k, collection_count)
 

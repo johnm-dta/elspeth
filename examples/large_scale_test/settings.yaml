@@ -48,3 +48,8 @@ sinks:
         - 'timestamp: str'
 landscape:
   url: sqlite:///examples/large_scale_test/runs/audit.db
+checkpoint:
+  enabled: true
+  frequency: every_n
+  checkpoint_interval: 100
+  aggregation_boundaries: true

@@ -42,6 +42,7 @@ _GUARANTEED_PROFILE_FIELDS = frozenset(
         "p25",
         "p75",
         "stdev",
+        "summary",
     }
 )
 _CONDITIONAL_PROFILE_FIELDS = frozenset({"missing_indices", "non_finite_indices"})
@@ -106,7 +107,7 @@ class BatchDistributionProfile(BaseTransform):
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:dfff28e93b76f3d9"
+    source_file_hash: str | None = "sha256:b8dc744bbac72ac4"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -311,6 +312,15 @@ class BatchDistributionProfile(BaseTransform):
             raise OverflowError(operation)
         return value
 
+    @staticmethod
+    def _format_number(value: int | float) -> str:
+        return f"{float(value):.3f}"
+
+    def _summary_prefix(self, group_value: Any) -> str:
+        if self._group_by is None:
+            return f"Distribution profile for {self._value_field}"
+        return f"Distribution profile for {self._value_field} grouped by {self._group_by}={group_value}"
+
     def _aggregate_group(
         self,
         grouped_rows: list[tuple[int, PipelineRow]],
@@ -355,6 +365,12 @@ class BatchDistributionProfile(BaseTransform):
             "p25": p25,
             "p75": p75,
             "stdev": stdev,
+            "summary": (
+                f"{self._summary_prefix(group_value)}: {len(grouped_rows)} rows, {count} finite values, "
+                f"{len(missing_indices)} missing, {len(non_finite_indices)} non-finite, "
+                f"mean {self._format_number(mean)}, median {self._format_number(median)}, "
+                f"range {self._format_number(sorted_values[0])} to {self._format_number(sorted_values[-1])}."
+            ),
         }
 
         if missing_indices:

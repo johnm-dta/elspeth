@@ -3793,6 +3793,7 @@ __all__ = [
     "ValidationEntryResponse",
     "ValidationResult",
     "ValidationSummary",
+    "_BadRequestLLMError",
     "_ComposerPreflightTelemetryResult",
     "_ComposerPreflightTelemetrySource",
     "_ComposerRequestEndpoint",

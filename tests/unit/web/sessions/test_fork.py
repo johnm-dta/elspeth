@@ -606,6 +606,64 @@ class TestForkSession:
             )
         assert len(audit_rows) == 1
 
+    @pytest.mark.asyncio
+    async def test_fork_and_archive_parent_session_with_durable_history(self, service) -> None:
+        """Archiving a fork parent with durable history soft-archives the parent."""
+        session = await service.create_session("alice", "Original", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={"plugin": "csv", "options": {"path": "data.csv"}},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        await service.add_message(session.id, "user", "Hello", composition_state_id=state.id, writer_principal="route_user_message")
+        msg = await service.add_message(session.id, "user", "World", composition_state_id=state.id, writer_principal="route_user_message")
+
+        await service.create_run(session.id, state.id)
+
+        child_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=msg.id,
+            new_message_content="Universe",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        await service.archive_session(session.id)
+
+        archived_session = await service.get_session(session.id)
+        assert archived_session.archived_at is not None
+
+        child = await service.get_session(child_session.id)
+        assert child.forked_from_session_id == session.id
+
+    @pytest.mark.asyncio
+    async def test_fork_and_delete_parent_session_no_durable_history(self, service) -> None:
+        """Archiving a fork parent without durable history physically deletes the parent."""
+        from elspeth.web.sessions.protocol import SessionNotFoundError
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        msg = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
+
+        child_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=msg.id,
+            new_message_content="Universe",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        await service.archive_session(session.id)
+
+        with pytest.raises(SessionNotFoundError):
+            await service.get_session(session.id)
+
+        child = await service.get_session(child_session.id)
+        assert child.forked_from_session_id == session.id
+
 
 # ── Route-level tests ───────────────────────────────────────────────────
 

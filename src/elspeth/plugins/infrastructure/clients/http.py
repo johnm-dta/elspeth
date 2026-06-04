@@ -33,6 +33,12 @@ from elspeth.plugins.infrastructure.clients.fingerprinting import (
     fingerprint_headers as _fingerprint_headers,
 )
 from elspeth.plugins.infrastructure.clients.fingerprinting import (
+    fingerprint_params as _fingerprint_params,
+)
+from elspeth.plugins.infrastructure.clients.fingerprinting import (
+    fingerprint_url as _fingerprint_url,
+)
+from elspeth.plugins.infrastructure.clients.fingerprinting import (
     is_sensitive_header as _is_sensitive_header_fn,
 )
 from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict as _parse_json_strict
@@ -353,10 +359,10 @@ class AuditedHTTPClient(AuditedClientBase):
         # DTO stays alive for typed telemetry payload; dict form used for Landscape hashing.
         request_dto = HTTPCallRequest(
             method=method,
-            url=full_url,
+            url=_fingerprint_url(full_url),
             headers=self._filter_request_headers(merged_headers),
             json=json,
-            params=params,
+            params=_fingerprint_params(params),
             audit_metadata=audit_request_metadata,
         )
         request_data = request_dto.to_dict()
@@ -608,10 +614,10 @@ class AuditedHTTPClient(AuditedClientBase):
         # DTO stays alive for typed telemetry payload; dict form used for Landscape hashing.
         request_dto = HTTPCallRequest(
             method=method_upper,
-            url=request.original_url,
+            url=_fingerprint_url(request.original_url),
             headers=self._filter_request_headers(merged_headers),
             json=json,
-            params=params,
+            params=_fingerprint_params(params),
             resolved_ip=request.resolved_ip,
         )
         request_data = request_dto.to_dict()
@@ -826,10 +832,10 @@ class AuditedHTTPClient(AuditedClientBase):
 
             blocked_hop_request_dto = HTTPCallRequest(
                 method="GET",
-                url=redirect_url,
+                url=_fingerprint_url(redirect_url),
                 headers=self._filter_request_headers(hop_headers),
                 hop_number=hop_number,
-                redirect_from=redirect_from,
+                redirect_from=_fingerprint_url(redirect_from),
             )
 
             # CRITICAL: Validate the redirect target for SSRF
@@ -874,11 +880,11 @@ class AuditedHTTPClient(AuditedClientBase):
             # both success and failure paths can record the hop in the audit trail.
             hop_request_dto = HTTPCallRequest(
                 method="GET",
-                url=redirect_url,
+                url=_fingerprint_url(redirect_url),
                 headers=self._filter_request_headers(hop_headers),
                 resolved_ip=redirect_request.resolved_ip,
                 hop_number=hop_number,
-                redirect_from=redirect_from,
+                redirect_from=_fingerprint_url(redirect_from),
             )
             redirects_followed += 1
 

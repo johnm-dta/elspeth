@@ -201,6 +201,13 @@ class TestSessionForeignKeys:
                     )
                 )
 
+    def test_forked_from_session_id_is_historical_without_live_session_fk(self, engine) -> None:
+        """Verify that sessions.forked_from_session_id has no ForeignKey constraint."""
+        inspector = inspect(engine)
+        foreign_keys = inspector.get_foreign_keys("sessions")
+        constrained_columns = {column for foreign_key in foreign_keys for column in foreign_key["constrained_columns"]}
+        assert "forked_from_session_id" not in constrained_columns
+
 
 class TestCheckConstraints:
     """Verify CHECK constraints reject invalid values."""

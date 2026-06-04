@@ -243,12 +243,9 @@ class BatchTransformMixin:
         except RuntimeError:
             # The row has already been admitted to the FIFO buffer. Convert a
             # shutdown-time submit race into an explicit row failure so the
-            # waiter/output path is satisfied and no ticket is stranded.
-            if state_id is not None:
-                with self._batch_submissions_lock:
-                    submission_key = (token.token_id, state_id)
-                    if submission_key in self._batch_submissions:
-                        self._batch_submissions.pop(submission_key)
+            # waiter/output path is satisfied and no ticket is stranded. The
+            # release loop remains the sole owner of submission cleanup for
+            # admitted rows, including explicit shutdown-result rows.
 
             from elspeth.contracts import TransformResult
 
@@ -356,7 +353,7 @@ class BatchTransformMixin:
                 # Clean up submission tracking (before emit, in case emit fails)
                 if state_id is not None:
                     with self._batch_submissions_lock:
-                        self._batch_submissions.pop((token.token_id, state_id), None)
+                        del self._batch_submissions[(token.token_id, state_id)]
 
                 # Emit to output port with state_id for correct waiter matching
                 # The port may block if downstream is applying backpressure

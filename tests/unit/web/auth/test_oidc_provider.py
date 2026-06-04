@@ -267,6 +267,15 @@ class TestOIDCTokenValidation:
 class TestOIDCGetUserInfo:
     """Tests for full profile retrieval from OIDC claims."""
 
+    def test_get_user_info_declares_token_trust_boundary_for_groups_claim(self) -> None:
+        metadata = OIDCAuthProvider.get_user_info.__trust_boundary__  # type: ignore[attr-defined]
+
+        assert metadata.tier == 3
+        assert metadata.source_param == "token"
+        assert metadata.suppresses == ("R1",)
+        assert metadata.test_ref == ("tests/unit/web/auth/test_oidc_provider.py::TestOIDCGetUserInfo::test_non_list_groups_claim_raises")
+        assert "'groups'" in metadata.invariant
+
     @pytest.mark.asyncio
     async def test_get_user_info_returns_profile(
         self,

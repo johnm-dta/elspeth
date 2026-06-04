@@ -116,7 +116,7 @@ def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path,
             category=Category.MANIFEST,
             cwe=(),
             scope=scope,
-            path_filter=None,
+            path_filter=r".*\.py$",
             examples_violation_count=1,
             examples_clean_count=1,
         )
@@ -148,6 +148,61 @@ def test_cli_surfaces_parse_and_read_errors_for_whole_repo_rules(tmp_path: Path,
     payload = json.loads(captured.out)
     rule_ids = {finding["rule_id"] for finding in payload}
     assert {"parse-error", "read-error"} <= rule_ids
+
+
+def test_cli_whole_repo_parse_diagnostics_respect_rule_path_filter(tmp_path: Path, capsys: object) -> None:
+    """A scoped whole-repo rule must not fail on malformed files outside its path_filter."""
+    import argparse
+    from collections.abc import Iterable
+
+    from elspeth_lints.core.cli import _run_check
+    from elspeth_lints.core.protocols import Category, Finding, RuleContext, RuleMetadata, RuleScope, Severity
+    from elspeth_lints.core.registry import RuleRegistry
+
+    class ScopedWholeRepoRule:
+        id = "demo.scoped-whole"
+        scope = RuleScope.WHOLE_REPO
+        metadata = RuleMetadata(
+            id=id,
+            name="Scoped whole repo",
+            description="Demo scoped whole-repo rule.",
+            severity=Severity.ERROR,
+            category=Category.MANIFEST,
+            cwe=(),
+            scope=scope,
+            path_filter=r"^src/.*\.py$",
+            examples_violation_count=1,
+            examples_clean_count=1,
+        )
+
+        def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> Iterable[Finding]:
+            del tree, file_path, context
+            return ()
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "good.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / ".uv-cache").mkdir()
+    (tmp_path / ".uv-cache" / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    (tmp_path / "outside.py").write_text("def broken(:\n", encoding="utf-8")
+    registry = RuleRegistry()
+    registry.register(ScopedWholeRepoRule())
+
+    exit_code = _run_check(
+        argparse.Namespace(
+            rules="demo.scoped-whole",
+            rule_set="static",
+            format="json",
+            root=tmp_path,
+            allowlist_dir=None,
+            repo_root=None,
+            files=None,
+        ),
+        registry=registry,
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == []
 
 
 def test_registry_decorator_registers_rule() -> None:

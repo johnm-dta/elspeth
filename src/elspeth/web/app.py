@@ -341,34 +341,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # endpoint. Closes the validate/runtime drift bug where the bundled
     # litellm catalog still listed models OpenRouter has retired (e.g.
     # ``anthropic/claude-3.5-sonnet``), letting the value-source compliance
-    # walker pass configs that 404 at runtime preflight. Probe is graceful:
-    # on failure we log a warning and the catalog falls back to the bundled
-    # litellm slice — staging must still boot for non-LLM features.
+    # walker pass configs that 404 at runtime preflight. The request-level
+    # probe is graceful inside ``prime_openrouter_catalog_from_live``; failures
+    # before the request boundary (client construction/context management) are
+    # startup failures rather than undocumented fallback decisions.
     probe_start = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
 
-            async def _probe_get(url: str) -> httpx.Response:
-                # ``request("GET", ...)`` rather than ``.get(...)``: identical
-                # httpx semantics, but avoids the L3 walker's token-level
-                # false match on the literal ``.get`` (R1 targets defensive
-                # ``dict.get`` reads, not HTTP client method calls).
-                return await _probe_client.request("GET", url)
+        async def _probe_get(url: str) -> httpx.Response:
+            # ``request("GET", ...)`` rather than ``.get(...)``: identical
+            # httpx semantics, but avoids the L3 walker's token-level
+            # false match on the literal ``.get`` (R1 targets defensive
+            # ``dict.get`` reads, not HTTP client method calls).
+            return await _probe_client.request("GET", url)
 
-            primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
-    except (httpx.HTTPError, OSError) as probe_exc:
-        # ``prime_openrouter_catalog_from_live`` catches its own
-        # ``httpx.RequestError`` internally; this wrapper covers failures
-        # from ``AsyncClient(...)`` construction or ``__aenter__`` —
-        # ``httpx.HTTPError`` (full httpx hierarchy) or ``OSError``
-        # (socket-level). Programming errors (NameError, TypeError) are
-        # NOT caught: those must crash boot so the bug surfaces.
-        slog.warning(
-            "openrouter_catalog_prime_unexpected_error",
-            exc_class=type(probe_exc).__name__,
-            action="falling back to bundled litellm catalog",
-        )
-        primed = False
+        primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
     probe_latency_ms = int((time.monotonic() - probe_start) * 1000)
     if primed:
         slog.info(

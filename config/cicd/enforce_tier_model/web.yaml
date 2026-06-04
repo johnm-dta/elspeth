@@ -18,44 +18,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[11]/body[1]/value'
   judge_metadata_signature: 'hmac-sha256:v2:1926240d4e6a4ea22a52ff6c11cb782f03cf9ed2beae6916f0b4017375b29b9f'
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=54a0a436e8a89380
-  owner: john
-  reason: |-
-    In JWKSTokenValidator.decode_token (oidc.py:390), kid = header.get("kid") reads the optional 'kid' header from an unverified JWT header (jwt.get_unverified_header). The JWT and its header are external-origin Tier-3 data from a remote IdP, and 'kid' is explicitly OPTIONAL per RFC 7515 JWS. A None result flows into the key-matching loop and, if no JWK matches, raises a typed AuthenticationError (line 398) — absence is recorded and surfaced as an auth failure, never fabricated. Direct subscript would raise KeyError on a legitimately kid-less token, converting an expected optional-claim case into a crash. This is meaning-preserving Tier-3 boundary handling, not silent data loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:08:45.706706+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE FIRES, CODE IS THE PRESCRIBED LEGITIMATE FORM. The data is genuinely Tier-3: `header = jwt.get_unverified_header(token)` at oidc.py:388 parses an unverified JWT header from a remote IdP, and per RFC 7515 the `kid` header is contractually OPTIONAL. The .get() preserves absence as None — kid=None then flows through the JWK lookup (lines 393–396) and, on no match, surfaces as a typed AuthenticationError at line 398 with the literal kid value in the message. This is meaning-preserving boundary handling: absence is recorded, not fabricated to a default, and a legitimately kid-less token raises an interpretable auth failure rather than a KeyError that auth middleware cannot map to 401. Function is not @trust_boundary-decorated (decorators at lines 65/110/142/159 are on other methods), but `header` is derived from `token` through a third-party library call rather than a tracked subscript/attribute path, so the decorator's name-rooted suppression would not cleanly cover this site; the per-line entry is the appropriate remedy.
-  judge_signature_version: 2
-  scope_fingerprint: 4066025450e77ed83ec2c80bdc9ef3a8d16a997edfe014a4ff1d47c699ec4e62
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[14]/body[9]/body[1]/body[2]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:e9a394a7af220b817f84034bb84c16d81f78d57d0f8919bc7a6aeecd7380e127'
-- key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=98c3e6a2eb0fb6bd
-  owner: john
-  reason: |-
-    In OIDCAuthProvider.get_user_info (oidc.py:467), raw_groups = payload.get("groups") reads the optional 'groups' claim from a decoded OIDC token — externally-authored data from an external IdP, a textbook Tier-3 boundary. The 'groups' claim is optional in OIDC; absence is a legitimate fact, not a contract break. The code handles None explicitly (empty list), coerces a list of group IDs to str (documented Entra integer-OID coercion), and raises AuthenticationError for any other type. This is boundary validation recording absence honestly as no-groups, not fabrication or silent data loss — the audit trail records exactly what the IdP asserted.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:52:03.678564+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The payload is a decoded OIDC token from an external IdP — Tier-3 external data at a textbook boundary. The 'groups' claim is optional in OIDC, so absence is a legitimate IdP statement, not a contract break. The code is the prescribed Tier-3 boundary form: shape-validate (isinstance list), meaning-preservingly coerce members to str (documented Entra integer-OID case), and raise AuthenticationError on any other shape — offensive enforcement at the boundary. None→[] is not fabrication: it represents 'no groups asserted' (the absence of group membership), preserving meaning rather than synthesizing membership in a group the IdP did not name. Decorator nudge does not apply: the function parameter is `token: str`, and `payload` is the result of a `decode_token(...)` function call rather than a name derived from `token` by subscript/iteration/attribute, so the decorator's source_param tracking would not cover this subject.
-  judge_signature_version: 2
-  scope_fingerprint: 088cb09adc196eb6c3938464aabddef9b39fa8807e1258e6a77177f97018b3f3
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[15]/body[4]/body[4]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:b8f693494f5efefba619ef20eee4d4b2814ec0f869c0ca0308b0eb6989f0d678'
 - key: web/auth/entra.py:R1:EntraAuthProvider:authenticate:fp=564181fecfacb986
   owner: john
   reason: |-
@@ -1233,104 +1195,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[28]/body[2]/value'
   judge_metadata_signature: 'hmac-sha256:v2:76e4d8601bbea9b0b3037a0747546d9a968faab8998b07f5561761844e3d333f'
-- key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=6eff26e727be1d1a
-  owner: john
-  reason: |-
-    In _litellm_error_detail (_helpers.py:508), getattr(exc, "status_code", None) reads status_code from a LiteLLM-native exception in the else-branch — a third-party-SDK exception object whose attribute surface is provider/SDK-controlled, i.e. Tier-3 external data even though our code holds the reference (our own _BadRequestLLMError carrier is dispatched by exact type in the other branch with direct attribute access). The follow-up `type(natural_status_code) is int` narrows to a validated shape and falls back to None, recording absence rather than fabricating a status code. This is the legitimate Tier-3 shape-guard, not a defensive read of a first-party contract. Existing rationale matches.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:37:39.388376+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The else-branch operates on a LiteLLM-native SDK exception whose attribute surface is third-party-controlled — explicitly Tier-3 per the Plugin-Ownership scope carve-out for 'an LLM provider's reply wrapped by a third-party SDK such as LiteLLM'. The first-party _BadRequestLLMError carrier is already handled via exact-type dispatch with direct attribute access at line 503-505, so the getattr() applies only to the non-first-party path. The follow-up `type(natural_status_code) is int else None` validates shape and records absence as None rather than fabricating a status code — the honest Tier-3 boundary pattern (validate at border, record what we got). Rationale is site-specific and corroborated by the inline comment at 499-502.
-  judge_signature_version: 2
-  scope_fingerprint: db97ecd0f8331527b185c72c44220015b58554686bd6dff85f0fad55bbc2bd29
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[94]/body[3]/orelse[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:0ede6ce82b77c5f5997797b255c4e76924663807d0faa6aae3255d92289c44df'
-- key: web/sessions/routes/_helpers.py:R5:_extract_runtime_model_snapshot:fp=c7a42ffc3485b7c0
-  owner: john
-  reason: |-
-    In _extract_runtime_model_snapshot (line 639), `if not isinstance(options, Mapping): raise AuditIntegrityError(...)` is an OFFENSIVE Tier-1 guard, not defensive suppression. The composition_state JSON is written by our own writer, which guarantees the structural envelope (options is a Mapping; model/model_version are str-or-absent) even though the values inside are LLM-authored. A non-Mapping options is therefore corruption of our own audit data — the code crashes with a typed AuditIntegrityError (and uses `type(value) is str`, not duck-typing, on the inner keys, lines 647/653) rather than coercing garbage into the audit row or hiding the writer bug behind a NULL. isinstance here is the exact-shape envelope check that surfaces our-code corruption by raising. Legitimate offensive use; absent optional keys are correctly recorded as None (line 645-646), not fabricated.
-
-
-    The @trust_boundary decorator nudge would mark this function tier=3 with source_param=`state` — but that is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary. `state` is a CompositionStateRecord written by our own composition_state writer: node["id"]/node["options"] are read by required direct-subscript (Tier-1, crash-on-absence) and the isinstance(options, Mapping) guard raises AuditIntegrityError on a non-Mapping — an OFFENSIVE check that surfaces corruption of OUR data, not a zero-trust rejection of external input. A @trust_boundary(tier=3) here would (a) misrepresent the trust tier in the audit-tooling record and (b) suppress the offensive guard that is doing exactly the Tier-1 job CLAUDE.md mandates. The honest representation is this per-line allowlist entry documenting a sanctioned Tier-1 offensive isinstance, NOT a Tier-3 boundary decorator.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:53:21.245553+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    PRESCRIBED FORM. The rule fires on `isinstance(options, Mapping)`, but the code is the offensive Tier-1 envelope-check pattern the project sanctions: it raises a typed AuditIntegrityError with full context (node id, observed type, expected shape) rather than coercing or NULL-defaulting, records optional keys as None (lines 645-646, no fabrication), and uses `type(value) is str` on the inner str-or-absent checks (lines 647/653) so the offensive exact-type discipline is visible. The data is Tier-1: composition_states is OUR audit table written by our own writer, and the codebase has established this disposition explicitly — the sibling at web/sessions/service.py:931-949 says verbatim 'composition_states.nodes is Tier-1 (our own audit data)' and applies the same offensive isinstance→raise envelope check, and web/blobs/service.py:185-195 uses the same AuditIntegrityError pattern on composition_states list/dict shapes. The decorator nudge does NOT apply: @trust_boundary is tier=3-only, so applying it here would mislabel a Tier-1 audit envelope as a Tier-3 external boundary AND suppress an offensive check that is doing the Tier-1 'crash on corruption of our own data' job CLAUDE.md mandates; the rationale anticipates this and rejects it correctly. The rationale is site-specific (rationale_duplicate_count=0), names the disposition, and the visible code conforms to it.
-  judge_signature_version: 2
-  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[97]/body[2]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:e37e9ddf1b4ff9bd90839a4e63b87648b200df7cccaefb4d18ba493a7d5dd167'
-- key: web/sessions/routes/_helpers.py:R6:_handle_convergence_error:fp=00b7ed549b93bf34
-  owner: john
-  reason: |-
-    _handle_convergence_error (_helpers.py:1956) catches except SQLAlchemyError as save_err around a best-effort persistence of partial composer state at a Tier-3 DB-persistence boundary. The catch is narrowed to the SQLAlchemyError family per CLAUDE.md Tier-1 semantics (TypeError/KeyError from state.to_dict()/CompositionStateData would be Tier-1 invariant bugs and deliberately propagate). It does not swallow: it records the failure class via slog (class name only, str(exc) deliberately omitted because SQLAlchemyError text can carry DB URLs/credentials/bound payloads) and surfaces the outcome to the caller by setting partial_state_save_failed=True and partial_state_save_error in the HTTP response body. The recovery is deliberate — a persistence failure must not upgrade a 422 convergence error to a 500. Record-then-degrade-with-explicit-signal, not a silent default. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T06:07:01.554936+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The R6 concern is silent swallow without re-raise or explicit error result; this code does neither. The catch is narrowed to SQLAlchemyError (TypeError/KeyError from state.to_dict()/CompositionStateData propagate as Tier-1 invariant breaks), it records the failure class via slog, and — crucially for R6 — it returns an explicit error result by setting response_body['partial_state_save_failed']=True and response_body['partial_state_save_error']=<class name>. The rationale also justifies the deliberate omission of str(exc)/exc_info (SQLAlchemyError text expands to bound parameters and __cause__ chains that can leak DB URLs/credentials) — a thoughtful security tradeoff, not a cover for swallowing. The recovery semantics (don't upgrade a 422 convergence error to a 500 due to best-effort partial-state persistence failure) are a legitimate degrade-with-explicit-signal pattern at the persistence boundary.
-  judge_signature_version: 2
-  scope_fingerprint: ffe235f625614b078895b7bff99423d92e589d958e56e8281f6f9fe2dca4690f
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[157]/body[5]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:d6f0c7d92bcf02fe197e203cfe194a97549d733600471a180a84755f0dd6abe1'
-- key: web/sessions/routes/_helpers.py:R6:_handle_plugin_crash:fp=10a0a4c1f8e0af26
-  owner: john
-  reason: |-
-    In _handle_plugin_crash (_helpers.py:2098), `except SQLAlchemyError as save_err` wraps the partial-state save during plugin-crash handling so that a DB write failure does not mask the original plugin-crash 500 response. The catch is narrow (full SQLAlchemyError family deliberately, to avoid OperationalError/ProgrammingError escaping; ValueError/TypeError/KeyError Tier-1 invariant bugs are NOT caught here and propagate) and the error is not swallowed: it is recorded via slog (class name only, to avoid leaking SQL params/secrets) and surfaced to the frontend as explicit partial_state_save_failed / partial_state_save_error fields so the UI can distinguish 'state captured' from 'state lost'. This is record-then-continue at an audit-DB-degradation boundary, not silent data loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:38:07.521390+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the surface pattern (try/except without re-raise), but the visible code is the policy-prescribed handling for an audit/state-persistence-degradation boundary: the catch is narrowed to SQLAlchemyError (not bare Exception), Tier-1 invariant types (ValueError/TypeError/KeyError) from to_dict()/CompositionStateData construction are deliberately NOT caught and propagate, the failure is recorded via slog.error with structured exc_class, and — directly satisfying the rule's own remediation clause 'return an explicit error/quarantine result' — the response surfaces partial_state_save_failed=True and partial_state_save_error=<class>. Re-raising would mask the primary plugin-crash 500 response with a secondary persistence failure, which is the exact inversion the comment guards against; the explicit response-field signal lets the frontend distinguish 'state captured, safe to retry' from 'state lost'. The exc_info omission is justified in-comment by the SQL/bound-param secret-leak risk. Rationale and code together establish conformance; no decorator applies (R6 is not in the {R1,R5} set).
-  judge_signature_version: 2
-  scope_fingerprint: d680f1d232f7ad5772bf2b49e5eb5f151d1caa3322148f62972b02f0b7d27349
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[158]/body[4]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:0f2402f57f9c6fda4b3ccd1e955bc341ac37c6c98c93d89280288a4cefb9c438'
-- key: web/sessions/routes/_helpers.py:R6:_handle_runtime_preflight_failure:fp=f1af9d80a5652f7d
-  owner: john
-  reason: |-
-    In _handle_runtime_preflight_failure (line 2331), `except SQLAlchemyError as save_err` wraps a best-effort audit-DB save of the partial composition state during error handling. The persistence-fallback contract is explicit: a DB write failure must NOT mask the original runtime-preflight 500. The catch is narrowed to SQLAlchemyError (not bare except), records the failure via slog as an audit-system-failure event (class name only, no exc_info, per the documented credential-redaction rationale), and surfaces partial_state_save_failed in the response body. This matches CLAUDE.md's audit-system-failure / persistence-fallback exemption. Programmer bugs are not caught and propagate. Not silent swallowing — the failure is recorded and surfaced.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:54:01.852329+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires by shape (try/except without re-raise), but the code is the policy-prescribed audit-system-failure / persistence-fallback handling: this is an opportunistic save of partial state during an already-in-progress 500 error path; letting the SQLAlchemyError propagate would mask the original runtime-preflight failure, which is the explicit anti-goal in the comment at lines 2303-2307. The handler is not silent — it records the failure via slog (the documented last-resort channel when DB persistence itself is what broke, per the telemetry-primacy carve-out) AND surfaces it as an explicit error result on the response body (`partial_state_save_failed=True`, `partial_state_save_error=<class name>`). Catch is narrowed to SQLAlchemyError so programmer bugs still propagate, and the pattern is symmetric with the sibling _handle_plugin_crash / _handle_convergence_error helpers (verified at _helpers.py:1858, 2006). The rationale names the specific exemption, ties it to the code's behaviour, and the visible code matches.
-  judge_signature_version: 2
-  scope_fingerprint: f830acbacdb0f024f540f0659fecd300fd5bbb68f271e9b26307fa6884160717
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[159]/body[4]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:def78794f31b1856e0b820bc5a253013ee079781a8f0f2452a541948649ccb6d'
 - key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=7b7d6c8ca4388365
   owner: john
   reason: |-
@@ -1684,139 +1548,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[43]/body[7]/test/values[0]/operand'
   judge_metadata_signature: 'hmac-sha256:v2:452c59074dff71739c9e1980109310daa56d1ed73fb594b6def7b55c1dfc9fba'
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=2de630b45978d685
-  owner: john
-  reason: |-
-    In _periodic_orphan_cleanup (line 180), the catch is narrowed to (SQLAlchemyError, OSError) — recoverable DB-layer transients and SQLite file-level I/O failures from cancel_all_orphaned_runs at a true external boundary (DB engine + filesystem). The correct behaviour for this periodic background loop is to absorb the transient and retry on the next interval. Programmer-bug exceptions (AttributeError, TypeError, AssertionError) are deliberately NOT caught and terminate the task so they surface at lifespan shutdown — the offensive-programming stance. exc_info is omitted to avoid the documented SQLAlchemy __cause__ credential-leak vector. The existing rationale is accurate. Not silent swallowing of bugs; consistent with sibling cleanup sites.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:55:12.912437+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the except, but the code is the policy-prescribed shape for a background loop at an external boundary: the catch is narrowed to (SQLAlchemyError, OSError) — DB-engine and SQLite-filesystem transients from cancel_all_orphaned_runs — while programmer-bug exceptions (AttributeError/TypeError/AssertionError) deliberately propagate to terminate the task, preserving the offensive-programming stance. The failure is recorded via slog.error rather than silently swallowed, and logging is the appropriate last-resort channel here because the failure IS at the audit-DB layer (SQLAlchemyError from engine.begin/conn.execute), so the audit channel is the broken thing being reported. The exc_info omission has a stated, code-consistent reason (SQLAlchemyError __cause__ leaking DB URLs/paths), matching the standardised redaction pattern. The rationale is site-specific (rationale_duplicate_count=0) and the visible comments corroborate each design choice.
-  judge_signature_version: 2
-  scope_fingerprint: e01b8fc50322bbae8528c468cd187e4b5bdc052660584de9702362694b874432
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[80]/body[3]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:32a985b3769584efd653acf23e27bb6ba6f9ad0f07af853f49a132184b267999'
-- key: web/app.py:R6:lifespan:fp=961011006d9c0cda
-  owner: john
-  reason: |-
-    In lifespan (app.py:351), `except (httpx.HTTPError, OSError) as probe_exc:` wraps the boot-time HTTP probe of OpenRouter's live /models endpoint — a Tier-3 external-system boundary. The catch is narrowly scoped to the httpx hierarchy and socket-level errors (the inline comment confirms NameError/TypeError propagate and crash boot so bugs surface), and on failure it logs a warning and falls back to the bundled litellm catalog so staging still boots for non-LLM features. Graceful degradation at a transient external boundary is the documented design (model_catalog.py); the warning log is acceptable here since this is boot infrastructure, not a pipeline event requiring Landscape. R6 is outside the {R1,R5} decorator set. Existing rationale verified and accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:56:31.560522+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. The except sits at a genuine Tier-3 external boundary (boot-time HTTP probe of OpenRouter's /models endpoint) and is the documented graceful-degradation pattern: the exception classes are narrowly scoped to httpx.HTTPError + OSError (not bare Exception, so NameError/TypeError still crash boot — confirmed by the inline comment), the handler records an explicit error result via primed=False which drives downstream fallback to the bundled litellm catalog, and slog.warning emits a structured event. R6's concern is silent suppression with no re-raise and no explicit error result; both halves are addressed here (explicit primed=False + structured warning + bounded scope). The Landscape-primacy concern does not apply because this is service-boot infrastructure executing before any pipeline/run exists to attach an audit record to. R6 is outside the {R1,R5} decorator set, so no @trust_boundary nudge.
-  judge_signature_version: 2
-  scope_fingerprint: 0ee9b9b2ecb6b73f5f0c00b5e31f10866cfe0299d1b46570a8aca28fdaad5007
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[81]/body[20]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e519c99e62ef950551a3cf678b215922cc23fcd07a531737cfdafb6580cf2236'
-- key: web/app.py:R7:lifespan:fp=91b3559b942c0040
-  owner: john
-  reason: |-
-    In lifespan (app.py:410), with contextlib.suppress(asyncio.CancelledError): await orphan_task immediately follows orphan_task.cancel() in the shutdown finally block. This is the canonical asyncio shutdown idiom: after cancelling a periodic background task, awaiting it is the documented way to let it observe its own CancelledError and clean up. The suppress is narrowly scoped to asyncio.CancelledError — exactly the exception the preceding cancel() is expected to raise — not a blanket swallow. It is offensive acknowledgement of a known control-flow signal during shutdown, not defensive handling of unknown state. No data loss. Existing rationale verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:25:57.888597+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The visible code shows orphan_task.cancel() immediately followed by `with contextlib.suppress(asyncio.CancelledError): await orphan_task` in the shutdown finally block — this is the canonical asyncio idiom for awaiting a cancelled task so it can observe its own CancelledError and unwind. The suppression is narrowly typed to asyncio.CancelledError (the exact exception cancel() is designed to raise), not a blanket swallow of unknown failures, and the await is what allows the task to run its own cleanup. This is not a Tier-3 boundary nor defensive recovery of unknown state — it is explicit acknowledgement of a control-flow signal we just sent. The rationale names the pattern correctly and the code matches it.
-  judge_signature_version: 2
-  scope_fingerprint: 0ee9b9b2ecb6b73f5f0c00b5e31f10866cfe0299d1b46570a8aca28fdaad5007
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[81]/body[28]/finalbody[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:85dfebf878de219482a62eeff12c48aa44a6e59777e9b35c0e417cf2daaf94ba'
-- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=9519401fd195b0ac
-  owner: john
-  reason: |-
-    In _BodySizeLimitMiddleware.dispatch (line 501), `request.headers.get("content-length")` reads an optional HTTP header from untrusted client input — Tier 3. content-length is optional and clients may omit it (comment lines 491-495); None means no declared size, in which case the request proceeds to the per-field Pydantic caps which are the actual contract. Notably the int(content_length) conversion at line 502 is deliberately NOT wrapped, so a malformed header propagates to Starlette's 400 handling rather than being defended — absence is handled honestly (skip the early 413) and bad values still crash. This is correct Tier-3 optional-header handling, not bug-hiding.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:47:35.806222+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES — the rule's premise (first-party dict with guaranteed shape) is false here. `request.headers` is a Starlette MultiDict wrapping the raw HTTP request headers from an untrusted client; the `content-length` header is optional per HTTP semantics, so absence is a legitimate external-data state, not a missing key in our contract. The code handles absence honestly (None → skip the early 413 short-circuit, defer to per-field Pydantic caps) and crucially does NOT wrap the `int(content_length)` conversion — malformed values still crash to Starlette's 400 path, so the suppression is not laundering a silent-recovery pattern. The docstring at lines 491-495 plainly states the design intent, and the visible code matches it. This is the prescribed Tier-3 boundary form for an optional external header.
-  judge_signature_version: 2
-  scope_fingerprint: 6727b0ede9bf6fed69e150333bf482a723144515f4a33fdc1de1c2dae1a75bfd
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[84]/body[2]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:4d4da7ca6eaec315758fe226844b5392eef5bc106d1e86debd63b4881a7fd21f'
-- key: web/app.py:R1:create_app:fp=7ce3ee8e08561e45
-  owner: john
-  reason: |-
-    create_app (app.py:706) reads os.environ.get("ELSPETH_ENV") != "test" as one clause of the production secret_key guard (the guard hard-crashes via SystemExit when secret_key is the default value on a non-local host outside tests). os.environ is a Tier-3 external boundary (process environment, not first-party data); .get() returns None when ELSPETH_ENV is unset and the != "test" comparison correctly treats absence as "not the test environment" without fabricating a substitute. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind. This is the canonical shape-safe read of an optional env var with explicit None handling. (Note: existing rationale's "WEB_CONCURRENCY" label is stale — the actual var is ELSPETH_ENV in the secret-key production guard; rewritten from current code.)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:48:47.282578+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. The flagged `os.environ.get("ELSPETH_ENV")` reads from the process environment — a Tier-3 external boundary (OS-controlled, not a first-party typed contract). The `.get(...) != "test"` idiom correctly treats absence as "not the test environment" without fabricating a substitute value; `None != "test"` evaluates exactly as intended, so this is a meaning-preserving boundary read, not a silent default. The decorator nudge does not apply because `os.environ` is module-level state, not a function parameter, so `@trust_boundary(source_param=...)` has nothing to bind to. The rationale correctly identifies the tier, the pattern, and why the structural alternative is inapplicable.
-  judge_signature_version: 2
-  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[85]/body[21]/test/values[3]/left'
-  judge_metadata_signature: 'hmac-sha256:v2:222762576179be875ec34782fc44fdd83caf46c64659dc1578f7060fb6c58c11'
-- key: web/app.py:R1:create_app:fp=f228499fcfff4222
-  owner: john
-  reason: |-
-    At app.py:797, os.environ.get("WEB_CONCURRENCY", "1") reads an optional process-environment variable — a genuine Tier-3 boundary external to ELSPETH. The default "1" is meaning-preserving: absence of WEB_CONCURRENCY documents single-worker, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") which rejects non-integers. This is an optional env-var read with a documented absence default, not a defensive .get() on a typed first-party object. (Note: the existing existing_reason text mislabels the variable as ELSPETH_ENV, but the code and the verified existing_rationale both correctly describe WEB_CONCURRENCY.)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:40:44.518046+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM: os.environ is a genuine Tier-3 external boundary (process environment, not a first-party typed dict), so R1's defensive-pattern premise does not apply — guarding an env-var read is the honest boundary pattern. The default "1" is meaning-preserving in context: absence of WEB_CONCURRENCY denotes single-worker semantics, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") at line 798, which raises on non-integers. Decorator nudge does not apply: os.environ is not a function parameter, so @trust_boundary's source_param mechanism cannot bind to it. Rationale is site-specific and correctly identifies the boundary, the default's semantics, and the downstream validation.
-  judge_signature_version: 2
-  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[85]/body[50]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:4a005df1a9ae9bbd273cc93559b4b69476831c6b6f52055746d0d0cb513ccb3a'
-- key: web/app.py:R4:create_app:_prometheus_metrics:fp=d1e9538947095df3
-  owner: john
-  reason: |-
-    In _prometheus_metrics (app.py), the broad `except Exception` wraps generate_latest(), which walks the global Prometheus REGISTRY and runs third-party collector code we do not own — a genuine external boundary at a public /metrics scrape endpoint. A corrupted collector raising would otherwise reach Starlette's default 500 handler and leak the traceback into the response body; the handler instead records the failure via `_handler_slog.error("prometheus_scrape_failed", exc_class=..., detail=str(scrape_exc)[:200])` and returns a fixed 503 with a one-line '# scrape failed' body, so scrapers retry gracefully. Audit-primacy (CLAUDE.md): this endpoint reads in-memory OTel counter state only, so a scrape failure is a telemetry-system failure — operational, not legal — which is the sanctioned use of slog (logged, not audited); no Landscape audit event is swallowed. Logging a bounded message is safe here, unlike the secret-bearing DB exceptions in execution/service.py: generate_latest() only formats global-REGISTRY state, every value of which /metrics already serves publicly, so the message identifies which collector broke without exposing anything not already public. Broad except is the correct width for unknown third-party collector failures at an external boundary; the error is recorded for operators, not dropped.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:55:36.395491+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The broad except wraps generate_latest() which walks the global Prometheus REGISTRY and executes third-party collector code at a public scrape endpoint — a genuine external boundary, not first-party code we control. R4's concern is suppression of bugs, but here the handler records (not suppresses) the failure: it logs exc_class plus a bounded 200-char detail, and returns a 503 with a fixed body so scrapers retry instead of receiving a Starlette default-500 traceback. The slog channel is correct per CLAUDE.md primacy: this IS the telemetry-emit path, so a failure here is a telemetry-system failure (operational, not legal) — there is no Landscape audit event to swallow. The leak-risk argument also holds: anything generate_latest() formats is by definition content /metrics serves publicly, so naming the failing collector exposes nothing new. R4 is not in the @trust_boundary suppressible set ({R1, R5}), so no decorator nudge.
-  judge_signature_version: 2
-  scope_fingerprint: 3b9b06bfdec2daf353f82af2ecd2e832c436e2ef06be4d5f8406e785c29a116b
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[85]/body[75]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:7576512fc01e9b1b35a5a5297057c9393b9ba28ee82562e75a8c5e3c3253cc08'
 - key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=b9536a22b9e37eda
   owner: john
   reason: |-
@@ -1936,352 +1667,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[35]/body[9]/body[0]/orelse[1]/body[0]/orelse[0]/orelse[0]/body[3]/test/left'
   judge_metadata_signature: 'hmac-sha256:v2:1fd8e672d1f7f5efc9006fb831483ec83f5a039b815bc5db36ab9055bc8f7c32'
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=c58de878b78c532e
-  owner: john
-  reason: |-
-    In cleanup_session_lock (line 376), `self._session_locks.pop(session_id, None)` removes the per-session asyncio lock on session deletion. This is process-local internal state; a session may never have called execute(), so no lock entry exists, yet cleanup runs on every session delete regardless. pop(key, None) is the idiomatic idempotent-removal pattern for that legitimate absence (the documented ProgressBroadcaster.cleanup_run() precedent), not a defensive Tier-3 read or fabrication. session_id is a trusted UUID-like string, not external payload. No audit data involved.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:56:12.163651+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. R9's premise — pop-with-default hides a missing-key bug — is false here. `_session_locks` (service.py:307) is a sparse cache: entries are lazily created via `setdefault` only when execute() runs (service.py:424). `cleanup_session_lock` is called unconditionally from the delete-session route's finally block (sessions.py:290-297) regardless of whether the session ever executed, so the absence of an entry is a legitimate expected state, not a missing-key contract violation. The pop-with-default is idempotent-cleanup, not silent-recovery from broken Tier-1 invariants — and `session_id` is a UUID-string, not external payload, so no Tier-3 boundary or fabrication is involved.
-  judge_signature_version: 2
-  scope_fingerprint: 7cd121fe71a37e9adb96dc7b6849df3c96e12c4ecea3e976f2212fb330d400cd
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[5]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:0c8db24441e8415598cb5356c10e03f93d5912cef59203d389aec97ec1da187b'
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=ae8955d9fc074acc
-  owner: john
-  reason: |-
-    In ExecutionServiceImpl.execute (service.py:424), `lock = self._session_locks.setdefault(session_key, asyncio.Lock())` is the atomic get-or-create idiom for a per-session lock map that the class owns — first-party process-local state, not external data. The intent is exactly 'create the lock if absent, else reuse it'; a KeyError on first call per session is the expected first-call state, not a bug to surface, so direct subscript would be wrong. The lock then serialises the get_active_run -> create_run TOCTOU window. This is the legitimate lazy-init use of setdefault, not the missing-key-hiding pattern R8 targets. Existing rationale verified and accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:03:10.528953+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. R8 targets setdefault used to hide missing-key bugs; here setdefault is the canonical atomic get-or-create idiom for a per-session lock map (`self._session_locks`) owned by this class — first-party process-local state, not external data. 'Missing key' is the expected first-call-per-session state, not an invariant break: direct subscript would be wrong because the lock is supposed to be lazily created the first time a session executes. The lock then serialises the get_active_run→create_run TOCTOU window, which is the documented intent at service.py:420-423. This is not the defensive 'paper over a contract gap' pattern the rule is aimed at; it is the prescribed lazy-init use of setdefault.
-  judge_signature_version: 2
-  scope_fingerprint: 90e75a2b4da79da294331dc3beb02b1b550548659ade316c6259e25058bad120
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[7]/body[2]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:30ac144f0770a214071cacf3e7d50d0b59bd878be834db43817d5e4aa877fd10'
-  judge_excerpt_redactions:
-    - pattern: dotenv_secret_assignment
-      byte_count: 23
-      redacted_hash: dfca8356a389f938
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=e0c1cd46e0b80ba5
-  owner: john
-  reason: |-
-    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:32:12.260837+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.95
-  judge_rationale: |-
-    PRESCRIBED FORM. Verified at web/interpretation_state.py:415 that materialize_state_for_execution returns the typed sum type CompositionState | InterpretationReviewPending — both arms produced by first-party code. isinstance at service.py:506 is the canonical Python discriminator for a Union return; it is structural dispatch, not a defensive shape guard. The pending arm emits per-site telemetry (lines 508-515) and raises the typed UnresolvedInterpretationPlaceholderError (line 516), the resolved arm continues — offensive programming at a typed-union boundary, not masking a contract violation. R5's concern (isinstance hiding bugs) does not apply: the type IS the contract here.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[8]/body[10]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:dcca38c96d5f3baa7ff86176ebd58c5977a9a9c23cf86dc115368d3f8ca168a0'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=a91add5d5970814d
-  owner: john
-  reason: |-
-    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:55:48.118835+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM at a genuine Tier-3 boundary. composition_state is hydrated at service.py:482 via state_from_record(state_record) from session-DB state — composer/user-authored persisted config re-read from our storage, which the custody doctrine keeps as Tier-3 at the read site regardless of the typed container. The R1 .get('path'/'file') here is optional-key presence detection in defense-in-depth path allowlisting: absence is meaning-preserving (the source isn't file-based — no value to validate), while presence is strictly enforced and raises PathAllowlistViolationError on out-of-allowlist resolution (lines 531–534, no silent default, no fabrication). The decorator-nudge test fails on Q3: the subject is rooted at the local composition_state, not at a function parameter, so per-line allowance is the correct scope. Rationale plainly states the why, the visible code supports it, no contradicting facts.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[8]/body[12]/body[2]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:83d1df0df965e02c36b48d042255173cd0e0d4a57f3829b5adf12e7d5ad60c4c'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=d458fff4dd2be32e
-  owner: john
-  reason: |-
-    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:33:30.941941+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM at a Tier-3 boundary. `composition_state` is hydrated at service.py:482 from a persisted session-DB record via `state_from_record(state_record)`, so `output.options` carries composer/operator-authored sink config re-read from our storage — Tier-3 per the custody doctrine (persistence interrupts chain-of-custody on someone-else's-statement values). The keys `path` and `file` are GENUINELY OPTIONAL (a non-filesystem sink legitimately sets neither), so `.get(key)` returning `None` is meaning-preserving (None = 'not specified, no path to allowlist-check'), not fabrication. The `if value is not None` guard then routes PRESENT values into offensive enforcement via `resolve_data_path` + `is_relative_to`, raising `PathAllowlistViolationError` if they escape — the prescribed Tier-3 pattern of guard-at-border + crash on bad upgrade. Decorator nudge does not apply: the subject is not rooted at a function parameter (the function takes ids; the Tier-3 data is loaded from the DB inside the function), so `@trust_boundary` with `source_param` cannot scope this site.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:cf3195f606025eb0ca4906221c31a983580c0d55a3355b97efb3cea3df9f13bb'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=f6eeabcecd608c77
-  owner: john
-  reason: |-
-    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:42:50.183308+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. composition_state.source.options is composer-authored config persisted in our store and re-read here — Tier-3 under the persisted-external-origin / chain-of-custody rule (a typed dataclass is a courier, not a tier-promoter). blob_ref is a genuinely optional key (present only on blob-backed sources), so .get returning None correctly records absence rather than fabricating a default, and the `if blob_ref is not None` branch escalates the value: UUID() parse with explicit MalformedBlobRefError, then a session-ownership IDOR check that raises BlobNotFoundError on mismatch (service.py:572-592). That is the policy-prescribed Tier-3 boundary form (coerce/validate at the border, record absence as None, crash informatively on bad shape), not a silent .get on a typed first-party object. Note: the function-scoped @trust_boundary decorator is not the right structural fix here because the external value flows in via `self`-attached state and is also used both via .get() and via subscript downstream (Tier-1 invariant block at lines 594+), not via a single source_param.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[8]/body[17]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:eb46fa1fa16865cda7e6a3b7febc862e14ffbadca4d26fa7be01b39b4d158dfa'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=b4fdef35d6621b71
-  owner: john
-  reason: |-
-    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:56:50.524766+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The outer `except BaseException as exc:` at line 660 owns the original failure; the inner try/except at 692-702 wraps a best-effort audit-status update during cleanup, and the bare `raise` at 703 sits in the outer block so the original `exc` propagates unmasked. R6's concern (silent swallow) does not apply: the cleanup failure is recorded via slog with only `type(...).__name__` for both exceptions, and the original error is re-raised. slog is the correct channel here because the audit/Landscape write is precisely the thing that broke, so primacy-order falls through to logging. The narrow catch (SQLAlchemyError, OSError) deliberately lets programmer bugs (AttributeError/TypeError/KeyError) propagate, matching the offensive stance, and the exc_class-only payload avoids the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Code and rationale agree; nothing in the excerpt contradicts the conformance claim.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[8]/body[24]/handlers[0]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:25d8a34a51d633087381b33b54cb0a86333f525ed06371175a0b957cac5603fd'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:validate_state:_blob_get_metadata:fp=07f7b1d9599f9e03
-  owner: john
-  reason: |-
-    In _blob_get_metadata (service.py:812), `except BlobNotFoundError:` returns None, catching one typed exception while looking up inline-blob metadata for dry-run pipeline validation. The function's signature is `BlobRecord | None`, and a not-found blob is a meaningful, expected absence (the referenced blob may not exist for the projected/draft state being validated) — recording it as None lets validate_pipeline report the gap rather than crashing the read-only validation. The catch is narrow (not bare Exception); other store errors propagate. This is the record-absence-as-None pattern, no fabrication. R6 is outside the {R1,R5} decorator set. Entry was ALLOWLIST-FRESH; this rationale is written from the current code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:03:34.930530+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The except clause catches a single typed exception (BlobNotFoundError), not bare Exception, and translates 'not found' into the function's declared `BlobRecord | None` return contract — None is the explicit semantic absence the function promises, not a fabricated default or silently-swallowed error. Other store errors propagate. This is the record-absence-as-None pattern at a lookup boundary used by dry-run validation, where a missing inline blob is an expected, meaningful absence that validate_pipeline reports rather than crashes on. R6's concern (swallow without explicit result) does not apply: the typed exception → typed Optional translation IS the explicit result. R6 is also outside the {R1,R5} @trust_boundary suppressible set, so the decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: d2a7378c1e7e89edf1984d60c1504e32e7353c2bd6bc0cb0caf10304e5af0703
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[11]/body[3]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:06139dc4e7ad8b83bffd20da3c3f1055f4376dc0141264e3a0bb3514568c160f'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=3195518183f4604c
-  owner: john
-  reason: |-
-    In cancel (service.py:856), event = self._shutdown_events.get(str(run_id)) reads from self._shutdown_events, an internal dict[str, threading.Event] (declared service.py:302). The .get here is a legitimate presence test, not defensive masking of a missing-key bug: a run may legitimately have NO registered shutdown event (it is still pending / not yet started, or already terminal), and the two states (present vs absent) are both expected and are explicitly branched on at line 857 — present means set the Event to signal the active Orchestrator, absent falls through to the pending/terminal path. This is the EAFP/presence-check use of .get on an internal map where key-absence is a designed-for state, not an anomaly to crash on. Existing reason verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:32:38.985686+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES. The R1 rule's premise (`.get()` hiding a missing-key bug) is false at this site: `self._shutdown_events` is a process-local `dict[str, threading.Event]` registered/cleared by `_run_pipeline`'s lifecycle, and key-absence is a designed-for program state — a run that is pending (not yet started) or already terminal will have no Event. The excerpt shows the code immediately branches on `event is not None` at line 857 and handles the absent path explicitly (consult SessionService, mark cancelled if non-terminal), so the `.get()` is a presence-test/LBYL branch, not silent suppression with a fabricated default. This is not a Tier boundary question (the dict is internal first-party state, not external data) and not the Defensive Programming pattern the rule targets — both outcomes of the lookup are valid and observably distinguished, not swallowed.
-  judge_signature_version: 2
-  scope_fingerprint: d92f4d50fcc70929d9a3777d3258a99df919c17fcba6a5cc4cd624b03edced58
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[13]/body[1]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:293eff6ee678aeddaab8c0396f4884bada30e0dc867ea9c2d5237653a430afab'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=6ae11216cb6427ab
-  owner: john
-  reason: |-
-    In _safe_broadcast (line 1119), `except RuntimeError as broadcast_err` narrowly catches the documented RuntimeError that asyncio's call_soon_threadsafe (inside broadcaster.broadcast) raises when the event loop is closed during shutdown — a genuine infrastructure boundary, not data handling. The catch is scoped to one specific exception type from one specific call; programmer bugs (TypeError, etc.) in self._to_run_event still propagate (the mapping is called outside the try, line 1116), and the failure is logged with exc_class (not the unstable CPython message). This is a legitimate narrow infrastructure-exception catch during shutdown; broadcasting is operational telemetry, not the audit trail, so the run's auditability is unaffected. The existing rationale matches the code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:47:28.667881+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on a narrow `except RuntimeError` around `broadcaster.broadcast`, but the visible code matches the policy-prescribed form for an asyncio infrastructure-boundary catch: (1) the catch is one specific exception type from one specific call known to raise RuntimeError when the event loop is closed during shutdown — a real infrastructure condition, not a data-handling defect; (2) `self._to_run_event` runs OUTSIDE the try at line 1116, so programmer bugs in the mapping (TypeError etc.) still propagate; (3) the handler is not silent — it emits `slog.error` with `exc_class` rather than the unstable CPython message. Per the primacy order, the broadcaster IS the live-UI telemetry channel; when telemetry itself fails, slog is the correct last-resort channel, not the Landscape (this is operational live-progress broadcasting, not the audit trail, which is unaffected). The rationale plainly states each of these facts and the code corroborates them.
-  judge_signature_version: 2
-  scope_fingerprint: f14a139c669ce7f8455c2997a2128c47b1a07b15cf63f81847792e8111ba57fe
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[14]/body[5]/body[15]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:c2f07cb3fb8e034927178f965f64ab6f0f8f4273380a39c3e259c2a9d0d4542f'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=59949748426d05a0
-  owner: john
-  reason: |-
-    _run_pipeline (service.py:1394) catches except GracefulShutdownError as gse — a named, typed control-flow signal raised by the orchestrator after it flushes in-progress work on cooperative shutdown, not an arbitrary error. The handler performs specific recorded work: _finalize_output_blobs, update_run_status to "cancelled" carrying the shutdown's own accounting fields (rows_processed/succeeded/failed/routed/quarantined from gse), and a cancelled-event broadcast. This is the offensive pattern of catching a specific signal to perform a specific audited state transition, exactly what R6 should not flag. The accounting comes from the exception, not re-derived from row counts. Existing rationale verified against current code and accurate. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:33:47.275624+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the shape (no re-raise) but the code is the policy-prescribed handling for a typed control-flow signal. GracefulShutdownError is a named, typed exception raised by the orchestrator after cooperatively flushing in-progress work; the handler does NOT swallow it silently — it performs an audited state transition: finalize output blobs, update_run_status to 'cancelled' carrying accounting fields read directly off the exception (gse.rows_processed/succeeded/failed/routed/quarantined), and broadcast a 'cancelled' SSE event. This matches the policy's 'recoverable failure typed so an outer per-unit handler peels it off' pattern, and the accounting is taken from the exception rather than re-derived. Rationale is site-specific and consistent with the visible code.
-  judge_signature_version: 2
-  scope_fingerprint: dab7079ca79da1aa0991eb1e39ae318c8b5fb0ccfaf4aea4201ce39de9b153b4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[14]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:ba094c312d62caf52e2a8e5606652fa23045c28840cb25cc8009f9ff3d068803'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=fc0b10cc4927e3e0
-  owner: john
-  reason: |-
-    At service.py:1492, `except (SQLAlchemyError, OSError) as probe_err` wraps a post-completion get_run() probe so transient audit-system degradation (DB hiccup, filesystem race) does not mask the original post-completion exception. The catch is narrow and ValueError is deliberately excluded: the ValueErrors get_run() can raise ('Run not found', malformed UUID, non-UTC datetimes) and AuditIntegrityError are all Tier-1 audit-data corruption that MUST crash per the tier model. The handler records to slog (policy-correct audit-degradation logging) and falls through to best-effort recovery — record-then-continue at an infrastructure boundary, not silent suppression. The existing rationale matches.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:43:30.056356+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The R6 catch is narrowly typed to (SQLAlchemyError, OSError) — infrastructure / audit-system degradation, not Tier-1 audit-data corruption. The rationale and the in-source comment together establish what is deliberately NOT caught: ValueError variants from get_run() ('Run not found', malformed UUID, non-UTC datetimes) and AuditIntegrityError remain uncaught and propagate, which is the correct Tier-1 invariant-break crash discipline. The handler is not silent: slog.error('post_exception_run_state_probe_failed', ...) records the audit-system degradation (the one case where slog is the policy-correct channel — when the audit system itself is the thing that's degraded), and the surrounding fall-through is explicit best-effort recovery whose branches are documented in the comment above (branches 1/2/3 keyed on probe outcome). The original exc from the outer BaseException handler at line 1427 is still in flight. This is record-then-continue at an infrastructure boundary, the prescribed R6 alternative to bare suppression. Decorator nudge does not apply: not R1/R5, not a Tier-3 external-parameter path.
-  judge_signature_version: 2
-  scope_fingerprint: dab7079ca79da1aa0991eb1e39ae318c8b5fb0ccfaf4aea4201ce39de9b153b4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[14]/body[5]/handlers[1]/body[4]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:791dd46a41ac8eda4ed85267641e5c7208f47a0401e325a1023acb47f69c8c9b'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=f75d502d14f8d197
-  owner: john
-  reason: |-
-    In _run_pipeline (line 1603), `except (SQLAlchemyError, OSError) as status_err` wraps a status-update DB operation inside the exception-recovery handler — a narrow catch for transient DB/IO failures during error recovery. The companion branch above (line 1594) deliberately re-raises IllegalRunTransitionError when current_status is non-terminal so a SessionService validator regression surfaces rather than being absorbed. Only the infrastructure-failure classes are caught here; programmer bugs propagate. slog records exc_class only (status_update_exc_class, original_exc_class) — no str(status_err), avoiding SQL/credential surface; client_msg is already sanitized. Legitimate trust-boundary catch with recording, not swallowing. Existing rationale accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:58:07.734540+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The R6 rule fires (the caught SQLAlchemyError/OSError is not re-raised), but the construct is the prescribed pattern for an error-in-error-handler at a Tier-1 audit-write site. Outer `except BaseException as exc:` is in flight; the nested try wraps `update_run_status` (Landscape write). The narrow catch is restricted to infrastructure exception classes (SQLAlchemyError family + OSError) — programmer bugs (TypeError/AttributeError) propagate uncaught, and the companion IRTE branch above (service.py:1594-1595) offensively re-raises validator regressions, demonstrating the discipline. The original `exc` propagates via the bare `raise` at service.py:1642, so the run still crashes; without this catch, a SQLAlchemyError on the failure-path audit write would mask the original pipeline error. slog records exc_class only for both exceptions (no `str(status_err)` to avoid SQL/credential surface, client_msg already sanitized), and slog is the correct channel here under CLAUDE.md's primacy order because the audit system is the very subsystem that failed — logger as last resort is licensed when audit is broken. Rationale matches the visible code and cites the canonical-pattern commit anchors; comments at 1604-1612 explain each design choice.
-  judge_signature_version: 2
-  scope_fingerprint: dab7079ca79da1aa0991eb1e39ae318c8b5fb0ccfaf4aea4201ce39de9b153b4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[14]/body[5]/handlers[1]/body[4]/body[1]/orelse[0]/handlers[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:c6a07d778b81b8e10518d33faac381f2f3e2ae864906c25c5816a6d3dd42248d'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=76aac7aeed5d2790
-  owner: john
-  reason: |-
-    In _finalize_output_blobs (service.py:1701), except self._FINALIZE_SUPPRESSED as blob_err catches a deliberately-narrow, explicitly-curated tuple (OSError, SQLAlchemyError, BlobNotFoundError, BlobQuotaExceededError, BlobStateError; defined at line 1667) during best-effort blob finalization after a run completes. The curation is offensive by design: RuntimeError is deliberately excluded as too broad (it would suppress Tier-1 anomaly signals), and programmer bugs (TypeError, AttributeError) are deliberately not caught (docstring line 1680). Finalization failure must not mask the original run outcome already recorded in the audit trail, so the I/O-class failure is recorded via slog (operational blob I/O, not audit-trail mutation) and isolated. This is documented narrow I/O fault-isolation, not broad silent swallowing — the catch cannot hide our own code bugs and the failure is observable.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:33:47.326924+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The R6 rule fires on shape (try/except without re-raise), and the code is the prescribed legitimate form: the catch is a narrow, explicitly-curated tuple (OSError, SQLAlchemyError, BlobNotFoundError, BlobQuotaExceededError, BlobStateError, defined at service.py:1667) with documented exclusions (RuntimeError, TypeError, AttributeError per the comments at 1663-1666 and docstring 1680). Call sites (service.py:1299, 1332, etc.) invoke this AFTER the authoritative audit-trail run-status transition has already been recorded, so re-raising would corrupt the recorded run outcome — exactly the failure mode the docstring at 1679 warns against. The slog channel is appropriate here because this is post-run operational blob I/O cleanup, not a pipeline data event; the audit trail's job (recording the run outcome) is already done. The exception tuple cannot mask programmer bugs in our own code (TypeError/AttributeError still propagate), satisfying the offensive-programming bar.
-  judge_signature_version: 2
-  scope_fingerprint: 7fc115f90980c3f1e75fda6bfa462c8a9fdf545e4e9979531783bc068ae21b2a
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[57]/body[16]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e0eba6f5b65317e50ca4393e4c7dbc611d495efca599eb77baf61112fdd46b03'
-- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=cd655256ca15f7bb
-  owner: john
-  reason: |-
-    In _serialize_response_via_walker (line 1082), `outcome.response` is a tool-call outcome that is a heterogeneous union — either a Mapping (already-dict response) or a ToolResult object. `if isinstance(response, Mapping)` is legitimate type-dispatch on that union: the Mapping branch deep_thaws it, the else branch casts to ToolResult and calls .to_dict() (lines 1082-1086). This is not isinstance hiding a bug — it is the canonical way to handle a value whose static type is Any/union, dispatching each shape to its correct serialization before redaction. No data is dropped or fabricated; both branches produce a faithful payload. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:57:50.686739+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. `outcome.response` is `_ToolOutcome.response: Any` (web/sessions/_persist_payload.py:112), which the dataclass docstring explicitly documents as a heterogeneous union populated by tool_batch.py — dict-shaped payloads (proposal_result, success_payload, error_payload at tool_batch.py:614/672/955) and ToolResult objects (tool_batch.py:1377). The `isinstance(response, Mapping)` is genuine union-dispatch into the two documented shapes: Mapping → deep_thaw, else → cast(ToolResult).to_dict(). The else branch does NOT swallow a wrong type — it casts and calls .to_dict(), so a non-ToolResult would AttributeError loudly. No fabrication, no silent recovery, both branches produce a faithful payload before redaction. Rationale's reading matches the code.
-  judge_signature_version: 2
-  scope_fingerprint: f86a7e72eeb0ffe6bfe019313c025decdba566c295daea02b2cd0f82ee03cbe5
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[93]/body[3]/body[4]/body[1]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:0462b3cfd6a387e72f073b2b0011d71b1cf3000bb911adead03f7335ce74c927'
-- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=54356b4332bf5c63
-  owner: john
-  reason: |-
-    run_tool_batch (tool_batch.py:886) catches except Exception as advisor_exc around an outbound LLM advisor call (request_advisor_hint via _call_advisor_with_audit) — a Tier-3 outbound external boundary where any provider/network exception class is possible. It does not swallow: it builds a structured ADVISOR_ERROR tool-result payload (carrying error_class and budget accounting), records it to the audit trail via recorder.record(finish_success(...)), appends it to llm_messages so the composer LLM gets explicit feedback rather than a silent stall, and the inner ComposerLLMCall record already fired in the callee's finally block. Broad-except is correct at an outbound boundary because the provider can raise any class; the failure is fully recorded and surfaced. Existing rationale verified and accurate. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:51:16.865810+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. R4 fires at line 886 on `except Exception as advisor_exc` wrapping an outbound LLM advisor call — a Tier-3 external boundary where the provider/network can raise any exception class, so narrow catches would mis-route real failures. The visible handler does not swallow: it captures `type(advisor_exc).__name__` into a structured ADVISOR_ERROR payload (lines 896-902), records it to the audit trail via `recorder.record(finish_success(...))` (lines 903-909), appends it to `llm_messages` so the composer LLM gets explicit feedback rather than a silent stall, and preserves budget accounting; the inline comment also notes the inner ComposerLLMCall audit record already fired in the callee's finally block. This is the prescribed Tier-3 outbound-boundary form (broad-except + record + surface), not silent suppression. Decorator nudge does not apply (R4 is outside the {R1, R5} suppressible set).
-  judge_signature_version: 2
-  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[27]/body[39]/body[16]/body[11]/handlers[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:37a29710cf4dd1522a83c1fa0f7f4b0fdb769a2759264a63c75b5191052ebc4e'
-- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=1498557d416fbe12
-  owner: john
-  reason: |-
-    At tool_batch.py:1259, `except Exception as tool_exc` is the plugin-bug isolation path in run_tool_batch. Tier-1 AuditIntegrityError and ToolArgumentError (plus a narrow re-raise set: AssertionError, MemoryError, RecursionError, SystemError) are re-raised by explicit handlers above this catch; any remaining exception escaping execute_tool() is captured and converted to a typed ComposerPluginCrashError with __cause__ preserved and a PLUGIN_CRASH invocation written before the raise. This is the documented web-server policy exception: aborting the ASGI worker on one plugin bug would take down every concurrent session including audit writes. It is audit-record-then-convert, not silent swallowing. The existing rationale matches.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:44:11.521852+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The R4 broad-except at line 1259 is the documented web-server policy exception for plugin-bug routing. Visible code confirms each rationale claim: lines 1212-1254 re-raise the narrow severe set (AssertionError/MemoryError/RecursionError/SystemError) so partial-state persistence never runs on poisoned memory; lines 1255-1258 re-raise AuditIntegrityError so Tier-1 audit invariants are not laundered; the catch at 1259 converts the residual to a typed ComposerPluginCrashError via .capture() (lines 1304-1310) preserving the original on plugin_crash_cause as __cause__, with _append_tool_outcome recording type(tool_exc).__name__ before the wrap and recorder.invocations carrying the PLUGIN_CRASH audit record forward. This is the raise≠crash pattern: the exception TYPE matches the ASGI structural handler that peels it off to HTTP 500, rather than aborting every concurrent session including audit writes. ToolArgumentError handling above (1196-1211) and the narrow re-raise list keep the concession bounded. The rationale states the policy exception plainly and the visible code corroborates each load-bearing claim.
-  judge_signature_version: 2
-  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[27]/body[39]/body[23]/handlers[3]'
-  judge_metadata_signature: 'hmac-sha256:v2:44643f1dc7389502d7eae16bb9f5c181a5a9354b8931e57dee91f2f71d160c91'
-- key: web/composer/tool_batch.py:R5:run_tool_batch:fp=9a7b25e2fc96514d
-  owner: john
-  reason: |-
-    In run_tool_batch (line 314), `if not isinstance(decoded_arguments, dict)` guards JSON decoded from the LLM tool-call response — untrusted model output, Tier 3. The LLM can emit valid JSON that is not a JSON object (list/str/number/null); isinstance rejects those at the boundary before they are treated as a keyword-argument mapping. Crucially this is not silent loss: the non-dict value is captured deterministically in the audit trail wrapped under '_decoded_non_object' (line 327) via begin_dispatch_or_arg_error, and an ARG_ERROR outcome is recorded for the turn. Legitimate isinstance type-dispatch at a Tier-3 LLM boundary with full audit capture of the rejected shape.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:59:18.034795+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. `decoded_arguments` is `json.loads(tool_call.function.arguments)` where `tool_call` is iterated from `call_model.assistant_message.tool_calls` — the LLM tool-call response, externally-sourced Tier-3 data per CLAUDE.md ('Transform on external calls: external response is Tier 3'). The isinstance check is the Tier-3→Tier-2 promotion gate: a non-dict JSON value (list/scalar/null) cannot be used as kwargs, and the policy prescribes 'crash/quarantine on the upgrade to Tier-2'. The visible code (lines 314–344) does exactly that — `begin_dispatch_or_arg_error` opens the audit envelope wrapping the rejected value under `_decoded_non_object` (line 327), `finish_arg_error` records a typed ARG_ERROR outcome with the actual decoded type in the message, and the loop continues to the next call. No silent coercion, no fabricated default — the bad shape is captured deterministically for the audit trail. Decorator nudge does not apply: the dataflow from `call_model` to `decoded_arguments` passes through `json.loads(...)`, a function call outside the decorator's tracked dataflow ops (subscript/.get/iteration/unpacking/attribute/assignment), so the static analyzer would not recognise the suppression scope.
-  judge_signature_version: 2
-  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[27]/body[39]/body[4]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:52936b8455de53cd0817600dba9fd6f40001bc7324a8a4777f70b30c37fa1c7f'
 - key: web/composer/redaction.py:R5:_coerce_stringified_json_object:fp=4f5bfe819cd1532d
   owner: john
   reason: |-
@@ -2382,44 +1767,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[71]/body[18]/body[2]/body[4]/body[2]'
   judge_metadata_signature: 'hmac-sha256:v2:590c388503d4ac5b8925782fa7cd67e1c38015e230d46ba426a3b743188bbd2c'
-- key: web/composer/source_inspection.py:R6:_inspect_json:fp=7ac9c954381a870b
-  owner: john
-  reason: |-
-    In _inspect_json (source_inspection.py:504), except json.JSONDecodeError as exc catches the parse failure of operator-supplied blob sample bytes that may be truncated at the 8 KiB peek boundary or genuinely malformed — the exact case 'validate at the boundary, record what we got' covers for Tier-3 external content. The catch is narrowly typed to json.JSONDecodeError (not bare/broad), distinguishes the truncated-vs-malformed cases via distinct operator-visible warnings (lines 511-514) rather than conflating them, and sets loaded=None which then flows through type-checked isinstance branches (lines 517-528) rather than fabricating a default structure. The failure is recorded (warnings) and observable, not silently swallowed. Existing rationale verified accurate against current code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:35:14.269288+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. _inspect_json is a Tier-3 boundary inspector for operator-supplied blob sample bytes; the except is narrowly typed to json.JSONDecodeError (not bare/broad), records the failure as an operator-visible warning that distinguishes truncated-sample from genuinely-malformed cases (lines 511-514), and sets loaded=None — explicit absence, not a fabricated default — which then flows through the isinstance branches at 517-528 that produce structured SourceInspectionFacts. R6's concern is swallowed-without-explicit-error-result; here the error is the explicit result (warning + None), exactly the 'validate at the boundary, record what we got' Tier-3 pattern. Decorator nudge does not apply: R6 is outside the suppressible set {R1, R5}.
-  judge_signature_version: 2
-  scope_fingerprint: 47679111231fb11564682e72e00c9136faa736815094e693c033f14581bc0c2c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[39]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:6a94820439de0dfdf6ddf02b96babfb513ff14db57dac7c646c1629958d988ef'
-- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=4e2ec0402671ae1e
-  owner: john
-  reason: |-
-    In _inspect_jsonl (line 468), the function parses operator/user-supplied JSONL sample bytes line-by-line — Tier-3 external content. The `except json.JSONDecodeError` is narrow (named, not bare), increments parse_failures, and `continue`s to the next line; the total is surfaced as an explicit warning in the returned facts (lines 469-476). This is the correct sample-inspection boundary behavior: a single malformed line must not abort inspection of the rest, and the failure is counted and reported rather than swallowed to a silent default. The existing rationale matches the current code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:59:00.676848+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The `sample` bytes are operator-supplied Tier-3 external content being inspected line-by-line. R6's concern is silent error-swallowing; here the narrow `except json.JSONDecodeError` is the prescribed Tier-3 boundary form: each malformed line is counted (`parse_failures += 1`), the loop continues so a single bad line doesn't abort inspection of the rest, and the aggregate count is surfaced as an explicit warning at line 476 in the returned facts. This is quarantine-with-recording per the Tier-3 quick reference, not silent recovery — absence of structure is reported, not papered over with a fabricated default. The rationale plainly maps the code to the policy and the visible code corroborates it.
-  judge_signature_version: 2
-  scope_fingerprint: 90d7774ca2babc4f9ad46302552c3144920adf872e804ac8ab4f86625194ce35
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[38]/body[6]/body[3]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:6649d9aaf630b8606e6579b0fd9fadc6d0820234f69bab180607029467167fb9'
 - key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=6f346528de4eff44
   owner: john
   reason: |-
@@ -2815,46 +2162,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[3]/body[6]/value'
   judge_metadata_signature: 'hmac-sha256:v2:8061925ef96b252dfcc0c1ed0778e940eff5ae7e8cc8844cbaca7930a289a7f7'
-- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=a1dd46422475f434
-  owner: web-sessions
-  reason: |-
-    HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:26:54.593337+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    The docstring documents that ``options.model`` and ``options.model_version`` are intentionally optional keys in the Tier-1 composition_state schema — absence is a meaningful state ('no runtime model pinned') distinct from a writer bug. The ``.get()`` here is not silent recovery: type anomalies on present values are raised as AuditIntegrityError, and absence is faithfully recorded as ``None`` rather than fabricated. R1's concern (hiding missing-key bugs) does not apply when absence is a contractually valid state and the code distinguishes absent-from-malformed. The decorator nudge doesn't apply: this is Tier-1 audit data, not a Tier-3 external parameter boundary.
-  judge_signature_version: 2
-  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
-  judge_transport: openrouter
-  ast_path: 'body[97]/body[2]/body[3]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:3ba303ffc47ec16395d975c900d9fc552e30e9f8f47c21614bbd0f637c115230'
-- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=dc84631f2ee5050f
-  owner: john
-  reason: |-
-    In _extract_runtime_model_snapshot (_helpers.py:645/646), `options.get("model")` / `options.get("model_version")` read LEGITIMATELY-OPTIONAL keys from a Tier-1 composition_state node written by our own writer. The REQUIRED keys (`node["id"]`, `node["options"]`) are read by direct subscript (crash-on-absence, correct for Tier-1), and a non-Mapping options raises AuditIntegrityError (offensive). model/model_version are optional BY DESIGN — an LLM transform without an explicit pin uses an LLM-pack default at runtime — so `.get`-returns-None faithfully records 'no runtime model pinned' (the audit columns are nullable) without fabricating a default. A non-str value at either key still raises AuditIntegrityError (line 647/653). The bare `.get` is the honest optional-key read; rewriting it surfaces no decision. R1 over-fires on these optional Tier-1 reads; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=state, tier=3) is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary and is therefore rejected: `state` is our own composition_state, the offensive AuditIntegrityError guards are doing the Tier-1 job CLAUDE.md mandates, and a tier=3 decorator would both misrepresent the trust tier and suppress those offensive checks.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T15:59:04.685789+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES. CompositionStateRecord.nodes is typed Sequence[Mapping[str, Any]] | None (web/sessions/protocol.py:419) and is our composition_states-table row; the outer-schema author is ELSPETH. The required keys `id` and `options` are read by direct subscript (lines 636, 638) — KeyError on absence is the correct Tier-1 behaviour. R1's premise (missing key = bug) is false at lines 645/646 specifically: `options.model` / `options.model_version` are documented optional-by-design keys whose absence faithfully means 'no runtime model pinned' (LLM-pack default applies at runtime); the audit columns are nullable so recording None is honest, not fabrication. The site already does offensive enforcement for the present-but-wrong-type case via `type(value) is not str` → AuditIntegrityError at lines 647-658, so the only thing .get() suppresses is the legitimate optional-key absence — exactly what the schema intends. The trust_boundary nudge is correctly rejected: a `tier=3, source_param='state'` decorator would mislabel a first-party composition-state read and would also suppress R5, masking the offensive type checks that do the Tier-1 integrity job here.
-  judge_signature_version: 2
-  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[97]/body[2]/body[4]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:e04bb09fbd2b2b88f76cc8ea315010c8ad83debaf7382ea1d31eb8f5721fec7c'
 - key: web/composer/llm_response_parsing.py:R1:_response_field:fp=216e94b72103f074
   owner: john
   reason: |-
@@ -3370,25 +2677,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[45]/body[1]/body[3]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:c0988f365846d4132b9f8e0612ac124623d3cca1c7042966707882402c4924ae'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=feb9afce47dffee1
-  owner: john
-  reason: |-
-    PRESCRIBED FORM — narrow transient-I/O catch around OPTIONAL enrichment; Tier-1 audit-data corruption deliberately propagates and crashes. In ExecutionServiceImpl._run_pipeline (web/execution/service.py:1250), `except (SQLAlchemyError, OSError)` wraps load_top_failure_samples()/format_failure_samples() — an OPTIONAL failure-sample enrichment of the run's error message. The in-code comment states the doctrine exactly: run-status persistence is more important than the optional sample enrichment, so a transient audit-system degradation (DB I/O or filesystem fault) degrades to the bare structural message (samples_text="") — which still satisfies the failed-requires-error invariant — and is recorded via the slog.warning audit-system-failure exemption per CLAUDE.md logging-telemetry-policy. CRITICALLY, malformed audit JSON (json.JSONDecodeError, a ValueError subclass raised by load_top_failure_samples) is Tier-1 audit-data corruption and is DELIBERATELY not in the catch tuple — it propagates and crashes per the tier model, because our own corrupt audit data must crash, not be silently degraded into a thinner error message. This is not a silent swallow and not fabrication: the outcome is an honest, structurally-valid error message minus an optional enrichment, with the degradation recorded. The catch is narrow (SQLAlchemyError, OSError) and excludes the Tier-1 corruption signal. R6 cannot distinguish a narrow recoverable-I/O catch around optional enrichment (with Tier-1 corruption excluded) from a silent swallow. Per-line allowlist is the prescribed mechanism.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T23:37:22.226492+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The except tuple is narrowly (SQLAlchemyError, OSError) — transient infrastructure failure modes around an OPTIONAL enrichment (top failure samples appended to an already-structurally-valid error message). The code path preserves the failed-requires-error invariant via the bare structural message when enrichment degrades, records the degradation via slog.warning (audit-system-failure exemption), and deliberately excludes json.JSONDecodeError/ValueError so Tier-1 audit-data corruption propagates and crashes. This matches the policy's distinction between transient I/O degradation around optional enrichment and silent swallowing of corruption signals; R6 cannot statically distinguish the two, so a per-line entry is the prescribed mechanism.
-  judge_signature_version: 2
-  scope_fingerprint: dab7079ca79da1aa0991eb1e39ae318c8b5fb0ccfaf4aea4201ce39de9b153b4
-  judge_transport: openrouter
-  ast_path: 'body[57]/body[14]/body[5]/body[37]/body[1]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:85b6e77715be24cbf30a1241a1ea78e8b0058e9529880551fb73cd9cf7d178ff'
 - key: web/sessions/routes/composer.py:R7:register_composer_routes:accept_composition_proposal:fp=2534d9088e852717
   owner: john
   reason: |-
@@ -3446,6 +2734,528 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[152]/body[7]/body[0]/body[3]/body[5]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:8d3a592fc5e065c66c46ab8ebee342394a4f45e871828a270350a04cc2ed3302'
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=4cfa0bef5fce8c3f
+  owner: john
+  reason: |-
+    In _periodic_orphan_cleanup (line 180), the catch is narrowed to (SQLAlchemyError, OSError) — recoverable DB-layer transients and SQLite file-level I/O failures from cancel_all_orphaned_runs at a true external boundary (DB engine + filesystem). The correct behaviour for this periodic background loop is to absorb the transient and retry on the next interval. Programmer-bug exceptions (AttributeError, TypeError, AssertionError) are deliberately NOT caught and terminate the task so they surface at lifespan shutdown — the offensive-programming stance. exc_info is omitted to avoid the documented SQLAlchemy __cause__ credential-leak vector. The existing rationale is accurate. Not silent swallowing of bugs; consistent with sibling cleanup sites.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:23:32.187627+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. The except clause is narrowed to (SQLAlchemyError, OSError) — these are genuine external-boundary failures (DB engine + SQLite filesystem) in a periodic background loop where absorb-and-retry-next-interval is the correct semantics. Programmer-bug exception types (AttributeError/TypeError/AssertionError) are deliberately left uncaught so they terminate the task and surface at lifespan shutdown, preserving the offensive-programming stance. The error is recorded via structured logging with a documented credential-leak reason for omitting exc_info, and the inline comment explains the routing decision. This is not silent swallowing — it is a typed, scoped catch matching the structural routing of a background retry loop.
+  judge_signature_version: 2
+  scope_fingerprint: e01b8fc50322bbae8528c468cd187e4b5bdc052660584de9702362694b874432
+  judge_transport: openrouter
+  ast_path: 'body[81]/body[3]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:689db47e339a1dcf94e87f56547cd4f4a1b81af69e9cf9221eabd0044611896d'
+- key: web/app.py:R7:lifespan:fp=99b1d84eb65cf352
+  owner: john
+  reason: |-
+    Shutdown suppresses the exact asyncio cancellation control signal after explicit task cancellation; it does not suppress operational errors.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:34:59.911404+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. After explicitly calling `orphan_task.cancel()`, awaiting the task is guaranteed to raise `asyncio.CancelledError` as the control-flow signal that cancellation took effect — this is the standard asyncio idiom, not error suppression. The `contextlib.suppress` is narrowly scoped to exactly `CancelledError` (not `Exception`), so any genuine operational failure in the cleanup task would still propagate. The rationale correctly identifies this as suppressing a cancellation signal we ourselves just sent, not swallowing errors.
+  judge_signature_version: 2
+  scope_fingerprint: 8dd45c1149590cdc95e80890013921aa05c8226aea16c273dc72aa5e55d2bf64
+  judge_transport: openrouter
+  ast_path: 'body[82]/body[28]/finalbody[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:e064ee849d15f00f5543da15163e254b4afa44ff1889299f32f1a62e8287d646'
+- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=92dd4b5a184dc62a
+  owner: john
+  reason: |-
+    In _BodySizeLimitMiddleware.dispatch (line 501), `request.headers.get("content-length")` reads an optional HTTP header from untrusted client input — Tier 3. content-length is optional and clients may omit it (comment lines 491-495); None means no declared size, in which case the request proceeds to the per-field Pydantic caps which are the actual contract. Notably the int(content_length) conversion at line 502 is deliberately NOT wrapped, so a malformed header propagates to Starlette's 400 handling rather than being defended — absence is handled honestly (skip the early 413) and bad values still crash. This is correct Tier-3 optional-header handling, not bug-hiding.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:35:06.769829+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.95
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: request.headers is HTTP request data from untrusted clients — Tier-3 external input, not first-party typed data. The Content-Length header is genuinely optional per HTTP spec, and .get() correctly distinguishes absence (None → skip early check, fall through to Pydantic per-field caps which are the real contract) from presence. The code is honest about its trust posture: int(content_length) is deliberately unwrapped so malformed headers crash to Starlette's 400 handler, and the docstring explicitly documents this design. This is the prescribed Tier-3 boundary form: validate-at-border, record absence as None, no fabrication.
+  judge_signature_version: 2
+  scope_fingerprint: 6727b0ede9bf6fed69e150333bf482a723144515f4a33fdc1de1c2dae1a75bfd
+  judge_transport: openrouter
+  ast_path: 'body[85]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:0bc64f8966c6891558687a9e4e162211f69e651ed5a14c86d80bdd894dc6a481'
+- key: web/app.py:R1:create_app:fp=f23aed5fee50ba7b
+  owner: john
+  reason: |-
+    create_app (app.py:706) reads os.environ.get("ELSPETH_ENV") != "test" as one clause of the production secret_key guard (the guard hard-crashes via SystemExit when secret_key is the default value on a non-local host outside tests). os.environ is a Tier-3 external boundary (process environment, not first-party data); .get() returns None when ELSPETH_ENV is unset and the != "test" comparison correctly treats absence as "not the test environment" without fabricating a substitute. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind. This is the canonical shape-safe read of an optional env var with explicit None handling. (Note: existing rationale's "WEB_CONCURRENCY" label is stale — the actual var is ELSPETH_ENV in the secret-key production guard; rewritten from current code.)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:35:12.701635+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES: os.environ is a Tier-3 external boundary (process environment, not first-party data under an ELSPETH typed contract). The .get("ELSPETH_ENV") != "test" comparison correctly treats absence as 'not test' without fabricating a substitute value — None propagates through the != comparison honestly. The decorator nudge does not apply because os.environ is module-level state, not a function parameter that @trust_boundary(source_param=...) could bind to. The guard itself is offensive (raises SystemExit on misconfiguration), and the .get() is the shape-safe read at the env-var boundary.
+  judge_signature_version: 2
+  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
+  judge_transport: openrouter
+  ast_path: 'body[86]/body[21]/test/values[3]/left'
+  judge_metadata_signature: 'hmac-sha256:v2:1353152d8d8f7e18e4ae41eb730c1a6285a3238f9c9cce5e12ac2f8221669fa4'
+- key: web/app.py:R1:create_app:fp=bf72ca4a84a3c2e7
+  owner: john
+  reason: |-
+    At app.py:797, os.environ.get("WEB_CONCURRENCY", "1") reads an optional process-environment variable — a genuine Tier-3 boundary external to ELSPETH. The default "1" is meaning-preserving: absence of WEB_CONCURRENCY documents single-worker, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") which rejects non-integers. This is an optional env-var read with a documented absence default, not a defensive .get() on a typed first-party object. (Note: the existing existing_reason text mislabels the variable as ELSPETH_ENV, but the code and the verified existing_rationale both correctly describe WEB_CONCURRENCY.)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:35:18.730143+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. os.environ is the process-environment boundary — a genuine Tier-3 external source whose shape ELSPETH does not control. The .get("WEB_CONCURRENCY", "1") reads an optional env var with a meaning-preserving default (absence documents single-worker intent, identical to the explicit "1" case), and the result is immediately validated by _parse_worker_count which rejects non-integers. This is the prescribed boundary form (validate-at-border, with absence handled honestly), not a defensive .get on first-party typed data.
+  judge_signature_version: 2
+  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
+  judge_transport: openrouter
+  ast_path: 'body[86]/body[50]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:74784f85d0b36d9d84020bc915540ddb7291b6bcde26cef4413dee3c82b1cc24'
+- key: web/app.py:R4:create_app:_prometheus_metrics:fp=cace50c86a32e828
+  owner: john
+  reason: |-
+    In _prometheus_metrics (app.py), the broad `except Exception` wraps generate_latest(), which walks the global Prometheus REGISTRY and runs third-party collector code we do not own — a genuine external boundary at a public /metrics scrape endpoint. A corrupted collector raising would otherwise reach Starlette's default 500 handler and leak the traceback into the response body; the handler instead records the failure via `_handler_slog.error("prometheus_scrape_failed", exc_class=..., detail=str(scrape_exc)[:200])` and returns a fixed 503 with a one-line '# scrape failed' body, so scrapers retry gracefully. Audit-primacy (CLAUDE.md): this endpoint reads in-memory OTel counter state only, so a scrape failure is a telemetry-system failure — operational, not legal — which is the sanctioned use of slog (logged, not audited); no Landscape audit event is swallowed. Logging a bounded message is safe here, unlike the secret-bearing DB exceptions in execution/service.py: generate_latest() only formats global-REGISTRY state, every value of which /metrics already serves publicly, so the message identifies which collector broke without exposing anything not already public. Broad except is the correct width for unknown third-party collector failures at an external boundary; the error is recorded for operators, not dropped.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T03:35:26.067620+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The broad except wraps generate_latest(), which runs third-party Prometheus collector code at an external HTTP scrape boundary — exactly the kind of unknown-third-party failure mode where narrow exception types cannot be enumerated. The handler records the failure structurally (exc_class + bounded detail) and returns a fixed 503, which is the correct operational disposition for a telemetry-scrape failure (not a Landscape audit event — no first-party invariant is being swallowed). The rationale correctly identifies the tier (telemetry/operational, not Tier-1 audit) and addresses why a bounded log message is safe here (REGISTRY state is already publicly served on /metrics). R4's concern — suppressing bugs — is mitigated by the structured error record plus distinct 503 status, so operators can observe the failure.
+  judge_signature_version: 2
+  scope_fingerprint: 3b9b06bfdec2daf353f82af2ecd2e832c436e2ef06be4d5f8406e785c29a116b
+  judge_transport: openrouter
+  ast_path: 'body[86]/body[75]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:8123dda774a76277460da4018cacdc68066e92201afee25af62fe4543e4f46dc'
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=c829a0906e9b3e29
+  owner: john
+  reason: |-
+    run_tool_batch (tool_batch.py:886) catches except Exception as advisor_exc around an outbound LLM advisor call (request_advisor_hint via _call_advisor_with_audit) — a Tier-3 outbound external boundary where any provider/network exception class is possible. It does not swallow: it builds a structured ADVISOR_ERROR tool-result payload (carrying error_class and budget accounting), records it to the audit trail via recorder.record(finish_success(...)), appends it to llm_messages so the composer LLM gets explicit feedback rather than a silent stall, and the inner ComposerLLMCall record already fired in the callee's finally block. Broad-except is correct at an outbound boundary because the provider can raise any class; the failure is fully recorded and surfaced. Existing rationale verified and accurate. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:31:04.664985+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. R4 fires on a broad-except wrapping an outbound LLM advisor call — a Tier-3 external boundary where the provider/network layer can legitimately raise any exception class. The code does not swallow: it records the failure to the audit trail via recorder.record(finish_success(...)) with error_class captured, surfaces a structured ADVISOR_ERROR payload back to the composer LLM, updates anti-anchor state, and continues. This matches the policy's prescription for Tier-3 outbound boundaries — record what we got, convert to a typed result, do not let provider-class variance crash the run. The rationale plainly identifies the boundary and the audit path, consistent with the visible code.
+  judge_signature_version: 2
+  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[39]/body[16]/body[11]/handlers[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:ae97ee983d021a324b9d030eee84c6393ecdd7340d2b115fc42717fdf30f7303'
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=e86afcd6f1854544
+  owner: john
+  reason: |-
+    At tool_batch.py:1259, `except Exception as tool_exc` is the plugin-bug isolation path in run_tool_batch. Tier-1 AuditIntegrityError and ToolArgumentError (plus a narrow re-raise set: AssertionError, MemoryError, RecursionError, SystemError) are re-raised by explicit handlers above this catch; any remaining exception escaping execute_tool() is captured and converted to a typed ComposerPluginCrashError with __cause__ preserved and a PLUGIN_CRASH invocation written before the raise. This is the documented web-server policy exception: aborting the ASGI worker on one plugin bug would take down every concurrent session including audit writes. It is audit-record-then-convert, not silent swallowing. The existing rationale matches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:31:11.953076+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. R4 fires on the broad `except Exception`, and the visible code shows exactly the policy-conformant handling for a web-server boundary: Tier-1 AuditIntegrityError is re-raised by an explicit handler immediately above (line 1258), a narrow re-raise set (AssertionError/MemoryError/RecursionError/SystemError) is handled separately with audit-record-then-raise, and the remaining catch wraps into a typed ComposerPluginCrashError with __cause__ preserved and a PLUGIN_CRASH invocation written before raising. This matches the documented web-server concession (don't take down the ASGI worker and all concurrent audit writes for one plugin bug) and is audit-record-then-convert, not silent swallowing. Decorator nudge does not apply: R4 is not in the {R1, R5} suppressible set.
+  judge_signature_version: 2
+  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[39]/body[23]/handlers[3]'
+  judge_metadata_signature: 'hmac-sha256:v2:0407a4f6abfbdadf7cf9c2fe7781830f04aa4e3dd4db2ae14a2df0d2ffa167d9'
+- key: web/composer/tool_batch.py:R5:run_tool_batch:fp=1b9dcb6c67012333
+  owner: john
+  reason: |-
+    In run_tool_batch (line 314), `if not isinstance(decoded_arguments, dict)` guards JSON decoded from the LLM tool-call response — untrusted model output, Tier 3. The LLM can emit valid JSON that is not a JSON object (list/str/number/null); isinstance rejects those at the boundary before they are treated as a keyword-argument mapping. Crucially this is not silent loss: the non-dict value is captured deterministically in the audit trail wrapped under '_decoded_non_object' (line 327) via begin_dispatch_or_arg_error, and an ARG_ERROR outcome is recorded for the turn. Legitimate isinstance type-dispatch at a Tier-3 LLM boundary with full audit capture of the rejected shape.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:31:23.159448+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The isinstance check guards `decoded_arguments` produced by json.loads on the LLM tool-call response — Tier-3 external data whose shape (JSON object vs scalar/list/null) is not contractually guaranteed. The guard is the boundary validation that promotes external data into a dict before it is splatted as kwargs, and the rejected value is captured verbatim in the audit trail under `_decoded_non_object` with an ARG_ERROR outcome — no fabrication, no silent recovery. This is the prescribed Tier-3 shape-validation pattern, and the rationale plainly establishes both the external origin and the audit recording.
+  judge_signature_version: 2
+  scope_fingerprint: cc89db4006bfcb5db3738dacf8c8c2f6b9868c26473c60bf98c7928628622e6c
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[39]/body[4]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:c6b76c2283a1857aa217071083b1a40591d4cfc9fff3dcb3a2eed376b04a7491'
+- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=ae6883ce1915b729
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — first-party sum-type dispatch, now mechanically declared. `_serialize_response_via_walker` accepts `_ToolOutcome`, whose `_ToolOutcomeResponse` type alias is `ToolResult | Mapping[str, Any] | None` in web/composer/_compose_loop_carriers.py. P3 constructs `_ToolOutcome` records only through `tool_batch.run_tool_batch._append_tool_outcome`; normal execute-tool, cache-hit, proposal, and session-aware success paths store a `ToolResult`, while the `request_advisor_hint` interception path intentionally stores first-party Mapping envelopes because that tool is outside `execute_tool` and performs an async advisor LLM call. Those Mapping envelopes are the disabled/budget-exhausted/advisor-error/timeout/success payloads produced in tool_batch.py and are redacted by the manifest entry for `request_advisor_hint`, whose known response keys include the sensitive `guidance` field. The external advisor text crosses its Tier-3 boundary in `_call_advisor_with_audit`, which validates non-empty content and records an inner ComposerLLMCall before building the first-party envelope. The `isinstance(response, Mapping)` branch therefore dispatches a declared internal union so P4 can either deep-thaw the advisor Mapping envelope or call `ToolResult.to_dict()`; it is not masking an unexpected contract violation or fabricating data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:31:30.776412+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM — the rationale plainly states that `_ToolOutcome.response` is a first-party union type `ToolResult | Mapping[str, Any] | None`, and the visible code dispatches on that union: the Mapping branch calls `deep_thaw` and the else branch `cast`s to `ToolResult` and calls `.to_dict()`. This is sum-type discrimination of a declared internal union, not a defensive shape guard against an unexpected contract violation, and it is not a Tier-3 boundary case (no external parameter, R5 here is structural dispatch). The isinstance is the prescribed way to fork on a Python union with no common method, and the rationale identifies which producers store Mappings vs ToolResults consistent with the code.
+  judge_signature_version: 2
+  scope_fingerprint: c87af842e6b25373cf6c3666950e45cef7ddbc0c7845e23029f21dbb9642d803
+  judge_transport: openrouter
+  ast_path: 'body[94]/body[3]/body[4]/body[1]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:5d84861e092a02dbdb184cdc59a4d49e7f467054d99510c52f38dc41eaf25dc4'
+- key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=7f739b2cc0f07da8
+  owner: john
+  reason: |-
+    In JWKSTokenValidator.decode_token (oidc.py:390), kid = header.get("kid") reads the optional 'kid' header from an unverified JWT header (jwt.get_unverified_header). The JWT and its header are external-origin Tier-3 data from a remote IdP, and 'kid' is explicitly OPTIONAL per RFC 7515 JWS. A None result flows into the key-matching loop and, if no JWK matches, raises a typed AuthenticationError (line 398) — absence is recorded and surfaced as an auth failure, never fabricated. Direct subscript would raise KeyError on a legitimately kid-less token, converting an expected optional-claim case into a crash. This is meaning-preserving Tier-3 boundary handling, not silent data loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:31:37.059098+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES at a genuine Tier-3 boundary. The JWT header is external-origin data from a remote IdP, and per RFC 7515 the 'kid' field is optional — no first-party contract guarantees its presence. The .get() result is not silently coerced: a None kid flows into the matching loop and, if no JWK matches, raises a typed AuthenticationError, which is the correct routing for a recoverable external-input failure. This is meaning-preserving boundary handling (absence recorded as None, surfaced as auth failure), not fabrication or silent recovery.
+  judge_signature_version: 2
+  scope_fingerprint: 4066025450e77ed83ec2c80bdc9ef3a8d16a997edfe014a4ff1d47c699ec4e62
+  judge_transport: openrouter
+  ast_path: 'body[15]/body[9]/body[1]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:8fa04c87290b2812df95829b9803d95e6650255adc83adae10b52d1b9fae8cbf'
+- key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=3ca0bb6706462b74
+  owner: john
+  reason: |-
+    In _litellm_error_detail (_helpers.py:508), getattr(exc, "status_code", None) reads status_code from a LiteLLM-native exception in the else-branch — a third-party-SDK exception object whose attribute surface is provider/SDK-controlled, i.e. Tier-3 external data even though our code holds the reference (our own _BadRequestLLMError carrier is dispatched by exact type in the other branch with direct attribute access). The follow-up `type(natural_status_code) is int` narrows to a validated shape and falls back to None, recording absence rather than fabricating a status code. This is the legitimate Tier-3 shape-guard, not a defensive read of a first-party contract. Existing rationale matches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:38:35.427493+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The getattr() targets a LiteLLM-native SDK exception in the else-branch — a third-party object whose attribute surface is provider-controlled, i.e. Tier-3 per the Plugin Ownership scope carve-out ('an LLM provider's reply wrapped by a third-party SDK'). The first-party carrier _BadRequestLLMError is handled in the other branch via exact-type dispatch with direct attribute access, so the guard is correctly scoped to the external case. The follow-up `type(...) is int` narrows the shape and records absence as None rather than fabricating, which matches the prescribed Tier-3 boundary form. Rule R2's concern (hiding a missing first-party attribute) does not apply here.
+  judge_signature_version: 2
+  scope_fingerprint: db97ecd0f8331527b185c72c44220015b58554686bd6dff85f0fad55bbc2bd29
+  judge_transport: openrouter
+  ast_path: 'body[90]/body[3]/orelse[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:26763b9b3e4e5444f8221c3d8f8b88767c56e8a3edc32bd795bf05f6cebdafa8'
+- key: web/sessions/routes/_helpers.py:R5:_extract_runtime_model_snapshot:fp=23dc9504f1c66975
+  owner: john
+  reason: |-
+    In _extract_runtime_model_snapshot (line 639), `if not isinstance(options, Mapping): raise AuditIntegrityError(...)` is an OFFENSIVE Tier-1 guard, not defensive suppression. The composition_state JSON is written by our own writer, which guarantees the structural envelope (options is a Mapping; model/model_version are str-or-absent) even though the values inside are LLM-authored. A non-Mapping options is therefore corruption of our own audit data — the code crashes with a typed AuditIntegrityError (and uses `type(value) is str`, not duck-typing, on the inner keys, lines 647/653) rather than coercing garbage into the audit row or hiding the writer bug behind a NULL. isinstance here is the exact-shape envelope check that surfaces our-code corruption by raising. Legitimate offensive use; absent optional keys are correctly recorded as None (line 645-646), not fabricated.
+
+
+    The @trust_boundary decorator nudge would mark this function tier=3 with source_param=`state` — but that is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary. `state` is a CompositionStateRecord written by our own composition_state writer: node["id"]/node["options"] are read by required direct-subscript (Tier-1, crash-on-absence) and the isinstance(options, Mapping) guard raises AuditIntegrityError on a non-Mapping — an OFFENSIVE check that surfaces corruption of OUR data, not a zero-trust rejection of external input. A @trust_boundary(tier=3) here would (a) misrepresent the trust tier in the audit-tooling record and (b) suppress the offensive guard that is doing exactly the Tier-1 job CLAUDE.md mandates. The honest representation is this per-line allowlist entry documenting a sanctioned Tier-1 offensive isinstance, NOT a Tier-3 boundary decorator.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:38:42.882858+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. The type annotation declares state.nodes as Sequence[Mapping[str, Any]] | None, but node["options"] is typed Any — so the Mapping shape of options is NOT statically guaranteed at this point, and the isinstance check is the offensive enforcement that surfaces writer-side corruption of our own audit-adjacent data by raising AuditIntegrityError (a typed, bubble-to-top exception). The rationale correctly identifies this as Tier-1 (our own composition_state writer's output), correctly records absent optional keys as None rather than fabricating, and correctly rejects the @trust_boundary(tier=3) nudge — applying it here would mislabel the trust tier and suppress the offensive guard. The visible code (exact-type checks on inner str values, typed AuditIntegrityError, direct subscript on required keys) corroborates the rationale.
+  judge_signature_version: 2
+  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
+  judge_transport: openrouter
+  ast_path: 'body[93]/body[2]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:b704a9a4f83fc71a4a0f08aa823c6075155b1b3ccfe6fc2c8c7a16411ed20100'
+- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=bce5d1bfa9700829
+  owner: john
+  reason: |-
+    HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:38:50.801252+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES on closer inspection, but actually PRESCRIBED FORM at a Tier-1 read boundary. The docstring explicitly identifies `options.model` and `options.model_version` as *optional* keys by design — absence is a legitimate state meaning 'no runtime model pinned', and recording None is the honest non-fabricating choice. Direct subscript `options["model"]` would raise KeyError on a legitimate absence, forcing the caller to catch and translate, which is worse than `.get()` returning None. The code then offensively type-checks any present value with `type(x) is str` and raises AuditIntegrityError on anomaly — this is the prescribed Tier-1 offensive pattern. The `.get()` here distinguishes 'absent (legitimate)' from 'present-but-wrong-type (audit anomaly)', which is exactly what the schema requires.
+  judge_signature_version: 2
+  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
+  judge_transport: openrouter
+  ast_path: 'body[93]/body[2]/body[3]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:82a9b07acdf6551fa27f2f336fc293fdcea0caf388372fd87ca327611016eb0e'
+- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=ad64db4a8b3325db
+  owner: john
+  reason: |-
+    In _extract_runtime_model_snapshot (_helpers.py:645/646), `options.get("model")` / `options.get("model_version")` read LEGITIMATELY-OPTIONAL keys from a Tier-1 composition_state node written by our own writer. The REQUIRED keys (`node["id"]`, `node["options"]`) are read by direct subscript (crash-on-absence, correct for Tier-1), and a non-Mapping options raises AuditIntegrityError (offensive). model/model_version are optional BY DESIGN — an LLM transform without an explicit pin uses an LLM-pack default at runtime — so `.get`-returns-None faithfully records 'no runtime model pinned' (the audit columns are nullable) without fabricating a default. A non-str value at either key still raises AuditIntegrityError (line 647/653). The bare `.get` is the honest optional-key read; rewriting it surfaces no decision. R1 over-fires on these optional Tier-1 reads; per-line entry is the reviewed suppression.
+
+    The @trust_boundary nudge (source_param=state, tier=3) is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary and is therefore rejected: `state` is our own composition_state, the offensive AuditIntegrityError guards are doing the Tier-1 job CLAUDE.md mandates, and a tier=3 decorator would both misrepresent the trust tier and suppress those offensive checks.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:38:59.068735+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES on optional Tier-1 keys. The excerpt shows required keys (`node["id"]`, `node["options"]`) read by direct subscript with offensive `isinstance`→`AuditIntegrityError` on the options mapping, and exact-type `type(x) is not str` checks on the optional values that raise AuditIntegrityError on anomaly. The `.get("model")` / `.get("model_version")` reads target keys that are optional BY DESIGN (LLM-pack default applies at runtime), and recording `None` faithfully represents 'no runtime model pinned' into nullable audit columns — that is honest absence, not fabrication. The decorator nudge would be wrong here: this is first-party Tier-1 composition_state, not external Tier-3 data, and a `tier=3` boundary would mislabel the trust tier while suppressing the offensive checks that do the Tier-1 job.
+  judge_signature_version: 2
+  scope_fingerprint: 7fc6ae8b37fbdaa6289513c6c8a8f74165bcbebad7feced4e3d4129493de16c0
+  judge_transport: openrouter
+  ast_path: 'body[93]/body[2]/body[4]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:90a3811473b7462942945515bf93d661989b1f6e79d29c8be5203e8e6726c5e4'
+- key: web/sessions/routes/_helpers.py:R6:_handle_convergence_error:fp=bc7bce58e1ea7cdd
+  owner: john
+  reason: |-
+    _handle_convergence_error (_helpers.py:1956) catches except SQLAlchemyError as save_err around a best-effort persistence of partial composer state at a Tier-3 DB-persistence boundary. The catch is narrowed to the SQLAlchemyError family per CLAUDE.md Tier-1 semantics (TypeError/KeyError from state.to_dict()/CompositionStateData would be Tier-1 invariant bugs and deliberately propagate). It does not swallow: it records the failure class via slog (class name only, str(exc) deliberately omitted because SQLAlchemyError text can carry DB URLs/credentials/bound payloads) and surfaces the outcome to the caller by setting partial_state_save_failed=True and partial_state_save_error in the HTTP response body. The recovery is deliberate — a persistence failure must not upgrade a 422 convergence error to a 500. Record-then-degrade-with-explicit-signal, not a silent default. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:39:06.518643+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The except is narrowed to SQLAlchemyError (Tier-1 TypeError/KeyError from to_dict()/CompositionStateData deliberately propagate), and the handler does not silently swallow: it emits a structured slog event with the exception class, sets partial_state_save_failed=True and partial_state_save_error on the response body, and degrades the outcome explicitly so a persistence failure does not upgrade a 422 convergence error to a 500. The omission of str(exc)/exc_info is a deliberate secret-hygiene choice (SQLAlchemyError repr can carry bound parameters and connection strings), not silencing. This is record-then-degrade-with-explicit-signal at a DB persistence boundary, which is the prescribed legitimate form for R6.
+  judge_signature_version: 2
+  scope_fingerprint: ffe235f625614b078895b7bff99423d92e589d958e56e8281f6f9fe2dca4690f
+  judge_transport: openrouter
+  ast_path: 'body[142]/body[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:3c20be8a95d0ed8a4f2ed82193e7aafedbd83d8283598ec45b1f1832bec22f45'
+- key: web/sessions/routes/_helpers.py:R6:_handle_plugin_crash:fp=330794dc236b4b2e
+  owner: john
+  reason: |-
+    In _handle_plugin_crash (_helpers.py:2098), `except SQLAlchemyError as save_err` wraps the partial-state save during plugin-crash handling so that a DB write failure does not mask the original plugin-crash 500 response. The catch is narrow (full SQLAlchemyError family deliberately, to avoid OperationalError/ProgrammingError escaping; ValueError/TypeError/KeyError Tier-1 invariant bugs are NOT caught here and propagate) and the error is not swallowed: it is recorded via slog (class name only, to avoid leaking SQL params/secrets) and surfaced to the frontend as explicit partial_state_save_failed / partial_state_save_error fields so the UI can distinguish 'state captured' from 'state lost'. This is record-then-continue at an audit-DB-degradation boundary, not silent data loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:39:14.032493+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The R6 rule fires on a narrow SQLAlchemyError catch, but the code is not swallowing — it records the failure via slog with the exception class, surfaces it to the client as explicit partial_state_save_failed/partial_state_save_error response fields, and deliberately preserves the original plugin-crash 500 response so the DB-save failure does not mask the primary error. This is the documented record-then-continue pattern at an audit-DB-degradation boundary: a narrower catch would let sibling SQLAlchemyError types escape and mask the primary response, while Tier-1 invariant errors (TypeError/KeyError/ValueError) are intentionally not caught and propagate. The rationale plainly states the why and the visible code corroborates it (slog.error call, explicit response_body signaling, comments documenting symmetry with _handle_convergence_error).
+  judge_signature_version: 2
+  scope_fingerprint: d680f1d232f7ad5772bf2b49e5eb5f151d1caa3322148f62972b02f0b7d27349
+  judge_transport: openrouter
+  ast_path: 'body[143]/body[4]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:558b160d1c34628ed45d819691dbe74a3f6738af148c2467cb5e7743dd4fa165'
+- key: web/sessions/routes/_helpers.py:R6:_handle_runtime_preflight_failure:fp=a2fdcb3a8186e070
+  owner: john
+  reason: |-
+    In _handle_runtime_preflight_failure (line 2331), `except SQLAlchemyError as save_err` wraps a best-effort audit-DB save of the partial composition state during error handling. The persistence-fallback contract is explicit: a DB write failure must NOT mask the original runtime-preflight 500. The catch is narrowed to SQLAlchemyError (not bare except), records the failure via slog as an audit-system-failure event (class name only, no exc_info, per the documented credential-redaction rationale), and surfaces partial_state_save_failed in the response body. This matches CLAUDE.md's audit-system-failure / persistence-fallback exemption. Programmer bugs are not caught and propagate. Not silent swallowing — the failure is recorded and surfaced.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:39:20.079021+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. The except narrowly catches SQLAlchemyError around a best-effort save of partial composer state during error-handling of an already-failing runtime preflight. Per policy, the original 500 must not be masked by a secondary persistence failure; the handler records the failure via slog as an audit-system-failure event and surfaces partial_state_save_failed/partial_state_save_error in the response body — this is explicit error surfacing, not silent swallowing. The exception type is narrow (SQLAlchemyError, not bare Exception), programmer bugs propagate, and the original exception's response is preserved. This matches the audit-system-failure / persistence-fallback exemption.
+  judge_signature_version: 2
+  scope_fingerprint: f830acbacdb0f024f540f0659fecd300fd5bbb68f271e9b26307fa6884160717
+  judge_transport: openrouter
+  ast_path: 'body[144]/body[4]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c15f36a42eccb4c1d432f55bafa8efbfee182f42719ba3fc4c040591981c4a69'
+- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=c14188b71e435f3d
+  owner: john
+  reason: |-
+    In cleanup_session_lock (line 376), `self._session_locks.pop(session_id, None)` removes the per-session asyncio lock on session deletion. This is process-local internal state; a session may never have called execute(), so no lock entry exists, yet cleanup runs on every session delete regardless. pop(key, None) is the idiomatic idempotent-removal pattern for that legitimate absence (the documented ProgressBroadcaster.cleanup_run() precedent), not a defensive Tier-3 read or fabrication. session_id is a trusted UUID-like string, not external payload. No audit data involved.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:08:26.126211+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM / RULE MISFIRES at the edge: this is an idempotent removal of process-local state (a dict of per-session asyncio locks) where absence is a legitimate state — a session may never have acquired a lock if execute() was never called, yet cleanup runs unconditionally on session delete. The rationale correctly identifies that pop(key, None) here is not hiding a missing-key bug in a contract we own; rather, the contract explicitly permits absence. This is not Tier-3 boundary data nor fabrication (no value is being substituted into a data flow — the return is discarded), and the Decision Test points to 'idempotent cleanup' rather than 'fix root cause.' The visible docstring and code support the rationale.
+  judge_signature_version: 2
+  scope_fingerprint: 7cd121fe71a37e9adb96dc7b6849df3c96e12c4ecea3e976f2212fb330d400cd
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[5]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:b4f7c736e4ce7670d519d52e04d4485fbc29daec2494bfb878a79550e170c8df'
+- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=c717fbe5f3b88ee3
+  owner: john
+  reason: |-
+    In ExecutionServiceImpl.execute (service.py:424), `lock = self._session_locks.setdefault(session_key, asyncio.Lock())` is the atomic get-or-create idiom for a per-session lock map that the class owns — first-party process-local state, not external data. The intent is exactly 'create the lock if absent, else reuse it'; a KeyError on first call per session is the expected first-call state, not a bug to surface, so direct subscript would be wrong. The lock then serialises the get_active_run -> create_run TOCTOU window. This is the legitimate lazy-init use of setdefault, not the missing-key-hiding pattern R8 targets. Existing rationale verified and accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:08:33.033870+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. R8 targets setdefault used to hide missing-key bugs by silently substituting a default for absent data. Here setdefault is the canonical atomic get-or-create idiom for a per-session lock registry — first-party process-local state owned by the class, where 'key absent' is the expected first-call state and the whole point is to lazily install a fresh asyncio.Lock for new sessions while reusing the existing one for repeat calls. Direct subscript would be wrong (KeyError on first call), and a check-then-set would reintroduce a TOCTOU race the lock exists to close. This is lazy-init, not missing-key suppression.
+  judge_signature_version: 2
+  scope_fingerprint: 90e75a2b4da79da294331dc3beb02b1b550548659ade316c6259e25058bad120
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[7]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:b2a62d99192266c6224d0928dc52a04d34a6b7eac8c3ba8881b8f2dd22ab00c0'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 23
+      redacted_hash: 1cf041d475e40d17
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=f06a8245e2f3c1af
+  owner: john
+  reason: |-
+    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:08:39.403893+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES — this is tagged-union dispatch on a first-party sum-type return (`CompositionState | InterpretationReviewPending`) from `materialize_state_for_execution()`, which is the canonical Python pattern for discriminating union variants. The isinstance check is not a defensive shape guard against external data nor a redundant re-check of a guaranteed type; it is the structural discriminator that selects which arm to execute. The pending arm emits telemetry and raises a typed error (offensive), and the resolved arm narrows the type for downstream use. R5's concern (masking contract violations) does not apply: there is no contract being violated — the union IS the contract.
+  judge_signature_version: 2
+  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[10]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:bdcc80d82cdc0838f039c77a52047ca101ac4dd080043fc075e40e440e2e3b00'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=08f79725af00b7e8
+  owner: john
+  reason: |-
+    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:08:47.013962+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: composition_state.source.options carries composer/user-authored config persisted and re-read from state — Tier-3 external-origin content per the policy's persisted-config rule, regardless of its dataclass courier. The keys 'path' and 'file' are genuinely optional (a non-file source declares neither), so absence legitimately means 'not used' and skipping is meaning-preserving, not fabrication; present values are strictly enforced with a hard PathAllowlistViolationError before reaching the engine. This is the prescribed Tier-3 boundary guard pattern, and the rationale correctly identifies the tier and the optionality. The function does not take the external data as a parameter (it's reached via self/composition_state), so @trust_boundary's source_param mechanism does not cleanly apply here.
+  judge_signature_version: 2
+  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[12]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:806c8acd546505054e6b207b49972f28ac31f4dde2a93ffec321a8ec3ebd53fb'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b5a321ad3a8cf21a
+  owner: john
+  reason: |-
+    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:08:54.064849+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES — output.options is composer/operator-authored sink config (Tier-3 external-origin per policy: persisted external-origin config re-read is Tier-3 at the read site, container dataclass notwithstanding). The 'path'/'file' keys are genuinely optional (non-filesystem sinks legitimately have neither), so .get() returning None is meaning-preserving absence, not fabrication, and is immediately guarded by `if value is not None`. When present, the value is offensively resolved and hard-rejected via PathAllowlistViolationError if it escapes allowed directories — this is the prescribed Tier-3 boundary form. The rationale correctly identifies the tier and the security semantics match the visible code.
+  judge_signature_version: 2
+  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:e9dc6a91969c42d0dbbb8862d73500ddf9e9ba7aa569b58d7ae2611a86870e39'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=99a68378ad3d14fc
+  owner: john
+  reason: |-
+    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:09:01.180251+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES on tier classification. composition_state.source.options carries composer-authored config re-read from our store — Tier-3 per policy ('persisted external-origin config re-read from our DB: still Tier-3'). blob_ref is an optional key whose absence is a legitimate state (non-blob-backed sources), and the code handles None by skipping the UUID/ownership block, then validates the present case with UUID() raising MalformedBlobRefError and a cross-session ownership check raising BlobNotFoundError. This is meaning-preserving Tier-3 navigation of an optional key, not fabrication or silent recovery; absence is preserved as None rather than substituted.
+  judge_signature_version: 2
+  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[17]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:c8caf542abc462e33c37e079136dac4c3fef78234eaec7ef416d7ee8ded13d79'
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=bfc061ccd5a7c11f
+  owner: john
+  reason: |-
+    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:09:09.407294+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except block is narrowly scoped to SQLAlchemyError/OSError (cleanup-path failures during a setup-failure recovery), records the failure via slog with class-name-only payload to avoid credential leakage through SQLAlchemy's str() expansion, and is immediately followed by a bare `raise` on line 705 that re-propagates the original exception unmasked. This is the canonical record-then-reraise pattern at a cleanup boundary, not silent swallowing — R6's concern (errors disappearing without re-raise) does not apply because the original exception continues to propagate. The narrow catch correctly lets programmer bugs (AttributeError/TypeError) surface per the offensive stance, and the rationale speaks directly to the flagged pattern with site-specific detail.
+  judge_signature_version: 2
+  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[24]/handlers[0]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:50d6e72534da410fd458d9b927900efd54d090817a44f564b0618ea151e0cf04'
+- key: web/execution/service.py:R6:ExecutionServiceImpl:validate_state:_blob_get_metadata:fp=3c935d81224534c9
+  owner: john
+  reason: |-
+    In _blob_get_metadata (service.py:812), `except BlobNotFoundError:` returns None, catching one typed exception while looking up inline-blob metadata for dry-run pipeline validation. The function's signature is `BlobRecord | None`, and a not-found blob is a meaningful, expected absence (the referenced blob may not exist for the projected/draft state being validated) — recording it as None lets validate_pipeline report the gap rather than crashing the read-only validation. The catch is narrow (not bare Exception); other store errors propagate. This is the record-absence-as-None pattern, no fabrication. R6 is outside the {R1,R5} decorator set. Entry was ALLOWLIST-FRESH; this rationale is written from the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:09:16.469683+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The catch is narrowly typed to BlobNotFoundError (not bare Exception), and the function's contract is `BlobRecord | None` where None signals absence to validate_pipeline. This is the record-absence-as-None pattern at a lookup boundary: the blob genuinely may not exist for a projected/draft state being dry-run validated, and surfacing that absence as None lets the validator report the gap rather than crashing read-only validation. Other store errors propagate unchanged. No fabrication (None means 'not found', not a synthesized substitute value), and the exception type matches the routing — expected-absence is peeled off, unexpected errors bubble.
+  judge_signature_version: 2
+  scope_fingerprint: d2a7378c1e7e89edf1984d60c1504e32e7353c2bd6bc0cb0caf10304e5af0703
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[11]/body[3]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:5c873d5d117d52497e283b61cca805e3431e0f4703270dbc7bc18b9bc3cb5045'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=825abd046bed0898
+  owner: john
+  reason: |-
+    In cancel (service.py:856), event = self._shutdown_events.get(str(run_id)) reads from self._shutdown_events, an internal dict[str, threading.Event] (declared service.py:302). The .get here is a legitimate presence test, not defensive masking of a missing-key bug: a run may legitimately have NO registered shutdown event (it is still pending / not yet started, or already terminal), and the two states (present vs absent) are both expected and are explicitly branched on at line 857 — present means set the Event to signal the active Orchestrator, absent falls through to the pending/terminal path. This is the EAFP/presence-check use of .get on an internal map where key-absence is a designed-for state, not an anomaly to crash on. Existing reason verified accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T07:09:23.197388+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES (as applied here) / PRESCRIBED FORM. The .get() is on self._shutdown_events, an internal dict[str, threading.Event] where key-absence is a designed-for state (run is pending or terminal), not a missing-key bug. The code immediately branches on `event is not None` and handles both arms with distinct, correct behavior (signal vs. update status). This is a legitimate presence test, not defensive masking; replacing it with direct subscript would force a KeyError-then-catch pattern for an expected state. R1's concern (hiding missing-key bugs) does not apply when absence is a first-class semantic state.
+  judge_signature_version: 2
+  scope_fingerprint: d92f4d50fcc70929d9a3777d3258a99df919c17fcba6a5cc4cd624b03edced58
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[13]/body[1]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:411bc0d352f526426836f7db767f544972d510f45a21fd4392d2cd1abaca7817'
 per_file_rules:
 - pattern: web/composer/tools/_common.py
   rules:

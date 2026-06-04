@@ -15,8 +15,6 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_factory
 
-pytest_plugins = ["tests.fixtures.azurite"]
-
 
 @pytest.fixture
 def system_landscape_db(tmp_path: Path) -> LandscapeDB:

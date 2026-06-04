@@ -485,6 +485,30 @@ class TestBatchTransformMixinEviction:
         assert result.status == "success"
         assert state_id == "state-attempt-2"
 
+    def test_release_requires_submission_tracking_entry(self) -> None:
+        """Missing release-path tracking is an invariant break, not silent cleanup."""
+        adapter = SharedBatchAdapter()
+        transform = BlockingBatchTransform()
+        transform.connect_output(adapter, max_pending=5)
+        token = make_token("row-missing-submission")
+        state_id = "state-missing-submission"
+        ctx = make_context(landscape=_make_factory(), token=token, state_id=state_id)
+        waiter = adapter.register(token.token_id, state_id)
+
+        try:
+            transform.accept({"value": 1}, ctx)
+            transform.wait_for_processing_started()
+
+            with transform._batch_submissions_lock:
+                del transform._batch_submissions[(token.token_id, state_id)]
+
+            transform.release_processing()
+
+            with pytest.raises(KeyError, match=token.token_id):
+                waiter.wait(timeout=3.0)
+        finally:
+            transform.close()
+
 
 class SlowBatchTransform(BaseTransform, BatchTransformMixin):
     """Batch transform with configurable processing delay.

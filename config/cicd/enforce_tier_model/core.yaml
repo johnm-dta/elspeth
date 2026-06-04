@@ -33,7 +33,7 @@ per_file_rules:
   - R5
   reason: Type discrimination for Pydantic validator dispatch and config parsing
   expires: null
-  max_hits: 45
+  max_hits: 46
 - pattern: core/security/*
   rules:
   - R1
@@ -317,3 +317,22 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[17]/body[8]/body[9]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:106237b1a5dc9b1f5177556347f78cc89bb448e37e7aabe52684246bdf71e418'
+- key: core/security/web.py:R6:validate_literal_ip_for_ssrf:fp=82650ca4aa6dc216
+  owner: john
+  reason: |-
+    Literal-IP SSRF validation treats parser rejection as a negative literal-IP result; DNS-bearing host validation occurs at request time and is not silently trusted here.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:39:26.486400+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. The function's documented contract is 'validate IF host is a literal IP, else ignore'. The ValueError from ipaddress.ip_address(host) is the parser's documented signal that the input is not a literal IP — the early return is a meaning-preserving control-flow branch on a typed parser result, not a silent swallow of an unexpected error. The docstring explicitly notes DNS-bearing hostnames are handled by validate_url_for_ssrf() at request time, so non-IP inputs are correctly skipped here rather than fabricated or trusted. This is the prescribed boundary form: parse, branch on parse outcome, dispatch.
+  judge_signature_version: 2
+  scope_fingerprint: a885a9cf21de6f462deec22dce775ab6883f48acc0ea2aaa4cc308940821e223
+  judge_transport: openrouter
+  ast_path: 'body[19]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:6d1ba3dfd99cb7590abd07084fe41179e22b083a48509dc07629e8b59b34ea36'

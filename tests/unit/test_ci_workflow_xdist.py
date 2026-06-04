@@ -265,3 +265,19 @@ def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() ->
         assert "github.event.pull_request.head.repo.full_name != github.repository" in verify_mode
         assert "shape-only-when-key-missing" in verify_mode
         assert "required" in verify_mode
+
+
+def test_trust_tier_ci_failure_points_to_signature_diagnosis_command() -> None:
+    """Signed allowlist failures should point operators at the repair triage command."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    trust_tier_run = _step_run(static_analysis, "Run trust-tier elspeth-lints rule")
+    sarif_run = _step_run(static_analysis, "Emit elspeth-lints trust-tier SARIF artifact")
+
+    for run in (trust_tier_run, sarif_run):
+        assert "diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model" in run
+        assert "sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model" in run
+        assert "--env-file /path/to/operator.env --owner" in run
+        assert "judge_metadata_signature" in run
+        assert "scope_fingerprint" in run

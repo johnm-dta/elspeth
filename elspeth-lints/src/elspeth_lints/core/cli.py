@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import secrets
+import shlex
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -45,8 +46,52 @@ OPERATOR_OVERRIDE_TOKEN_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN"
 OPERATOR_OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
 OPERATOR_OVERRIDE_MIN_TOKEN_BYTES = 20
 
+_JUDGE_SIGNING_ENV_FILE_KEYS = frozenset(
+    {
+        "ELSPETH_JUDGE_METADATA_HMAC_KEY",
+        "ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        OPERATOR_OVERRIDE_TOKEN_ENV,
+        OPERATOR_OVERRIDE_TOKEN_SHA256_ENV,
+    }
+)
+_SIGNABLE_DIAGNOSIS_STATUSES = frozenset(
+    {
+        "MISSING_SIGNATURE",
+        "INVALID_SIGNATURE",
+        "AST_PATH_BINDING_DRIFT",
+        "SCOPE_BINDING_DRIFT",
+        "BINDING_DRIFT",
+    }
+)
+
 
 _MAX_AUDIT_IDENTITY_LENGTH = 200
+
+
+@dataclass(frozen=True, slots=True)
+class _JudgeSignatureSigningSpec:
+    """One exact ``justify`` invocation requested by the signing command."""
+
+    file_path: str
+    rule: str
+    symbol: str
+    fingerprint: str
+    rationale: str
+    source: str
+    stale_source_file: str | None = None
+    stale_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _JudgeSignatureSigningFailure:
+    """One failed ``justify`` call from a best-effort signing run."""
+
+    index: int
+    total: int
+    spec: _JudgeSignatureSigningSpec
+    exit_code: int
 
 
 # CLI spelling -> stored transport identity. The operator types the short
@@ -224,6 +269,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_audit_verdict(args)
     if args.command == "reaudit":
         return _run_reaudit(args)
+    if args.command == "diagnose-judge-signatures":
+        return _run_diagnose_judge_signatures(args)
+    if args.command == "sign-judge-signatures":
+        return _run_sign_judge_signatures(args)
     if args.command == "migrate-judge-scope":
         return _run_migrate_judge_scope(args)
     if args.command == "check-judge-coverage":
@@ -599,6 +648,122 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_judge_transport_arg(reaudit)
     _add_judge_tools_arg(reaudit)
 
+    diagnose_judge_signatures = subparsers.add_parser(
+        "diagnose-judge-signatures",
+        help=(
+            "Read-only signed judge metadata diagnosis. Agent-safe: does not write "
+            "allowlist YAML and does not require ELSPETH_JUDGE_METADATA_HMAC_KEY; "
+            "when the key is present in an operator-held shell, also verifies HMACs."
+        ),
+    )
+    diagnose_judge_signatures.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree to scan for the entries' underlying findings",
+    )
+    diagnose_judge_signatures.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files to inspect read-only",
+    )
+    diagnose_judge_signatures.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Dotenv file containing diagnosis-relevant keys such as "
+            "ELSPETH_JUDGE_METADATA_HMAC_KEY. Existing environment values win; "
+            "unrelated keys are ignored."
+        ),
+    )
+    diagnose_judge_signatures.add_argument(
+        "--format",
+        dest="diagnose_format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format for the diagnosis report",
+    )
+
+    sign_judge_signatures = subparsers.add_parser(
+        "sign-judge-signatures",
+        help=(
+            "OPERATOR-ONLY: re-run justify for diagnosed signed allowlist drift, "
+            "optionally adding manifest-listed first-time justifications. Loads "
+            "operator secrets from --env-file, removes stale diagnosed rows, and "
+            "writes fresh signed allow_hits entries."
+        ),
+    )
+    sign_judge_signatures.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree to scan for the entries' underlying findings",
+    )
+    sign_judge_signatures.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help=("Repository root used by trust-boundary scanners. Omit for the tier-model-only default."),
+    )
+    sign_judge_signatures.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files to repair in place",
+    )
+    sign_judge_signatures.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Dotenv file containing signing-relevant keys. Existing environment "
+            "values win; unrelated keys are ignored and secret values are not printed."
+        ),
+    )
+    sign_judge_signatures.add_argument(
+        "--owner",
+        type=_non_empty_string,
+        required=True,
+        help="Audit identity (operator) recorded on freshly signed entries.",
+    )
+    sign_judge_signatures.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "YAML file containing entries: [{file_path, rule, symbol, fingerprint, "
+            "rationale}] for brand-new findings that diagnosis cannot infer."
+        ),
+    )
+    sign_judge_signatures.add_argument(
+        "--operator-override",
+        action="store_true",
+        help=("Forward --operator-override to each justify call. Requires the operator override token environment exactly like justify."),
+    )
+    sign_judge_signatures.add_argument(
+        "--max-tokens",
+        type=_positive_int,
+        default=None,
+        help="Override the judge response max_tokens for each justify call.",
+    )
+    sign_judge_signatures.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact repair plan without calling the judge, removing stale rows, or writing signed entries.",
+    )
+    sign_judge_signatures.add_argument(
+        "--format",
+        dest="justify_format",
+        choices=("text", "json"),
+        default="text",
+        help="Per-entry justify output format.",
+    )
+    _add_judge_transport_arg(sign_judge_signatures)
+    _add_judge_tools_arg(sign_judge_signatures)
+
     migrate_judge_scope = subparsers.add_parser(
         "migrate-judge-scope",
         help=(
@@ -899,6 +1064,8 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
     diagnostic_paths: set[Path] = set()
     if whole_repo_rules:
         for item in walk_python_files(args.root, tuple(args.files or ()) or None):
+            if not _rules_for_path(item.path, root=args.root, rules=whole_repo_rules):
+                continue
             diagnostic = _diagnostic_finding_for_walk_item(item)
             if diagnostic is not None:
                 findings.append(diagnostic)
@@ -2905,6 +3072,464 @@ def _emit_reaudit_progress(progress: Any) -> None:
         f"prompt_tokens_cached={cached} "
         f"prompt_tokens_uncached={uncached}\n"
     )
+
+
+def _run_diagnose_judge_signatures(args: argparse.Namespace) -> int:
+    """Run the read-only signed metadata diagnosis and render its report."""
+    from elspeth_lints.core.judge_signature_diagnosis import (
+        diagnose_judge_signatures,
+        load_diagnosis_env_file,
+        render_judge_signature_diagnosis_json,
+        render_judge_signature_diagnosis_text,
+    )
+
+    try:
+        load_diagnosis_env_file(args.env_file)
+        report = diagnose_judge_signatures(root=args.root, allowlist_dir=args.allowlist_dir)
+    except ValueError as exc:
+        sys.stderr.write(f"diagnose-judge-signatures error: {exc}\n")
+        return 2
+
+    if args.diagnose_format == "json":
+        sys.stdout.write(render_judge_signature_diagnosis_json(report))
+    else:
+        sys.stdout.write(render_judge_signature_diagnosis_text(report))
+    return 1 if report.requires_action else 0
+
+
+def _run_sign_judge_signatures(args: argparse.Namespace) -> int:
+    """Repair signed judge allowlist drift by re-running exact ``justify`` calls.
+
+    The command is intentionally write-capable and operator-only. It consumes
+    the read-only diagnosis surface, removes each stale diagnosed row only for
+    the judge call being attempted, then delegates fresh signatures to the
+    existing ``justify`` implementation. If a judge call fails, the stale row is
+    restored so a rejected suppression does not erase the remaining backlog.
+    """
+    from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
+    from elspeth_lints.core.judge_signature_diagnosis import diagnose_judge_signatures
+
+    try:
+        _load_judge_signing_env_file(args.env_file)
+        if not args.dry_run:
+            _judge_metadata_hmac_key()
+        report = diagnose_judge_signatures(root=args.root, allowlist_dir=args.allowlist_dir)
+        diagnosis_specs, stale_keys, unrepairable = _signing_specs_from_diagnosis(report)
+        healthy_keys = frozenset(item.key for item in report.items if not item.requires_action)
+        manifest_specs = _filter_already_signed_manifest_specs(
+            tuple(spec for manifest in args.manifest for spec in _load_judge_signing_manifest(manifest)),
+            healthy_keys=healthy_keys,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"sign-judge-signatures error: {exc}\n")
+        return 2
+
+    if unrepairable:
+        sys.stderr.write("sign-judge-signatures: diagnosis found entries this command cannot safely sign:\n")
+        for item in unrepairable:
+            sys.stderr.write(f"  {item.status}: {item.key} ({item.note})\n")
+        sys.stderr.write("Run diagnose-judge-signatures for the exact operator action before retrying.\n")
+        return 2
+
+    specs = _dedupe_signing_specs((*diagnosis_specs, *manifest_specs))
+    if not specs:
+        sys.stdout.write("sign-judge-signatures: nothing to sign\n")
+        return 0
+
+    sys.stdout.write(
+        "sign-judge-signatures: "
+        f"{len(diagnosis_specs)} diagnosed repair(s), {len(manifest_specs)} manifest repair(s), "
+        f"{len(specs)} unique justify call(s)\n"
+    )
+
+    if args.dry_run:
+        if stale_keys:
+            sys.stdout.write("stale rows that would be removed before signing:\n")
+            for source_file, key in stale_keys:
+                sys.stdout.write(f"  {source_file}: {key}\n")
+        sys.stdout.write("justify calls that would run:\n")
+        for spec in specs:
+            sys.stdout.write(f"  {_render_signing_spec_command(spec, args)}\n")
+        return 0
+
+    failures: list[_JudgeSignatureSigningFailure] = []
+    for index, spec in enumerate(specs, start=1):
+        sys.stdout.write(
+            f"sign-judge-signatures: [{index}/{len(specs)}] {spec.source}: {spec.file_path}:{spec.rule}:{spec.symbol}:fp={spec.fingerprint}\n"
+        )
+        removed_stale_entry: str | None = None
+        stale_yaml: Path | None = None
+        try:
+            if spec.stale_source_file is not None and spec.stale_key is not None:
+                stale_yaml = args.allowlist_dir / spec.stale_source_file
+                removed_stale_entry = _pop_allow_hits_entry(stale_yaml, spec.stale_key)
+        except ValueError as exc:
+            sys.stderr.write(f"sign-judge-signatures error: {exc}\n")
+            return 2
+
+        exit_code = _run_justify(_namespace_for_signing_spec(spec, args))
+        if exit_code != 0:
+            failures.append(
+                _JudgeSignatureSigningFailure(
+                    index=index,
+                    total=len(specs),
+                    spec=spec,
+                    exit_code=exit_code,
+                )
+            )
+            if stale_yaml is not None and removed_stale_entry is not None:
+                _append_entry_to_yaml(stale_yaml, removed_stale_entry)
+                sys.stderr.write(
+                    "sign-judge-signatures: justify failed; restored the stale row for the blocked entry. "
+                    "continuing with remaining entries.\n"
+                )
+            else:
+                sys.stderr.write(
+                    "sign-judge-signatures: justify failed for a manifest entry; no diagnosed stale row was removed. "
+                    "continuing with remaining entries.\n"
+                )
+            continue
+
+    if failures:
+        sys.stderr.write(
+            "sign-judge-signatures: "
+            f"completed with {len(failures)} failed justify call(s); "
+            f"{len(specs) - len(failures)} succeeded. "
+            "Fix or remove the rejected suppressions, then rerun; already-signed entries will be skipped.\n"
+        )
+        for failure in failures:
+            spec = failure.spec
+            sys.stderr.write(
+                f"  [{failure.index}/{failure.total}] exit={failure.exit_code}: "
+                f"{spec.source}: {spec.file_path}:{spec.rule}:{spec.symbol}:fp={spec.fingerprint}\n"
+            )
+        return failures[0].exit_code
+
+    sys.stdout.write("sign-judge-signatures: completed\n")
+    return 0
+
+
+def _load_judge_signing_env_file(env_file: Path | None) -> None:
+    """Load only signing-relevant dotenv keys, with existing env winning."""
+    if env_file is None:
+        return
+    from dotenv import dotenv_values
+
+    resolved = env_file.resolve()
+    if not resolved.is_file():
+        raise ValueError(f"--env-file: {resolved} is not a file")
+    values = dotenv_values(resolved)
+    for key, value in values.items():
+        if key not in _JUDGE_SIGNING_ENV_FILE_KEYS or value is None or key in os.environ:
+            continue
+        os.environ[key] = value
+
+
+def _signing_specs_from_diagnosis(
+    report: Any,
+) -> tuple[tuple[_JudgeSignatureSigningSpec, ...], tuple[tuple[str, str], ...], tuple[Any, ...]]:
+    """Convert actionable diagnosis rows into exact signing specs."""
+    specs: list[_JudgeSignatureSigningSpec] = []
+    stale_keys: list[tuple[str, str]] = []
+    unrepairable: list[Any] = []
+    for item in report.items:
+        if not item.requires_action:
+            continue
+        if item.status not in _SIGNABLE_DIAGNOSIS_STATUSES:
+            unrepairable.append(item)
+            continue
+        repair_key = item.repair_key or item.key
+        parsed = _diagnosis_key_to_signing_parts(repair_key)
+        if parsed is None:
+            unrepairable.append(item)
+            continue
+        file_path, rule, symbol, fingerprint = parsed
+        rationale = _reason_for_allowlist_key(report.allowlist_dir / item.source_file, item.key)
+        specs.append(
+            _JudgeSignatureSigningSpec(
+                file_path=file_path,
+                rule=rule,
+                symbol=symbol,
+                fingerprint=fingerprint,
+                rationale=rationale,
+                source=f"diagnosis:{item.status}",
+                stale_source_file=item.source_file,
+                stale_key=item.key,
+            )
+        )
+        stale_keys.append((item.source_file, item.key))
+    return tuple(specs), tuple(stale_keys), tuple(unrepairable)
+
+
+def _diagnosis_key_to_signing_parts(key: str) -> tuple[str, str, str, str] | None:
+    from elspeth_lints.core.reaudit import _parse_entry_key
+
+    parsed = _parse_entry_key(key)
+    if parsed is None:
+        return None
+    file_path, rule, symbol_context, fingerprint = parsed
+    symbol = ".".join(symbol_context) if symbol_context else "_module_"
+    return file_path, rule, symbol, fingerprint
+
+
+def _reason_for_allowlist_key(target_yaml: Path, key: str) -> str:
+    import yaml
+
+    try:
+        raw = yaml.safe_load(target_yaml.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"{target_yaml}: cannot read rationale for {key!r}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{target_yaml}: allowlist YAML must be a mapping")
+    raw_entries = raw.get("allow_hits", [])
+    if raw_entries is None:
+        raw_entries = []
+    if not isinstance(raw_entries, list):
+        raise ValueError(f"{target_yaml}: allow_hits must be a list")
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict) or raw_entry.get("key") != key:
+            continue
+        reason = raw_entry.get("reason", "")
+        if not isinstance(reason, str):
+            raise ValueError(f"{target_yaml}: reason for {key!r} must be a string")
+        stripped = reason.strip()
+        return stripped if stripped else "Re-sign stale judge metadata after operator inspection."
+    raise ValueError(f"{target_yaml}: no allow_hits entry found for key {key!r}")
+
+
+def _load_judge_signing_manifest(manifest: Path) -> tuple[_JudgeSignatureSigningSpec, ...]:
+    import yaml
+
+    try:
+        raw = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"--manifest {manifest}: cannot read YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"--manifest {manifest}: expected a mapping")
+    raw_entries = raw.get("entries")
+    if not isinstance(raw_entries, list):
+        raise ValueError(f"--manifest {manifest}: entries must be a list")
+
+    specs: list[_JudgeSignatureSigningSpec] = []
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"--manifest {manifest}: entries[{index}] must be a mapping")
+        file_path = _manifest_string(raw_entry, "file_path", manifest, index)
+        rule = _manifest_string(raw_entry, "rule", manifest, index)
+        symbol = _manifest_string(raw_entry, "symbol", manifest, index)
+        fingerprint = _manifest_string(raw_entry, "fingerprint", manifest, index).removeprefix("fp=")
+        rationale = _bounded_rationale_string(_manifest_string(raw_entry, "rationale", manifest, index))
+        _parse_symbol(symbol)
+        if not fingerprint:
+            raise ValueError(f"--manifest {manifest}: entries[{index}].fingerprint must be non-empty")
+        specs.append(
+            _JudgeSignatureSigningSpec(
+                file_path=file_path,
+                rule=rule,
+                symbol=symbol,
+                fingerprint=fingerprint,
+                rationale=rationale,
+                source=f"manifest:{manifest}:{index}",
+            )
+        )
+    return tuple(specs)
+
+
+def _manifest_string(raw_entry: dict[Any, Any], field_name: str, manifest: Path, index: int) -> str:
+    value = raw_entry.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"--manifest {manifest}: entries[{index}].{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _dedupe_signing_specs(specs: Sequence[_JudgeSignatureSigningSpec]) -> tuple[_JudgeSignatureSigningSpec, ...]:
+    deduped: list[_JudgeSignatureSigningSpec] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for spec in specs:
+        identity = (spec.file_path, spec.rule, spec.symbol, spec.fingerprint)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(spec)
+    return tuple(deduped)
+
+
+def _filter_already_signed_manifest_specs(
+    specs: Sequence[_JudgeSignatureSigningSpec],
+    *,
+    healthy_keys: frozenset[str],
+) -> tuple[_JudgeSignatureSigningSpec, ...]:
+    """Drop manifest specs whose exact allowlist key is already healthy."""
+    return tuple(spec for spec in specs if _canonical_key_for_signing_spec(spec) not in healthy_keys)
+
+
+def _canonical_key_for_signing_spec(spec: _JudgeSignatureSigningSpec) -> str:
+    symbol_context = _parse_symbol(spec.symbol)
+    symbol_part = ":".join(symbol_context) if symbol_context else "_module_"
+    return f"{spec.file_path}:{spec.rule}:{symbol_part}:fp={spec.fingerprint}"
+
+
+def _remove_diagnosed_stale_entries(allowlist_dir: Path, stale_keys: Sequence[tuple[str, str]]) -> None:
+    by_file: dict[str, set[str]] = {}
+    for source_file, key in stale_keys:
+        by_file.setdefault(source_file, set()).add(key)
+    for source_file, keys in sorted(by_file.items()):
+        _remove_allow_hits_entries(allowlist_dir / source_file, keys)
+
+
+def _pop_allow_hits_entry(target_yaml: Path, entry_key: str) -> str:
+    """Remove and return one exact allow_hits entry from ``target_yaml``."""
+    removed_entry: str | None = None
+
+    def remove_from(current: str | None) -> str:
+        nonlocal removed_entry
+        if current is None:
+            raise ValueError(f"{target_yaml}: allowlist YAML file is required")
+
+        lines = current.splitlines(keepends=True)
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+        if header_index is None:
+            raise ValueError(f"{target_yaml}: no allow_hits block found")
+
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            block_end = idx
+            break
+
+        matching_ranges = [
+            (entry_start, entry_end)
+            for entry_start, entry_end in _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+            if lines[entry_start].rstrip("\r\n") == f"- key: {entry_key}"
+        ]
+        if not matching_ranges:
+            raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+        if len(matching_ranges) > 1:
+            raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
+
+        entry_start, entry_end = matching_ranges[0]
+        removed_entry = "".join(lines[entry_start:entry_end])
+        new_lines = [*lines[:entry_start], *lines[entry_end:]]
+        return "".join(new_lines)
+
+    atomic_update_text(target_yaml, remove_from, encoding="utf-8", create_parent=False)
+    if removed_entry is None:
+        raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+    return removed_entry
+
+
+def _remove_allow_hits_entries(target_yaml: Path, entry_keys: set[str]) -> None:
+    """Remove exact allow_hits entries from ``target_yaml`` using text surgery."""
+    if not entry_keys:
+        return
+
+    def remove_from(current: str | None) -> str:
+        if current is None:
+            raise ValueError(f"{target_yaml}: allowlist YAML file is required")
+
+        lines = current.splitlines(keepends=True)
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+        if header_index is None:
+            raise ValueError(f"{target_yaml}: no allow_hits block found")
+
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            block_end = idx
+            break
+
+        ranges = _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+        ranges_by_key: dict[str, tuple[int, int]] = {}
+        for entry_start, entry_end in ranges:
+            line = lines[entry_start].rstrip("\r\n")
+            if not line.startswith("- key: "):
+                continue
+            key = line.removeprefix("- key: ")
+            if key in ranges_by_key:
+                raise ValueError(f"{target_yaml}: duplicate allow_hits entry found for key {key!r}")
+            ranges_by_key[key] = (entry_start, entry_end)
+
+        missing = sorted(entry_keys - set(ranges_by_key))
+        if missing:
+            raise ValueError(f"{target_yaml}: no allow_hits entry found for key {missing[0]!r}")
+
+        new_lines = list(lines)
+        for key in sorted(entry_keys, key=lambda item: ranges_by_key[item][0], reverse=True):
+            entry_start, entry_end = ranges_by_key[key]
+            del new_lines[entry_start:entry_end]
+        return "".join(new_lines)
+
+    atomic_update_text(target_yaml, remove_from, encoding="utf-8", create_parent=False)
+
+
+def _namespace_for_signing_spec(spec: _JudgeSignatureSigningSpec, args: argparse.Namespace) -> argparse.Namespace:
+    return argparse.Namespace(
+        root=args.root,
+        repo_root=args.repo_root,
+        allowlist_dir=args.allowlist_dir,
+        file_path=spec.file_path,
+        rule=spec.rule,
+        symbol=spec.symbol,
+        fingerprint=spec.fingerprint,
+        rationale=spec.rationale,
+        owner=args.owner,
+        operator_override=args.operator_override,
+        max_tokens=args.max_tokens,
+        dry_run=False,
+        justify_format=args.justify_format,
+        judge_transport=args.judge_transport,
+        judge_tools=args.judge_tools,
+    )
+
+
+def _render_signing_spec_command(spec: _JudgeSignatureSigningSpec, args: argparse.Namespace) -> str:
+    parts = [
+        "elspeth-lints",
+        "justify",
+        "--root",
+        str(args.root),
+        "--allowlist-dir",
+        str(args.allowlist_dir),
+        "--file-path",
+        spec.file_path,
+        "--rule",
+        spec.rule,
+        "--symbol",
+        spec.symbol,
+        "--fingerprint",
+        spec.fingerprint,
+        "--rationale",
+        spec.rationale,
+        "--owner",
+        args.owner,
+    ]
+    if args.repo_root is not None:
+        parts.extend(["--repo-root", str(args.repo_root)])
+    if args.max_tokens is not None:
+        parts.extend(["--max-tokens", str(args.max_tokens)])
+    if args.operator_override:
+        parts.append("--operator-override")
+    if args.judge_transport != "openrouter":
+        parts.extend(["--judge-transport", args.judge_transport])
+    if args.judge_tools != "none":
+        parts.extend(["--judge-tools", args.judge_tools])
+    return " ".join(shlex.quote(part) for part in parts)
 
 
 def _run_migrate_judge_scope(args: argparse.Namespace) -> int:

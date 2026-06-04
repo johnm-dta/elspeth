@@ -199,6 +199,22 @@ env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli rota
 # Symmetric N:N prefix groups are auto-paired by default; pass --no-auto-pair-symmetric
 # to surface them as ambiguous instead. Stale entries are kept by default (--remove-stale to delete).
 
+# Signed judge metadata diagnosis (read-only, agent-safe)
+# Installed by the normal repo environment sync:
+#   uv sync --frozen --all-extras
+diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model
+# Add --env-file /path/to/operator.env to load diagnosis-relevant keys from a
+# dotenv file. The command only imports ELSPETH_JUDGE_METADATA_HMAC_KEY and
+# ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE; existing env values win.
+# Without ELSPETH_JUDGE_METADATA_HMAC_KEY this runs in verification_mode:
+# shape-only: it validates signed-metadata shape, v1 file_fingerprint drift,
+# v2 scope_fingerprint/ast_path binding drift, and missing live findings, then
+# emits exact operator-run repair commands with the key represented only as
+# ELSPETH_JUDGE_METADATA_HMAC_KEY=<operator-held-key>. In an operator-held shell
+# where the key is present, the same command upgrades to verification_mode:
+# authoritative and also recomputes judge_metadata_signature HMACs. It never
+# writes YAML; repair remains through justify or migrate-judge-scope.
+
 # Judge-gated allowlist entry creation (audit metadata write path)
 env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli justify --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --file-path plugins/example.py --symbol MyClass._method --rationale "why this suppression is honest" --owner "$USER"
 # Writes judge_verdict, judge_rationale, source binding fields, and the HMAC

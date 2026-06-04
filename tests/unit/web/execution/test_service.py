@@ -41,6 +41,7 @@ from elspeth.core.config import (
 )
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
+from elspeth.web.blobs.protocol import BlobFinalizationResult
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -58,7 +59,7 @@ from elspeth.web.sessions.protocol import (
     RunAlreadyActiveError,
     SessionRunStatus,
 )
-from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -924,7 +925,7 @@ class TestInlineBlobRuntimePreflight:
         blob_service.link_blob_to_run = AsyncMock(side_effect=link_blob_to_run)
         blob_service.read_blob_content = AsyncMock(side_effect=read_blob_content)
         blob_service.get_blob = AsyncMock(side_effect=get_blob)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
@@ -1028,7 +1029,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=AuditIntegrityError("audit write refused"))
 
@@ -1090,7 +1091,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=b"small prompt")
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
 
@@ -1164,7 +1165,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=b"content")
         blob_service.get_blob = AsyncMock(side_effect=get_blob)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
 
@@ -1237,7 +1238,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
 
         pipeline_yaml = f"""
@@ -3401,6 +3402,35 @@ class TestEventBusBridge:
         assert run_event.data.tokens_routed_success == 7
         assert run_event.data.tokens_routed_failure == 2
         assert run_event.run_id == "run-123"
+
+    def test_progress_broadcast_closed_loop_records_drop_telemetry(self, service: ExecutionServiceImpl) -> None:
+        """Loop-closed progress drops are operational telemetry, not slog-only."""
+        from elspeth.contracts.cli import ProgressEvent
+
+        loop = asyncio.new_event_loop()
+        try:
+            broadcaster = ProgressBroadcaster(loop)
+            broadcaster.subscribe("run-123")
+            loop.close()
+            service._broadcaster = broadcaster
+
+            service._broadcast_progress_event(
+                "run-123",
+                ProgressEvent(
+                    rows_processed=100,
+                    rows_succeeded=92,
+                    rows_failed=5,
+                    rows_quarantined=3,
+                    rows_routed_success=7,
+                    rows_routed_failure=2,
+                    elapsed_seconds=10.5,
+                ),
+            )
+        finally:
+            if not loop.is_closed():
+                loop.close()
+
+        assert observed_value(service._telemetry.progress_broadcast_dropped_total) == 1
 
 
 # ── B10: _call_async() Bridge Tests ──────────────────────────────────

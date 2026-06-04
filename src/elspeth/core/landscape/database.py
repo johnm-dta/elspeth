@@ -850,7 +850,7 @@ class LandscapeDB:
                 conn.execute(runs_table.insert().values(...))
             # Committed automatically if no exception raised
         """
-        if getattr(self, "_read_only", False):
+        if self._read_only:
             with self.read_only_connection() as conn:
                 yield conn
             return

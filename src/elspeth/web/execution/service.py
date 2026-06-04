@@ -17,8 +17,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
@@ -872,7 +873,7 @@ class ExecutionServiceImpl:
         shutdown_event: threading.Event,
         user_id: str | None = None,
         auth_provider_type: str | None = None,
-    ) -> None:
+    ) -> _RunPipelineOutcome:
         """Execute a pipeline in the background thread.
 
         B7 fix: Wrapped in try/except BaseException/finally.
@@ -913,7 +914,7 @@ class ExecutionServiceImpl:
                         ),
                     ),
                 )
-                return
+                return None
 
             # B8/C1: SessionService is async — bridge from background thread.
             # Cancelled-race recovery: catch only the narrow subclass.  See
@@ -941,7 +942,7 @@ class ExecutionServiceImpl:
                             ),
                         ),
                     )
-                    return
+                    return None
                 raise
 
             # B3 fix: construct from WebSettings, not hardcoded paths
@@ -1110,29 +1111,15 @@ class ExecutionServiceImpl:
 
             # Set up EventBus to bridge ProgressEvent -> RunEvent -> broadcaster.
             # _to_run_event is a pure mapping (system code) — let it crash.
-            # broadcast() uses call_soon_threadsafe → RuntimeError if the
-            # event loop is closed during shutdown.  Only catch that specific
-            # infrastructure failure; let programmer bugs (TypeError, etc.) crash.
-            def _safe_broadcast(evt: ProgressEvent) -> None:
-                run_event = self._to_run_event(run_id, evt)
-                try:
-                    self._broadcaster.broadcast(run_id, run_event)
-                except RuntimeError as broadcast_err:
-                    # call_soon_threadsafe raises RuntimeError when the
-                    # event loop is closed — expected during shutdown.
-                    # Log the class name, not the message: the canonical
-                    # CPython wording ("Event loop is closed") is not a
-                    # stable contract and future interpreter versions may
-                    # reword it.  ``exc_class`` is the diagnostic token
-                    # every other site in this module uses.
-                    slog.error(
-                        "progress_broadcast_failed",
-                        run_id=run_id,
-                        exc_class=type(broadcast_err).__name__,
-                    )
+            # ProgressBroadcaster reports the only accepted drop mode (event
+            # loop already closed) as an explicit telemetry outcome. Any
+            # RuntimeError from an open loop remains a programmer/infrastructure
+            # invariant failure and propagates through EventBus.
+            def _broadcast_progress(evt: ProgressEvent) -> None:
+                self._broadcast_progress_event(run_id, evt)
 
             event_bus = EventBus()
-            event_bus.subscribe(ProgressEvent, _safe_broadcast)
+            event_bus.subscribe(ProgressEvent, _broadcast_progress)
 
             # Match the CLI run path's runtime infrastructure. External-call
             # plugins such as web_scrape require a RateLimitRegistry during
@@ -1241,18 +1228,12 @@ class ExecutionServiceImpl:
                 # subclass raised by load_top_failure_samples) is Tier-1
                 # audit-data corruption and is DELIBERATELY not caught — it
                 # must crash per the tier model, not be silently degraded.
-                samples_text = ""
-                if landscape_db is not None:
-                    try:
-                        samples = load_top_failure_samples(landscape_db, result.run_id)
-                        samples_text = format_failure_samples(samples)
-                    except (SQLAlchemyError, OSError):
-                        slog.warning(
-                            "failure_sample_enrichment_failed",
-                            run_id=run_id,
-                            landscape_run_id=result.run_id,
-                            exc_info=True,
-                        )
+                samples_outcome = self._enrich_failure_samples(
+                    landscape_db,
+                    run_id=run_id,
+                    landscape_run_id=result.run_id,
+                )
+                samples_text = samples_outcome.samples_text
                 if result.status == RunStatus.FAILED:
                     session_error = _structural_failure_message(
                         rows_processed=result.rows_processed,
@@ -1312,7 +1293,7 @@ class ExecutionServiceImpl:
                             ),
                         ),
                     )
-                    return
+                    return None
                 raise
 
             # Finalize blobs after the authoritative completion transition
@@ -1422,6 +1403,7 @@ class ExecutionServiceImpl:
                     ),
                 ),
             )
+            return _RUN_PIPELINE_GRACEFUL_SHUTDOWN_HANDLED
 
         except BaseException as exc:
             # B7 fix: Catch BaseException (not Exception) to handle
@@ -1483,39 +1465,12 @@ class ExecutionServiceImpl:
             # observed in the wild.
             run_already_terminal = False
             if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                try:
-                    current_run = self._call_async(self._session_service.get_run(run_uuid))
-                    current_status = current_run.status
-                    if current_status in SESSION_TERMINAL_RUN_STATUS_VALUES:
-                        run_already_terminal = True
-                except (SQLAlchemyError, OSError) as probe_err:
-                    # Narrow catch — mirrors the sibling pattern at the
-                    # ``update_run_status`` recovery below (commits
-                    # b8ba2214/127417cb).  Audit-system *degradation*
-                    # (SQLAlchemyError, OSError) falls through to the
-                    # best-effort recovery so we don't make the probe-failure
-                    # scenario worse than today; slog here is policy-correct
-                    # per logging-telemetry-policy because this IS an
-                    # audit-system-degradation case.
-                    #
-                    # ValueError is deliberately NOT caught.  The ValueErrors
-                    # ``get_run`` can raise — "Run not found" (the row vanished
-                    # mid-run), ``UUID(row.id)`` malformed, non-UTC datetimes
-                    # via ``_ensure_utc`` — are all Tier 1 audit-data
-                    # corruption.  Per CLAUDE.md tier model, Tier 1 invariant
-                    # violations MUST crash immediately; absorbing them here
-                    # would silently log audit corruption while the recovery
-                    # path falls through to ``update_run_status`` which would
-                    # encounter the same corruption anyway.  ``RunRecord``'s
-                    # explicit invariant breaches surface as
-                    # ``AuditIntegrityError(Exception)`` (not ValueError) and
-                    # are likewise — correctly — uncaught here.
-                    slog.error(
-                        "post_exception_run_state_probe_failed",
-                        run_id=run_id,
-                        original_exc_class=type(exc).__name__,
-                        probe_exc_class=type(probe_err).__name__,
-                    )
+                probe_outcome = self._probe_run_already_terminal(
+                    run_uuid,
+                    run_id=run_id,
+                    original_exc_class=type(exc).__name__,
+                )
+                run_already_terminal = probe_outcome.run_already_terminal
 
                 if run_already_terminal:
                     # Post-audit-terminal exception path.  The run already
@@ -1547,7 +1502,10 @@ class ExecutionServiceImpl:
                     pass
                 else:
                     try:
-                        self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))
+                        status_update_exc_class = self._persist_failed_run_status(
+                            run_uuid,
+                            error=client_msg,
+                        )
                     except IllegalRunTransitionError as irte:
                         # elspeth-879f6de6bd recovery branch 3 (probe-failed
                         # AND row-actually-terminal — see the comment block
@@ -1599,22 +1557,20 @@ class ExecutionServiceImpl:
                             original_exc_class=type(exc).__name__,
                             irte_current_status=irte.current_status,
                         )
-                    except (SQLAlchemyError, OSError) as status_err:
-                        # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
-                        # SQLAlchemyError family + OSError only. Programmer bugs in
-                        # update_run_status must propagate so they don't masquerade
-                        # as a transient status-update failure.  exc_class only —
-                        # ``str(status_err)`` can surface SQL + bound parameters +
-                        # ``__cause__`` credentials, and ``client_msg`` is already
-                        # the sanitized form of ``exc`` (see _sanitize_error_for_client
-                        # above), so re-logging it as ``original_error`` gives no
-                        # extra triage surface beyond the class name.
-                        slog.error(
-                            "run_status_update_failed_in_except",
-                            run_id=run_id,
-                            original_exc_class=type(exc).__name__,
-                            status_update_exc_class=type(status_err).__name__,
-                        )
+                    else:
+                        # The helper returns an explicit degradation result for
+                        # DB/filesystem persistence failure instead of raising
+                        # that transient over the original pipeline exception.
+                        if status_update_exc_class is not None:
+                            # Class names only: ``str(status_err)`` can surface
+                            # SQL + bound parameters + ``__cause__`` credentials,
+                            # and ``client_msg`` is already sanitized.
+                            slog.error(
+                                "run_status_update_failed_in_except",
+                                run_id=run_id,
+                                original_exc_class=type(exc).__name__,
+                                status_update_exc_class=status_update_exc_class,
+                            )
             else:
                 slog.warning(
                     "skipping_status_update_on_signal",
@@ -1657,6 +1613,87 @@ class ExecutionServiceImpl:
             if telemetry_manager is not None:
                 telemetry_manager.close()
             self._broadcaster.cleanup_run(run_id)
+        return None
+
+    def _persist_failed_run_status(self, run_uuid: UUID, *, error: str) -> str | None:
+        """Best-effort failed-status persistence for exception recovery.
+
+        Returns the transient DB/filesystem exception class when persistence
+        cannot be recorded, rather than raising it and masking the original
+        pipeline exception being recovered.
+        """
+        try:
+            self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=error))
+        except (SQLAlchemyError, OSError) as status_err:
+            # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
+            # SQLAlchemyError family + OSError only. Programmer bugs in
+            # update_run_status must propagate so they don't masquerade
+            # as a transient status-update failure.
+            return type(status_err).__name__
+        return None
+
+    def _enrich_failure_samples(
+        self,
+        landscape_db: LandscapeDB | None,
+        *,
+        run_id: str,
+        landscape_run_id: str,
+    ) -> _FailureSampleEnrichmentOutcome:
+        if landscape_db is None:
+            return _FailureSampleEnrichmentOutcome(samples_text="")
+        try:
+            samples = load_top_failure_samples(landscape_db, landscape_run_id)
+            return _FailureSampleEnrichmentOutcome(samples_text=format_failure_samples(samples))
+        except (SQLAlchemyError, OSError):
+            slog.warning(
+                "failure_sample_enrichment_failed",
+                run_id=run_id,
+                landscape_run_id=landscape_run_id,
+                exc_info=True,
+            )
+            return _FailureSampleEnrichmentOutcome(samples_text="", failed=True)
+
+    def _probe_run_already_terminal(
+        self,
+        run_uuid: UUID,
+        *,
+        run_id: str,
+        original_exc_class: str,
+    ) -> _RunStateProbeOutcome:
+        try:
+            current_run = self._call_async(self._session_service.get_run(run_uuid))
+            return _RunStateProbeOutcome(run_already_terminal=current_run.status in SESSION_TERMINAL_RUN_STATUS_VALUES)
+        except (SQLAlchemyError, OSError) as probe_err:
+            # Narrow catch — mirrors the sibling pattern at the
+            # ``update_run_status`` recovery below (commits b8ba2214/127417cb).
+            # Audit-system degradation falls through to the best-effort
+            # recovery so we don't make the probe-failure scenario worse than
+            # today; slog here is policy-correct because this IS an
+            # audit-system-degradation case.
+            #
+            # ValueError is deliberately NOT caught.  The ValueErrors ``get_run``
+            # can raise — "Run not found" (the row vanished mid-run),
+            # ``UUID(row.id)`` malformed, non-UTC datetimes via ``_ensure_utc`` —
+            # are all Tier 1 audit-data corruption. ``RunRecord``'s explicit
+            # invariant breaches surface as ``AuditIntegrityError(Exception)``
+            # and are likewise — correctly — uncaught here.
+            slog.error(
+                "post_exception_run_state_probe_failed",
+                run_id=run_id,
+                original_exc_class=original_exc_class,
+                probe_exc_class=type(probe_err).__name__,
+            )
+            return _RunStateProbeOutcome(run_already_terminal=False, failed=True)
+
+    def _broadcast_progress_event(self, run_id: str, progress: ProgressEvent) -> None:
+        run_event = self._to_run_event(run_id, progress)
+        broadcast_result = self._broadcaster.broadcast(run_id, run_event)
+        if broadcast_result.dropped_count > 0:
+            assert broadcast_result.drop_reason is not None, "BroadcastResult with drops must carry a drop_reason"
+            self._telemetry.progress_broadcast_dropped_total.add(
+                broadcast_result.dropped_count,
+                attributes={"reason": broadcast_result.drop_reason},
+            )
 
     # Exceptions that can escape finalize_run_output_blobs itself
     # (not per-blob errors, which are captured in the result).
@@ -1678,6 +1715,28 @@ class ExecutionServiceImpl:
         BlobStateError,
     )
 
+    def _finalize_output_blobs_outcome(self, run_id: str, *, success: bool) -> _OutputBlobFinalizationOutcome:
+        blob_service = self._blob_service
+        if blob_service is None:
+            raise RuntimeError("_finalize_output_blobs_outcome requires blob_service; caller must check before finalizing")
+        try:
+            result = self._call_async(
+                blob_service.finalize_run_output_blobs(
+                    UUID(run_id),
+                    success=success,
+                )
+            )
+        except self._FINALIZE_SUPPRESSED as blob_err:
+            return _OutputBlobFinalizationOutcome(
+                finalized_count=0,
+                errors=(),
+                failure_exc_type=type(blob_err).__name__,
+            )
+        return _OutputBlobFinalizationOutcome(
+            finalized_count=len(result.finalized),
+            errors=tuple({"blob_id": str(e.blob_id), "exc_type": e.exc_type} for e in result.errors),
+        )
+
     def _finalize_output_blobs(self, run_id: str, *, success: bool) -> None:
         """Finalize pending output blobs after a run completes/fails/cancels.
 
@@ -1688,31 +1747,26 @@ class ExecutionServiceImpl:
         """
         if self._blob_service is None:
             return
-        try:
-            result = self._call_async(
-                self._blob_service.finalize_run_output_blobs(
-                    UUID(run_id),
-                    success=success,
-                )
-            )
-            if result.errors:
-                slog.error(
-                    "blob_finalization_partial_failure",
-                    run_id=run_id,
-                    success=success,
-                    finalized_count=len(result.finalized),
-                    error_count=len(result.errors),
-                    errors=[{"blob_id": str(e.blob_id), "exc_type": e.exc_type} for e in result.errors],
-                )
-        except self._FINALIZE_SUPPRESSED as blob_err:
+        outcome = self._finalize_output_blobs_outcome(run_id, success=success)
+        if outcome.failure_exc_type is not None:
             slog.error(
                 "blob_finalization_failed",
                 run_id=run_id,
                 success=success,
-                exc_type=type(blob_err).__name__,
+                exc_type=outcome.failure_exc_type,
+            )
+            return
+        if outcome.errors:
+            slog.error(
+                "blob_finalization_partial_failure",
+                run_id=run_id,
+                success=success,
+                finalized_count=outcome.finalized_count,
+                error_count=len(outcome.errors),
+                errors=list(outcome.errors),
             )
 
-    def _on_pipeline_done(self, future: Future[None]) -> None:
+    def _on_pipeline_done(self, future: Future[_RunPipelineOutcome]) -> None:
         """B7 Layer 2: Safety net callback.
 
         Fires when the Future completes. Retrieves (and suppresses) any
@@ -1787,6 +1841,29 @@ class ExecutionServiceImpl:
                 tokens_routed_failure=progress.rows_routed_failure,
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputBlobFinalizationOutcome:
+    finalized_count: int
+    errors: tuple[Mapping[str, str], ...]
+    failure_exc_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FailureSampleEnrichmentOutcome:
+    samples_text: str
+    failed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RunStateProbeOutcome:
+    run_already_terminal: bool
+    failed: bool = False
+
+
+type _RunPipelineOutcome = Literal["graceful_shutdown_handled"] | None
+_RUN_PIPELINE_GRACEFUL_SHUTDOWN_HANDLED: Literal["graceful_shutdown_handled"] = "graceful_shutdown_handled"
 
 
 # Protocol conformance enforcement — mypy verifies ExecutionServiceImpl

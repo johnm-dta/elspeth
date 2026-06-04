@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cc423ddf05e26ab8"
+    source_file_hash: str | None = "sha256:6e4ca4dbc786973f"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -939,6 +939,7 @@ class AzureBlobSource(BaseSource):
                     destination=self._on_validation_failure,
                 )
             return
+
     def _normalize_row_keys(self, row: Any) -> Mapping[str, Any]:
         """Normalize JSON/JSONL object keys at the source boundary."""
         try:

@@ -462,6 +462,15 @@ class OIDCAuthProvider:
         """Return optional cosmetic claims as visible strings or None."""
         return optional_profile_claim(payload, claim_name)
 
+    @trust_boundary(
+        tier=3,
+        source="OIDC ID token from a remote IdP; decoded payload carries optional profile claims including 'groups'",
+        source_param="token",
+        suppresses=("R1",),
+        invariant="raises AuthenticationError on malformed non-list 'groups'; treats absent 'groups' as no groups; never coerces scalar groups silently",
+        test_ref="tests/unit/web/auth/test_oidc_provider.py::TestOIDCGetUserInfo::test_non_list_groups_claim_raises",
+        test_fingerprint="cefa7844868a4e9b7662d3966a910dc1698332f477a06c5b9050ddb699657898",
+    )
     async def get_user_info(self, token: str) -> UserProfile:
         """Decode the OIDC token and extract profile claims."""
         jwks = await self._validator.ensure_jwks()

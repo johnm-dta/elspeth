@@ -200,8 +200,37 @@ class TestProgressBroadcasterThreadSafety:
         event = _make_event()
 
         # Should not raise
-        broadcaster.broadcast("run-1", event)
+        result = broadcaster.broadcast("run-1", event)
         mock_loop.call_soon_threadsafe.assert_not_called()
+        assert result.scheduled_count == 0
+        assert result.dropped_count == 0
+        assert result.drop_reason is None
+
+    def test_broadcast_closed_loop_reports_explicit_drop(self) -> None:
+        """Closed event loop drops progress explicitly without catching RuntimeError."""
+        loop = asyncio.new_event_loop()
+        broadcaster = ProgressBroadcaster(loop)
+        broadcaster.subscribe("run-1")
+        event = _make_event()
+        loop.close()
+
+        result = broadcaster.broadcast("run-1", event)
+
+        assert result.scheduled_count == 0
+        assert result.dropped_count == 1
+        assert result.drop_reason == "loop_closed"
+
+    def test_broadcast_runtime_error_from_open_loop_propagates(self) -> None:
+        """RuntimeError from an open loop is not treated as shutdown."""
+        mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        mock_loop.is_closed.return_value = False
+        mock_loop.call_soon_threadsafe.side_effect = RuntimeError("broadcaster invariant bug")
+        broadcaster = ProgressBroadcaster(mock_loop)
+        broadcaster.subscribe("run-1")
+        event = _make_event()
+
+        with pytest.raises(RuntimeError, match="broadcaster invariant bug"):
+            broadcaster.broadcast("run-1", event)
 
     @pytest.mark.asyncio
     async def test_broadcast_from_background_thread_delivers_events(self) -> None:

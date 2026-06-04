@@ -902,11 +902,52 @@ class TierModelVisitor(ast.NodeVisitor):
             return len(value.keys) == 0
         return False
 
+    def _is_transform_result_error_call(self, node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "error"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "TransformResult"
+        )
+
+    def _assigned_transform_error_names(self, nodes: list[ast.AST]) -> set[str]:
+        names: set[str] = set()
+        for child in nodes:
+            if isinstance(child, ast.Assign) and self._is_transform_result_error_call(child.value):
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+                and child.value is not None
+                and self._is_transform_result_error_call(child.value)
+            ):
+                names.add(child.target.id)
+        return names
+
+    def _routes_transform_error_to_completion(self, nodes: list[ast.AST]) -> bool:
+        """True when a handler delivers an explicit TransformResult.error."""
+        error_names = self._assigned_transform_error_names(nodes)
+        for child in nodes:
+            if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "_complete_ticket"):
+                continue
+            for arg in child.args:
+                if self._is_transform_result_error_call(arg):
+                    return True
+                if isinstance(arg, ast.Name) and arg.id in error_names:
+                    return True
+        return False
+
     def _handler_is_silent(self, node: ast.ExceptHandler) -> bool:
         """Return True if the except handler swallows errors without re-raise or explicit return."""
         own_scope_nodes = [child for statement in node.body for child in iter_own_scope(statement)]
         has_raise = any(isinstance(child, ast.Raise) for child in own_scope_nodes)
         if has_raise:
+            return False
+
+        if self._routes_transform_error_to_completion(own_scope_nodes):
             return False
 
         returns: list[ast.Return] = [child for child in own_scope_nodes if isinstance(child, ast.Return)]

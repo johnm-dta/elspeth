@@ -55,6 +55,7 @@ from elspeth.web.composer._compose_loop_carriers import (
     _DispatchOutcome,
     _PersistOutcome,
     _TerminateOutcome,
+    _ToolOutcome,
 )
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import (
@@ -129,7 +130,7 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     vague_term_wiring_count,
 )
-from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
+from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 from elspeth.web.sessions.models import sessions_table
 
 slog = structlog.get_logger()
@@ -1075,7 +1076,7 @@ class ComposerServiceImpl:
 
     def _serialize_response_via_walker(
         self,
-        outcome: Any,
+        outcome: _ToolOutcome,
         *,
         telemetry: Any,
     ) -> str:

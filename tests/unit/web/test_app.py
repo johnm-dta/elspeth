@@ -80,6 +80,16 @@ class _StaticAsyncClient:
         raise httpx.ConnectError("catalog probe disabled in test", request=request)
 
 
+class _EnteringAsyncClientRaises:
+    """Async client stub whose context enter fails before a request exists."""
+
+    async def __aenter__(self) -> _EnteringAsyncClientRaises:
+        raise OSError("catalog client context failed")
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class TestCreateApp:
     """Tests for create_app()."""
 
@@ -603,6 +613,18 @@ class TestOidcDiscoveryStartup:
 
 class TestLifespanShutdown:
     """Shutdown must await the execution-service drain path."""
+
+    @pytest.mark.asyncio
+    async def test_lifespan_propagates_catalog_client_context_failure(self, tmp_path) -> None:
+        """Outer HTTP-client construction failures are startup failures, not fallback decisions."""
+        app = create_app(_settings(tmp_path))
+
+        with (
+            patch("httpx.AsyncClient", return_value=_EnteringAsyncClientRaises()),
+            pytest.raises(OSError, match="catalog client context failed"),
+        ):
+            async with lifespan(app):
+                pass
 
     @pytest.mark.asyncio
     async def test_lifespan_awaits_execution_service_shutdown(self, tmp_path) -> None:

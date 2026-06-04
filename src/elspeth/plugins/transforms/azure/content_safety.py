@@ -124,7 +124,7 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     name = "azure_content_safety"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bd11ff7b54fff17"
+    source_file_hash: str | None = "sha256:275a42d602a3ffe0"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 

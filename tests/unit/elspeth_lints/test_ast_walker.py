@@ -9,6 +9,7 @@ import pytest
 
 from elspeth_lints.core.ast_walker import (
     PythonFileReadError,
+    iter_python_files,
     parse_python_file,
     walk_function_own_scope,
 )
@@ -69,6 +70,18 @@ def test_parse_python_file_returns_read_error_for_oserror(
     assert result.path == source_path
     assert result.error_type == "OSError"
     assert result.message == "OSError: synthetic I/O fault"
+
+
+def test_iter_python_files_skips_dependency_and_cache_directories(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "elspeth" / "good.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 1\n", encoding="utf-8")
+    for ignored_dir in (".venv", ".uv-cache", ".worktrees", "node_modules", "build", "dist"):
+        ignored = tmp_path / ignored_dir / "dependency.py"
+        ignored.parent.mkdir(parents=True)
+        ignored.write_text("value = 2\n", encoding="utf-8")
+
+    assert list(iter_python_files(tmp_path)) == [source]
 
 
 def test_walk_function_own_scope_keeps_comprehension_nodes_visible() -> None:

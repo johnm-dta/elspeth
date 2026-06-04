@@ -662,6 +662,45 @@ class TestR6SilentExcept:
         r6_findings = [f for f in findings if f.rule_id == "R6"]
         assert len(r6_findings) == 1
 
+    def test_transform_result_error_routed_to_completion_is_explicit(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        shutdown_result = TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
+                        self._complete_ticket(ticket, token, shutdown_result, state_id)
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert r6_findings == []
+
+    def test_transform_result_error_without_completion_route_still_fires(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
     def test_nested_non_default_return_does_not_make_handler_non_silent(self) -> None:
         source = dedent("""
             try:

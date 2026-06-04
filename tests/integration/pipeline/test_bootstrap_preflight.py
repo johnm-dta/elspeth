@@ -12,6 +12,7 @@ tests/unit/engine/test_bootstrap_preflight.py.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -25,24 +26,49 @@ from elspeth.core.dependency_config import (
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
 
 
-def _make_bootstrap_config() -> MagicMock:
+class _GraphStub:
+    """Minimal validated graph surface consumed by bootstrap/context wiring tests."""
+
+    def validate(self) -> None:
+        return None
+
+    def get_aggregation_id_map(self) -> dict[str, str]:
+        return {}
+
+
+def _make_bootstrap_config() -> SimpleNamespace:
     """Create the minimal config surface bootstrap_and_run reads in these tests."""
-    mock_config = MagicMock()
-    mock_config.depends_on = []
-    mock_config.commencement_gates = []
-    mock_config.collection_probes = []
-    mock_config.gates = []
-    mock_config.coalesce = []
-    mock_config.landscape.export.enabled = False
-    mock_config.landscape.dump_to_jsonl = False
-    mock_config.landscape.dump_to_jsonl_path = None
-    mock_config.landscape.dump_to_jsonl_fail_on_error = False
-    mock_config.landscape.dump_to_jsonl_include_payloads = False
-    mock_config.landscape.dump_to_jsonl_payload_base_path = None
-    mock_config.landscape.url = "sqlite:///audit.db"
-    mock_config.payload_store.backend = "filesystem"
-    mock_config.payload_store.base_path = Path(".elspeth/payloads")
-    return mock_config
+
+    def _model_dump(*, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return {}
+
+    return SimpleNamespace(
+        depends_on=[],
+        commencement_gates=[],
+        collection_probes=[],
+        gates=[],
+        coalesce=[],
+        checkpoint=SimpleNamespace(enabled=True),
+        rate_limit=SimpleNamespace(),
+        concurrency=SimpleNamespace(),
+        telemetry=SimpleNamespace(),
+        landscape=SimpleNamespace(
+            backend="sqlite",
+            export=SimpleNamespace(enabled=False),
+            dump_to_jsonl=False,
+            dump_to_jsonl_path=None,
+            dump_to_jsonl_fail_on_error=False,
+            dump_to_jsonl_include_payloads=False,
+            dump_to_jsonl_payload_base_path=None,
+            url="sqlite:///audit.db",
+        ),
+        payload_store=SimpleNamespace(
+            backend="filesystem",
+            base_path=Path(".elspeth/payloads"),
+        ),
+        model_dump=_model_dump,
+    )
 
 
 class TestBootstrapDependencyDispatch:
@@ -50,14 +76,7 @@ class TestBootstrapDependencyDispatch:
 
     def test_skips_dependencies_when_not_configured(self) -> None:
         """When depends_on is empty, dependency resolver is never called."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
-        mock_config.commencement_gates = []
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
+        mock_config = _make_bootstrap_config()
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
@@ -71,7 +90,7 @@ class TestBootstrapDependencyDispatch:
             patch("elspeth.engine.dependency_resolver.resolve_dependencies") as mock_resolve,
         ):
             mock_plugins.return_value = MagicMock(spec=PluginBundle)
-            mock_graph = MagicMock()
+            mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
             mock_run_result = MagicMock()
@@ -99,7 +118,9 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
@@ -107,7 +128,7 @@ class TestBootstrapProgrammaticExecution:
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
         ):
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
             mock_ctx = MagicMock()
             mock_ctx.orchestrator.run.return_value = MagicMock()
@@ -127,7 +148,9 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
@@ -135,7 +158,7 @@ class TestBootstrapProgrammaticExecution:
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
         ):
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
             mock_ctx = MagicMock()
             mock_ctx.orchestrator.run.side_effect = ValueError("pipeline failed")
@@ -154,7 +177,9 @@ class TestBootstrapProgrammaticExecution:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
@@ -162,7 +187,7 @@ class TestBootstrapProgrammaticExecution:
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
         ):
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_db_cls.from_url.return_value = mock_db
             mock_ctx = MagicMock()
             mock_ctx.orchestrator.run.return_value = MagicMock()
@@ -183,13 +208,13 @@ class TestBootstrapProgrammaticExecution:
 
         mock_config = _make_bootstrap_config()
         mock_config.checkpoint.enabled = False
-        mock_graph = MagicMock()
-        mock_graph.get_aggregation_id_map.return_value = {}
-        mock_plugins = MagicMock(spec=PluginBundle)
-        mock_plugins.transforms = []
-        mock_plugins.aggregations = {}
-        mock_plugins.source = MagicMock()
-        mock_plugins.sinks = {"out": MagicMock()}
+        mock_graph = _GraphStub()
+        mock_plugins = SimpleNamespace(
+            transforms=[],
+            aggregations={},
+            source=object(),
+            sinks={"out": object()},
+        )
         mock_db = MagicMock()
 
         with (
@@ -216,14 +241,9 @@ class TestBootstrapDependencyResultsFlow:
         """Dependency run results must be visible in commencement gate expressions."""
         from elspeth.core.dependency_config import DependencyConfig
 
-        mock_config = MagicMock()
+        mock_config = _make_bootstrap_config()
         mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
 
         dep_result = DependencyRunResult(
             name="indexer",
@@ -241,7 +261,9 @@ class TestBootstrapDependencyResultsFlow:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.core.landscape.LandscapeDB"),
             patch("elspeth.core.payload_store.FilesystemPayloadStore"),
@@ -251,7 +273,7 @@ class TestBootstrapDependencyResultsFlow:
             patch("elspeth.engine.dependency_resolver.resolve_dependencies", return_value=[dep_result]),
             patch("elspeth.engine.commencement.evaluate_commencement_gates", side_effect=capture_gate_context),
         ):
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
             mock_ctx = MagicMock()
             mock_ctx.orchestrator.run.return_value = MagicMock()
             mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
@@ -272,14 +294,7 @@ class TestBootstrapCommencementGateDispatch:
 
     def test_skips_gates_when_not_configured(self) -> None:
         """When commencement_gates is empty, gate evaluator is never called."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
-        mock_config.commencement_gates = []
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
+        mock_config = _make_bootstrap_config()
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
@@ -292,7 +307,7 @@ class TestBootstrapCommencementGateDispatch:
             patch("elspeth.engine.commencement.evaluate_commencement_gates") as mock_eval_gates,
         ):
             mock_plugins.return_value = MagicMock(spec=PluginBundle)
-            mock_graph = MagicMock()
+            mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
             mock_run_result = MagicMock()
@@ -309,13 +324,8 @@ class TestBootstrapCommencementGateDispatch:
 
     def test_gate_failure_propagates(self) -> None:
         """When a gate fails, CommencementGateFailedError propagates through bootstrap."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
+        mock_config = _make_bootstrap_config()
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]  # Non-empty triggers gate eval
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
 
         with (
             patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
@@ -333,7 +343,7 @@ class TestBootstrapCommencementGateDispatch:
             ),
         ):
             mock_plugins.return_value = MagicMock(spec=PluginBundle)
-            mock_graph = MagicMock()
+            mock_graph = _GraphStub()
             mock_graph_cls.from_plugin_instances.return_value = mock_graph
 
             from elspeth.cli import bootstrap_and_run

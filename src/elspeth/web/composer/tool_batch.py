@@ -24,7 +24,11 @@ from uuid import UUID
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.composer._compose_loop_carriers import _CallModelOutcome, _DispatchOutcome
+from elspeth.web.composer._compose_loop_carriers import (
+    _CallModelOutcome,
+    _DispatchOutcome,
+    _ToolOutcome,
+)
 from elspeth.web.composer._required_paths_validator import (
     _TOOL_REQUIRED_PATHS,
     _find_missing_required_paths,
@@ -75,7 +79,6 @@ from elspeth.web.composer.tools import (
     is_session_aware_tool,
 )
 from elspeth.web.execution.schemas import ValidationResult
-from elspeth.web.sessions._persist_payload import _ToolOutcome
 
 if TYPE_CHECKING:
     from elspeth.web.composer.service import (

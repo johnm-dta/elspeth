@@ -8,7 +8,6 @@ from elspeth.web.sessions._persist_payload import (
     AuditOutcome,
     RedactedToolRow,
     StatePayload,
-    _ToolOutcome,
 )
 
 
@@ -117,48 +116,3 @@ def test_state_payload_has_no_version_field():
         "_insert_composition_state under _session_write_lock"
     )
     assert fields == {"data", "derived_from_state_id"}, f"unexpected StatePayload fields: {fields}"
-
-
-def test_tool_outcome_state_unchanged_when_pre_eq_post():
-    outcome = _ToolOutcome(
-        call=type("FakeCall", (), {"id": "x", "function": type("F", (), {"name": "n"})()})(),
-        response={"ok": True},
-        error_class=None,
-        error_message=None,
-        pre_version=3,
-        post_version=3,
-    )
-    assert outcome.post_version == outcome.pre_version
-
-
-def test_tool_outcome_freezes_dict_response():
-    """``_ToolOutcome.__post_init__`` must call ``freeze_fields`` on
-    ``call`` and ``response`` so that a dict response cannot be mutated
-    through the dataclass reference. Without the guard, ``frozen=True``
-    is a lie about deep immutability — the attribute cannot be
-    reassigned but the dict it points to remains fully mutable.
-    Closes synthesised review finding H5."""
-    from types import MappingProxyType
-
-    response_dict = {"ok": True, "nested": {"k": "v"}}
-    outcome = _ToolOutcome(
-        call={"id": "tc_x", "function": {"name": "set_source"}},
-        response=response_dict,
-        error_class=None,
-        error_message=None,
-        pre_version=1,
-        post_version=2,
-    )
-
-    # Both call and response must be deeply frozen — the outer mapping
-    # is a MappingProxyType (rejects __setitem__) and nested dicts are
-    # also frozen.
-    assert isinstance(outcome.response, MappingProxyType)
-    assert isinstance(outcome.call, MappingProxyType)
-    with pytest.raises(TypeError):
-        outcome.response["ok"] = False  # type: ignore[index]
-    # Mutation via the original reference must not be visible through
-    # the dataclass reference (deep_freeze copies inputs to immutable
-    # equivalents; the original dict and the proxy are distinct).
-    response_dict["ok"] = False
-    assert outcome.response["ok"] is True

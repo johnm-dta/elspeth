@@ -17,7 +17,7 @@
 // evidence the run produced them, no fake action buttons.
 // ============================================================================
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   downloadRunOutputContent,
   fetchRunOutputPreview,
@@ -110,17 +110,48 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
   const [expandedArtifactIds, setExpandedArtifactIds] = useState<Set<string>>(
     new Set(),
   );
+  const activeRunIdRef = useRef(runId);
+  const manifestRequestSeqRef = useRef(0);
+  const previewRunGenerationRef = useRef(0);
 
-  const loadManifest = async () => {
+  const loadManifest = async (
+    targetRunId: string,
+    options: { clearRunScopedState?: boolean } = {},
+  ) => {
+    const requestSeq = ++manifestRequestSeqRef.current;
+    activeRunIdRef.current = targetRunId;
+    if (options.clearRunScopedState) {
+      previewRunGenerationRef.current += 1;
+      setManifest(null);
+      setPreviewByArtifactId({});
+      setExpandedArtifactIds(new Set());
+    }
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetchRunOutputs(runId);
+      const response = await fetchRunOutputs(targetRunId);
+      if (
+        requestSeq !== manifestRequestSeqRef.current ||
+        targetRunId !== activeRunIdRef.current
+      ) {
+        return;
+      }
       setManifest(response);
     } catch (err) {
+      if (
+        requestSeq !== manifestRequestSeqRef.current ||
+        targetRunId !== activeRunIdRef.current
+      ) {
+        return;
+      }
       setError(formatError(err, "Failed to load outputs"));
     } finally {
-      setIsLoading(false);
+      if (
+        requestSeq === manifestRequestSeqRef.current &&
+        targetRunId === activeRunIdRef.current
+      ) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -139,7 +170,7 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
   };
 
   useEffect(() => {
-    void loadManifest();
+    void loadManifest(runId, { clearRunScopedState: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
@@ -161,13 +192,27 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
       ...prev,
       [artifact.artifact_id]: { status: "loading" },
     }));
+    const targetRunId = runId;
+    const previewRunGeneration = previewRunGenerationRef.current;
     try {
-      const preview = await fetchRunOutputPreview(runId, artifact.artifact_id);
+      const preview = await fetchRunOutputPreview(targetRunId, artifact.artifact_id);
+      if (
+        previewRunGeneration !== previewRunGenerationRef.current ||
+        targetRunId !== activeRunIdRef.current
+      ) {
+        return;
+      }
       setPreviewByArtifactId((prev) => ({
         ...prev,
         [artifact.artifact_id]: { status: "loaded", preview },
       }));
     } catch (err) {
+      if (
+        previewRunGeneration !== previewRunGenerationRef.current ||
+        targetRunId !== activeRunIdRef.current
+      ) {
+        return;
+      }
       // The preview endpoint returns 410 + error_type=artifact_purged_or_moved
       // when the file existed at manifest time but is gone now (purge race).
       // We surface this as a per-row "no longer available on disk" state
@@ -198,7 +243,7 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
         <button
           type="button"
           className="btn-compact"
-          onClick={() => void loadManifest()}
+          onClick={() => void loadManifest(runId)}
           disabled={isLoading}
         >
           {isLoading ? "Loading…" : "Refresh"}

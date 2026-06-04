@@ -4,6 +4,7 @@ Handles SQLite (development) and PostgreSQL (production) backends
 with appropriate settings for each.
 """
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -730,7 +731,13 @@ class LandscapeDB:
 
     @staticmethod
     def _sqlite_read_only_url(url: str) -> str:
-        """Return a SQLite URI URL that opens the existing file read-only."""
+        """Return a SQLite URI URL that opens the existing file read-only.
+
+        SQLite ``immutable=1`` is only safe for static, read-only-directory
+        snapshots with no WAL sidecar. Live WAL-mode audit databases may have
+        committed schema or rows in the ``-wal`` file that immutable
+        connections intentionally ignore.
+        """
         parsed = make_url(url)
         if not parsed.drivername.startswith("sqlite"):
             return url
@@ -744,8 +751,11 @@ class LandscapeDB:
         db_path = Path(database)
         if not db_path.is_absolute():
             db_path = Path.cwd() / db_path
+        immutable = not Path(f"{db_path}-wal").exists() and not os.access(db_path.parent, os.W_OK)
         uri_path = quote(str(db_path), safe="/:")
-        return f"{parsed.drivername}:///file:{uri_path}?mode=ro&immutable=1&uri=true"
+        if immutable:
+            return f"{parsed.drivername}:///file:{uri_path}?mode=ro&immutable=1&uri=true"
+        return f"{parsed.drivername}:///file:{uri_path}?mode=ro&uri=true"
 
     @classmethod
     def from_url(
@@ -770,8 +780,10 @@ class LandscapeDB:
             create_tables: Whether to create tables if they don't exist.
                            Set to False when connecting to an existing database.
             read_only: Open an existing database for inspection only. SQLite
-                uses a ``mode=ro&immutable=1`` URI so evidence mounts are not
-                mutated by WAL/SHM sidecar creation.
+                uses a ``mode=ro`` URI so the database file itself is not
+                writable. Static read-only-directory snapshots with no WAL
+                sidecar use ``immutable=1``; live WAL databases do not, so
+                committed WAL contents remain visible.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
             dump_to_jsonl_path: Optional override path for JSONL journal
             dump_to_jsonl_fail_on_error: Fail if journal write fails

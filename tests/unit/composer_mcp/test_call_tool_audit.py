@@ -503,11 +503,18 @@ async def test_delete_session_persists_deletion_audit_record() -> None:
         assert not (scratch / f"{sid}.json").exists()
         assert sidecar.exists()
         lines = sidecar.read_text(encoding="utf-8").splitlines()
-        assert len(lines) == 1
-        deletion_record = _json.loads(lines[0])
+        assert len(lines) == 3
+        records = [_json.loads(line) for line in lines]
+        assert [record["tool_name"] for record in records] == [
+            "new_session",
+            "save_session",
+            "delete_session",
+        ]
+        assert all(record["status"] == ComposerToolStatus.SUCCESS.value for record in records)
+        deletion_record = records[-1]
         assert deletion_record["tool_name"] == "delete_session"
         assert deletion_record["status"] == ComposerToolStatus.SUCCESS.value
         verify_events_sidecar_integrity(sidecar)
 
         await _call_handler(server.request_handlers, "list_sessions", {})
-        assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1
+        assert sidecar.read_text(encoding="utf-8").splitlines() == lines

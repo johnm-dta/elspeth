@@ -515,6 +515,10 @@ class InterpretationUnsupportedChoiceError(InterpretationResolveError):
     """The requested choice is valid generally but unsupported for this kind."""
 
 
+class QuarantineCleanupError(AuditIntegrityError):
+    """Session archive committed, but staged blob cleanup failed."""
+
+
 class _InterpretationHashDomainV2Payload(TypedDict):
     """Closed hash-domain payload for interpretation review events."""
 
@@ -604,8 +608,10 @@ def _find_llm_transform_node(
             node["options"] if "options" in node else None,
             message=f"{context}: node {affected_node_id!r} has no options mapping",
         )
-        prompt_template = options["prompt_template"] if "prompt_template" in options else None
-        if not isinstance(prompt_template, str) or not prompt_template:
+        if "prompt_template" not in options or not isinstance(options["prompt_template"], str):
+            raise InterpretationPlaceholderConsumedError(f"{context}: node {affected_node_id!r} options.prompt_template is not a string")
+        prompt_template = options["prompt_template"]
+        if not prompt_template:
             raise InterpretationPlaceholderConsumedError(
                 f"{context}: node {affected_node_id!r} must declare non-empty options.prompt_template"
             )
@@ -2255,7 +2261,13 @@ class SessionServiceImpl:
             # failure. The session rows may already be gone, but silently
             # returning here would hide the orphaned quarantine state.
             if staged_blob_dir is not None and staged_blob_dir.exists():
-                shutil.rmtree(staged_blob_dir)
+                try:
+                    shutil.rmtree(staged_blob_dir)
+                except OSError as exc:
+                    raise QuarantineCleanupError(
+                        f"archive_session({sid}): session delete committed but quarantine cleanup failed for "
+                        f"{staged_blob_dir}. Manual cleanup of the staged blob directory is required."
+                    ) from exc
 
                 quarantine_root = staged_blob_dir.parent
                 with contextlib.suppress(OSError):
@@ -2766,7 +2778,11 @@ class SessionServiceImpl:
                             node["options"],
                             message=f"create_pending_interpretation_event: node {affected_node_id!r} options is not a mapping",
                         )
-                        prompt_template = cast(str, options["prompt_template"])
+                        if "prompt_template" not in options or not isinstance(options["prompt_template"], str):
+                            raise ValueError(
+                                f"create_pending_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
+                            )
+                        prompt_template = options["prompt_template"]
                         if llm_draft != prompt_template:
                             raise ValueError(
                                 "create_pending_interpretation_event: llm_prompt_template event draft must match current options.prompt_template"

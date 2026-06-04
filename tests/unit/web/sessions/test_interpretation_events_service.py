@@ -543,6 +543,35 @@ async def test_create_pending_interpretation_event_rejects_raw_kind_string(servi
 
 
 @pytest.mark.asyncio
+async def test_create_pending_prompt_template_review_rejects_non_string_template(service) -> None:
+    """Writer-boundary corruption must name the prompt template type anomaly."""
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(
+        service,
+        session_id=session_id,
+        node=_llm_node(prompt_template=42),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match=r"options\.prompt_template is not a string"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id="llm_transform_1",
+            tool_call_id="call_bad_template",
+            user_term="llm_prompt_template:llm_transform_1",
+            kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+            llm_draft="42",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
+
+
+@pytest.mark.asyncio
 async def test_create_pending_interpretation_event_accepts_invented_source_component(service) -> None:
     """Invented-source surfaces bind to the source component, not an LLM node."""
     session_id = uuid4()

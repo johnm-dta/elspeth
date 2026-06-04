@@ -152,6 +152,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
+    ("runs", "ck_runs_openrouter_catalog_source"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.

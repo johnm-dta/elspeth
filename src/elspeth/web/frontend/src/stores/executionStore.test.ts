@@ -38,6 +38,17 @@ function resetInterpretationStore(): void {
   resetStore(useInterpretationEventsStore);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, resolve, reject };
+}
+
 describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -297,6 +308,89 @@ function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
   };
 }
 
+describe("executionStore.execute", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+  });
+
+  it("drops a late start success after the active session changes", async () => {
+    const { executePipeline, fetchRuns } = await import("@/api/client");
+    const pendingExecute = deferred<{ run_id: string }>();
+    (executePipeline as ReturnType<typeof vi.fn>).mockReturnValue(
+      pendingExecute.promise,
+    );
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const executePromise = useExecutionStore.getState().execute("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingExecute.resolve({ run_id: "run-stale" });
+    const runId = await executePromise;
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(state.activeRunId).toBeNull();
+    expect(state.progress).toBeNull();
+    expect(state.isExecuting).toBe(false);
+    expect(fetchRuns).not.toHaveBeenCalled();
+    expect(connectToRun).not.toHaveBeenCalled();
+  });
+
+  it("drops a late fanout guard after the active session changes", async () => {
+    const { executePipeline } = await import("@/api/client");
+    const pendingExecute = deferred<never>();
+    const guard = {
+      ack_token: "ack-line-explode",
+      risk_level: "high" as const,
+      summary: "LLM transform fanout needs confirmation.",
+      risks: [],
+    };
+    (executePipeline as ReturnType<typeof vi.fn>).mockReturnValue(
+      pendingExecute.promise,
+    );
+
+    const executePromise = useExecutionStore.getState().execute("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingExecute.reject({
+      status: 428,
+      detail: guard.summary,
+      error_type: "execution_fanout_ack_required",
+      fanout_guard: guard,
+    });
+    const runId = await executePromise;
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(state.pendingFanoutGuard).toBeNull();
+    expect(state.pendingFanoutSessionId).toBeNull();
+    expect(state.error).toBeNull();
+    expect(state.isExecuting).toBe(false);
+  });
+
+  it("drops a late execution error after the active session changes", async () => {
+    const { executePipeline } = await import("@/api/client");
+    const pendingExecute = deferred<never>();
+    (executePipeline as ReturnType<typeof vi.fn>).mockReturnValue(
+      pendingExecute.promise,
+    );
+
+    const executePromise = useExecutionStore.getState().execute("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingExecute.reject({
+      status: 500,
+      detail: "old session failed",
+    });
+    const runId = await executePromise;
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(state.error).toBeNull();
+    expect(state.isExecuting).toBe(false);
+  });
+});
+
 function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
   return {
     run_id: "run-1",
@@ -407,6 +501,7 @@ describe("executionStore fanout guard", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
   });
 
   const guard = {

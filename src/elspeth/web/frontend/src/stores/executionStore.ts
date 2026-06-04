@@ -79,6 +79,7 @@ interface ValidateOptions {
 // because it's not serialisable and components don't need to read it.
 let wsConnection: WebSocketConnection | null = null;
 let validationRequestSeq = 0;
+let executionRequestSeq = 0;
 
 function currentCompositionVersion(): number | null {
   return useSessionStore.getState().compositionState?.version ?? null;
@@ -99,6 +100,16 @@ function shouldApplyValidationResult(
     return false;
   }
   return true;
+}
+
+function shouldApplyExecutionResult(
+  sessionId: string,
+  requestSeq: number,
+): boolean {
+  return (
+    requestSeq === executionRequestSeq &&
+    useSessionStore.getState().activeSessionId === sessionId
+  );
 }
 
 function assertNever(value: never): never {
@@ -363,12 +374,19 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       set({ isExecuting: false, error: blockedByInterpretation });
       return null;
     }
+    const requestSeq = ++executionRequestSeq;
     set({ isExecuting: true, error: null });
     try {
       const { run_id } =
         fanoutAck === undefined
           ? await api.executePipeline(sessionId)
           : await api.executePipeline(sessionId, fanoutAck);
+      if (!shouldApplyExecutionResult(sessionId, requestSeq)) {
+        if (requestSeq === executionRequestSeq) {
+          set({ isExecuting: false });
+        }
+        return null;
+      }
       set({
         activeRunId: run_id,
         isExecuting: false,
@@ -395,6 +413,12 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       get().connectWebSocket(run_id);
       return run_id;
     } catch (err) {
+      if (!shouldApplyExecutionResult(sessionId, requestSeq)) {
+        if (requestSeq === executionRequestSeq) {
+          set({ isExecuting: false });
+        }
+        return null;
+      }
       const apiErr = err as ApiError;
       if (
         apiErr.status === 428 &&
@@ -625,6 +649,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
 
   reset() {
     validationRequestSeq += 1;
+    executionRequestSeq += 1;
     wsConnection?.close();
     wsConnection = null;
     set(initialExecutionState);

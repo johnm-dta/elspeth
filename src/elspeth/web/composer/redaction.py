@@ -3090,10 +3090,10 @@ def redact_tool_call_response(
 def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     """Redact internal storage paths from a serialized state dict.
 
-    When source options contain a ``blob_ref``, ``path`` points at an
-    internal storage location that must not be exposed to agents or users.
-    Preserve the key with a sentinel value so external consumers can still
-    tell that the source path contract is satisfied.
+    When source options contain a ``blob_ref``, ``path`` (and the equivalent
+    ``file`` carrier) point at an internal storage location that must not be
+    exposed to agents or users. Preserve the key(s) with a sentinel value so
+    external consumers can still tell that the source path contract is satisfied.
 
     Returns a shallow copy with source options redacted. Does not mutate
     the input dict.
@@ -3128,8 +3128,14 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(state_dict)
     redacted_source = dict(source)
     redacted_options = dict(options)
-    if "path" in redacted_options:
-        redacted_options["path"] = REDACTED_BLOB_SOURCE_PATH
+    # Both "path" and "file" are blob storage-path carriers: blob ownership
+    # detection (web/blobs/service.py) and the fork rewrite
+    # (web/sessions/routes/sessions.py) treat them equivalently. Mask both so a
+    # blob-backed source authored with the "file" option shape cannot leak the
+    # internal storage_path through this redaction surface (elspeth-a7aa07b7ce).
+    for storage_path_key in ("path", "file"):
+        if storage_path_key in redacted_options:
+            redacted_options[storage_path_key] = REDACTED_BLOB_SOURCE_PATH
     redacted_source["options"] = redacted_options
     redacted["source"] = redacted_source
     return redacted

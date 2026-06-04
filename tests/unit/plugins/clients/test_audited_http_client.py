@@ -1632,6 +1632,62 @@ class TestAuditedHTTPClientGet:
         assert recorded_request["params"]["api_key"] != "PARAM_SECRET"
         assert str(recorded_request["params"]["api_key"]).startswith("<fingerprint:")
 
+    def test_request_ssrf_safe_telemetry_bug_does_not_double_record(self) -> None:
+        """A telemetry programmer-bug after a successful SSRF record must not
+        produce a second audit row (elspeth-affb35a660).
+
+        _emit_telemetry_after_audit re-raises programmer bugs (TypeError etc.).
+        request_ssrf_safe previously emitted telemetry inside the network try
+        block, so that re-raise was caught by `except Exception` and triggered a
+        second _record_call(ERROR) at the same call_index — a duplicate-index
+        audit write that also misclassifies a telemetry bug as an HTTP failure.
+        The success record+emit must sit OUTSIDE the network try (like post()/
+        get()), so the bug propagates with exactly one SUCCESS record written.
+        """
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        safe_request = SSRFSafeRequest(
+            original_url="https://api.example.com/page",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/page",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        def _telemetry_bug(event: object) -> None:
+            raise TypeError("telemetry bug")
+
+        shared_client = MagicMock()
+        ssrf_context = MagicMock()
+        ssrf_client = MagicMock()
+        ssrf_context.__enter__.return_value = ssrf_client
+        ssrf_client.get.return_value = mock_response
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.side_effect = [shared_client, ssrf_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=_telemetry_bug,
+            )
+            with pytest.raises(TypeError, match="telemetry bug"):
+                client.request_ssrf_safe("GET", safe_request)
+
+        # Exactly one audit row, and it is the SUCCESS record — not a duplicate
+        # ERROR row misattributing the telemetry bug to the HTTP call.
+        assert mock_execution.record_call.call_count == 1
+        assert mock_execution.record_call.call_args_list[0].kwargs["status"] == CallStatus.SUCCESS
+
     def test_request_ssrf_safe_post_passes_query_params_to_httpx(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SSRF-safe POST must preserve explicit query params on the network request."""
         from elspeth.core.security.web import SSRFSafeRequest

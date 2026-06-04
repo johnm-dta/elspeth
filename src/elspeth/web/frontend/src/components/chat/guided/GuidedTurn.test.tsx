@@ -234,6 +234,47 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
 // ── Suite 3: Distinctness / independence pin ──────────────────────────────────
 
 describe("GuidedTurn dispatcher — widget instance independence", () => {
+  it("remounts a same-type widget when the live turn payload changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const firstPayload: SingleSelectPayload = {
+      question: "First custom question",
+      options: [{ id: "first", label: "First", hint: null }],
+      allow_custom: true,
+    };
+    const secondPayload: SingleSelectPayload = {
+      question: "Second custom question",
+      options: [{ id: "second", label: "Second", hint: null }],
+      allow_custom: true,
+    };
+
+    const { rerender } = render(
+      <GuidedTurn
+        turn={makeTurn("single_select", firstPayload)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Custom" }), "stale");
+    expect(
+      screen.getByRole("button", { name: "Submit custom" }),
+    ).not.toBeDisabled();
+
+    rerender(
+      <GuidedTurn
+        turn={makeTurn("single_select", secondPayload)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByText("Second custom question")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Custom" })).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Submit custom" }),
+    ).toBeDisabled();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("two simultaneous single_select turns render independently without state bleed", () => {
     const onSubmit1 = vi.fn();
     const onSubmit2 = vi.fn();

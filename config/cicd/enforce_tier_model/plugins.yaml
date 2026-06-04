@@ -415,25 +415,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[16]/body[19]/body[6]/body[0]/body[4]/handlers[1]'
   judge_metadata_signature: 'hmac-sha256:v2:e93f521410de789d918b5a3b9e457d80576265658c5bc2826e1066d252326e0c'
-- key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=588df931d0f0d1f1
-  owner: john
-  reason: |-
-    In AuditedHTTPClient._emit_telemetry_after_audit (http.py:282), the broad except Exception as tel_err is the last clause of a layered filter: contract_errors.TIER_1_ERRORS are re-raised (line 278) and programmer-bug exceptions TypeError/AttributeError/KeyError/NameError are re-raised (line 280). The method name and the telemetry-primacy policy confirm audit (Landscape) has already fired before this point, so the remaining broad catch covers genuine telemetry-channel failures (network/serialization in the async sink) which are best-effort and must not corrupt the main HTTP call path once audit succeeded. logger.warning is the correct last-resort channel here precisely because telemetry itself is the broken subsystem. Narrowly scoped after the re-raise filters; not silent swallowing of audit or programmer-bug failures. Matches the existing rationale.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:49:55.626042+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The visible code at lines 278-280 establishes a layered filter that re-raises contract_errors.TIER_1_ERRORS (audit/integrity violations) and TypeError/AttributeError/KeyError/NameError (programmer bugs) before the broad except at line 282. The function name _emit_telemetry_after_audit and the surrounding ExternalCallCompleted emission show this is the telemetry leg, which per Telemetry Primacy is async best-effort once audit has fired. logger.warning is the correct last-resort channel precisely because the telemetry subsystem itself is the failing one here — exactly the policy-defined fallback. The rationale correctly identifies all three load-bearing facts (filter order, audit-already-fired, telemetry-as-best-effort), and R4 is not in the decorator's suppressible set {R1,R5}, so a per-line allowlist entry is the right shape.
-  judge_signature_version: 2
-  scope_fingerprint: 4b0862d7dbc9d1ca49f0b3fe5a623bc4a25b56f16607eef262a51f4469261a2c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[23]/body[10]/body[2]/handlers[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:24518d4b93d7aa73d655afe95464be3ccc5cb2e4667ec02575b37c108acc34ba'
 - key: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=153b600f7b824428
   owner: john
   reason: |-
@@ -1295,7 +1276,26 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[14]/body[22]/body[2]/body[0]/value'
   judge_metadata_signature: 'hmac-sha256:v2:c3e490f45b54a54e85d38b2f4706657eb9f6f4a6d71309f5b90e6c8df488d573'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_send_ssrf_safe_request:fp=54961c9c041be486
+- key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=c4f175091e2b6cef
+  owner: john
+  reason: |-
+    In AuditedHTTPClient._emit_telemetry_after_audit (http.py:282), the broad except Exception as tel_err is the last clause of a layered filter: contract_errors.TIER_1_ERRORS are re-raised (line 278) and programmer-bug exceptions TypeError/AttributeError/KeyError/NameError are re-raised (line 280). The method name and the telemetry-primacy policy confirm audit (Landscape) has already fired before this point, so the remaining broad catch covers genuine telemetry-channel failures (network/serialization in the async sink) which are best-effort and must not corrupt the main HTTP call path once audit succeeded. logger.warning is the correct last-resort channel here precisely because telemetry itself is the broken subsystem. Narrowly scoped after the re-raise filters; not silent swallowing of audit or programmer-bug failures. Matches the existing rationale.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T10:10:17.363777+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The broad except is the terminal clause of a layered filter that has already re-raised Tier-1/audit-integrity errors and programmer-bug exceptions (TypeError/AttributeError/KeyError/NameError). Per the Telemetry primacy policy, audit has fired first (the method is _emit_telemetry_after_audit), and telemetry is explicitly best-effort; logger.warning is the documented last-resort channel precisely when telemetry itself is the broken subsystem. The catch logs with exc_info and structured fields, so the failure is recorded rather than silently swallowed.
+  judge_signature_version: 2
+  scope_fingerprint: 4b0862d7dbc9d1ca49f0b3fe5a623bc4a25b56f16607eef262a51f4469261a2c
+  judge_transport: openrouter
+  ast_path: 'body[25]/body[10]/body[2]/handlers[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:f5bfe1ffe358770b3b8102b430c6f3978241a09f993bfe189eca481a2fe0dca7'
+- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_send_ssrf_safe_request:fp=bdc0a2470c42fe8d
   owner: john
   reason: |-
     False positive on HTTP client.get method dispatch; this is not dict.get default fabrication, and the response remains inside the audited request path.
@@ -1303,14 +1303,14 @@ allow_hits:
     Suppression gated by cicd-judge; see judge_rationale below.
   expires: '2026-09-02'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T06:40:55.624619+00:00'
+  judge_recorded_at: '2026-06-04T10:10:24.445377+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.97
   judge_rationale: |-
-    RULE MISFIRES. The flagged `.get` is `httpx.Client.get(url, ...)` — an HTTP GET method dispatch on an httpx client object — not `dict.get(key, default)`. The R1 rule targets dict.get default-fabrication patterns, and the visible code makes clear this is a method call on an httpx.Client (passing url and kwargs, no default value semantics). The static analyzer matched on the bare `.get` token without distinguishing the receiver type.
+    RULE MISFIRES. The flagged `.get` is `httpx.Client.get(...)` — an HTTP method dispatch (a method named 'get' on the httpx client), not `dict.get(key, default)`. The analyzer matched on the bare name; there is no missing-key suppression or default-fabrication semantics here. The rationale correctly identifies the false-positive shape and the visible code confirms it (the call passes URL/params/headers/extensions, not a key+default).
   judge_signature_version: 2
   scope_fingerprint: 9632d1f4f9453244a57e75d1e0e5cd3714529234884a0cccb546d7b9ae41381c
   judge_transport: openrouter
-  ast_path: 'body[23]/body[15]/body[1]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:8c7cf303ad33f352fac3cfcba3db29ff5a0f95812a290b105b8f6c96757df4ff'
+  ast_path: 'body[25]/body[15]/body[1]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:b986ffc94f1461b1c64417215b9d5f31973c3d12f9df86c0c9dd4282eb1a2eb2'

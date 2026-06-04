@@ -179,18 +179,26 @@ class ProgressBroadcaster:
                     state.drain_scheduled = True
                     states_to_schedule.append(state)
         if self._loop.is_closed() is True:
-            with self._lock:
-                if run_id in self._subscribers:
-                    states_to_drop = list(self._subscribers[run_id].values())
-                else:
-                    states_to_drop = []
-                for state in states_to_drop:
-                    state.pending.clear()
-                    state.drain_scheduled = False
-            return BroadcastResult(dropped_count=len(states_to_drop), drop_reason="loop_closed")
-        for state in states_to_schedule:
-            self._loop.call_soon_threadsafe(self._drain_pending, run_id, state)
+            return self._drop_pending_for_closed_loop(run_id)
+        try:
+            for state in states_to_schedule:
+                self._loop.call_soon_threadsafe(self._drain_pending, run_id, state)
+        except RuntimeError:
+            if self._loop.is_closed() is True:
+                return self._drop_pending_for_closed_loop(run_id)
+            raise
         return BroadcastResult(scheduled_count=len(states_to_schedule))
+
+    def _drop_pending_for_closed_loop(self, run_id: str) -> BroadcastResult:
+        with self._lock:
+            if run_id in self._subscribers:
+                states_to_drop = list(self._subscribers[run_id].values())
+            else:
+                states_to_drop = []
+            for state in states_to_drop:
+                state.pending.clear()
+                state.drain_scheduled = False
+        return BroadcastResult(dropped_count=len(states_to_drop), drop_reason="loop_closed")
 
     @staticmethod
     def _append_pending_locked(state: _SubState, event: RunEvent) -> None:

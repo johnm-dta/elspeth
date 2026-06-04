@@ -220,6 +220,25 @@ class TestProgressBroadcasterThreadSafety:
         assert result.dropped_count == 1
         assert result.drop_reason == "loop_closed"
 
+    def test_broadcast_loop_closure_during_schedule_reports_explicit_drop(self) -> None:
+        """Loop closure between pre-check and scheduling is treated as shutdown."""
+        mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        mock_loop.is_closed.side_effect = [False, True]
+        mock_loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        broadcaster = ProgressBroadcaster(mock_loop)
+        broadcaster.subscribe("run-1")
+        event = _make_event()
+
+        result = broadcaster.broadcast("run-1", event)
+
+        sub_map = broadcaster._subscribers["run-1"]
+        state = next(iter(sub_map.values()))
+        assert result.scheduled_count == 0
+        assert result.dropped_count == 1
+        assert result.drop_reason == "loop_closed"
+        assert len(state.pending) == 0
+        assert state.drain_scheduled is False
+
     def test_broadcast_runtime_error_from_open_loop_propagates(self) -> None:
         """RuntimeError from an open loop is not treated as shutdown."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)

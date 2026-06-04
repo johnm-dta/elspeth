@@ -467,6 +467,70 @@ describe("sessionStore", () => {
       expect(state.recoveryStartedCompositionVersion).toBeNull();
     });
 
+    it("drops stale sendMessage responses after the active session changes", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      const sendDeferred = deferred<{
+        message: ChatMessage;
+        state: CompositionState | null;
+        proposals?: CompositionProposal[];
+      }>();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        sendDeferred.promise,
+      );
+
+      useSessionStore.setState({
+        activeSessionId: "session-a",
+        messages: [],
+        compositionState: makeCompositionState(1, ["a-start"]),
+      });
+      const sendPromise = useSessionStore.getState().sendMessage("build it");
+      await Promise.resolve();
+
+      const currentMessage: ChatMessage = {
+        id: "b-message",
+        session_id: "session-b",
+        role: "user",
+        content: "current session",
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+      };
+      const currentState = makeCompositionState(20, ["b-node"]);
+      useSessionStore.setState({
+        activeSessionId: "session-b",
+        messages: [currentMessage],
+        compositionState: currentState,
+        compositionProposals: [
+          makeCompositionProposal({ id: "proposal-b", session_id: "session-b" }),
+        ],
+        isComposing: false,
+      });
+
+      sendDeferred.resolve({
+        message: {
+          id: "a-assistant",
+          session_id: "session-a",
+          role: "assistant",
+          content: "stale response",
+          tool_calls: null,
+          created_at: "2026-05-14T00:00:01Z",
+        },
+        state: makeCompositionState(2, ["a-node"]),
+        proposals: [
+          makeCompositionProposal({ id: "proposal-a", session_id: "session-a" }),
+        ],
+      });
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("session-b");
+      expect(state.messages).toEqual([currentMessage]);
+      expect(state.compositionState).toBe(currentState);
+      expect(state.compositionProposals).toEqual([
+        expect.objectContaining({ id: "proposal-b", session_id: "session-b" }),
+      ]);
+      expect(state.error).toBeNull();
+    });
+
     it("polls composer progress only while a send is composing", async () => {
       vi.useFakeTimers();
       try {
@@ -1203,6 +1267,79 @@ describe("sessionStore", () => {
   });
 
   describe("retryMessage abort handling", () => {
+    it("drops stale retryMessage responses after the active session changes", async () => {
+      const { recompose: mockRecompose } = await import("@/api/client");
+      const retryDeferred = deferred<{
+        message: ChatMessage;
+        state: CompositionState | null;
+        proposals?: CompositionProposal[];
+      }>();
+      (mockRecompose as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        retryDeferred.promise,
+      );
+      const retriedMessage: ChatMessage = {
+        id: "a-user",
+        session_id: "session-a",
+        role: "user",
+        content: "retry this",
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-a",
+        messages: [retriedMessage],
+        compositionState: makeCompositionState(1, ["a-start"]),
+      });
+      const retryPromise = useSessionStore
+        .getState()
+        .retryMessage("a-user");
+      await Promise.resolve();
+
+      const currentMessage: ChatMessage = {
+        id: "b-message",
+        session_id: "session-b",
+        role: "user",
+        content: "current session",
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+      };
+      const currentState = makeCompositionState(20, ["b-node"]);
+      useSessionStore.setState({
+        activeSessionId: "session-b",
+        messages: [currentMessage],
+        compositionState: currentState,
+        compositionProposals: [
+          makeCompositionProposal({ id: "proposal-b", session_id: "session-b" }),
+        ],
+        isComposing: false,
+      });
+
+      retryDeferred.resolve({
+        message: {
+          id: "a-assistant",
+          session_id: "session-a",
+          role: "assistant",
+          content: "stale retry response",
+          tool_calls: null,
+          created_at: "2026-05-14T00:00:01Z",
+        },
+        state: makeCompositionState(2, ["a-node"]),
+        proposals: [
+          makeCompositionProposal({ id: "proposal-a", session_id: "session-a" }),
+        ],
+      });
+      await retryPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("session-b");
+      expect(state.messages).toEqual([currentMessage]);
+      expect(state.compositionState).toBe(currentState);
+      expect(state.compositionProposals).toEqual([
+        expect.objectContaining({ id: "proposal-b", session_id: "session-b" }),
+      ]);
+      expect(state.error).toBeNull();
+    });
+
     it("maps a client-side AbortError to the compose-timeout copy", async () => {
       const { recompose: mockRecompose } = await import("@/api/client");
       const abortError = new DOMException(

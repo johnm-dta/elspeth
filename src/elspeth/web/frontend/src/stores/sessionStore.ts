@@ -478,6 +478,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         api.fetchCompositionProposals(id),
         api.fetchComposerPreferences(id),
       ]);
+      // The user may switch sessions while these requests are in flight.
+      // Drop stale payloads so an older selection cannot overwrite the
+      // newly active session's messages or composition state.
+      if (get().activeSessionId !== id) {
+        return;
+      }
       set({
         messages,
         compositionState,

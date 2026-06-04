@@ -4,6 +4,7 @@ import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import type {
   ChatMessage,
+  ComposerPreferences,
   ComposerRecoveryError,
   ComposerProgressSnapshot,
   CompositionState,
@@ -1044,6 +1045,111 @@ describe("sessionStore", () => {
   });
 
   describe("selectSession stale session handling", () => {
+    it("drops stale selectSession responses after the active session changes", async () => {
+      const apiClient = await import("@/api/client");
+      const aMessages = deferred<ChatMessage[]>();
+      const aState = deferred<CompositionState | null>();
+      const aProposals = deferred<CompositionProposal[]>();
+      const aPreferences = deferred<ComposerPreferences | null>();
+      const bMessages = deferred<ChatMessage[]>();
+      const bState = deferred<CompositionState | null>();
+      const bProposals = deferred<CompositionProposal[]>();
+      const bPreferences = deferred<ComposerPreferences | null>();
+      const messagePromises = new Map([
+        ["session-a", aMessages.promise],
+        ["session-b", bMessages.promise],
+      ]);
+      const statePromises = new Map([
+        ["session-a", aState.promise],
+        ["session-b", bState.promise],
+      ]);
+      const proposalPromises = new Map([
+        ["session-a", aProposals.promise],
+        ["session-b", bProposals.promise],
+      ]);
+      const preferencePromises = new Map([
+        ["session-a", aPreferences.promise],
+        ["session-b", bPreferences.promise],
+      ]);
+      const lookup = <T,>(promises: Map<string, Promise<T>>, id: string) => {
+        const promise = promises.get(id);
+        if (!promise) {
+          throw new Error(`unexpected session ${id}`);
+        }
+        return promise;
+      };
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockImplementation(
+        (id: string) => lookup(messagePromises, id),
+      );
+      (
+        apiClient.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockImplementation((id: string) => lookup(statePromises, id));
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockImplementation((id: string) => lookup(proposalPromises, id));
+      (
+        apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>
+      ).mockImplementation((id: string) => lookup(preferencePromises, id));
+
+      const selectA = useSessionStore.getState().selectSession("session-a");
+      const selectB = useSessionStore.getState().selectSession("session-b");
+
+      const bMessage: ChatMessage = {
+        id: "b-message",
+        session_id: "session-b",
+        role: "user",
+        content: "current",
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+      };
+      const bCompositionState = makeCompositionState(2, ["b-node"]);
+      bMessages.resolve([bMessage]);
+      bState.resolve(bCompositionState);
+      bProposals.resolve([
+        makeCompositionProposal({ id: "proposal-b", session_id: "session-b" }),
+      ]);
+      bPreferences.resolve({
+        session_id: "session-b",
+        trust_mode: "explicit_approve",
+        density_default: "high",
+        interpretation_review_disabled: false,
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      await selectB;
+
+      aMessages.resolve([
+        {
+          id: "a-message",
+          session_id: "session-a",
+          role: "user",
+          content: "stale",
+          tool_calls: null,
+          created_at: "2026-05-14T00:00:00Z",
+        },
+      ]);
+      aState.resolve(makeCompositionState(1, ["a-node"]));
+      aProposals.resolve([
+        makeCompositionProposal({ id: "proposal-a", session_id: "session-a" }),
+      ]);
+      aPreferences.resolve({
+        session_id: "session-a",
+        trust_mode: "explicit_approve",
+        density_default: "high",
+        interpretation_review_disabled: false,
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      await selectA;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("session-b");
+      expect(state.messages).toEqual([bMessage]);
+      expect(state.compositionState).toBe(bCompositionState);
+      expect(state.compositionProposals).toEqual([
+        expect.objectContaining({ id: "proposal-b", session_id: "session-b" }),
+      ]);
+      expect(state.composerPreferences?.session_id).toBe("session-b");
+    });
+
     it("clears stale active session when selected session no longer exists", async () => {
       const apiClient = await import("@/api/client");
       (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockRejectedValueOnce({

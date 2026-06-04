@@ -184,6 +184,11 @@ jobs:
             --rules meta.no-new-bespoke-cicd-enforcer \
             --root .
 
+      - name: Run adapter facade budget legacy gate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          uv run python scripts/cicd/enforce_adapter_budget.py
+
       - name: Emit elspeth-lints SARIF artifact
         if: always()
         working-directory: ${{ env.CI_CHECKOUT_PATH }}

@@ -13,6 +13,8 @@ from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, Rul
 from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer.metadata import MANIFEST_PATH, RULE_ID, RULE_METADATA
 
 MANIFEST_RELATIVE_PATH = Path(MANIFEST_PATH)
+WORKFLOWS_RELATIVE_PATH = Path(".github/workflows")
+PENDING_STATUS = "pending"
 ACTIVE_STATUSES = frozenset({"pending", "shadow", "cutover"})
 DELETED_STATUS = "deleted"
 KNOWN_STATUSES = ACTIVE_STATUSES | frozenset({DELETED_STATUS})
@@ -88,6 +90,21 @@ class NoNewBespokeCicdEnforcerRule:
                 )
             )
 
+        ci_references = _ci_referenced_paths(root)
+        for rel_path in sorted(manifest.pending_paths):
+            if rel_path in ci_references:
+                continue
+            findings.append(
+                Finding(
+                    rule_id=RULE_ID,
+                    file_path=MANIFEST_PATH,
+                    line=1,
+                    column=0,
+                    message=f"{rel_path} is status: pending in {MANIFEST_PATH} but is not exercised by CI.",
+                    fingerprint=f"pending-not-exercised:{rel_path}",
+                )
+            )
+
         return findings
 
 
@@ -95,6 +112,7 @@ class NoNewBespokeCicdEnforcerRule:
 class _MigrationManifest:
     active_paths: frozenset[str]
     deleted_paths: frozenset[str]
+    pending_paths: frozenset[str]
 
 
 def _actual_enforcer_scripts(root: Path) -> tuple[Path, ...]:
@@ -106,10 +124,24 @@ def _actual_enforcer_scripts(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(enforce_scripts | inventory_scripts))
 
 
+def _ci_referenced_paths(root: Path) -> frozenset[str]:
+    workflows_dir = root / WORKFLOWS_RELATIVE_PATH
+    if not workflows_dir.exists():
+        return frozenset()
+    workflow_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for pattern in ("*.yml", "*.yaml")
+        for path in sorted(workflows_dir.glob(pattern))
+        if path.is_file()
+    )
+    actual_paths = {path.relative_to(root).as_posix() for path in _actual_enforcer_scripts(root)}
+    return frozenset(rel_path for rel_path in actual_paths if rel_path in workflow_text)
+
+
 def _load_manifest(root: Path) -> _MigrationManifest:
     manifest_file = root / MANIFEST_RELATIVE_PATH
     if not manifest_file.exists():
-        return _MigrationManifest(active_paths=frozenset(), deleted_paths=frozenset())
+        return _MigrationManifest(active_paths=frozenset(), deleted_paths=frozenset(), pending_paths=frozenset())
 
     raw = yaml.safe_load(manifest_file.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
@@ -118,6 +150,7 @@ def _load_manifest(root: Path) -> _MigrationManifest:
 
     active_paths: set[str] = set()
     deleted_paths: set[str] = set()
+    pending_paths: set[str] = set()
     for index, raw_rule in enumerate(rules):
         item = _mapping_value(raw_rule, f"rules[{index}]")
         old_script = _required_string(item, "old_script", context=f"rules[{index}]")
@@ -133,8 +166,14 @@ def _load_manifest(root: Path) -> _MigrationManifest:
             deleted_paths.add(old_script)
         else:
             active_paths.add(old_script)
+            if status == PENDING_STATUS:
+                pending_paths.add(old_script)
 
-    return _MigrationManifest(active_paths=frozenset(active_paths), deleted_paths=frozenset(deleted_paths))
+    return _MigrationManifest(
+        active_paths=frozenset(active_paths),
+        deleted_paths=frozenset(deleted_paths),
+        pending_paths=frozenset(pending_paths),
+    )
 
 
 def _is_tracked_legacy_script(old_script: str) -> bool:

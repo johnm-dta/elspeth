@@ -13,6 +13,15 @@ def test_meta_gate_allows_manifested_legacy_enforcers(tmp_path: Path) -> None:
     """Existing enforce_*.py scripts are allowed only when tracked in the manifest."""
     _write_file(tmp_path / "scripts/cicd/enforce_existing.py", "print('legacy')\n")
     _write_file(
+        tmp_path / ".github/workflows/ci.yaml",
+        """
+jobs:
+  lint:
+    steps:
+      - run: python scripts/cicd/enforce_existing.py
+""",
+    )
+    _write_file(
         tmp_path / "config/cicd/lint_migration_status.yaml",
         """
 version: 1
@@ -27,6 +36,39 @@ rules:
     findings = list(RULE.analyze_repository(tmp_path, RuleContext(root=tmp_path)))
 
     assert findings == []
+
+
+def test_meta_gate_blocks_unexercised_pending_enforcers(tmp_path: Path) -> None:
+    """Pending legacy scripts must be visibly exercised by CI while awaiting migration."""
+    _write_file(tmp_path / "scripts/cicd/enforce_existing.py", "print('legacy')\n")
+    _write_file(
+        tmp_path / ".github/workflows/ci.yaml",
+        """
+jobs:
+  lint:
+    steps:
+      - run: echo no legacy scripts here
+""",
+    )
+    _write_file(
+        tmp_path / "config/cicd/lint_migration_status.yaml",
+        """
+version: 1
+rules:
+  - old_script: scripts/cicd/enforce_existing.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-test
+""",
+    )
+
+    findings = list(RULE.analyze_repository(tmp_path, RuleContext(root=tmp_path)))
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "meta.no-new-bespoke-cicd-enforcer"
+    assert "pending" in findings[0].message
+    assert "not exercised by CI" in findings[0].message
+    assert "scripts/cicd/enforce_existing.py" in findings[0].message
 
 
 def test_meta_gate_allows_manifested_adr019_inventory_scripts(tmp_path: Path) -> None:

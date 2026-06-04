@@ -64,8 +64,8 @@ class TestCSVSinkHeaders:
             assert rows[0] == ["u1", "100.0"]
             assert rows[1] == ["u2", "200.0"]
 
-    def test_partial_custom_headers(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Unmapped fields keep their normalized names."""
+    def test_partial_custom_headers_raise_for_unmapped_fields(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """CUSTOM header mode requires every emitted field to be explicitly mapped."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
@@ -79,15 +79,10 @@ class TestCSVSinkHeaders:
             )
         )
 
-        sink.write([{"user_id": "u1", "amount": 100.0, "status": "active"}], ctx)
-        sink.flush()
-        sink.close()
+        with pytest.raises(ValueError, match="CUSTOM header mode has no mapping for field 'amount'"):
+            sink.write([{"user_id": "u1", "amount": 100.0, "status": "active"}], ctx)
 
-        with open(output_file) as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            # user_id mapped, others keep normalized names
-            assert header == ["User ID", "amount", "status"]
+        assert not output_file.exists()
 
     def test_original_headers_from_landscape(self, tmp_path: Path) -> None:
         """headers: original fetches mapping from Landscape."""

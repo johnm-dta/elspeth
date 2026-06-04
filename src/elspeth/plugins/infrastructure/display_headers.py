@@ -132,10 +132,34 @@ def resolve_contract_from_context_if_needed(sink: DisplayHeaderHost, ctx: SinkCo
     """
     if sink._headers_mode != HeaderMode.ORIGINAL:
         return
-    if sink._output_contract is not None:
-        return  # Already set explicitly
-    if ctx.contract is not None:
+    if ctx.contract is None:
+        return
+    if sink._output_contract is None:
         sink._output_contract = ctx.contract
+        return
+
+    existing = sink._output_contract
+    incoming = ctx.contract
+
+    existing_original_by_normalized = {field.normalized_name: field.original_name for field in existing.fields}
+    conflicts: list[str] = []
+    for field in incoming.fields:
+        existing_original = existing_original_by_normalized.get(field.normalized_name)
+        if existing_original is None:
+            continue
+        if existing_original != field.original_name:
+            conflicts.append(f"{field.normalized_name}: {existing_original!r} != {field.original_name!r}")
+
+    if conflicts:
+        raise ValueError(
+            "headers: original received incompatible contracts for the same sink. "
+            "The same normalized field maps to different original headers: "
+            f"{', '.join(conflicts)}. Split the sink output by source/contract or normalize headers explicitly."
+        )
+
+    incoming_names = {field.normalized_name for field in incoming.fields}
+    if not incoming_names.issubset(existing_original_by_normalized):
+        sink._output_contract = existing.merge(incoming)
 
 
 def set_resume_field_resolution(sink: DisplayHeaderHost, resolution_mapping: dict[str, str]) -> None:

@@ -49,6 +49,72 @@ def _write_tier_model_fixture(root: Path) -> Path:
     return fixture_root
 
 
+def _write_freeze_guard_governance_fixture(root: Path) -> Path:
+    """Create a fixture whose code findings are suppressed but allowlist governance is bad."""
+    fixture_root = root / "freeze-governance"
+    fixture_root.mkdir()
+    (fixture_root / "example.py").write_text(
+        """from dataclasses import dataclass
+from types import MappingProxyType
+
+
+@dataclass(frozen=True)
+class Example:
+    data: dict[str, str]
+
+    def __post_init__(self):
+        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+        object.__setattr__(self, "data2", MappingProxyType(dict(self.data)))
+""",
+        encoding="utf-8",
+    )
+    allowlist_dir = fixture_root / "config" / "cicd" / "enforce_freeze_guards"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "_defaults.yaml").write_text(
+        """version: 1
+defaults:
+  fail_on_stale: true
+  fail_on_expired: true
+  allowlist_budget:
+    max_total_entries: 0
+""",
+        encoding="utf-8",
+    )
+    (allowlist_dir / "fixture.yaml").write_text(
+        """allow_hits:
+- key: stale.py:FG1:_module_:fp=deadbeef
+  owner: test-owner
+  reason: stale exact entry fixture
+  safety: test
+  expires: null
+- key: expired.py:FG2:_module_:fp=cafebabe
+  owner: test-owner
+  reason: expired exact entry fixture
+  safety: test
+  expires: 2000-01-01
+per_file_rules:
+- pattern: example.py
+  rules:
+  - FG1
+  reason: suppress fixture FG1 findings but exceed max_hits
+  expires: null
+  max_hits: 1
+- pattern: expired.py
+  rules:
+  - FG2
+  reason: expired per-file rule fixture
+  expires: 2000-01-01
+- pattern: unused.py
+  rules:
+  - FG3
+  reason: unused per-file rule fixture
+  expires: null
+""",
+        encoding="utf-8",
+    )
+    return fixture_root
+
+
 def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PYTHONPATH": str(ELSPETH_LINTS_SRC)}
     return subprocess.run(
@@ -114,3 +180,70 @@ def test_allowlist_dir_nonexistent_exits_2(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "is not a directory" in result.stderr
+
+
+def test_non_tier_allowlist_governance_failures_reach_json_output(tmp_path: Path) -> None:
+    """Non-tier shared allowlists must fail full checks on governance debt."""
+    fixture_root = _write_freeze_guard_governance_fixture(tmp_path)
+    result = _run_cli(
+        [
+            "check",
+            "--rules",
+            "immutability.freeze_guards",
+            "--root",
+            str(fixture_root),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert result.returncode == 1, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    findings = json.loads(result.stdout)
+    rule_ids = {finding["rule_id"] for finding in findings}
+    assert {
+        "allowlist.stale_entry",
+        "allowlist.expired_entry",
+        "allowlist.expired_rule",
+        "allowlist.unused_rule",
+        "allowlist.max_hits_exceeded",
+        "allowlist.budget_exceeded",
+    }.issubset(rule_ids)
+    assert "FG1" not in rule_ids
+
+
+def test_non_tier_allowlist_governance_is_distinct_in_text_and_sarif(tmp_path: Path) -> None:
+    """Text and SARIF emit governance findings as distinct allowlist rule ids."""
+    fixture_root = _write_freeze_guard_governance_fixture(tmp_path)
+    text_result = _run_cli(
+        [
+            "check",
+            "--rules",
+            "immutability.freeze_guards",
+            "--root",
+            str(fixture_root),
+            "--format",
+            "text",
+        ]
+    )
+    assert text_result.returncode == 1
+    assert "allowlist.stale_entry" in text_result.stdout
+    assert "allowlist.max_hits_exceeded" in text_result.stdout
+    assert ": FG1:" not in text_result.stdout
+
+    sarif_result = _run_cli(
+        [
+            "check",
+            "--rules",
+            "immutability.freeze_guards",
+            "--root",
+            str(fixture_root),
+            "--format",
+            "sarif",
+        ]
+    )
+    assert sarif_result.returncode == 1
+    sarif_payload = json.loads(sarif_result.stdout)
+    sarif_rule_ids = {result["ruleId"] for run in sarif_payload["runs"] for result in run["results"]}
+    assert "allowlist.expired_rule" in sarif_rule_ids
+    assert "allowlist.budget_exceeded" in sarif_rule_ids
+    assert "FG1" not in sarif_rule_ids

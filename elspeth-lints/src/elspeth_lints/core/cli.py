@@ -1055,7 +1055,12 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
     if repo_root is not None and not repo_root.is_dir():
         sys.stderr.write(f"--repo-root: {repo_root} is not a directory\n")
         return 2
-    context = RuleContext(root=args.root, allowlist_dir_override=allowlist_dir, repo_root=repo_root)
+    context = RuleContext(
+        root=args.root,
+        allowlist_dir_override=allowlist_dir,
+        repo_root=repo_root,
+        emit_allowlist_governance=True,
+    )
     selected_rules = [registry.get(rule_id) for rule_id in requested_rules]
     whole_repo_rules = [rule for rule in selected_rules if rule.scope == RuleScope.WHOLE_REPO]
     incremental_rules = [rule for rule in selected_rules if rule.scope == RuleScope.INCREMENTAL]

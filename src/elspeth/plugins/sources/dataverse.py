@@ -206,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2b60ca394671fcef"
+    source_file_hash: str | None = "sha256:6d56aa1f83215734"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -670,6 +670,19 @@ class DataverseSource(BaseSource):
                     # inferred fields. Pydantic extra="allow" accepts any type
                     # for extras — the contract enforces inferred types here.
                     contract = self._contract_builder.contract if self._contract_builder is not None else self.require_schema_contract()
+                    if self._contract_builder is not None and contract.mode in ("OBSERVED", "FLEXIBLE"):
+                        # Dataverse rows can be sparse across pages/FetchXML
+                        # result sets. If a later row emits a new attribute,
+                        # its SourceRow contract must carry the audit/header
+                        # metadata before validation and yield.
+                        if self._field_resolution is None:
+                            raise ValueError("field_resolution must be established before sparse-field contract inference")
+                        contract = self._contract_builder.process_sparse_fields(
+                            validated_row,
+                            self._field_resolution.resolution_mapping,
+                        )
+                        self.set_schema_contract(contract)
+
                     if contract.locked:
                         violations = contract.validate(validated_row)
                         if violations:

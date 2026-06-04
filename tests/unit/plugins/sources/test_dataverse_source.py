@@ -1325,6 +1325,41 @@ class TestSchemaContractLocking:
         assert len(rows) == 1
         assert rows[0].contract is not None
 
+    def test_fetchxml_sparse_attributes_are_added_to_emitted_row_contract(self) -> None:
+        """Later sparse Dataverse attributes must stay under schema-contract custody."""
+        from elspeth.plugins.sources.dataverse import DataverseSource
+
+        pages = [_make_page([{"a": 1}, {"a": 2, "b": "new"}])]
+
+        with patch(
+            "elspeth.plugins.sources.dataverse.create_schema_from_config",
+            return_value=MagicMock(
+                model_validate=lambda row: MagicMock(to_row=lambda: dict(row)),
+            ),
+        ):
+            source = DataverseSource(_fetchxml_config(schema={"mode": "observed"}))
+
+        mock_client = MagicMock()
+        mock_client.paginate_fetchxml.return_value = iter(pages)
+        source._client = mock_client
+
+        rows = list(source.load(_mock_source_context()))
+
+        assert len(rows) == 2
+        assert rows[0].is_quarantined is False
+        assert rows[1].is_quarantined is False
+        assert rows[1].row == {"a": 2, "b": "new"}
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        assert mapping == {"a": "a", "b": "b"}
+
+        second_contract = rows[1].contract
+        assert second_contract is not None
+        assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
+        assert second_contract.get_field("b").original_name == "b"
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # get_field_resolution tests

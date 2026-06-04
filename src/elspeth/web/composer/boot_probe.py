@@ -8,6 +8,8 @@ auth, or network failures are not fatal: non-LLM web features must still boot.
 
 from __future__ import annotations
 
+import httpx
+
 from elspeth.web.composer.service import _litellm_acompletion
 
 
@@ -23,7 +25,9 @@ async def probe_composer_config(*, model: str, temperature: float | None, seed: 
     a fixed trivial prompt, so a 400 on that payload is a config rejection for
     the requested model/temperature/seed tuple.
     """
+    from litellm.exceptions import APIError as LiteLLMAPIError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from openai import OpenAIError as OpenAIProviderError
 
     kwargs: dict[str, object] = {
         "model": model,
@@ -40,5 +44,5 @@ async def probe_composer_config(*, model: str, temperature: float | None, seed: 
         return True
     except LiteLLMBadRequestError as exc:
         raise ComposerBootConfigError(f"composer sampling rejected by {model}: temperature={temperature}, seed={seed} - {exc}") from exc
-    except Exception:
+    except (LiteLLMAPIError, OpenAIProviderError, TimeoutError, httpx.HTTPError):
         return False

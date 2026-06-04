@@ -108,6 +108,7 @@ _COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogr
     description="Composer boot config probe latency in milliseconds",
     unit="ms",
 )
+_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -387,7 +388,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             probe_models.append(settings.composer_advisor_model)
         for model in probe_models:
             composer_probe_start = time.monotonic()
-            probe_status = "success"
+            probe_status = "started"
             attributes: dict[str, AttributeValue] = {
                 "composer_model": settings.composer_model,
                 "composer_temperature": str(settings.composer_temperature),
@@ -398,20 +399,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "probe_status": probe_status,
             }
             try:
-                ok = await probe_composer_config(
-                    model=model,
-                    temperature=settings.composer_temperature,
-                    seed=settings.composer_seed,
+                ok = await asyncio.wait_for(
+                    probe_composer_config(
+                        model=model,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
+                    ),
+                    timeout=_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS,
                 )
+                if ok:
+                    probe_status = "success"
                 if not ok:
                     probe_status = "transient_failure"
                     slog.warning(
                         "composer_boot_probe_transient_failure",
                         model=model,
+                        failure_class="provider_or_transport_error",
                         action="booting; composer LLM calls will be exercised at first use",
                     )
+            except TimeoutError:
+                probe_status = "transient_failure"
+                slog.warning(
+                    "composer_boot_probe_transient_failure",
+                    model=model,
+                    failure_class="TimeoutError",
+                    timeout_seconds=_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS,
+                    action="booting; composer LLM calls will be exercised at first use",
+                )
             except ComposerBootConfigError:
                 probe_status = "rejected"
+                raise
+            except asyncio.CancelledError:
+                probe_status = "cancelled"
+                raise
+            except Exception:
+                probe_status = "local_error"
                 raise
             finally:
                 attributes["probe_status"] = probe_status

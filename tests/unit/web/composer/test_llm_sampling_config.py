@@ -113,3 +113,27 @@ async def test_advisor_omits_sampling_when_settings_are_none(monkeypatch: pytest
 
     assert "temperature" not in captured
     assert "seed" not in captured
+
+
+@pytest.mark.asyncio
+async def test_advisor_sends_configured_sampling(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _response("advice")
+
+    monkeypatch.setattr(svc, "_litellm_acompletion", fake_acompletion)
+
+    await _service(tmp_path, composer_temperature=0.0, composer_seed=42)._call_advisor_with_audit(
+        {
+            "trigger": "reactive",
+            "problem_summary": "stuck",
+            "recent_errors": [],
+            "attempted_actions": [],
+        },
+        recorder=None,
+    )
+
+    assert captured["temperature"] == 0.0
+    assert captured["seed"] == 42

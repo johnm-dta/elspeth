@@ -572,6 +572,7 @@ class TestOidcDiscoveryStartup:
         return _settings(
             tmp_path,
             auth_provider="oidc",
+            composer_boot_probe_enabled=False,
             oidc_issuer="https://issuer.example.com",
             oidc_audience="test-audience",
             oidc_client_id="test-client-id",
@@ -703,6 +704,66 @@ class TestLifespanShutdown:
             assert attributes["probe_status"] == "success"
 
     @pytest.mark.asyncio
+    async def test_lifespan_records_transient_failure_when_composer_probe_times_out(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+        cancelled = False
+
+        async def _hanging_probe(**_kwargs: object) -> bool:
+            nonlocal cancelled
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled = True
+            return True
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _hanging_probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        async def _enter_and_exit_lifespan() -> None:
+            async with lifespan(app):
+                pass
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            await asyncio.wait_for(_enter_and_exit_lifespan(), timeout=1.0)
+
+        counter.add.assert_called_once()
+        _, attributes = counter.add.call_args.args
+        assert attributes["probe_status"] == "transient_failure"
+        assert attributes["probed_model"] == "gpt-5.5"
+        latency.record.assert_called_once()
+        assert cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_lifespan_records_local_error_when_composer_probe_raises_programmer_error(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+
+        async def _buggy_probe(**_kwargs: object) -> bool:
+            raise TypeError("signature drift")
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _buggy_probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+
+        with (
+            patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])),
+            pytest.raises(TypeError, match="signature drift"),
+        ):
+            async with lifespan(app):
+                pass
+
+        counter.add.assert_called_once()
+        _, attributes = counter.add.call_args.args
+        assert attributes["probe_status"] == "local_error"
+        assert attributes["probed_model"] == "gpt-5.5"
+        latency.record.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_lifespan_propagates_catalog_client_context_failure(self, tmp_path) -> None:
         """Outer HTTP-client construction failures are startup failures, not fallback decisions."""
         app = create_app(_settings(tmp_path))
@@ -716,7 +777,7 @@ class TestLifespanShutdown:
 
     @pytest.mark.asyncio
     async def test_lifespan_awaits_execution_service_shutdown(self, tmp_path) -> None:
-        app = create_app(_settings(tmp_path))
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
         fake_execution_service = MagicMock(spec=["get_live_run_ids", "set_openrouter_catalog_snapshot", "shutdown"])
         fake_execution_service.get_live_run_ids.return_value = frozenset()
         fake_execution_service.shutdown = AsyncMock()

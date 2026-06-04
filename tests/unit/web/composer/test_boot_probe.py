@@ -60,3 +60,30 @@ async def test_probe_is_graceful_on_transient(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(bp, "_litellm_acompletion", fake_acompletion)
 
     assert await bp.probe_composer_config(model="gpt-4o", temperature=0.0, seed=42) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_is_graceful_on_litellm_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from litellm.exceptions import InternalServerError
+
+    async def fake_acompletion(**_kwargs: object) -> object:
+        raise InternalServerError(
+            message="Missing credentials.",
+            model="gpt-4o",
+            llm_provider="openai",
+        )
+
+    monkeypatch.setattr(bp, "_litellm_acompletion", fake_acompletion)
+
+    assert await bp.probe_composer_config(model="gpt-4o", temperature=0.0, seed=42) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_propagates_programmer_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**_kwargs: object) -> object:
+        raise TypeError("signature drift")
+
+    monkeypatch.setattr(bp, "_litellm_acompletion", fake_acompletion)
+
+    with pytest.raises(TypeError, match="signature drift"):
+        await bp.probe_composer_config(model="gpt-4o", temperature=0.0, seed=42)

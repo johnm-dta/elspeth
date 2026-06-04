@@ -51,6 +51,16 @@ class WebSettings(BaseModel):
     # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
     tutorial_cache_dir: Path | None = Field(default=None)
     composer_model: str = "gpt-5.5"
+    # Operator-set LLM sampling. Default None means omitted from the
+    # provider request, which is the coherent default for reasoning-model
+    # defaults like gpt-5.5 that reject non-default temperature values.
+    # Sent verbatim when set; provider rejection is the operator's config
+    # error and is validated at boot. See
+    # docs/superpowers/specs/2026-06-03-composer-operator-set-sampling-config-design.md.
+    composer_temperature: float | None = Field(default=None, ge=0, le=2)
+    composer_seed: int | None = None
+    # Tests/offline development can disable the real provider boot probe.
+    composer_boot_probe_enabled: bool = True
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)

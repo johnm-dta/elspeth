@@ -172,6 +172,47 @@ class TestWebSettingsValidation:
 
         assert settings.composer_model == "gpt-5.5"
 
+    def test_composer_sampling_defaults_to_none_and_probe_enabled(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.composer_temperature is None
+        assert settings.composer_seed is None
+        assert settings.composer_boot_probe_enabled is True
+
+    def test_composer_temperature_accepts_in_range_and_rejects_out_of_range(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_temperature=0.0).composer_temperature == 0.0
+        assert WebSettings(**base, composer_temperature=1.5).composer_temperature == 1.5
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=2.5)
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=-0.1)
+
+    def test_composer_seed_accepts_int_and_none(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_seed=42).composer_seed == 42
+        assert WebSettings(**base, composer_seed=None).composer_seed is None
+
     def test_max_upload_bytes_zero_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(

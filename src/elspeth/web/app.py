@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.util.types import AttributeValue
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.engine import Engine
@@ -98,6 +99,15 @@ from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 # landing, not a regression.
 _PROMETHEUS_READER = PrometheusMetricReader()
 metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
+_COMPOSER_BOOT_CONFIG_COUNTER = metrics.get_meter(__name__).create_counter(
+    "composer.boot_config",
+    description="Composer effective sampling config recorded at boot",
+)
+_COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogram(
+    "composer.boot_config.probe_latency_ms",
+    description="Composer boot config probe latency in milliseconds",
+    unit="ms",
+)
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -368,6 +378,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             latency_ms=probe_latency_ms,
             action="serving bundled litellm catalog (may include retired models)",
         )
+
+    if settings.composer_boot_probe_enabled:
+        from elspeth.web.composer.boot_probe import ComposerBootConfigError, probe_composer_config
+
+        probe_models = [settings.composer_model]
+        if settings.composer_advisor_enabled:
+            probe_models.append(settings.composer_advisor_model)
+        for model in probe_models:
+            composer_probe_start = time.monotonic()
+            probe_status = "success"
+            attributes: dict[str, AttributeValue] = {
+                "composer_model": settings.composer_model,
+                "composer_temperature": str(settings.composer_temperature),
+                "composer_seed": str(settings.composer_seed),
+                "composer_advisor_model": settings.composer_advisor_model,
+                "composer_advisor_enabled": settings.composer_advisor_enabled,
+                "probed_model": model,
+                "probe_status": probe_status,
+            }
+            try:
+                ok = await probe_composer_config(
+                    model=model,
+                    temperature=settings.composer_temperature,
+                    seed=settings.composer_seed,
+                )
+                if not ok:
+                    probe_status = "transient_failure"
+                    slog.warning(
+                        "composer_boot_probe_transient_failure",
+                        model=model,
+                        action="booting; composer LLM calls will be exercised at first use",
+                    )
+            except ComposerBootConfigError:
+                probe_status = "rejected"
+                raise
+            finally:
+                attributes["probe_status"] = probe_status
+                composer_probe_latency_ms = int((time.monotonic() - composer_probe_start) * 1000)
+                _COMPOSER_BOOT_CONFIG_COUNTER.add(1, attributes)
+                _COMPOSER_BOOT_CONFIG_PROBE_LATENCY.record(composer_probe_latency_ms, attributes)
 
     # Resolve the catalog snapshot id (always populated — bundled fallback
     # is always available) and stash on ``app.state``. Run-create writes

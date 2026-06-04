@@ -237,6 +237,8 @@ def register_message_routes(router: APIRouter) -> None:
                             session_id=session.id,
                             user_message=body.content,
                             model=settings.composer_model,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
                         )
                     )
 

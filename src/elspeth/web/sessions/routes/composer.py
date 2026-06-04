@@ -2295,6 +2295,8 @@ def register_composer_routes(router: APIRouter) -> None:
                             session_id=str(session_id),
                             blob_service=request.app.state.blob_service,
                             model=settings.composer_model,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
                         )
                     except InvariantError as exc:
                         # Same B1-sanitization rationale as the step_advance
@@ -2648,6 +2650,8 @@ def register_composer_routes(router: APIRouter) -> None:
                         model=settings.composer_model,
                         user_message=body.message,
                         plugin_hint=plugin_hint,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
                     )
                     if source_resolution is not None:
                         finished_at = datetime.now(UTC)
@@ -2872,6 +2876,8 @@ def register_composer_routes(router: APIRouter) -> None:
                         model=settings.composer_model,
                         step=guided.step,
                         user_message=body.message,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)

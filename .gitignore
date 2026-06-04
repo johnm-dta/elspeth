@@ -294,3 +294,6 @@ clarion.yaml
 .clarion
 docs/audit/triage/
 notes/resign/*
+
+AGENTS.md
+CLAUDE.md

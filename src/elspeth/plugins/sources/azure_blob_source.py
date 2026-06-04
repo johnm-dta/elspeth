@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6e4ca4dbc786973f"
+    source_file_hash: str | None = "sha256:d87e86de4a9a5fbc"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -1052,6 +1052,18 @@ class AzureBlobSource(BaseSource):
             # fields. Pydantic extra="allow" accepts any type for extras — the
             # contract knows inferred types from the first row and enforces here.
             contract = self.require_schema_contract()
+            if self._format in ("json", "jsonl") and self._contract_builder is not None and contract.mode in ("OBSERVED", "FLEXIBLE"):
+                # JSON/JSONL blobs can be sparse. If a later row emits a new
+                # normalized key, the row contract must own its original-name
+                # and type metadata before validation and yield.
+                if self._field_resolution is None:
+                    raise ValueError("field_resolution must be established before sparse-field contract inference")
+                contract = self._contract_builder.process_sparse_fields(
+                    validated_row,
+                    self._field_resolution.resolution_mapping,
+                )
+                self.set_schema_contract(contract)
+
             if contract.locked:
                 violations = contract.validate(validated_row)
                 if violations:

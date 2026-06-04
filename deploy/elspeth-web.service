@@ -17,14 +17,17 @@ EnvironmentFile=/home/john/elspeth/deploy/elspeth-web.env
 # to stale worktrees before, which let /api stay healthy while the SPA root 404ed.
 Environment=PYTHONPATH=/home/john/elspeth/src
 
+# Uvicorn expects IP CIDRs or '*' here, not Unix socket paths. For this UDS
+# deployment, trust is established by filesystem permissions on the socket.
+# Do not combine --limit-max-requests with Restart=on-failure: uvicorn exits 0
+# after request recycling, which systemd treats as a clean stop.
 ExecStart=/home/john/elspeth/.venv/bin/uvicorn elspeth.web.app:create_app \
     --factory \
     --uds /run/elspeth/uvicorn.sock \
     --proxy-headers \
-    --forwarded-allow-ips=/run/elspeth/uvicorn.sock \
+    --forwarded-allow-ips='*' \
     --no-server-header \
-    --limit-concurrency 100 \
-    --limit-max-requests 10000
+    --limit-concurrency 100
 
 Restart=on-failure
 RestartSec=2

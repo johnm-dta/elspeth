@@ -203,7 +203,7 @@ def test_derive_rows_processed_fork_counts_source_rows_not_leaves() -> None:
         fork_to=["sink_a", "sink_b"],
     )
     config = PipelineConfig(
-        source=as_source(src),
+        sources={"primary": as_source(src)},
         transforms=[],
         sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
         gates=[gate],
@@ -299,7 +299,7 @@ def test_derive_rows_processed_aggregation_counts_source_rows_not_result() -> No
     agg_node_id = agg_id_map[next(iter(agg_id_map))]
     agg.node_id = agg_node_id
     config = PipelineConfig(
-        source=as_source(src),
+        sources={"primary": as_source(src)},
         transforms=[as_transform(agg)],
         sinks={"output": as_sink(out)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -374,7 +374,7 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
         aggregations={},
         gates=[],
     )
-    config = PipelineConfig(source=as_source(src), transforms=[as_transform(xf)], sinks={"output": as_sink(out)})
+    config = PipelineConfig(sources={"primary": as_source(src)}, transforms=[as_transform(xf)], sinks={"output": as_sink(out)})
     run = Orchestrator(db).run(config, graph=graph, payload_store=MockPayloadStore())
 
     # Live truth: 1 source row, 3 expanded children, 1 expand parent.
@@ -538,7 +538,7 @@ def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrup
     agg_node_id = graph.get_aggregation_id_map()[AggregationName("agg_branch_hold")]
     batch_transform.node_id = agg_node_id
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(batch_transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},

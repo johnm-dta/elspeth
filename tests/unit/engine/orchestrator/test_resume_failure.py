@@ -364,7 +364,7 @@ class TestResumeFinalizesAsFailed:
             patch.object(orch, "_initialize_run_context", return_value=run_ctx),
             patch("elspeth.engine.orchestrator.core.run_transform_runtime_preflights"),
             patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
-            pytest.raises(Exception, match="left non-terminal scheduler work after sink durability") as exc_info,
+            pytest.raises(Exception, match="left non-terminal scheduler work after end-of-source flush") as exc_info,
         ):
             orch._process_resumed_rows(
                 MagicMock(spec=RecorderFactory),
@@ -391,11 +391,10 @@ class TestResumeFinalizesAsFailed:
         assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
         processor.drain_scheduled_work.assert_called_once_with(run_ctx.ctx)
         processor.process_existing_row.assert_not_called()
-        flush_sinks.assert_called_once()
+        flush_sinks.assert_not_called()
 
     def test_setup_resume_context_uses_all_source_roots(self) -> None:
         """Multi-source resume must build a full source map instead of calling graph.get_sources()[0]."""
-        orch = _make_orchestrator(make_landscape_db())
         graph = ExecutionGraph()
         graph.add_node(
             "source-orders",
@@ -751,7 +750,7 @@ class TestResumeFinalizesAsFailed:
                 return_value=LoopResult(interrupted=False, start_time=0.0, phase_start=0.0, last_progress_time=0.0),
             ),
             patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
-            pytest.raises(Exception, match="left non-terminal scheduler work after sink durability") as exc_info,
+            pytest.raises(Exception, match="left non-terminal scheduler work after final source flush") as exc_info,
         ):
             orch._execute_run(
                 MagicMock(spec=RecorderFactory),
@@ -762,7 +761,7 @@ class TestResumeFinalizesAsFailed:
             )
 
         assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
-        flush_sinks.assert_called_once()
+        flush_sinks.assert_not_called()
 
     def test_reconstruct_resume_state_uses_run_sources_records_for_multi_source_rows(self) -> None:
         """Resume reconstruction must restore schema classes and contracts per source node."""
@@ -1101,6 +1100,7 @@ class TestResumeFinalizesAsFailed:
         orch = _make_orchestrator(db)
         run_id = "run-exhausted-source-engine-work"
         mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-engine-work",
@@ -1125,6 +1125,8 @@ class TestResumeFinalizesAsFailed:
             restored_aggregation_state={"agg-node": MagicMock(spec=AggregationCheckpointState)},
             restored_coalesce_state=None,
             unprocessed_rows=(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
             schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "exhausted"},

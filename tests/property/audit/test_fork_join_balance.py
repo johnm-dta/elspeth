@@ -815,7 +815,7 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -979,7 +979,7 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -1517,7 +1517,7 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -2024,7 +2024,7 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(pass_a), as_transform(pass_b)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -2916,7 +2916,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(explode), as_transform(pass_after)],
             sinks={"output": as_sink(sink)},
         )
@@ -3212,7 +3212,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[coalesce],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(record_a), as_transform(pass_b)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -3493,7 +3493,7 @@ class TestForkRecoveryInvariant:
             fork_to=["sink_a", "sink_b"],
         )
         config_a = PipelineConfig(
-            source=as_source(source_a),
+            sources={"primary": as_source(source_a)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_a), "sink_b": as_sink(sink_b_a)},
             gates=[gate],
@@ -3533,7 +3533,7 @@ class TestForkRecoveryInvariant:
         sink_a_b = CollectSink("sink_a")
         sink_b_b = CollectSink("sink_b")
         config_b = PipelineConfig(
-            source=as_source(source_b),
+            sources={"primary": as_source(source_b)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_b), "sink_b": as_sink(sink_b_b)},
             gates=[gate],
@@ -4046,7 +4046,7 @@ class TestForkRecoveryInvariant:
         agg_node_id = agg_id_map[next(iter(agg_id_map))]
         agg.node_id = agg_node_id
         config = PipelineConfig(
-            source=as_source(src),
+            sources={"primary": as_source(src)},
             transforms=[as_transform(agg)],
             sinks={"output": as_sink(out)},
             aggregation_settings={agg_node_id: agg_settings},
@@ -4392,7 +4392,7 @@ class TestForkRecoveryInvariant:
 
         sink_map = {name: as_sink(sink) for name, sink in sinks_by_name.items()}
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks=sink_map,
             gates=[gate],
@@ -4876,7 +4876,7 @@ class TestForkRecoveryInvariant:
         sink = CollectSink("output")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink)},
         )
@@ -5134,7 +5134,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[coalesce],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(pass_a), as_transform(pass_b), as_transform(post_merge)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -5369,7 +5369,9 @@ class TestForkRecoveryInvariant:
         # The node_id key is opaque to _get_buffered_checkpoint_token_ids (it only reads
         # nodes.values() → tokens → token_id), but create_checkpoint validates node_id is
         # in the graph, so key the buffered state on a real node id (the source node).
-        agg_node_key = str(graph.get_source())
+        source_node_ids = graph.get_sources()
+        assert source_node_ids, "expected at least one source node in fork recovery test graph"
+        agg_node_key = str(source_node_ids[0])
         buffered_token_ckpt = AggregationTokenCheckpoint(
             token_id=buffered_child.token_id,
             row_id=row_id,
@@ -5585,7 +5587,7 @@ class TestForkRecoveryInvariant:
             output_mode="transform",
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(explode), agg_transform],
             sinks={"output": as_sink(sink)},
             aggregation_settings={agg_node_id: agg_settings},

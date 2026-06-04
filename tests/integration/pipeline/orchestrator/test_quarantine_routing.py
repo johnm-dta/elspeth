@@ -762,7 +762,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )

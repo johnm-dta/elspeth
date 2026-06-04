@@ -155,7 +155,7 @@ class TestRetryAuditTrail:
         assert runtime_retry.exponential_base == 3.0
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t) for t in transforms],
             sinks={"output": as_sink(sink)},
         )

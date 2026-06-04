@@ -4907,6 +4907,24 @@ class TestResolveYamlPaths:
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "/srv/data/output/results.csv" in result
 
+    def test_sink_persist_directory_relative_path_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "source:\n"
+            "  plugin: csv\n"
+            "  options:\n"
+            "    path: /abs/in.csv\n"
+            "sinks:\n"
+            "  chroma:\n"
+            "    plugin: chroma_sink\n"
+            "    options:\n"
+            "      mode: persistent\n"
+            "      persist_directory: outputs/chroma-store\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-store" in result
+
     def test_non_string_input_raises_type_error(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
 

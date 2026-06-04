@@ -5681,6 +5681,13 @@ class TestPatchOutputPathSecurity:
         )
         assert result.success is False
 
+    def test_persist_directory_key_also_validated(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_sink_path
+
+        error = _validate_sink_path({"persist_directory": "/tmp/elspeth-outside"}, data_dir="/data")
+        assert error is not None
+        assert "persist_directory" in error
+
     def test_file_key_traversal_rejected(self) -> None:
         state = self._state_with_output({"path": "/data/outputs/ok.csv"})
         catalog = _mock_catalog()

@@ -724,9 +724,15 @@ def validate_pipeline(
         )
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
-    # Any `path` or `file` key in source/sink options must resolve under
-    # an allowed directory. Uses the shared helpers from AD-4.
-    from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
+    # Local filesystem keys in source/sink options must resolve under allowed
+    # directories. Uses the shared helpers from AD-4.
+    from elspeth.web.paths import (
+        SINK_LOCAL_PATH_OPTION_KEYS,
+        SOURCE_LOCAL_PATH_OPTION_KEYS,
+        allowed_sink_directories,
+        allowed_source_directories,
+        resolve_data_path,
+    )
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
@@ -734,7 +740,7 @@ def validate_pipeline(
     # SourceSpec with typed .options attribute (Mapping[str, Any]).
     source_options = dict(state.source.options) if state.source is not None else {}
     path_checked = False
-    for key in ("path", "file"):
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         value = source_options.get(key)
         if value is not None:
             path_checked = True
@@ -771,7 +777,7 @@ def validate_pipeline(
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
-        for key in ("path", "file"):
+        for key in SINK_LOCAL_PATH_OPTION_KEYS:
             value = output.options.get(key)
             if value is not None:
                 path_checked = True

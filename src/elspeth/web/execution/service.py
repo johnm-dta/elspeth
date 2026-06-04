@@ -525,10 +525,10 @@ class ExecutionServiceImpl:
         # authenticated user could skip validation and execute a state that
         # reads files outside the allowed directories.
         if composition_state.source is not None:
-            from elspeth.web.paths import allowed_source_directories, resolve_data_path
+            from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
             allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
-            for key in ("path", "file"):
+            for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
                 value = composition_state.source.options.get(key)
                 if value is not None:
                     resolved = resolve_data_path(value, str(self._settings.data_dir))
@@ -539,11 +539,11 @@ class ExecutionServiceImpl:
         # Without this, a client can set sink options.path to any absolute or
         # ../ path and /execute will write there.
         if composition_state.outputs:
-            from elspeth.web.paths import allowed_sink_directories, resolve_data_path
+            from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
 
             allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
             for output in composition_state.outputs:
-                for key in ("path", "file"):
+                for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     value = output.options.get(key)
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))

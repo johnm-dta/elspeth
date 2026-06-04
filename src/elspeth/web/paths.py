@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+SOURCE_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file")
+SINK_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file", "persist_directory")
+
 
 def resolve_data_path(value: str, data_dir: str) -> Path:
     """Resolve a path value against data_dir (relative) or as-is (absolute).

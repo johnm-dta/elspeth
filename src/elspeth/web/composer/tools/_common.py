@@ -71,6 +71,8 @@ from elspeth.web.interpretation_state import (
     strip_authoring_options,
 )
 from elspeth.web.paths import (
+    SINK_LOCAL_PATH_OPTION_KEYS,
+    SOURCE_LOCAL_PATH_OPTION_KEYS,
     allowed_sink_directories,
     allowed_source_directories,
     resolve_data_path,
@@ -1146,7 +1148,7 @@ def _validate_source_path(
 
     allowed = allowed_source_directories(data_dir)
 
-    for key in ("path", "file"):
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         if key in options:
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
@@ -1172,12 +1174,12 @@ def _validate_sink_path(
 
     allowed = allowed_sink_directories(data_dir)
 
-    for key in ("path", "file"):
+    for key in SINK_LOCAL_PATH_OPTION_KEYS:
         if key in options:
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
-                    f"Path violation (S2): '{options[key]}' is outside the "
+                    f"Path violation (S2): '{key}' value '{options[key]}' is outside the "
                     f"allowed directories. Sink output paths "
                     f"must be under {data_dir}/outputs/ or {data_dir}/blobs/."
                 )

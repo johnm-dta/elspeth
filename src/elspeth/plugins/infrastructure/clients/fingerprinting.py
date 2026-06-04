@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from elspeth.contracts.errors import FrameworkBugError
@@ -174,8 +173,18 @@ def is_sensitive_query_param(param_name: str) -> bool:
     return lower_name.startswith("x") and lower_name[1:] in SENSITIVE_QUERY_PARAM_WORDS
 
 
-def fingerprint_params(params: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Fingerprint sensitive query parameters for audit recording."""
+def fingerprint_params(
+    params: Mapping[str, str | int | float] | None,
+) -> dict[str, str | int | float] | None:
+    """Fingerprint sensitive query parameters for audit recording.
+
+    Values are scalar query-parameter values (the call sites in ``http.py``
+    pass ``dict[str, str | int | float]``). Sensitive values are replaced with
+    a ``<fingerprint:...>`` string; non-sensitive values pass through
+    unchanged. The value type is therefore statically ``str | int | float`` —
+    not ``Any`` — so this builds deterministic, precisely-typed audit hash
+    material rather than an untyped Tier-3 boundary.
+    """
     if params is None:
         return None
 
@@ -189,7 +198,7 @@ def fingerprint_params(params: Mapping[str, Any] | None) -> dict[str, Any] | Non
     except ValueError:
         have_key = False
 
-    result: dict[str, Any] = {}
+    result: dict[str, str | int | float] = {}
 
     for k, v in params.items():
         if is_sensitive_query_param(k):

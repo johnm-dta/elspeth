@@ -33,7 +33,7 @@ per_file_rules:
   - R5
   reason: Type discrimination for Pydantic validator dispatch and config parsing
   expires: null
-  max_hits: 46
+  max_hits: 45
 - pattern: core/security/*
   rules:
   - R1

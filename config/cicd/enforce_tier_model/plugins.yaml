@@ -858,25 +858,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[21]/body[13]/body[2]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:07ab8b23154f3cd80140c09b0ec2e35a1dfeb42919eb568a4fd4a6b94adbfcbf'
-- key: plugins/sinks/json_sink.py:R6:JSONSink:write:fp=70e172c6d4480200
-  owner: john
-  reason: |-
-    In JSONSink.write (json_sink.py:368), the JSON-array branch wraps a per-row trial json.dumps(output_row, allow_nan=False) in `except (ValueError, TypeError) as exc`. Because the JSON array dumps the whole cumulative buffer atomically, a single non-serializable value (NaN/Infinity or non-serializable object) would otherwise abort the entire file; pre-encoding each row and diverting the bad ones via _divert_row (recorded + routed) buffers only the good rows. The catch is narrow to the two serialization-shaped exceptions json.dumps raises, and each diversion is recorded — a per-row Tier-2 data fault, no silent loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:05:11.258896+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The rule fires on a real `except` block, but the code is the project-standard sink-level per-row quarantine pattern: the catch is tightly scoped to `(ValueError, TypeError)` — exactly the exceptions `json.dumps(..., allow_nan=False)` raises for NaN/Infinity or non-serializable values — and the row is recorded via `self._divert_row(...)` with the exception message as the reason, then iteration `continue`s. This is a Tier-2 value-level fault (the shape is dict; the value cannot be encoded), and the `_divert_row` quarantine is the same pattern used across csv_sink, chroma_sink, dataverse, azure_blob_sink, and json_sink's JSONL branch (json_sink.py:438). The atomicity argument in the visible comment (one bad row would abort the whole cumulative-buffer write) explains why per-row pre-encoding is required here rather than letting the batch crash. No silent swallow: every diversion is surfaced via `SinkWriteResult.diversions`.
-  judge_signature_version: 2
-  scope_fingerprint: a50bd7ea247c7f87ca704ed03ab4e65ec3edc9f9e780d161106d52abb9d4de73
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[23]/body[14]/body[5]/orelse[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:1dd6ba0b8a15f71512549ed050c8e9ee78129e34e2a0a53adde52940754a36fd'
 - key: plugins/sinks/json_sink.py:R6:JSONSink:_write_jsonl_content:fp=7f2a8740a6f881fa
   owner: john
   reason: |-

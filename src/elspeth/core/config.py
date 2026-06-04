@@ -1835,13 +1835,13 @@ def _reject_file_backed_template_options_for_in_memory_loader(raw_config: Mappin
     """Reject file-backed template expansion options without a settings file root."""
     for collection_name in ("transforms", "aggregations"):
         collection = raw_config[collection_name] if collection_name in raw_config else None
-        if not isinstance(collection, list):
+        if type(collection) is not list:
             continue
         for index, plugin_config in enumerate(collection):
-            if not isinstance(plugin_config, dict):
+            if type(plugin_config) is not dict:
                 continue
             options = plugin_config["options"] if "options" in plugin_config else None
-            if not isinstance(options, dict):
+            if type(options) is not dict:
                 continue
             present = sorted(key for key in _FILE_BACKED_TEMPLATE_OPTION_KEYS if key in options)
             if not present:

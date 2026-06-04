@@ -459,25 +459,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[12]/body[1]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:12fe587f1e8311ad52d538ff47a50dd62ff9abfef16f0ff9fcd43f105daa5b4f'
-- key: web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=6eeb90e8c33babf8
-  owner: john
-  reason: |-
-    In maybe_auto_title_session (_auto_title.py:128), `except (LiteLLMAPIError, TimeoutError, asyncio.CancelledError) as exc:` wraps a one-shot LLM completion — a Tier-3 external provider boundary via litellm. The catch is a narrow enumeration (not bare Exception) of provider/scheduling failures, and it routes them to operational telemetry via `_record_auto_title_failure(exc)` so 'provider declined' is recorded, not silently swallowed. Programmer bugs and DB write failures explicitly propagate (preserving crash-on-invariant). Auto-titling is best-effort UI metadata, so classifying these expected external failures as non-fatal is the correct boundary response. R6 is outside the {R1,R5} decorator set. Existing rationale verified and accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:49:29.119936+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The except catches a narrow enumeration of Tier-3 boundary failures (LiteLLM provider error, network timeout, task cancellation) from the `_litellm_acompletion` call — external-system origin, not first-party code we control. The handler is not silent: it calls `_record_auto_title_failure(exc)` to record the provider failure on operational telemetry, which is exactly R6's prescribed remediation ("explicit error/quarantine result"). Programmer bugs and DB write failures (e.g. from `update_session_title`) are NOT in the catch tuple and propagate normally, preserving crash-on-invariant for first-party code. Auto-titling is best-effort UI metadata, so converting recorded provider/cancellation failures into a no-op return is the meaning-preserving boundary response. R6 is outside the {R1,R5} decorator suppression set, so no structural alternative applies.
-  judge_signature_version: 2
-  scope_fingerprint: 6afdc82348cb24f410eda1b56bac41769840b6f8b2cb7c88945cfb0babf0077d
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[18]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:711fd47ed7d51f5a8bdab54ee66e07f6faa235a4265f7fe38f0afd001c21f59e'
 - key: web/composer/implicit_decisions.py:R5:_flatten_options:fp=24bbd76d54ccfe33
   owner: john
   reason: |-
@@ -2753,25 +2734,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[81]/body[3]/body[1]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:689db47e339a1dcf94e87f56547cd4f4a1b81af69e9cf9221eabd0044611896d'
-- key: web/app.py:R7:lifespan:fp=99b1d84eb65cf352
-  owner: john
-  reason: |-
-    Shutdown suppresses the exact asyncio cancellation control signal after explicit task cancellation; it does not suppress operational errors.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:34:59.911404+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. After explicitly calling `orphan_task.cancel()`, awaiting the task is guaranteed to raise `asyncio.CancelledError` as the control-flow signal that cancellation took effect — this is the standard asyncio idiom, not error suppression. The `contextlib.suppress` is narrowly scoped to exactly `CancelledError` (not `Exception`), so any genuine operational failure in the cleanup task would still propagate. The rationale correctly identifies this as suppressing a cancellation signal we ourselves just sent, not swallowing errors.
-  judge_signature_version: 2
-  scope_fingerprint: 8dd45c1149590cdc95e80890013921aa05c8226aea16c273dc72aa5e55d2bf64
-  judge_transport: openrouter
-  ast_path: 'body[82]/body[28]/finalbody[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:e064ee849d15f00f5543da15163e254b4afa44ff1889299f32f1a62e8287d646'
 - key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=92dd4b5a184dc62a
   owner: john
   reason: |-

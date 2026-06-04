@@ -20,7 +20,7 @@ per_file_rules:
 - pattern: engine/executors/transform.py
   rules:
   - R5
-  reason: BatchTransformRuntimeProtocol narrowing plus timeout exception discrimination
+  reason: BatchTransformMixin type narrowing for mypy
   expires: null
   max_hits: 2
 - pattern: engine/orchestrator/aggregation.py

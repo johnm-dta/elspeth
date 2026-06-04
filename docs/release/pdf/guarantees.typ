@@ -28,7 +28,7 @@
   audience: "Users, integrators, auditors, assurance staff",
   classification: default-classification,
   status: "Assurance appendix -- current as of " + data.doc-date,
-  distribution: "Internal -- Digital Transformation Agency only",
+  distribution: "Public evaluation release copy",
 )
 
 #outline(

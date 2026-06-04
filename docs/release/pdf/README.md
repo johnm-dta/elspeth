@@ -51,6 +51,10 @@ tagged. They are **unofficial documents** — the AGDS-inspired visual
 idiom does not imply Commonwealth endorsement; every page carries a
 footer disclaimer to that effect.
 
+Non-draft release PDFs use the cover distribution label **Public
+evaluation release copy**. The executive summary remains a draft
+internal brief until its approval banner is removed.
+
 ## Build
 
 ```bash

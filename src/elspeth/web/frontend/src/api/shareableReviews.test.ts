@@ -350,7 +350,20 @@ describe("shareableReviews API client", () => {
     });
   });
 
-  it("fetchSharedInspect propagates 401 from the parser", async () => {
+  it("fetchSharedInspect treats 401 as a capability-token error without clearing auth", async () => {
+    localStorage.setItem("auth_token", "reviewer-session-token");
+    useAuthStore.setState({
+      token: "reviewer-session-token",
+      user: {
+        user_id: "reviewer",
+        username: "reviewer",
+        display_name: null,
+        email: null,
+        groups: [],
+      },
+      loginError: null,
+      isLoading: false,
+    } as never);
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: "Invalid or expired share token" }), {
         status: 401,
@@ -360,6 +373,9 @@ describe("shareableReviews API client", () => {
     await expect(fetchSharedInspect("bad-token")).rejects.toMatchObject({
       status: 401,
     });
+    expect(useAuthStore.getState().token).toBe("reviewer-session-token");
+    expect(useAuthStore.getState().user?.username).toBe("reviewer");
+    expect(localStorage.getItem("auth_token")).toBe("reviewer-session-token");
   });
 
   it("fetchSharedInspect propagates 404 from the parser (blob expired)", async () => {

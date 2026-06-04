@@ -3200,6 +3200,95 @@ class TestBlobRefPreValidation:
             direction="input",
         )
 
+    @pytest.mark.asyncio
+    async def test_second_named_source_malformed_blob_ref_raises_before_run_creation(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Malformed blob_ref on any named source is rejected before create_run()."""
+        from elspeth.web.execution.errors import MalformedBlobRefError
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "orders_rows",
+            "options": {"path": "/tmp/data/blobs/orders.csv"},
+            "on_validation_failure": "quarantine",
+        }
+        state.sources = {
+            "orders": state.source,
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "options": {"blob_ref": "not-a-uuid", "path": "/tmp/data/blobs/refunds.csv"},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        with pytest.raises(MalformedBlobRefError, match=r"sources\.refunds\.blob_ref"):
+            await service.execute(session_id=uuid4())
+
+        mock_session_service.create_run.assert_not_called()
+        blob_service.get_blob.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_named_blob_sources_all_link_to_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Every valid named blob source gets an input blob_run_links row."""
+        session_id = uuid4()
+        run_id = uuid4()
+        orders_blob = str(uuid4())
+        refunds_blob = str(uuid4())
+        orders_path = f"/tmp/data/blobs/{session_id}/{orders_blob}_orders.csv"
+        refunds_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_refunds.csv"
+        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(
+            side_effect=lambda blob_id: MagicMock(
+                session_id=session_id,
+                storage_path={
+                    orders_blob: orders_path,
+                    refunds_blob: refunds_path,
+                }[str(blob_id)],
+            )
+        )
+        blob_service.link_blob_to_run = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "orders_rows",
+            "options": {"blob_ref": orders_blob, "path": orders_path},
+            "on_validation_failure": "quarantine",
+        }
+        state.sources = {
+            "orders": state.source,
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "options": {"blob_ref": refunds_blob, "path": refunds_path},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        with patch.object(service, "_run_pipeline"):
+            await service.execute(session_id=session_id)
+
+        linked_blob_ids = [call.kwargs["blob_id"] for call in blob_service.link_blob_to_run.await_args_list]
+        assert linked_blob_ids == [UUID(orders_blob), UUID(refunds_blob)]
+        assert all(call.kwargs["run_id"] == run_id for call in blob_service.link_blob_to_run.await_args_list)
+        assert all(call.kwargs["direction"] == "input" for call in blob_service.link_blob_to_run.await_args_list)
+
 
 # ── Blob Ownership (Cross-Session IDOR) ──────────────────────────────
 
@@ -3254,6 +3343,55 @@ class TestBlobOwnership:
 
         # Critical: create_run was never called (rejected before run creation)
         mock_session_service.create_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_second_named_source_cross_session_blob_ref_rejected(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Cross-session blob_ref on a non-first named source preserves IDOR collapse."""
+        from elspeth.web.blobs.protocol import BlobNotFoundError
+
+        executing_session_id = uuid4()
+        other_session_id = uuid4()
+        orders_blob = str(uuid4())
+        refunds_blob = str(uuid4())
+        orders_path = f"/tmp/data/blobs/{executing_session_id}/{orders_blob}_orders.csv"
+        refunds_path = f"/tmp/data/blobs/{other_session_id}/{refunds_blob}_refunds.csv"
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(
+            side_effect=lambda blob_id: MagicMock(
+                session_id=executing_session_id if str(blob_id) == orders_blob else other_session_id,
+                storage_path=orders_path if str(blob_id) == orders_blob else refunds_path,
+            )
+        )
+        blob_service.link_blob_to_run = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "orders_rows",
+            "options": {"blob_ref": orders_blob, "path": orders_path},
+            "on_validation_failure": "quarantine",
+        }
+        state.sources = {
+            "orders": state.source,
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "options": {"blob_ref": refunds_blob, "path": refunds_path},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        with pytest.raises(BlobNotFoundError):
+            await service.execute(session_id=executing_session_id)
+
+        mock_session_service.create_run.assert_not_called()
+        blob_service.link_blob_to_run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_same_session_blob_ref_accepted(
@@ -3439,6 +3577,58 @@ class TestBlobSourcePathReadGuard:
 
         assert exc_info.value.stored_path == diverging_path
         assert exc_info.value.canonical_path == canonical_path
+        mock_session_service.create_run.assert_not_called()
+        blob_service.link_blob_to_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_second_named_blob_source_path_mismatch_raises_structured_error(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """A non-first named source must also match the canonical blob path."""
+        from elspeth.web.execution.errors import BlobSourcePathMismatchError
+
+        session_id = uuid4()
+        orders_blob = str(uuid4())
+        refunds_blob = str(uuid4())
+        orders_path = f"/tmp/data/blobs/{session_id}/{orders_blob}_orders.csv"
+        refunds_canonical_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_refunds.csv"
+        refunds_diverging_path = f"/tmp/data/blobs/{session_id}/{refunds_blob}_OTHER.csv"
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(
+            side_effect=lambda blob_id: MagicMock(
+                session_id=session_id,
+                storage_path=orders_path if str(blob_id) == orders_blob else refunds_canonical_path,
+            )
+        )
+        blob_service.link_blob_to_run = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "orders_rows",
+            "options": {"blob_ref": orders_blob, "path": orders_path},
+            "on_validation_failure": "quarantine",
+        }
+        state.sources = {
+            "orders": state.source,
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "options": {"blob_ref": refunds_blob, "path": refunds_diverging_path},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        with pytest.raises(BlobSourcePathMismatchError) as exc_info:
+            await service.execute(session_id=session_id)
+
+        assert exc_info.value.blob_id == refunds_blob
+        assert exc_info.value.stored_path == refunds_diverging_path
+        assert exc_info.value.canonical_path == refunds_canonical_path
         mock_session_service.create_run.assert_not_called()
         blob_service.link_blob_to_run.assert_not_called()
 

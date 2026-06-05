@@ -5809,6 +5809,18 @@ class TestTransformProviderConfigPathSecurity:
         error = _validate_transform_provider_config_path({"some_field": "value"}, data_dir="/data")
         assert error is None
 
+    def test_helper_skips_null_persist_directory(self) -> None:
+        # A null nested path value must be skipped cleanly (no TypeError from
+        # Path(None)) — parity with the runtime siblings (service/validation),
+        # which guard with ``value is not None`` before resolving.
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {"provider": "chroma", "provider_config": {"persist_directory": None, "collection": "docs"}},
+            data_dir="/data",
+        )
+        assert error is None
+
     def test_upsert_node_rejects_persist_directory_outside_allowed(self) -> None:
         state = _empty_state()
         catalog = self._catalog_with_rag()

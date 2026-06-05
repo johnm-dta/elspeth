@@ -1210,15 +1210,22 @@ def _validate_transform_provider_config_path(
     allowed = allowed_sink_directories(data_dir)
 
     for key in NESTED_LOCAL_PATH_OPTION_KEYS:
-        if key in provider_config:
-            resolved = resolve_data_path(provider_config[key], data_dir)
-            if not any(resolved.is_relative_to(d) for d in allowed):
-                return (
-                    f"Path violation (S2): provider_config '{key}' value "
-                    f"'{provider_config[key]}' is outside the allowed directories. "
-                    f"Transform provider paths must be under {data_dir}/outputs/ "
-                    f"or {data_dir}/blobs/."
-                )
+        if key not in provider_config:
+            continue
+        value = provider_config[key]
+        # A null nested path must be skipped, not resolved — Path(None) raises.
+        # Mirrors the runtime siblings (service/validation) which guard on
+        # ``value is not None`` before resolving.
+        if value is None:
+            continue
+        resolved = resolve_data_path(value, data_dir)
+        if not any(resolved.is_relative_to(d) for d in allowed):
+            return (
+                f"Path violation (S2): provider_config '{key}' value "
+                f"'{value}' is outside the allowed directories. "
+                f"Transform provider paths must be under {data_dir}/outputs/ "
+                f"or {data_dir}/blobs/."
+            )
     return None
 
 

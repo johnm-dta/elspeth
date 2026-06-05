@@ -3595,6 +3595,53 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
+    def test_load_settings_from_yaml_string_expands_env_vars_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The YAML-string loader preserves historical env expansion by default."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-server-secret-value-suffix"
+
+    def test_load_settings_from_yaml_string_can_preserve_env_syntax(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Web execution uses this opt-out after inline blob substitution."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+""",
+            expand_env_vars=False,
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
 
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""

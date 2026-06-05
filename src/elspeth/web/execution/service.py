@@ -29,6 +29,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import SecretResolutionInput
+from elspeth.contracts.blobs_inline import BlobInlineRef
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
@@ -960,6 +961,7 @@ class ExecutionServiceImpl:
             resolved_yaml = pipeline_yaml
             resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
+            inline_refs: list[BlobInlineRef] = []
             inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
             needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
             if needs_config_tree:
@@ -1085,8 +1087,10 @@ class ExecutionServiceImpl:
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O.
-            settings = load_settings_from_yaml_string(resolved_yaml)
+            # bypassing Dynaconf file I/O. Disable server env expansion when
+            # inline blobs were substituted: blob bytes are user-authored and
+            # must not resolve host ``${VAR}`` values after secret controls.
+            settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=not inline_refs)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

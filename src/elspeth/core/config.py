@@ -8,6 +8,7 @@ Settings are frozen (immutable) after construction.
 import ast
 import re
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -1520,6 +1521,51 @@ class ElspethSettings(BaseModel):
 # Regex pattern for ${VAR} or ${VAR:-default} syntax
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
+# Closed list of plugin option fields that are rendered back into user-visible
+# pipeline rows.  Expanding environment variables in these fields would turn the
+# option into a config-to-output secret exfiltration gadget.  Keep this list
+# narrow: credential-bearing fields still expand through _expand_env_vars().
+_ENV_EXPANSION_OUTPUT_ECHO_DENYLIST = {
+    "report_assemble": frozenset({"join_with", "title"}),
+}
+
+
+def _reject_env_refs_in_output_echo_options(config: Mapping[str, object]) -> None:
+    """Reject ${VAR} references in config fields that are echoed to outputs.
+
+    Environment expansion is intentionally available for credential-bearing
+    options, but report assembly presentation fields become user-visible report
+    text.  Rejecting placeholders before _expand_env_vars() runs preserves the
+    legitimate secret wiring path without allowing server environment values to
+    be copied into downloadable sink artifacts.
+    """
+
+    for section in ("transforms", "aggregations"):
+        nodes = config.get(section)
+        if not isinstance(nodes, list):
+            continue
+        for index, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                continue
+            plugin_name = node.get("plugin")
+            if not isinstance(plugin_name, str):
+                continue
+            denied_fields = _ENV_EXPANSION_OUTPUT_ECHO_DENYLIST.get(plugin_name)
+            if denied_fields is None:
+                continue
+            options = node.get("options")
+            if not isinstance(options, dict):
+                continue
+            for field_name in sorted(denied_fields):
+                value = options.get(field_name)
+                if isinstance(value, str) and _ENV_VAR_PATTERN.search(value):
+                    raise ValueError(
+                        "Environment variable expansion is not allowed in "
+                        f"{section}[{index}] report_assemble option {field_name!r} "
+                        "because that value is emitted in user-visible report output. "
+                        "Use literal presentation text; reserve ${VAR} expansion for credential-bearing options."
+                    )
+
 
 def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
     """Recursively expand ${VAR} and ${VAR:-default} patterns in config values.
@@ -2143,6 +2189,8 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Filter Dynaconf internals (now safe — all non-known keys are Dynaconf's)
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
 
+    _reject_env_refs_in_output_echo_options(raw_config)
+
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)
 
@@ -2179,6 +2227,7 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    _reject_env_refs_in_output_echo_options(raw_config)
     raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 

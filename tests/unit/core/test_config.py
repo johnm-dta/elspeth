@@ -3595,6 +3595,80 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
+    def test_yaml_string_rejects_report_assemble_title_env_ref_before_expansion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output-echoing report fields must not expand server environment secrets."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("ELSPETH_SECRET_KEY", "must-not-appear-in-errors")
+
+        yaml_content = """
+source:
+  plugin: text
+  on_success: lines
+  options: {}
+aggregations:
+  - name: pages
+    plugin: report_assemble
+    input: lines
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      title: "${ELSPETH_SECRET_KEY}"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+
+        with pytest.raises(ValueError) as exc_info:
+            load_settings_from_yaml_string(yaml_content)
+
+        error_msg = str(exc_info.value)
+        assert "report_assemble" in error_msg
+        assert "title" in error_msg
+        assert "ELSPETH_SECRET_KEY" not in error_msg
+        assert "must-not-appear-in-errors" not in error_msg
+
+    def test_yaml_string_rejects_report_assemble_join_with_env_default_before_expansion(self) -> None:
+        """Defaulted ${VAR:-...} syntax is also unsafe in report body joiners."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        yaml_content = """
+source:
+  plugin: text
+  on_success: lines
+  options: {}
+aggregations:
+  - name: pages
+    plugin: report_assemble
+    input: lines
+    on_success: output
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+      text_field: line
+      join_with: "${OPTIONAL_SEPARATOR:- -- }"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+
+        with pytest.raises(ValueError) as exc_info:
+            load_settings_from_yaml_string(yaml_content)
+
+        error_msg = str(exc_info.value)
+        assert "report_assemble" in error_msg
+        assert "join_with" in error_msg
+
 
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""

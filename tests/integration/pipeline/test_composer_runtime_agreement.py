@@ -3280,8 +3280,10 @@ sinks:
 
         session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
-        def stop_after_audit(yaml_text: str) -> None:
+        def stop_after_audit(yaml_text: str, *, expand_env_vars: bool = True) -> None:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
+            # Web-authored YAML must never expand host ${VAR} placeholders.
+            assert expand_env_vars is False
             assert "You are an audited prompt." in yaml_text
             raise RuntimeError("stop after inline audit")
 

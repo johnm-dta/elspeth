@@ -13,7 +13,7 @@ import yaml
 from elspeth.cli_helpers import PluginBundle, instantiate_plugins_from_config
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.web.execution.protocol import ValidationSettings
-from elspeth.web.paths import resolve_data_path
+from elspeth.web.paths import NESTED_PATH_OPTION_KEYS, SINK_PATH_OPTION_KEYS, SOURCE_PATH_OPTION_KEYS, resolve_data_path
 
 RUNTIME_CHECK_PLUGIN_INSTANTIATION = "plugin_instantiation"
 RUNTIME_CHECK_GRAPH_STRUCTURE = "graph_structure"
@@ -73,9 +73,31 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
         opts = source["options"]
         if not isinstance(opts, dict):
             raise TypeError(f"YAML generator produced non-dict 'source.options' value (got {type(opts).__name__})")
-        for key in ("path", "file"):
+        for key in SOURCE_PATH_OPTION_KEYS:
             if key in opts and not Path(str(opts[key])).is_absolute():
                 opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+
+    transforms = config.get("transforms")
+    if transforms is not None:
+        if not isinstance(transforms, list):
+            raise TypeError(f"YAML generator produced non-list 'transforms' value (got {type(transforms).__name__})")
+        for index, transform_cfg in enumerate(transforms):
+            if not isinstance(transform_cfg, dict):
+                raise TypeError(f"YAML generator produced non-dict transform at index {index} (got {type(transform_cfg).__name__})")
+            opts = transform_cfg.get("options")
+            if opts is not None:
+                if not isinstance(opts, dict):
+                    raise TypeError(f"YAML generator produced non-dict 'transforms[{index}].options' value (got {type(opts).__name__})")
+                provider_config = opts.get("provider_config")
+                if provider_config is not None:
+                    if not isinstance(provider_config, dict):
+                        raise TypeError(
+                            f"YAML generator produced non-dict 'transforms[{index}].options.provider_config' value "
+                            f"(got {type(provider_config).__name__})"
+                        )
+                    for key in NESTED_PATH_OPTION_KEYS:
+                        if key in provider_config and not Path(str(provider_config[key])).is_absolute():
+                            provider_config[key] = str(resolve_data_path(str(provider_config[key]), data_dir))
 
     sinks = config.get("sinks")
     if sinks is not None:
@@ -89,7 +111,7 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
                 if opts is not None:
                     if not isinstance(opts, dict):
                         raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
-                    for key in ("path", "file"):
+                    for key in SINK_PATH_OPTION_KEYS:
                         if key in opts and not Path(str(opts[key])).is_absolute():
                             opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
 

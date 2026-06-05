@@ -723,10 +723,17 @@ def validate_pipeline(
             ),
         )
 
-    # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
-    # Any `path` or `file` key in source/sink options must resolve under
-    # an allowed directory. Uses the shared helpers from AD-4.
-    from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
+    # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth).
+    # Known filesystem option keys must resolve under allowed directories,
+    # including Chroma persist_directory in sink options and RAG provider_config.
+    from elspeth.web.paths import (
+        NESTED_PATH_OPTION_KEYS,
+        SINK_PATH_OPTION_KEYS,
+        SOURCE_PATH_OPTION_KEYS,
+        allowed_sink_directories,
+        allowed_source_directories,
+        resolve_data_path,
+    )
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
@@ -734,7 +741,7 @@ def validate_pipeline(
     # SourceSpec with typed .options attribute (Mapping[str, Any]).
     source_options = dict(state.source.options) if state.source is not None else {}
     path_checked = False
-    for key in ("path", "file"):
+    for key in SOURCE_PATH_OPTION_KEYS:
         value = source_options.get(key)
         if value is not None:
             path_checked = True
@@ -769,9 +776,51 @@ def validate_pipeline(
                     ),
                 )
 
+    for node in state.nodes or ():
+        provider_config = node.options.get("provider_config")
+        if not isinstance(provider_config, dict):
+            continue
+        for nested_key in NESTED_PATH_OPTION_KEYS:
+            value = provider_config.get(nested_key)
+            if value is not None:
+                path_checked = True
+                resolved = resolve_data_path(value, str(settings.data_dir))
+                if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
+                    return ValidationResult(
+                        is_valid=False,
+                        checks=[
+                            ValidationCheck(
+                                name=_CHECK_PATH_ALLOWLIST,
+                                passed=False,
+                                detail=f"Node '{node.id}' provider_config.{nested_key} '{value}' is outside allowed output directories",
+                                affected_nodes=(node.id,),
+                                outcome_code=None,
+                            ),
+                            *_skipped_checks(_CHECK_PATH_ALLOWLIST),
+                        ],
+                        errors=[
+                            ValidationError(
+                                component_id=node.id,
+                                component_type=node.node_type,
+                                message=(
+                                    f"Path traversal blocked: node '{node.id}' provider_config.{nested_key}='{value}' "
+                                    "resolves outside allowed directories"
+                                ),
+                                suggestion="Use a path within the outputs or blobs directory.",
+                                error_code=None,
+                            ),
+                        ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"node {node.id} provider_config.{nested_key} resolves outside allowed output directories",
+                            component_id=node.id,
+                            component_type=node.node_type,
+                        ),
+                    )
+
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
-        for key in ("path", "file"):
+        for key in SINK_PATH_OPTION_KEYS:
             value = output.options.get(key)
             if value is not None:
                 path_checked = True

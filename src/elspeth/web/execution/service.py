@@ -523,10 +523,10 @@ class ExecutionServiceImpl:
         # authenticated user could skip validation and execute a state that
         # reads files outside the allowed directories.
         if composition_state.source is not None:
-            from elspeth.web.paths import allowed_source_directories, resolve_data_path
+            from elspeth.web.paths import SOURCE_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
             allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
-            for key in ("path", "file"):
+            for key in SOURCE_PATH_OPTION_KEYS:
                 value = composition_state.source.options.get(key)
                 if value is not None:
                     resolved = resolve_data_path(value, str(self._settings.data_dir))
@@ -535,13 +535,29 @@ class ExecutionServiceImpl:
 
         # Sink path allowlist — prevents arbitrary file writes via sink options.
         # Without this, a client can set sink options.path to any absolute or
-        # ../ path and /execute will write there.
-        if composition_state.outputs:
-            from elspeth.web.paths import allowed_sink_directories, resolve_data_path
+        # ../ path and /execute will write there. Chroma's RAG provider and
+        # sink also expose persist_directory, which is likewise a write/read
+        # path for local vector-store files.
+        from elspeth.web.paths import NESTED_PATH_OPTION_KEYS, SINK_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
 
-            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+        allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+
+        for node in composition_state.nodes:
+            provider_config = node.options.get("provider_config")
+            if not isinstance(provider_config, dict):
+                continue
+            for nested_key in NESTED_PATH_OPTION_KEYS:
+                value = provider_config.get(nested_key)
+                if value is not None:
+                    resolved = resolve_data_path(value, str(self._settings.data_dir))
+                    if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
+                        raise PathAllowlistViolationError(
+                            f"Node '{node.id}' provider_config.{nested_key}='{value}' resolves outside allowed output directories"
+                        )
+
+        if composition_state.outputs:
             for output in composition_state.outputs:
-                for key in ("path", "file"):
+                for key in SINK_PATH_OPTION_KEYS:
                     value = output.options.get(key)
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))

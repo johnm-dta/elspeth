@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+SOURCE_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file")
+SINK_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file", "persist_directory")
+# Nested under transform options.provider_config for retrieval providers that
+# read/write local indexes. Keep this list deliberately narrow: broader nested
+# scanning would treat arbitrary plugin dictionaries as filesystem contracts.
+NESTED_PATH_OPTION_KEYS: tuple[str, ...] = ("persist_directory",)
+
 
 def resolve_data_path(value: str, data_dir: str) -> Path:
     """Resolve a path value against data_dir (relative) or as-is (absolute).

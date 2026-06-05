@@ -236,6 +236,72 @@ class TestValidatePipelinePathAllowlist:
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
 
+    def test_rag_provider_persist_directory_outside_outputs_blocked(self) -> None:
+        """Chroma RAG provider persistence is covered by the web path allowlist."""
+        state = _make_state(
+            source_options={},
+            nodes=(
+                _make_node(
+                    {
+                        "provider_config": {"mode": "persistent", "persist_directory": "/tmp/rag-chroma-outside"},
+                        "schema": {"mode": "observed"},
+                    },
+                    plugin="rag_retrieval",
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        result = validate_pipeline(state, settings, MagicMock(spec=YamlGenerator))
+
+        assert result.is_valid is False
+        assert _check(result, "path_allowlist").passed is False
+        assert any("provider_config.persist_directory" in e.message for e in result.errors)
+
+    def test_sink_persist_directory_outside_outputs_blocked(self) -> None:
+        """Chroma persistent storage is a sink write path and must be allowlisted."""
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    {
+                        "persist_directory": "/tmp/chroma-outside",
+                        "schema": {"mode": "observed"},
+                    },
+                    name="chroma",
+                    plugin="chroma_sink",
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        result = validate_pipeline(state, settings, MagicMock(spec=YamlGenerator))
+
+        assert result.is_valid is False
+        assert _check(result, "path_allowlist").passed is False
+        assert any("persist_directory" in e.message for e in result.errors)
+
+    def test_sink_persist_directory_under_outputs_passes_allowlist(self) -> None:
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    {
+                        "persist_directory": "/tmp/test_data/outputs/chroma",
+                        "schema": {"mode": "observed"},
+                    },
+                    name="chroma",
+                    plugin="chroma_sink",
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "path_allowlist").passed is True
+
     def test_no_path_option_records_skipped_check(self) -> None:
         """B11 fix: path allowlist check is always recorded, even when skipped."""
         state = _make_state(source_options={})

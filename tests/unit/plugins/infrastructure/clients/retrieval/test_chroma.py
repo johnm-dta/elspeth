@@ -81,6 +81,26 @@ class TestChromaSearchProviderConfig:
                 ssl=False,
             )
 
+    def test_client_mode_blocks_metadata_service_host(self):
+        with pytest.raises(ValueError, match="SSRF policy"):
+            ChromaSearchProviderConfig(
+                collection="test",
+                mode="client",
+                host="169.254.169.254",
+                port=8000,
+                ssl=True,
+            )
+
+    def test_client_mode_rejects_host_with_scheme(self):
+        with pytest.raises(ValueError, match="bare hostname"):
+            ChromaSearchProviderConfig(
+                collection="test",
+                mode="client",
+                host="https://chroma.example.com",
+                port=443,
+                ssl=True,
+            )
+
     def test_client_mode_allows_http_for_localhost(self):
         config = ChromaSearchProviderConfig(
             collection="test",

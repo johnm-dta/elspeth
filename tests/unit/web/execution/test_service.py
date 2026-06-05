@@ -3747,6 +3747,65 @@ class TestSinkPathRestriction:
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
+    async def test_rag_provider_persist_directory_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Execution rejects nested Chroma provider persistence paths."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "in",
+                "on_success": "out",
+                "on_error": "discard",
+                "options": {"provider_config": {"mode": "persistent", "persist_directory": "/tmp/rag-chroma-outside"}},
+            }
+        ]
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(
+            PathAllowlistViolationError, match=r"provider_config.persist_directory=.*resolves outside allowed output directories"
+        ):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_sink_persist_directory_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Chroma persist_directory is a sink write path, not a generic option."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "chroma",
+                "plugin": "chroma_sink",
+                "options": {"persist_directory": "/tmp/chroma-outside"},
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match=r"persist_directory=.*resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
     async def test_sink_without_path_option_passes(
         self,
         service: ExecutionServiceImpl,
@@ -4832,6 +4891,20 @@ class TestResolveYamlPaths:
         yaml_str = "source:\n  plugin: csv\n  options:\n    path: /abs/in.csv\nsinks:\n  primary:\n    plugin: csv\n    options:\n      file: output/results.csv\n"
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "/srv/data/output/results.csv" in result
+
+    def test_transform_relative_provider_persist_directory_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "transforms:\n  - name: rag\n    plugin: rag_retrieval\n    options:\n      provider_config:\n        mode: persistent\n        persist_directory: outputs/chroma-rag\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-rag" in result
+
+    def test_sink_relative_persist_directory_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "source:\n  plugin: csv\n  options:\n    path: /abs/in.csv\nsinks:\n  chroma:\n    plugin: chroma_sink\n    options:\n      persist_directory: outputs/chroma-index\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-index" in result
 
     def test_non_string_input_raises_type_error(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths

@@ -199,6 +199,67 @@ class TestValidatePipelineEmptyComposition:
         assert all(err.error_code != "empty_pipeline" for err in result.errors)
 
 
+class TestValidatePipelineAuthoringGate:
+    """Authoring validation must gate runtime YAML generation."""
+
+    def test_invalid_aggregation_trigger_env_placeholder_never_reaches_yaml_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression for aggregation trigger.condition env-expansion disclosure.
+
+        Composer-authored trigger fields are Tier-3 input. If an invalid
+        trigger condition can reach ``load_settings_from_yaml_string()``, the
+        core loader expands ``${VAR}`` placeholders using the server process
+        environment before Pydantic reports the invalid expression. The
+        validation endpoint must therefore stop at authoring validation and
+        never generate/load YAML for this state.
+        """
+        monkeypatch.setenv("ELSPETH_SECRET_KEY", "SUPERSECRETLEAK")
+        state = _make_state(
+            nodes=(
+                NodeSpec(
+                    id="agg",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="transform_in",
+                    on_success="results",
+                    on_error="discard",
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                    trigger={"condition": "${ELSPETH_SECRET_KEY}"},
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+
+        with (
+            patch(
+                "elspeth.web.composer.state._known_batch_aware_transform_plugins",
+                return_value=frozenset({"batch_stats"}),
+            ),
+            patch(
+                "elspeth.web.composer.state._known_batch_aware_transform_plugins_requiring_aggregation",
+                return_value=frozenset({"batch_stats"}),
+            ),
+        ):
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code == "authoring_state_invalid"
+        assert result.errors[0].component_id == "agg"
+        assert result.errors[0].component_type == "aggregation"
+        assert "Aggregation 'agg' trigger is invalid" in result.errors[0].message
+        assert "SUPERSECRETLEAK" not in yaml.safe_dump(result.model_dump())
+        assert _check(result, "authoring_state").passed is False
+        assert result.readiness.authoring_valid is False
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+
 class TestValidatePipelinePathAllowlist:
     """C3/S2: Source path allowlist check — defense-in-depth."""
 

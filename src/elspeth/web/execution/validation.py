@@ -104,6 +104,7 @@ _CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
 _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
 _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
 _CHECK_INTERPRETATION_REVIEW = "interpretation_review"
+_CHECK_AUTHORING_STATE = "authoring_state"
 _CHECK_SETTINGS = "settings_load"
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
@@ -162,6 +163,7 @@ _ALL_CHECKS = [
     _CHECK_PATH_ALLOWLIST,
     _CHECK_SECRET_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
+    _CHECK_AUTHORING_STATE,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
     _CHECK_INTERPRETATION_REVIEW,
     _CHECK_BLOB_INLINE_REFS,
@@ -1027,6 +1029,82 @@ def validate_pipeline(
             detail=(
                 f"All {len(semantic_contracts)} semantic contract(s) satisfied" if semantic_contracts else "No semantic contracts to check"
             ),
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    # Step 1d: Composer authoring validation
+    #
+    # ``validate_pipeline()`` is also exposed directly by the authenticated
+    # ``/validate`` endpoint and by YAML export/runtime-preflight callers. Do
+    # not assume the caller already ran ``CompositionState.validate()``: an
+    # invalid state can be persisted for repair feedback. Blocking here keeps
+    # Tier-3 composer-authored fields (notably aggregation trigger.condition)
+    # from reaching the settings loader, whose environment expansion is a
+    # server-side capability and must not be reachable through invalid authoring
+    # input.
+    authoring = state.validate()
+    if not authoring.is_valid:
+        affected_nodes = tuple(
+            dict.fromkeys(
+                entry.component.removeprefix("node:")
+                for entry in authoring.errors
+                if entry.component.startswith("node:")
+            )
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_AUTHORING_STATE,
+                passed=False,
+                detail="Composer authoring validation failed",
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        )
+        node_component_types = {node.id: node.node_type for node in state.nodes}
+
+        def _authoring_component(entry_component: str) -> tuple[str | None, str | None]:
+            if entry_component.startswith("node:"):
+                node_id = entry_component.removeprefix("node:")
+                return node_id, node_component_types.get(node_id, "transform")
+            if entry_component in {"source", "metadata"}:
+                return entry_component, entry_component
+            if entry_component.startswith("output:"):
+                return entry_component.removeprefix("output:"), "sink"
+            return entry_component, None
+
+        errors.extend(
+            ValidationError(
+                component_id=_authoring_component(entry.component)[0],
+                component_type=_authoring_component(entry.component)[1],
+                message=entry.message,
+                suggestion="Fix the composer authoring error before running runtime validation.",
+                error_code="authoring_state_invalid",
+            )
+            for entry in authoring.errors
+        )
+        checks.extend(_skipped_checks(_CHECK_AUTHORING_STATE))
+        first_error = authoring.errors[0] if authoring.errors else None
+        first_component = first_error.component if first_error is not None else None
+        first_component_id, first_component_type = _authoring_component(first_component) if first_component is not None else (None, None)
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            readiness=_blocked_readiness(
+                code="authoring_state_invalid",
+                detail="Composer authoring validation failed.",
+                component_id=first_component_id,
+                component_type=first_component_type,
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_AUTHORING_STATE,
+            passed=True,
+            detail="Composer authoring state is valid",
             affected_nodes=(),
             outcome_code=None,
         )

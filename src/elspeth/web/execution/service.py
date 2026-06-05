@@ -66,6 +66,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
+    ExecuteRequestValidationError,
     MalformedBlobRefError,
     PathAllowlistViolationError,
     SemanticContractViolationError,
@@ -480,6 +481,15 @@ class ExecutionServiceImpl:
         # Bridge CompositionStateRecord → CompositionState for generate_yaml().
         # The record stores raw dicts; generate_yaml() needs the typed domain object.
         composition_state = state_from_record(state_record)
+
+        # /execute is callable without first visiting /validate. Composer
+        # authoring validation is therefore a mandatory pre-YAML gate here too:
+        # invalid Tier-3 state must not reach load_settings_from_yaml_string(),
+        # where server-side environment expansion is available.
+        authoring = composition_state.validate()
+        if not authoring.is_valid:
+            detail = "; ".join(entry.message for entry in authoring.errors)
+            raise ExecuteRequestValidationError(f"Composition state is not executable: {detail}")
 
         semantic_errors, semantic_contracts = validate_semantic_contracts(composition_state)
         if semantic_errors:

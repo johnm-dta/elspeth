@@ -3595,6 +3595,58 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
+    def test_load_settings_from_yaml_string_expands_env_vars_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The in-memory loader preserves historical ${VAR} expansion by default."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-server-secret-value-suffix"
+
+    def test_load_settings_from_yaml_string_can_skip_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Opt-out keeps runtime-substituted ${VAR} literal so host secrets are not resolved.
+
+        Web execution uses this after splicing in inline-blob bytes / resolved
+        secrets: the operator tree was already expanded, and attacker-supplied
+        blob text like ${INLINE_PROMPT_SECRET} must stay data, not a host lookup.
+        """
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+""",
+            expand_env_vars=False,
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+
 
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""

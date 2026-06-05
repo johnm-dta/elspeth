@@ -30,6 +30,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import SecretResolutionInput
+from elspeth.contracts.blobs_inline import BlobInlineRef
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
@@ -42,7 +43,7 @@ from elspeth.core.blobs_inline import (
     _fetch_blob_contents,
     _substitute_blob_content_refs,
 )
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import expand_env_vars_in_config, load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
@@ -962,6 +963,10 @@ class ExecutionServiceImpl:
             resolved_yaml = pipeline_yaml
             resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
+            # Pre-declared so the load_settings_from_yaml_string() call below
+            # (outside the needs_config_tree block) can gate env expansion on
+            # whether any runtime substitution occurred.
+            inline_refs: list[BlobInlineRef] = []
             inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
             needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
             if needs_config_tree:
@@ -972,7 +977,13 @@ class ExecutionServiceImpl:
                     raise TypeError(
                         f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
                     )
-                resolved_dict = cast(dict[str, Any], config_dict)
+                # Expand ${VAR} ONCE, across the operator-authored YAML tree
+                # only — before any runtime substitution. Resolved web secrets
+                # and fetched inline-blob bytes are spliced in below and are
+                # deliberately NOT re-expanded: attacker-controlled blob text
+                # such as ${OPENAI_API_KEY} must stay literal data, not a host
+                # environment lookup that bypasses preflight secret controls.
+                resolved_dict = expand_env_vars_in_config(cast(dict[str, Any], config_dict))
 
                 if self._secret_service is not None and user_id is not None:
                     from elspeth.core.secrets import resolve_secret_refs
@@ -1087,8 +1098,14 @@ class ExecutionServiceImpl:
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O.
-            settings = load_settings_from_yaml_string(resolved_yaml)
+            # bypassing Dynaconf file I/O. When runtime values (resolved
+            # secrets or inline blob bytes) were substituted, the operator
+            # tree was already env-expanded above; disable the second pass so
+            # those runtime values cannot resolve host ${VAR} secrets.
+            if secret_resolution_inputs or inline_refs:
+                settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=False)
+            else:
+                settings = load_settings_from_yaml_string(resolved_yaml)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

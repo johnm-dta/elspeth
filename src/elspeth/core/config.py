@@ -2186,7 +2186,21 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
+def expand_env_vars_in_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Expand ``${VAR}`` placeholders across an operator-authored config tree.
+
+    Thin public wrapper over the module-private :func:`_expand_env_vars` so the
+    web execution service can expand the operator-authored YAML tree exactly
+    once, *before* it splices in runtime-only values (resolved web secrets,
+    fetched inline-blob bytes). Those runtime values are NOT operator-authored
+    and must never be passed through env expansion — attacker-supplied blob
+    text such as ``${OPENAI_API_KEY}`` must remain literal data, not a host
+    environment lookup.
+    """
+    return _expand_env_vars(config)
+
+
+def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
     This is used by the web execution service to load pipeline configs
@@ -2198,6 +2212,13 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
 
     Args:
         yaml_content: YAML configuration as a string.
+        expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
+            patterns from the host environment. Keep this enabled for
+            operator-authored YAML. Web execution disables it when the YAML
+            already carries runtime-substituted values (resolved secrets or
+            inline blob bytes) that were either expanded earlier on the
+            operator tree or must stay literal, so user-authored blob bytes
+            cannot resolve host secrets after the preflight access controls.
 
     Returns:
         Validated ElspethSettings instance.
@@ -2214,7 +2235,8 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
     _reject_file_backed_template_options_for_in_memory_loader(raw_config)
-    raw_config = _expand_env_vars(raw_config)
+    if expand_env_vars:
+        raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 
 

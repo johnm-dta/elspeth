@@ -97,7 +97,7 @@ class TestDeaggregationExampleSmoke:
 
     def test_example_runs_end_to_end(self, example_dir: Path) -> None:
         """The deaggregation example must build, validate, and execute cleanly."""
-        from elspeth.cli_helpers import bootstrap_and_run
+        from elspeth.cli import bootstrap_and_run
 
         result = bootstrap_and_run(example_dir / "settings.yaml")
 

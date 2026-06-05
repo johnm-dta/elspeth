@@ -96,6 +96,9 @@ def test_get_shareable_link_remints_stable_digest(
 ) -> None:
     """Two GETs yield identical payload_digest but different token strings."""
     client, session_id = audit_readiness_client_with_state
+    mark_response = client.post(f"/api/sessions/{session_id}/mark-ready-for-review")
+    assert mark_response.status_code == 200, mark_response.text
+
     r1 = client.get(f"/api/sessions/{session_id}/shareable-link")
     r2 = client.get(f"/api/sessions/{session_id}/shareable-link")
     assert r1.status_code == 200, r1.text

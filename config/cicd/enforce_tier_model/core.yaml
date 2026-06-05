@@ -203,25 +203,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[26]/body[4]/body[6]/body[5]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:a2dbcd0e000e98a7a7c0627d646db86a158a090a541fe26020eb5781efcc47c7'
-- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
-  owner: john
-  reason: |-
-    In begin_node_state (line 173) the except (ValueError, TypeError) is reachable ONLY inside the quarantined=True branch: it wraps stable_hash(input_data) and falls back to repr_hash(input_data). The quarantined flag explicitly marks input_data as Tier-3 external row data that may contain non-canonical values (NaN/Infinity, or unserializable types) which stable_hash legitimately rejects — and stable_hash/canonical_json genuinely raise both ValueError (non-finite floats/Decimals) and TypeError (types rfc8785 cannot serialize), so the catch tuple is accurate and complete, not over-broad. The non-quarantined branch (line 176) calls stable_hash uncaught, so this fallback cannot mask a canonicalization bug on our own normal data — only Tier-3 quarantined input degrades to repr_hash. repr_hash is a deterministic alternate hash of the SAME input (the node state still records a real input_hash for that exact data), not a default or fabricated value and not data loss. This is legitimate Tier-3 boundary handling; the existing rationale matches the code and I confirmed its exception-type claims against canonical.py.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:45:32.391769+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM at a Tier-3 quarantine boundary. The try/except is reachable only when caller-supplied quarantined=True, which the docstring (lines 159-160) declares as Tier-3 external data that may carry non-canonical values. Verified at canonical.py:66/69/76/95/148 that stable_hash legitimately raises ValueError on non-finite floats/Decimals and TypeError on unserializable types — the catch tuple is narrow and accurate, not a bare except. The fallback repr_hash (contracts/hashing.py:117, documented for exactly this Tier-3 boundary) is a deterministic alternate hash of the SAME input_data — not a default, not fabrication; the audit row still records a real hash of what we got. The non-quarantined branch (line 176) lets stable_hash crash uncaught, so canonicalization bugs on our own Tier-1/Tier-2 data still surface. Matches the policy's quarantine-on-upgrade pattern and the 'record what we got' clause.
-  judge_signature_version: 2
-  scope_fingerprint: 74cf9456077e5e4476f61cc819d598784dbadc3ef99c29f05eb6e300435b437d
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[28]/body[2]/body[2]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:1316a4b94882ac39a1b0c040b5ded0068e515efb30975df07439e377a138ef2b'
 - key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=b8840fd73f01302a
   owner: john
   reason: |-
@@ -317,3 +298,41 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[17]/body[8]/body[9]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:106237b1a5dc9b1f5177556347f78cc89bb448e37e7aabe52684246bdf71e418'
+- key: core/security/web.py:R6:validate_literal_ip_for_ssrf:fp=82650ca4aa6dc216
+  owner: john
+  reason: |-
+    Literal-IP SSRF validation treats parser rejection as a negative literal-IP result; DNS-bearing host validation occurs at request time and is not silently trusted here.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-02'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-04T06:39:26.486400+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. The function's documented contract is 'validate IF host is a literal IP, else ignore'. The ValueError from ipaddress.ip_address(host) is the parser's documented signal that the input is not a literal IP — the early return is a meaning-preserving control-flow branch on a typed parser result, not a silent swallow of an unexpected error. The docstring explicitly notes DNS-bearing hostnames are handled by validate_url_for_ssrf() at request time, so non-IP inputs are correctly skipped here rather than fabricated or trusted. This is the prescribed boundary form: parse, branch on parse outcome, dispatch.
+  judge_signature_version: 2
+  scope_fingerprint: a885a9cf21de6f462deec22dce775ab6883f48acc0ea2aaa4cc308940821e223
+  judge_transport: openrouter
+  ast_path: 'body[19]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:6d1ba3dfd99cb7590abd07084fe41179e22b083a48509dc07629e8b59b34ea36'
+- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=504ed700a3e4381c
+  owner: john
+  reason: |-
+    In begin_node_state (line 173) the except (ValueError, TypeError) is reachable ONLY inside the quarantined=True branch: it wraps stable_hash(input_data) and falls back to repr_hash(input_data). The quarantined flag explicitly marks input_data as Tier-3 external row data that may contain non-canonical values (NaN/Infinity, or unserializable types) which stable_hash legitimately rejects — and stable_hash/canonical_json genuinely raise both ValueError (non-finite floats/Decimals) and TypeError (types rfc8785 cannot serialize), so the catch tuple is accurate and complete, not over-broad. The non-quarantined branch (line 176) calls stable_hash uncaught, so this fallback cannot mask a canonicalization bug on our own normal data — only Tier-3 quarantined input degrades to repr_hash. repr_hash is a deterministic alternate hash of the SAME input (the node state still records a real input_hash for that exact data), not a default or fabricated value and not data loss. This is legitimate Tier-3 boundary handling; the existing rationale matches the code and I confirmed its exception-type claims against canonical.py.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:43:16.748849+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.83
+  judge_rationale: |-
+    PRESCRIBED FORM. The except is gated on quarantined=True, which by the parameter's documented contract marks input_data as Tier-3 external data that may legitimately contain non-canonical values (NaN/Infinity, non-serializable types). stable_hash rejecting such values is expected, and falling back to repr_hash produces a deterministic alternate hash of the same data — not a fabricated default and not silent data loss. The non-quarantined branch deliberately leaves stable_hash uncaught, so canonicalization bugs on first-party data still surface; this is the meaning-preserving boundary form, not a silent suppress.
+  judge_signature_version: 2
+  scope_fingerprint: 74cf9456077e5e4476f61cc819d598784dbadc3ef99c29f05eb6e300435b437d
+  judge_transport: openrouter
+  ast_path: 'body[29]/body[2]/body[2]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f039287d98bb7c96b0e879cdf907b124c20f36fd8ce420241cbad6a6799ee116'

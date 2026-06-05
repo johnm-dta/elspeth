@@ -30,8 +30,8 @@ values.
 
 Layer: L3 (application). Imports from L0 (``contracts/freeze``,
 ``contracts/errors``), L1 (``core/composer/state``,
-``core/composer/runtime_preflight``), and L3 (``web/sessions/_persist_payload``,
-``web/composer/protocol``, ``web/composer/state``).
+``core/composer/runtime_preflight``), and L3 (``web/composer/protocol``,
+``web/composer/state``).
 """
 
 from __future__ import annotations
@@ -44,7 +44,42 @@ from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult
 from elspeth.web.composer.state import CompositionState, ValidationSummary
-from elspeth.web.sessions._persist_payload import _ToolOutcome
+from elspeth.web.composer.tools._common import ToolResult
+
+_ToolOutcomeResponse = ToolResult | Mapping[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolOutcome:
+    """Result of one tool call within a compose turn.
+
+    The response contract is a closed sum type produced by P3
+    ``tool_batch.run_tool_batch`` and consumed by P4 ``turn_audit``:
+
+    * ``ToolResult`` for normal execute-tool, cache-hit, proposal, and
+      session-aware success paths.
+    * ``Mapping[str, Any]`` for the first-party ``request_advisor_hint``
+      interception envelopes. That tool is intentionally outside
+      ``execute_tool`` because it makes an async advisor LLM call, so its
+      successful/disabled/budget/error/timeout payloads are already
+      serialized mapping envelopes rather than ``ToolResult`` instances.
+    * ``None`` for argument-error and plugin-crash paths, where
+      ``error_class`` / ``error_message`` carry the outcome.
+
+    ``call`` remains ``Any`` because it is a LiteLLM ToolCall object (or a
+    frozen mapping in tests) and this carrier deliberately avoids coupling to
+    provider-specific response classes.
+    """
+
+    call: Any  # ToolCall — typed in protocol module
+    response: _ToolOutcomeResponse
+    error_class: str | None
+    error_message: str | None
+    pre_version: int
+    post_version: int
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "call", "response")
 
 
 @dataclass(frozen=True, slots=True)

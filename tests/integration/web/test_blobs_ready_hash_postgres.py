@@ -51,13 +51,8 @@ from elspeth.web.sessions.schema import initialize_session_schema
 # testcontainer modules use the same session-row construction.
 from .conftest import _make_session
 
-# Skipped: the session-DB schema uses SQLite-only CHECK constraints
-# (char()/trim-comma) that fail to CREATE on Postgres, so these tests error at
-# schema setup. Postgres is deferred (SQLite-only stance); portability work and
-# re-enable steps are tracked in filigree elspeth-f18d996d71.
 pytestmark = [
     pytest.mark.testcontainer,
-    pytest.mark.skip(reason="Postgres deferred; session-DB CHECK constraints SQLite-only — elspeth-f18d996d71"),
 ]
 
 

@@ -2623,32 +2623,18 @@ class TestPartialStatePreservation:
             assert exc_info.value.partial_state is None
 
 
-class TestComposerSamplingDeterminism:
-    """Composer LLM calls must use temperature=0.0 and supported deterministic seed.
+class TestComposerSamplingConfig:
+    """Composer LLM sampling must come from operator config.
 
-    RGR investigation 2026-05-06 §4.4: uncontrolled sampling at the
-    LiteLLM/OpenRouter default (~1.0) was the largest single explanation
-    for schema-construction nondeterminism. Pipeline composition is an
-    extraction task, not a creative one — temperature 0 is the right
-    setpoint per the LLM-debugging-skill temperature guide.
-
-    Audit primacy: the values that flow to LiteLLM are also recorded on
-    each ComposerLLMCall, so a reviewer can correlate any individual
-    failure with the precise sampling regime that produced it.
+    Default ``None`` means omit the provider parameter. Configured values are
+    sent verbatim and recorded on each ComposerLLMCall, so a reviewer can
+    correlate failures with the precise sampling regime.
     """
 
     @pytest.mark.asyncio
-    async def test_call_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The tool-loop LLM call site sends temperature=0.0 and seed=42 when supported."""
-        import litellm
-
-        monkeypatch.setattr(
-            litellm,
-            "get_supported_openai_params",
-            lambda model: ["temperature", "tools", "seed"],
-        )
+    async def test_call_llm_sends_configured_temperature_and_seed(self) -> None:
         catalog = _mock_catalog()
-        settings = _make_settings()
+        settings = _make_settings(composer_temperature=0.0, composer_seed=42)
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
         state = _empty_state()
 
@@ -2669,19 +2655,11 @@ class TestComposerSamplingDeterminism:
 
         assert mock_acomp.call_count >= 1
         first_call_kwargs = mock_acomp.call_args_list[0].kwargs
-        assert first_call_kwargs["temperature"] == 0.0, f"composer must send temperature=0.0, got {first_call_kwargs.get('temperature')!r}"
-        assert first_call_kwargs["seed"] == 42, f"composer must send seed=42, got {first_call_kwargs.get('seed')!r}"
+        assert first_call_kwargs["temperature"] == 0.0
+        assert first_call_kwargs["seed"] == 42
 
     @pytest.mark.asyncio
-    async def test_call_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Direct Anthropic-style adapters reject OpenAI seed; omit it when unsupported."""
-        import litellm
-
-        monkeypatch.setattr(
-            litellm,
-            "get_supported_openai_params",
-            lambda model: ["temperature", "tools"],
-        )
+    async def test_call_llm_omits_sampling_when_operator_leaves_it_unset(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2695,26 +2673,13 @@ class TestComposerSamplingDeterminism:
             await service._call_llm([{"role": "user", "content": "Hello"}], [])
 
         kwargs = mock_acomp.call_args_list[0].kwargs
-        assert kwargs["temperature"] == 0.0
+        assert "temperature" not in kwargs
         assert "seed" not in kwargs
 
     @pytest.mark.asyncio
-    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42 when supported.
-
-        run-diagnostics text generation goes through _call_text_llm. Since the
-        skill prescribes determinism for the user's LLM transforms, the host
-        composer should be at least as deterministic.
-        """
-        import litellm
-
-        monkeypatch.setattr(
-            litellm,
-            "get_supported_openai_params",
-            lambda model: ["temperature", "seed"],
-        )
+    async def test_call_text_llm_sends_configured_temperature_and_seed(self) -> None:
         catalog = _mock_catalog()
-        settings = _make_settings()
+        settings = _make_settings(composer_temperature=0.0, composer_seed=42)
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
 
         completion = _make_llm_response(content="diagnostic text")
@@ -2732,15 +2697,7 @@ class TestComposerSamplingDeterminism:
         assert kwargs["seed"] == 42
 
     @pytest.mark.asyncio
-    async def test_call_text_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Diagnostics must share the same provider-parameter gate as composition."""
-        import litellm
-
-        monkeypatch.setattr(
-            litellm,
-            "get_supported_openai_params",
-            lambda model: ["temperature"],
-        )
+    async def test_call_text_llm_omits_sampling_when_operator_leaves_it_unset(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2754,7 +2711,7 @@ class TestComposerSamplingDeterminism:
             await service._call_text_llm([{"role": "user", "content": "explain"}])
 
         kwargs = mock_acomp.call_args_list[0].kwargs
-        assert kwargs["temperature"] == 0.0
+        assert "temperature" not in kwargs
         assert "seed" not in kwargs
 
 

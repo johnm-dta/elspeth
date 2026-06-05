@@ -42,7 +42,7 @@
   audience: "Engineering reviewers, auditors, integrators",
   classification: default-classification,
   status: "Reference — current as of " + data.doc-date,
-  distribution: "Internal — Digital Transformation Agency only",
+  distribution: "Public evaluation release copy",
   hero: cover-hero-sda(),
 )
 

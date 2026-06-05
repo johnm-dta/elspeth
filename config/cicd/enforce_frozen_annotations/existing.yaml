@@ -1,12 +1,8 @@
 # Existing frozen dataclasses with intentional mutable container annotations.
-# These are data containers for external/pipeline data where the dict/list
-# annotation accurately reflects the runtime type (no __post_init__ freezing).
 #
-# Migrated to the shared core allowlist loader (Plan A Task 6). Keys are in
-# canonical form `<file>:<rule_id>:<symbol_context>:fp=<fingerprint>`. The
-# fingerprint format `<file>:<class>:<field>` is kept verbatim from the rule's
-# `_finding` at rule.py L57; Plan B will redesign fingerprints centrally and
-# resolve the redundant file-path embedding then.
+# Migrated to the shared core allowlist loader. Stale entries are now enforced
+# by elspeth-lints as allowlist governance findings; this file is intentionally
+# empty until a live finding needs a reviewed exemption.
 
 allow_hits:
   # ResumeState: dict inside a tuple element — nested, not a direct field type issue
@@ -21,93 +17,38 @@ allow_hits:
     reason: "MCP tool definition: Callable signature contains dict parameter."
     safety: "pre-existing exemption — content audit pending in Plan B"
 
-  # Composer redaction TraversalNode: value_provider Callable receives the
-  # model's serialised root dict (Tier 2 pipeline data view), same justification
-  # as _ToolDef:handler above. The signature reflects the consumer-supplied
-  # input shape for the closure; the TraversalNode itself is frozen and the
-  # callable reference is never mutated after construction.
+  # Composer redaction TraversalNode callables receive and/or mutate consumer-owned dicts.
   - key: "src/elspeth/web/composer/redaction.py:immutability.frozen_annotations:_module_:fp=src/elspeth/web/composer/redaction.py:TraversalNode:value_provider"
     owner: "@elspeth-maintainers"
-    reason: "Composer redaction TraversalNode: value_provider Callable receives the model's serialised root dict (Tier 2 pipeline data view), same justification as _ToolDef:handler above. The signature reflects the consumer-supplied input shape for the closure; the TraversalNode itself is frozen and the callable reference is never mutated after construction."
+    reason: "Composer redaction TraversalNode: value_provider Callable receives the model's serialised root dict. The frozen TraversalNode holds the callable reference, not the dict."
     safety: "pre-existing exemption — content audit pending in Plan B"
-
-  # Composer redaction TraversalNode: substitute_provider sibling to
-  # value_provider (Task 8). Same Callable-receives-root-dict shape; the
-  # closure mutates the consumer-supplied dict in place at every reachable
-  # leaf for this node's path. Frozen TraversalNode holds the callable
-  # reference, not the dict; the dict is the caller's local (rev-3 W8b
-  # walker-atomicity).
   - key: "src/elspeth/web/composer/redaction.py:immutability.frozen_annotations:_module_:fp=src/elspeth/web/composer/redaction.py:TraversalNode:substitute_provider"
     owner: "@elspeth-maintainers"
-    reason: "Composer redaction TraversalNode: substitute_provider sibling to value_provider (Task 8). Same Callable-receives-root-dict shape; the closure mutates the consumer-supplied dict in place at every reachable leaf for this node's path. Frozen TraversalNode holds the callable reference, not the dict; the dict is the caller's local (rev-3 W8b walker-atomicity)."
+    reason: "Composer redaction TraversalNode: substitute_provider mutates the consumer-supplied dict through a held callable. The frozen TraversalNode holds the callable reference, not the dict."
     safety: "pre-existing exemption — content audit pending in Plan B"
 
-  # Composer dispatch ToolBatchContext: discovery_cache is an intentionally-mutable
-  # shared cache the dispatch loop writes into across batches of one compose call.
-  # The dict[...] annotation accurately reflects the runtime type — retyping it as
-  # Mapping would misrepresent a field run_tool_batch mutates by design. Paired with
-  # the FG3 per_file_rules entry in enforce_freeze_guards/web.yaml. Documented at the field.
+  # Composer dispatch ToolBatchContext: discovery_cache is an intentionally mutable per-compose-call cache.
   - key: "src/elspeth/web/composer/tool_batch.py:immutability.frozen_annotations:_module_:fp=src/elspeth/web/composer/tool_batch.py:ToolBatchContext:discovery_cache"
     owner: "@elspeth-maintainers"
-    reason: "Composer dispatch ToolBatchContext: discovery_cache is an intentionally-mutable shared cache the dispatch loop writes into across batches of one compose call. The dict[...] annotation accurately reflects the runtime type; the frozen context holds the reference (batch-invariant) while the contents are deliberately exempt from deep_freeze. Paired with the FG3 per_file_rules entry in enforce_freeze_guards/web.yaml."
-    safety: "Verified: run_tool_batch writes discovery_cache[cache_key]; the frozen dataclass holds only the reference, and the cache outlives a single batch (per-compose-call lifecycle) so it cannot move to the per-batch BatchAccumulator."
+    reason: "Composer dispatch ToolBatchContext: discovery_cache is an intentionally mutable shared cache the dispatch loop writes into across batches of one compose call."
+    safety: "Verified: run_tool_batch writes discovery_cache[cache_key]; the frozen dataclass holds only the reference."
 
   # Dataverse API response — Tier 3 external data, genuinely mutable
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:rows"
     owner: "@elspeth-maintainers"
-    reason: "Dataverse API response — Tier 3 external data, genuinely mutable."
+    reason: "Dataverse API response rows are external Tier 3 data and the runtime type is a list of dict rows."
     safety: "pre-existing exemption — content audit pending in Plan B"
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:headers"
     owner: "@elspeth-maintainers"
-    reason: "Dataverse API response — Tier 3 external data, genuinely mutable."
+    reason: "Dataverse API response headers are external Tier 3 data and the runtime type is dict[str, str]."
     safety: "pre-existing exemption — content audit pending in Plan B"
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:request_headers"
     owner: "@elspeth-maintainers"
-    reason: "Dataverse API response — Tier 3 external data, genuinely mutable."
+    reason: "Dataverse request headers are retained with the response metadata and the runtime type is dict[str, str]."
     safety: "pre-existing exemption — content audit pending in Plan B"
 
   # Retrieval chunk metadata — external search API response (Tier 3)
   - key: "src/elspeth/plugins/infrastructure/clients/retrieval/types.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/retrieval/types.py:RetrievalChunk:metadata"
     owner: "@elspeth-maintainers"
-    reason: "Retrieval chunk metadata — external search API response (Tier 3)."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-
-  # Verification results — external API responses (Tier 3)
-  - key: "src/elspeth/plugins/infrastructure/clients/verifier.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/verifier.py:VerificationResult:live_response"
-    owner: "@elspeth-maintainers"
-    reason: "Verification results — external API responses (Tier 3)."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-  - key: "src/elspeth/plugins/infrastructure/clients/verifier.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/verifier.py:VerificationResult:recorded_response"
-    owner: "@elspeth-maintainers"
-    reason: "Verification results — external API responses (Tier 3)."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-  - key: "src/elspeth/plugins/infrastructure/clients/verifier.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/verifier.py:VerificationResult:differences"
-    owner: "@elspeth-maintainers"
-    reason: "Verification results — external API responses (Tier 3)."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-
-  # Pooled executor row context — pipeline row data (Tier 2)
-  - key: "src/elspeth/plugins/infrastructure/pooling/executor.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/pooling/executor.py:RowContext:row"
-    owner: "@elspeth-maintainers"
-    reason: "Pooled executor row context — pipeline row data (Tier 2)."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-
-  # LLM transform internals — query templates and results
-  - key: "src/elspeth/plugins/transforms/llm/transform.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/transforms/llm/transform.py:MultiQueryStrategy:_query_templates"
-    owner: "@elspeth-maintainers"
-    reason: "LLM transform internals — query templates and results."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-  - key: "src/elspeth/plugins/transforms/llm/transform.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/transforms/llm/transform.py:_QuerySuccess:fields"
-    owner: "@elspeth-maintainers"
-    reason: "LLM transform internals — query templates and results."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-  - key: "src/elspeth/plugins/transforms/llm/transform.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/transforms/llm/transform.py:_QuerySuccess:audit_metadata"
-    owner: "@elspeth-maintainers"
-    reason: "LLM transform internals — query templates and results."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-
-  # RAG query result — error dict from external API (Tier 3)
-  - key: "src/elspeth/plugins/transforms/rag/query.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/transforms/rag/query.py:QueryResult:error"
-    owner: "@elspeth-maintainers"
-    reason: "RAG query result — error dict from external API (Tier 3)."
+    reason: "Retrieval chunk metadata is external search API response data and the runtime type is dict[str, Any]."
     safety: "pre-existing exemption — content audit pending in Plan B"

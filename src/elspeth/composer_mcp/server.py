@@ -417,6 +417,22 @@ def _session_id_argument(arguments: dict[str, Any]) -> str:
     return cast(str, session_id)
 
 
+def _new_session_name_argument(arguments: Mapping[str, object]) -> str:
+    """Return a validated new_session name or the documented default."""
+    if "name" not in arguments:
+        return "Untitled Pipeline"
+
+    name = arguments["name"]
+    if type(name) is not str:
+        raise ToolArgumentError(
+            argument="name",
+            expected="a string",
+            actual_type=type(name).__name__,
+        )
+
+    return name
+
+
 def _dispatch_session_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -429,9 +445,9 @@ def _dispatch_session_tool(
     if tool_name == "new_session":
         # Tier-3 MCP args. ``name`` is optional (required: []); its schema
         # documents the default "Untitled Pipeline", so absence is a declared
-        # API-contract default, not an inference from adjacent fields. Explicit
-        # branch makes the default visible and avoids the defensive ``.get``.
-        name = arguments["name"] if "name" in arguments else "Untitled Pipeline"
+        # API-contract default, not an inference from adjacent fields. If present,
+        # the value must match the advertised string schema exactly.
+        name = _new_session_name_argument(arguments)
         session_id, new_state = manager.new_session(name=name)
         manager.save(session_id, new_state)
         return {
@@ -592,7 +608,7 @@ def create_server(
             for d in tool_defs
         ]
 
-    @server.call_tool()  # type: ignore[untyped-decorator]
+    @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]
     async def call_tool(
         name: str,
         arguments: dict[str, Any],

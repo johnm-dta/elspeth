@@ -7,9 +7,11 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has incomplete type stubs
+    AbstractClock,
     Duration,
     InMemoryBucket,
     Limiter,
@@ -20,6 +22,8 @@ from pyrate_limiter import (  # type: ignore[attr-defined]  # pyrate-limiter has
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+    from elspeth.engine.clock import Clock
 
 # Pattern for valid rate limiter names (used in SQL table names)
 _VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
@@ -34,6 +38,16 @@ _suppressed_lock = threading.Lock()
 # This avoids replacing the global threading.excepthook at import time.
 _original_excepthook: object = None
 _hook_installed: bool = False
+
+
+class _PyrateClockAdapter(AbstractClock):
+    """Adapt ELSPETH's monotonic Clock protocol to pyrate-limiter milliseconds."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def now(self) -> int:
+        return int(self._clock.monotonic() * 1000)
 
 
 def _install_hook() -> None:
@@ -125,6 +139,8 @@ class RateLimiter:
         requests_per_minute: int,
         persistence_path: str | None = None,
         window_ms: int | Duration | None = None,
+        clock: Clock | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         """Initialize rate limiter.
 
@@ -137,6 +153,11 @@ class RateLimiter:
             persistence_path: Optional SQLite database path for persistence
             window_ms: Optional window override in milliseconds.
                 Defaults to Duration.MINUTE.
+            clock: Optional monotonic clock for deterministic in-memory tests.
+                Not supported with SQLite persistence because persisted bucket
+                timestamps must be comparable across processes.
+            sleep: Optional sleep function paired with clock-driven tests for
+                blocking acquire().
 
         Raises:
             ValueError: If name is invalid or rate limit is not positive.
@@ -154,11 +175,16 @@ class RateLimiter:
         if requests_per_minute <= 0:
             msg = f"requests_per_minute must be positive, got {requests_per_minute}"
             raise ValueError(msg)
+        if clock is not None and persistence_path is not None:
+            msg = "clock injection is only supported for in-memory rate limiters"
+            raise ValueError(msg)
 
         self.name = name
         self._requests_per_minute = requests_per_minute
         self._persistence_path = persistence_path
         self._window_ms = int(Duration.MINUTE if window_ms is None else window_ms)
+        self._clock = clock
+        self._sleep = time.sleep if sleep is None else sleep
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
         self._closed = False
@@ -184,8 +210,23 @@ class RateLimiter:
         else:
             self._bucket = InMemoryBucket(rates=rates)
 
-        # Single limiter with per-minute rate
-        self._limiter = Limiter(self._bucket, max_delay=self._window_ms, raise_when_fail=True)
+        # Single limiter with per-minute rate. Omit the clock argument in
+        # production so pyrate-limiter keeps its wall-clock behavior; inject the
+        # adapter only for deterministic in-memory tests.
+        if clock is None:
+            self._limiter = Limiter(self._bucket, max_delay=self._window_ms, raise_when_fail=True)
+        else:
+            self._limiter = Limiter(
+                self._bucket,
+                clock=_PyrateClockAdapter(clock),
+                max_delay=self._window_ms,
+                raise_when_fail=True,
+            )
+
+    def _monotonic(self) -> float:
+        if self._clock is None:
+            return time.monotonic()
+        return self._clock.monotonic()
 
     @staticmethod
     def _validate_weight(weight: int) -> None:
@@ -220,7 +261,7 @@ class RateLimiter:
             if timeout < 0:
                 raise ValueError(f"timeout must be non-negative, got {timeout!r}")
 
-        deadline = None if timeout is None else (time.monotonic() + timeout)
+        deadline = None if timeout is None else (self._monotonic() + timeout)
 
         while True:
             if self.try_acquire(weight):
@@ -228,14 +269,14 @@ class RateLimiter:
 
             # Check timeout
             if deadline is not None:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"Failed to acquire {weight} tokens within {timeout}s timeout")
                 # Sleep for shorter of: 10ms or remaining time
-                time.sleep(min(0.01, remaining))
+                self._sleep(min(0.01, remaining))
             else:
                 # No timeout - sleep 10ms and retry
-                time.sleep(0.01)
+                self._sleep(0.01)
 
     def try_acquire(self, weight: int = 1) -> bool:
         """Try to acquire tokens without blocking.

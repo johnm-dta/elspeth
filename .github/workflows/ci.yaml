@@ -156,9 +156,16 @@ jobs:
           ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
           ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
+          set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
             --root src/elspeth
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=Trust-tier signed allowlist diagnosis::If this failure mentions judge_metadata_signature, file_fingerprint, scope_fingerprint, or ast_path drift, run: diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model. To repair diagnosed drift from an operator shell, run: sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --env-file /path/to/operator.env --owner \"\$USER\""
+          fi
+          exit "$status"
 
       - name: Run trust-boundary honesty-gate elspeth-lints rules
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -176,6 +183,11 @@ jobs:
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules meta.no-new-bespoke-cicd-enforcer \
             --root .
+
+      - name: Run adapter facade budget legacy gate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          uv run python scripts/cicd/enforce_adapter_budget.py
 
       - name: Emit elspeth-lints SARIF artifact
         if: always()
@@ -289,6 +301,7 @@ jobs:
             --format sarif > elspeth-lints-trust-tier.sarif
           status=$?
           if [ "$status" -gt 1 ]; then
+            echo "::error title=Trust-tier signed allowlist diagnosis::If this failure mentions judge_metadata_signature, file_fingerprint, scope_fingerprint, or ast_path drift, run: diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model. To repair diagnosed drift from an operator shell, run: sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --env-file /path/to/operator.env --owner \"\$USER\""
             exit "$status"
           fi
 
@@ -572,6 +585,7 @@ jobs:
             --frozen \
             --all-extras \
             --no-emit-project \
+            --no-emit-local \
             --format requirements-txt \
             --output-file requirements-audit.txt
           # CVE-2025-45768 / PYSEC-2025-183 has no fixed PyJWT release;
@@ -753,10 +767,7 @@ jobs:
     needs:
       - static-analysis
       - test
-      # test-postgres-testcontainer is intentionally NOT a gate: Postgres is
-      # deferred (SQLite-only stance) and the session-DB schema is not yet
-      # PG-portable. The job's tests are skipped; re-add this here when PG
-      # portability lands — tracked in filigree elspeth-f18d996d71.
+      - test-postgres-testcontainer
       - supply-chain-audit
       - e2e-frontend
       - frontend-unit
@@ -770,6 +781,10 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
+            echo "Postgres testcontainer job failed"
             exit 1
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then

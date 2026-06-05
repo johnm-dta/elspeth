@@ -124,7 +124,7 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     name = "azure_content_safety"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bd11ff7b54fff17"
+    source_file_hash: str | None = "sha256:275a42d602a3ffe0"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 
@@ -167,6 +167,13 @@ class AzureContentSafety(BaseAzureSafetyTransform):
         """Exercise the real single-row validation path with a local fake client."""
 
         class _ProbeResponse:
+            text = (
+                '{"categoriesAnalysis":[{"category":"Hate","severity":0},'
+                '{"category":"Violence","severity":0},{"category":"Sexual","severity":0},'
+                '{"category":"SelfHarm","severity":0}]}'
+            )
+            content = text.encode("utf-8")
+
             def raise_for_status(self) -> None:
                 return None
 
@@ -257,10 +264,7 @@ class AzureContentSafety(BaseAzureSafetyTransform):
 
         # Parse response into category -> severity mapping
         # Azure API responses are external data (Tier 3: Zero Trust) — validate immediately
-        try:
-            data = response.json()
-        except (ValueError, TypeError) as e:
-            raise MalformedResponseError(f"Invalid JSON in Content Safety response: {e}") from e
+        data = self._parse_external_json_response(response, label="Content Safety response")
 
         try:
             result: dict[str, int] = dict.fromkeys(_EXPECTED_CATEGORIES, 0)

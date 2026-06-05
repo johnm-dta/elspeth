@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
+from elspeth_lints.core.allowlist_governance import allowlist_governance_findings_for_root
 from elspeth_lints.core.ast_walker import PythonFileReadError, PythonSyntaxError, walk_python_files
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.plugin_contract.component_type.metadata import LEGACY_RULE_ID, RULE_ID, RULE_METADATA, SUGGESTION
@@ -49,10 +50,21 @@ class ComponentTypeRule:
         """Run a whole-root scan, or a direct tree scan for focused tests."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return find_component_type_findings(scan_tree_classes(tree, display_path(file_path, context.root), []))
-        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
+        return scan_root(
+            context.root,
+            allowlist_dir_override=context.allowlist_dir_override,
+            governance_emitted_dirs=context.allowlist_governance_emitted_dirs,
+            emit_allowlist_governance=context.emit_allowlist_governance,
+        )
 
 
-def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
+def scan_root(
+    root: Path,
+    *,
+    allowlist_dir_override: Path | None = None,
+    governance_emitted_dirs: set[str] | None = None,
+    emit_allowlist_governance: bool = True,
+) -> list[Finding]:
     """Scan a root and apply the legacy component-type allowlist."""
     allowlist_dir = (
         allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_component_type")
@@ -65,7 +77,18 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         source_lines = parsed.source.splitlines()
         all_classes.extend(scan_tree_classes(parsed.tree, display_path(parsed.path, root), source_lines))
     findings = find_component_type_findings(all_classes)
-    return [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    active = [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    return [
+        *active,
+        *allowlist_governance_findings_for_root(
+            allowlist,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+            emitted_dirs=governance_emitted_dirs,
+            enabled=emit_allowlist_governance,
+        ),
+    ]
 
 
 def scan_tree_classes(tree: ast.AST, file_path: str, source_lines: list[str]) -> list[ClassInfo]:

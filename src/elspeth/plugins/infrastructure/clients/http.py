@@ -33,6 +33,12 @@ from elspeth.plugins.infrastructure.clients.fingerprinting import (
     fingerprint_headers as _fingerprint_headers,
 )
 from elspeth.plugins.infrastructure.clients.fingerprinting import (
+    fingerprint_params as _fingerprint_params,
+)
+from elspeth.plugins.infrastructure.clients.fingerprinting import (
+    fingerprint_url as _fingerprint_url,
+)
+from elspeth.plugins.infrastructure.clients.fingerprinting import (
     is_sensitive_header as _is_sensitive_header_fn,
 )
 from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict as _parse_json_strict
@@ -312,7 +318,7 @@ class AuditedHTTPClient(AuditedClientBase):
         url: str,
         headers: dict[str, str] | None,
         timeout: float | None,
-        json: dict[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
         params: dict[str, str | int | float] | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
@@ -353,10 +359,10 @@ class AuditedHTTPClient(AuditedClientBase):
         # DTO stays alive for typed telemetry payload; dict form used for Landscape hashing.
         request_dto = HTTPCallRequest(
             method=method,
-            url=full_url,
+            url=_fingerprint_url(full_url),
             headers=self._filter_request_headers(merged_headers),
             json=json,
-            params=params,
+            params=_fingerprint_params(params),
             audit_metadata=audit_request_metadata,
         )
         request_data = request_dto.to_dict()
@@ -437,7 +443,7 @@ class AuditedHTTPClient(AuditedClientBase):
         self,
         url: str,
         *,
-        json: dict[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
@@ -506,24 +512,66 @@ class AuditedHTTPClient(AuditedClientBase):
             token_id=token_id,
         )
 
-    def get_ssrf_safe(
+    @staticmethod
+    def _send_ssrf_safe_request(
+        client: httpx.Client,
+        method: str,
+        connection_url: str,
+        *,
+        headers: dict[str, str],
+        extensions: dict[str, str] | None,
+        json: Mapping[str, Any] | None,
+        params: dict[str, str | int | float] | None,
+    ) -> httpx.Response:
+        """Send one IP-pinned request with method-specific httpx handling."""
+        if method == "GET":
+            return client.get(
+                connection_url,
+                params=params,
+                headers=headers,
+                extensions=extensions,
+            )
+        if method == "POST":
+            return client.post(
+                connection_url,
+                json=json,
+                params=params,
+                headers=headers,
+                extensions=extensions,
+            )
+        return client.request(
+            method,
+            connection_url,
+            json=json,
+            params=params,
+            headers=headers,
+            extensions=extensions,
+        )
+
+    def request_ssrf_safe(
         self,
+        method: str,
         request: SSRFSafeRequest,
         *,
         headers: dict[str, str] | None = None,
+        json: Mapping[str, Any] | None = None,
+        params: dict[str, str | int | float] | None = None,
         follow_redirects: bool = False,
         max_redirects: int = 10,
         allowed_ranges: Sequence[IPv4Network | IPv6Network] = (),
     ) -> tuple[httpx.Response, str, Call]:
-        """GET with SSRF-safe IP pinning and redirect validation.
+        """HTTP request with SSRF-safe IP pinning and redirect validation.
 
         Connects to the pre-validated IP in the SSRFSafeRequest, setting the
         Host header and TLS SNI to the original hostname. Each redirect hop
         is independently validated against the SSRF blocklist.
 
         Args:
+            method: HTTP method to send for the initial request.
             request: SSRFSafeRequest from validate_url_for_ssrf()
             headers: Additional headers for this request
+            json: JSON body for POST requests.
+            params: Query parameters for the request.
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
             allowed_ranges: IP networks that may bypass the default SSRF
@@ -544,6 +592,7 @@ class AuditedHTTPClient(AuditedClientBase):
             httpx.HTTPError: For network/HTTP errors
             SSRFBlockedError: If redirect target resolves to blocked IP
         """
+        method_upper = method.upper()
         self._acquire_rate_limit()
 
         call_index = self._next_call_index()
@@ -565,9 +614,11 @@ class AuditedHTTPClient(AuditedClientBase):
         # Record original URL and resolved IP in audit trail.
         # DTO stays alive for typed telemetry payload; dict form used for Landscape hashing.
         request_dto = HTTPCallRequest(
-            method="GET",
-            url=request.original_url,
+            method=method_upper,
+            url=_fingerprint_url(request.original_url),
             headers=self._filter_request_headers(merged_headers),
+            json=json,
+            params=_fingerprint_params(params),
             resolved_ip=request.resolved_ip,
         )
         request_data = request_dto.to_dict()
@@ -585,10 +636,14 @@ class AuditedHTTPClient(AuditedClientBase):
                 timeout=effective_timeout,
                 follow_redirects=False,
             ) as ssrf_client:
-                response = ssrf_client.get(
+                response = self._send_ssrf_safe_request(
+                    ssrf_client,
+                    method_upper,
                     connection_url,
                     headers=merged_headers,
                     extensions=extensions if extensions else None,
+                    json=json,
+                    params=params,
                 )
 
             # Handle redirects with SSRF validation at each hop
@@ -619,34 +674,6 @@ class AuditedHTTPClient(AuditedClientBase):
                     status_code=response.status_code,
                 )
 
-            call = self._record_call(
-                call_index=call_index,
-                call_type=CallType.HTTP,
-                status=call_status,
-                request_data=request_dto,
-                response_data=response_dto,
-                error=error_data,
-                latency_ms=latency_ms,
-            )
-
-            self._emit_telemetry_after_audit(
-                provider=request.host_header,
-                call_status=call_status,
-                latency_ms=latency_ms,
-                request_data=request_data,
-                response_data=response_data,
-                request_payload=request_dto,
-                response_payload=response_dto,
-                call_type_label="http_ssrf_safe",
-            )
-
-            return response, final_hostname_url, call
-
-        except contract_errors.TIER_1_ERRORS:
-            # Telemetry re-raise after successful Landscape record_call.
-            # The SUCCESS record already exists — do NOT record a second
-            # ERROR call with the same call_index (unique constraint).
-            raise
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
 
@@ -680,6 +707,61 @@ class AuditedHTTPClient(AuditedClientBase):
             )
 
             raise
+
+        # Success path: record + emit OUTSIDE the network try block, mirroring
+        # _execute_request (post/get). _emit_telemetry_after_audit re-raises
+        # programmer bugs (TypeError/AttributeError/KeyError/NameError) and
+        # Tier-1 errors; keeping it inside the try would let `except Exception`
+        # record a SECOND ERROR call at the same call_index after the SUCCESS
+        # record already committed — a duplicate-index audit write that also
+        # misattributes a telemetry/programmer bug to the HTTP call
+        # (elspeth-affb35a660). Out here, that re-raise propagates cleanly with
+        # exactly one SUCCESS record written.
+        call = self._record_call(
+            call_index=call_index,
+            call_type=CallType.HTTP,
+            status=call_status,
+            request_data=request_dto,
+            response_data=response_dto,
+            error=error_data,
+            latency_ms=latency_ms,
+        )
+
+        self._emit_telemetry_after_audit(
+            provider=request.host_header,
+            call_status=call_status,
+            latency_ms=latency_ms,
+            request_data=request_data,
+            response_data=response_data,
+            request_payload=request_dto,
+            response_payload=response_dto,
+            call_type_label="http_ssrf_safe",
+        )
+
+        return response, final_hostname_url, call
+
+    def get_ssrf_safe(
+        self,
+        request: SSRFSafeRequest,
+        *,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = False,
+        max_redirects: int = 10,
+        allowed_ranges: Sequence[IPv4Network | IPv6Network] = (),
+    ) -> tuple[httpx.Response, str, Call]:
+        """GET with SSRF-safe IP pinning and redirect validation.
+
+        Compatibility wrapper around ``request_ssrf_safe()`` for existing
+        callers that only fetch pages.
+        """
+        return self.request_ssrf_safe(
+            "GET",
+            request,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            max_redirects=max_redirects,
+            allowed_ranges=allowed_ranges,
+        )
 
     def _follow_redirects_safe(
         self,
@@ -755,10 +837,10 @@ class AuditedHTTPClient(AuditedClientBase):
 
             blocked_hop_request_dto = HTTPCallRequest(
                 method="GET",
-                url=redirect_url,
+                url=_fingerprint_url(redirect_url),
                 headers=self._filter_request_headers(hop_headers),
                 hop_number=hop_number,
-                redirect_from=redirect_from,
+                redirect_from=_fingerprint_url(redirect_from),
             )
 
             # CRITICAL: Validate the redirect target for SSRF
@@ -803,11 +885,11 @@ class AuditedHTTPClient(AuditedClientBase):
             # both success and failure paths can record the hop in the audit trail.
             hop_request_dto = HTTPCallRequest(
                 method="GET",
-                url=redirect_url,
+                url=_fingerprint_url(redirect_url),
                 headers=self._filter_request_headers(hop_headers),
                 resolved_ip=redirect_request.resolved_ip,
                 hop_number=hop_number,
-                redirect_from=redirect_from,
+                redirect_from=_fingerprint_url(redirect_from),
             )
             redirects_followed += 1
 

@@ -55,6 +55,7 @@ from elspeth.web.composer._compose_loop_carriers import (
     _DispatchOutcome,
     _PersistOutcome,
     _TerminateOutcome,
+    _ToolOutcome,
 )
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import (
@@ -129,7 +130,7 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     vague_term_wiring_count,
 )
-from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
+from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 from elspeth.web.sessions.models import sessions_table
 
 slog = structlog.get_logger()
@@ -138,21 +139,8 @@ _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
 
-# Composer LLM sampling constants. Hardcoded for deterministic tool-call
-# construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
-# ceiling on URL→download→line-explode primarily to LiteLLM/OpenRouter
-# default sampling at ~1.0). Pipeline composition is closer to "extraction"
-# than "creative writing" in the LLM-debugging-skill temperature guide;
-# 0.0 is the right point for tool-construction tasks.
-#
-# The temperature value is recorded on every audit row via ComposerLLMCall.
-# The seed is recorded when LiteLLM advertises support for the configured
-# provider/model, otherwise it is omitted from the provider request and
-# recorded as ``None`` so the audit row mirrors the actual request shape.
-#
-# Configurability is Tier 2 — do not read from settings/env without an ADR.
-_COMPOSER_LLM_TEMPERATURE: Final[float] = 0.0
-_COMPOSER_LLM_SEED: Final[int] = 42
+# Composer LLM sampling is operator-set via WebSettings.composer_temperature /
+# composer_seed: sent verbatim when configured, omitted when None.
 _COMPOSER_LLM_SEED_PARAM: Final[str] = "seed"
 
 # Bounded set of exception class names emitted as `exception_class` attribute on
@@ -303,21 +291,6 @@ async def _litellm_acompletion(**kwargs: Any) -> Any:
 
     _apply_openrouter_app_identity(kwargs)
     return await litellm.acompletion(**kwargs)
-
-
-def _litellm_completion_supports_param(model: str, param: str) -> bool:
-    """Return whether LiteLLM advertises chat-completion support for ``param``."""
-    import litellm
-
-    supported_params = litellm.get_supported_openai_params(model=model)
-    return isinstance(supported_params, list) and param in supported_params
-
-
-def _composer_llm_seed_for_model(model: str) -> int | None:
-    """Seed value to send to LiteLLM, or ``None`` when the provider rejects it."""
-    if _litellm_completion_supports_param(model, _COMPOSER_LLM_SEED_PARAM):
-        return _COMPOSER_LLM_SEED
-    return None
 
 
 def _state_is_structurally_empty(state: CompositionState) -> bool:
@@ -1075,7 +1048,7 @@ class ComposerServiceImpl:
 
     def _serialize_response_via_walker(
         self,
-        outcome: Any,
+        outcome: _ToolOutcome,
         *,
         telemetry: Any,
     ) -> str:
@@ -2711,15 +2684,15 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
-            seed = _composer_llm_seed_for_model(self._model)
             kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
                 "tools": tools,
-                "temperature": _COMPOSER_LLM_TEMPERATURE,
             }
-            if seed is not None:
-                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
+            if self._settings.composer_temperature is not None:
+                kwargs["temperature"] = self._settings.composer_temperature
+            if self._settings.composer_seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = self._settings.composer_seed
             response = await _litellm_acompletion(
                 **kwargs,
             )
@@ -2744,14 +2717,14 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
-            seed = _composer_llm_seed_for_model(self._model)
             kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "temperature": _COMPOSER_LLM_TEMPERATURE,
             }
-            if seed is not None:
-                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
+            if self._settings.composer_temperature is not None:
+                kwargs["temperature"] = self._settings.composer_temperature
+            if self._settings.composer_seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = self._settings.composer_seed
             response = await _litellm_acompletion(
                 **kwargs,
             )
@@ -3195,15 +3168,15 @@ class ComposerServiceImpl:
         response: Any = None
         error_class: str | None = None
         error_message: str | None = None
-        advisor_seed = _composer_llm_seed_for_model(advisor_model)
         kwargs: dict[str, Any] = {
             "model": advisor_model,
             "messages": messages,
-            "temperature": _COMPOSER_LLM_TEMPERATURE,
             "max_tokens": max_completion,
         }
-        if advisor_seed is not None:
-            kwargs[_COMPOSER_LLM_SEED_PARAM] = advisor_seed
+        if self._settings.composer_temperature is not None:
+            kwargs["temperature"] = self._settings.composer_temperature
+        if self._settings.composer_seed is not None:
+            kwargs[_COMPOSER_LLM_SEED_PARAM] = self._settings.composer_seed
         try:
             response = await asyncio.wait_for(
                 _litellm_acompletion(**kwargs),
@@ -3294,8 +3267,8 @@ class ComposerServiceImpl:
                         status=status,
                         started_at=started_at,
                         started_ns=started_ns,
-                        temperature=_COMPOSER_LLM_TEMPERATURE,
-                        seed=advisor_seed,
+                        temperature=self._settings.composer_temperature,
+                        seed=self._settings.composer_seed,
                         response=response,
                         error_class=error_class,
                         error_message=error_message,
@@ -3397,8 +3370,8 @@ class ComposerServiceImpl:
                         status=status,
                         started_at=started_at,
                         started_ns=started_ns,
-                        temperature=_COMPOSER_LLM_TEMPERATURE,
-                        seed=_composer_llm_seed_for_model(self._model),
+                        temperature=self._settings.composer_temperature,
+                        seed=self._settings.composer_seed,
                         response=response,
                         error_class=error_class,
                         error_message=error_message,

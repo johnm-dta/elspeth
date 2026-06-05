@@ -9,7 +9,8 @@ from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path
 
-from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
+from elspeth_lints.core.allowlist_governance import allowlist_governance_findings_for_root
 from elspeth_lints.core.protocols import Finding as LintFinding
 from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, Severity
 from elspeth_lints.rules.manifest.symbol_inventory.metadata import RULE_ID, RULE_METADATA
@@ -95,7 +96,11 @@ class SymbolInventoryRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[LintFinding]:
         """Run the source inventory scan."""
         del tree, file_path
-        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
+        return scan_root(
+            context.root,
+            allowlist_dir_override=context.allowlist_dir_override,
+            emit_allowlist_governance=context.emit_allowlist_governance,
+        )
 
 
 class ADR019Visitor(ast.NodeVisitor):
@@ -197,13 +202,31 @@ class ADR019Visitor(ast.NodeVisitor):
             self._add(FindingKind.ROW_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
 
 
-def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[LintFinding]:
+def scan_root(
+    root: Path,
+    *,
+    allowlist_dir_override: Path | None = None,
+    emit_allowlist_governance: bool = True,
+) -> list[LintFinding]:
     """Scan source files and apply the ADR-019 symbol allowlist."""
     source_root, project_root = source_scan_roots(root)
     findings = scan_tree(source_root, project_root)
     allowlist_dir = allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "symbol_inventory")
-    active = filter_findings(findings, allowlist_dir)
-    return [to_lint_finding(finding) for finding in active]
+    loaded = load_allowlist(allowlist_dir, valid_rule_ids={RULE_ID}) if allowlist_dir.exists() else None
+    active = _filter_loaded_findings(findings, loaded)
+    lint_findings = [to_lint_finding(finding) for finding in active]
+    if loaded is None:
+        return lint_findings
+    return [
+        *lint_findings,
+        *allowlist_governance_findings_for_root(
+            loaded,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+            enabled=emit_allowlist_governance,
+        ),
+    ]
 
 
 def source_scan_roots(root: Path) -> tuple[Path, Path]:
@@ -247,20 +270,24 @@ def filter_findings(findings: Iterable[InventoryFinding], allowlist: Path | None
     if allowlist is None or not allowlist.exists():
         return list(findings)
     loaded = load_allowlist(allowlist, valid_rule_ids={RULE_ID})
+    return _filter_loaded_findings(findings, loaded)
+
+
+def _filter_loaded_findings(findings: Iterable[InventoryFinding], loaded: Allowlist | None) -> list[InventoryFinding]:
+    if loaded is None:
+        return list(findings)
     return [
         finding
         for finding in findings
-        if not any(
-            rule.matches(
-                FindingKey(
-                    file_path=finding.path,
-                    rule_id=RULE_ID,
-                    symbol_context=(),
-                    fingerprint="",
-                )
+        if loaded.match(
+            FindingKey(
+                file_path=finding.path,
+                rule_id=RULE_ID,
+                symbol_context=(),
+                fingerprint="",
             )
-            for rule in loaded.per_file_rules
         )
+        is None
     ]
 
 

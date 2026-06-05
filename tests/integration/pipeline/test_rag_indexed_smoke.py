@@ -173,7 +173,7 @@ class TestRAGIndexedSmoke:
 
     def test_full_pipeline_sequence(self, example_dir: Path) -> None:
         """Run query pipeline — depends_on triggers indexing first."""
-        from elspeth.cli_helpers import bootstrap_and_run
+        from elspeth.cli import bootstrap_and_run
 
         query_yaml = example_dir / "query_pipeline.yaml"
         result = bootstrap_and_run(query_yaml)
@@ -201,7 +201,7 @@ class TestRAGIndexedSmoke:
         (not as a JSON blob on ``runs``).  Each result has its own row with
         ``result_type``, ``name``, and ``result_json`` (canonical JSON).
         """
-        from elspeth.cli_helpers import bootstrap_and_run
+        from elspeth.cli import bootstrap_and_run
 
         query_yaml = example_dir / "query_pipeline.yaml"
         result = bootstrap_and_run(query_yaml)

@@ -37,6 +37,7 @@ from elspeth.contracts import (
     RoutingSpec,
     TriggerType,
 )
+from elspeth.contracts.audit import validate_resolved_prompt_template_hash
 from elspeth.contracts.call_data import CallPayload
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.contracts.hashing import repr_hash
@@ -809,6 +810,13 @@ class ExecutionRepository:
             Invalid state_id will raise IntegrityError due to foreign key constraint.
             Call indices should be allocated via allocate_call_index() for coordination.
         """
+        # Validate the cross-DB prompt-hash anchor BEFORE inserting. The Call
+        # dataclass enforces the same invariant in __post_init__, but that runs
+        # AFTER execute_insert — a bad hash would commit to `calls` and only then
+        # raise. Checking here keeps the audit trail pristine (Tier 1): a bad
+        # hash leaves zero rows (elspeth-a94e626a36).
+        validate_resolved_prompt_template_hash(call_type, resolved_prompt_template_hash)
+
         call_id = generate_id()
         timestamp = now()
         prepared = self._prepare_call_payloads(
@@ -1058,6 +1066,12 @@ class ExecutionRepository:
         Returns:
             The recorded Call model
         """
+        # Validate the cross-DB prompt-hash anchor BEFORE inserting (see the
+        # state-parented record_call for rationale): a bad hash must leave zero
+        # `calls` rows rather than commit and then raise from Call.__post_init__
+        # (elspeth-a94e626a36).
+        validate_resolved_prompt_template_hash(call_type, resolved_prompt_template_hash)
+
         if call_index is None:
             call_index = self.allocate_operation_call_index(operation_id)
         call_id = f"call_{operation_id}_{call_index}"

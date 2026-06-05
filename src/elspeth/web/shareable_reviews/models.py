@@ -63,10 +63,11 @@ class MarkReadyForReviewResponse(_StrictResponse):
 class ShareableLinkResponse(_StrictResponse):
     """Returned by ``GET /api/sessions/{session_id}/shareable-link``.
 
-    Re-mints a fresh token for the current ``(session, state)`` snapshot on
-    every call. Two calls in succession produce two different tokens (the
-    nonce differs) but identical ``payload_digest`` (content-addressing of
-    an unchanged snapshot).
+    Re-mints a fresh token only for the current ``(session, state)``
+    snapshot that already has a matching ``mark_ready_for_review`` audit
+    row and snapshot blob. Two calls in succession produce two different
+    tokens (the nonce differs) but identical ``payload_digest``
+    (content-addressing of an unchanged snapshot).
 
     The ``state_id`` is surfaced because the underlying composition may
     have advanced since the last call; the client uses this to confirm

@@ -598,6 +598,21 @@ class TestR4BroadExcept:
         r4_findings = [f for f in findings if f.rule_id == "R4"]
         assert len(r4_findings) == 0
 
+    def test_nested_helper_raise_does_not_satisfy_outer_handler(self) -> None:
+        """A raise inside a nested helper is not a re-raise by the handler."""
+        source = dedent("""
+            try:
+                risky_operation()
+            except Exception:
+                def helper():
+                    raise RuntimeError("not the handler")
+                record_problem()
+        """)
+        findings = parse_and_visit(source)
+
+        r4_findings = [f for f in findings if f.rule_id == "R4"]
+        assert len(r4_findings) == 1
+
     def test_ignores_specific_exceptions(self) -> None:
         """Catching specific exceptions should NOT be flagged."""
         source = dedent("""
@@ -641,6 +656,45 @@ class TestR6SilentExcept:
                 def helper():
                     raise RuntimeError("not the handler")
                 helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+    def test_transform_result_error_routed_to_completion_is_explicit(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        shutdown_result = TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
+                        self._complete_ticket(ticket, token, shutdown_result, state_id)
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert r6_findings == []
+
+    def test_transform_result_error_without_completion_route_still_fires(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
         """)
         findings = parse_and_visit(source)
 

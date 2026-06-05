@@ -15,7 +15,7 @@ import pytest
 
 chromadb = pytest.importorskip("chromadb")
 
-from elspeth.contracts.enums import CallStatus  # noqa: E402
+from elspeth.contracts.enums import CallStatus, CallType  # noqa: E402
 from elspeth.core.landscape.execution_repository import ExecutionRepository  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.chroma import (  # noqa: E402
@@ -257,6 +257,20 @@ class TestChromaSearchProvider:
             token_id=None,
         )
         assert chunks == []
+
+        # Audit integrity (elspeth-6ae78686e4): the empty-collection path is
+        # still an auditable retrieval decision. It must record a SUCCESS
+        # VECTOR call with result_count 0, not silently exit before recording.
+        # Without this, an auditor cannot distinguish "retrieval ran against an
+        # empty corpus" from "retrieval never ran". collection_count makes it
+        # distinguishable from a populated query that simply matched nothing.
+        provider._execution.record_call.assert_called_once()
+        kwargs = provider._execution.record_call.call_args.kwargs
+        assert kwargs["call_type"] == CallType.VECTOR
+        assert kwargs["status"] == CallStatus.SUCCESS
+        response = kwargs["response_data"].to_dict()
+        assert response["result_count"] == 0
+        assert response["collection_count"] == 0
 
     def test_source_id_matches_document_id(self):
         provider = self._make_provider(

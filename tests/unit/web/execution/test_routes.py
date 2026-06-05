@@ -1296,6 +1296,69 @@ class TestRunStatusEndpoint:
         assert svc.get_status.call_args.kwargs["run_record"] is running_record
 
     @pytest.mark.asyncio
+    async def test_failed_status_with_landscape_id_includes_accounting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.web.sessions.protocol import RunRecord
+
+        run_id = uuid4()
+        session_id = uuid4()
+        state_id = uuid4()
+        accounting = _accounting(source_rows=2, succeeded=1, failed=1, routed_failure=1)
+        failed_record = RunRecord(
+            id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+            status="failed",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=2,
+            rows_succeeded=1,
+            rows_failed=1,
+            rows_routed_success=0,
+            rows_routed_failure=1,
+            rows_quarantined=0,
+            error="sink failed",
+            landscape_run_id="land-failed",
+            pipeline_yaml=None,
+        )
+
+        async def fake_get_status(
+            status_run_id: UUID,
+            *,
+            accounting: RunAccounting | None = None,
+            run_record: RunRecord | None = None,
+        ) -> RunStatusResponse:
+            assert run_record is failed_record
+            return RunStatusResponse(
+                run_id=str(status_run_id),
+                status="failed",
+                started_at=failed_record.started_at,
+                finished_at=failed_record.finished_at,
+                accounting=accounting,
+                error=failed_record.error,
+                landscape_run_id=failed_record.landscape_run_id,
+                discard_summary=DiscardSummary(total=0, validation_errors=0, transform_errors=0, sink_discards=0),
+            )
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(side_effect=fake_get_status)
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=failed_record)
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {"land-failed": accounting},
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(f"/api/runs/{run_id}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert body["accounting"]["source"]["rows_processed"] == 2
+        assert body["accounting"]["tokens"]["failed"] == 1
+        assert svc.get_status.call_args.kwargs["accounting"] == accounting
+
+    @pytest.mark.asyncio
     async def test_status_returns_200(self) -> None:
         run_id = uuid4()
         svc = MagicMock()
@@ -1488,6 +1551,70 @@ class TestResultsEndpoint:
             assert body["accounting"]["routing"]["routed_success"] == 1
             assert body["accounting"]["routing"]["routed_failure"] == 0
             assert body["landscape_run_id"] == "lscape-1"
+
+    @pytest.mark.asyncio
+    async def test_results_for_failed_run_with_landscape_id_includes_accounting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.web.sessions.protocol import RunRecord
+
+        run_id = uuid4()
+        session_id = uuid4()
+        state_id = uuid4()
+        accounting = _accounting(source_rows=3, succeeded=1, failed=2, routed_failure=1, quarantined=1)
+        failed_record = RunRecord(
+            id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+            status="failed",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=3,
+            rows_succeeded=1,
+            rows_failed=2,
+            rows_routed_success=0,
+            rows_routed_failure=1,
+            rows_quarantined=1,
+            error="pipeline failed",
+            landscape_run_id="land-results-failed",
+            pipeline_yaml=None,
+        )
+
+        async def fake_get_status(
+            status_run_id: UUID,
+            *,
+            accounting: RunAccounting | None = None,
+            run_record: RunRecord | None = None,
+        ) -> RunStatusResponse:
+            assert run_record is failed_record
+            return RunStatusResponse(
+                run_id=str(status_run_id),
+                status="failed",
+                started_at=failed_record.started_at,
+                finished_at=failed_record.finished_at,
+                accounting=accounting,
+                error=failed_record.error,
+                landscape_run_id=failed_record.landscape_run_id,
+                discard_summary=DiscardSummary(total=0, validation_errors=0, transform_errors=0, sink_discards=0),
+            )
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(side_effect=fake_get_status)
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=failed_record)
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {"land-results-failed": accounting},
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(f"/api/runs/{run_id}/results")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert body["accounting"]["source"]["rows_processed"] == 3
+        assert body["accounting"]["routing"]["quarantined"] == 1
+        assert body["landscape_run_id"] == "land-results-failed"
+        assert svc.get_status.call_args.kwargs["accounting"] == accounting
 
     @pytest.mark.asyncio
     async def test_results_includes_virtual_discard_summary(self) -> None:

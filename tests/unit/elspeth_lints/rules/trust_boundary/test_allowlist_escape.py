@@ -240,7 +240,11 @@ def handler(payload):
 
     findings = scope_rule.scan_root(root, allowlist_dir_override=allowlist_dir)
 
-    assert [finding.rule_id for finding in findings] == ["TBS2"]
+    assert [finding.rule_id for finding in findings] == [
+        "TBS2",
+        "allowlist.stale_entry",
+        "allowlist.expired_entry",
+    ]
 
 
 def test_trust_boundary_allowlist_rejects_per_file_rules(tmp_path: Path) -> None:

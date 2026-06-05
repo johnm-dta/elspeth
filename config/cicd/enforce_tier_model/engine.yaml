@@ -1,19 +1,4 @@
 per_file_rules:
-- pattern: engine/executors/transform.py
-  rules:
-  - L1
-  reason: "Engine imports BatchTransformMixin from plugins/infrastructure/batching/
-    for the row-pipelining concurrency contract (TransformExecutor inspects mixin
-    state via isinstance + _pool_size/_batch_wait_timeout to coordinate accept()/
-    wait()/evict_submission() with backpressure). The full Protocol-extraction +
-    mixin/ports/row_reorder_buffer relocation is its own large refactor (~1100 LOC
-    across batching/) tracked separately. TransformResult and CapacityError have
-    already been relocated to contracts/; this targeted entry replaces the previous
-    umbrella ``engine/* L1`` exemption so any NEW L1 violation in engine/ now fails
-    CI rather than being silently waived. Burndown predecessor: filigree
-    elspeth-30f4e36f09 (closed); follow-up tracks the mixin Protocol extraction."
-  max_hits: 1
-  expires: null
 - pattern: engine/batch_adapter.py
   rules:
   - R5

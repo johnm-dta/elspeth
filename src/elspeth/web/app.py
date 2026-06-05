@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.util.types import AttributeValue
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.engine import Engine
@@ -48,6 +49,7 @@ from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.routes import catalog_router
@@ -97,6 +99,16 @@ from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 # landing, not a regression.
 _PROMETHEUS_READER = PrometheusMetricReader()
 metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
+_COMPOSER_BOOT_CONFIG_COUNTER = metrics.get_meter(__name__).create_counter(
+    "composer.boot_config",
+    description="Composer effective sampling config recorded at boot",
+)
+_COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogram(
+    "composer.boot_config.probe_latency_ms",
+    description="Composer boot config probe latency in milliseconds",
+    unit="ms",
+)
+_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -125,13 +137,13 @@ class _AuthorizationEndpointDiscoveryDocument(BaseModel):
         return value
 
 
-def _validate_authorization_endpoint_discovery_document(discovery: object) -> str:
+def _validate_authorization_endpoint_discovery_document(discovery: object, *, issuer: str) -> str:
     """Validate the discovery document shape and return authorization_endpoint."""
     try:
         document = _AuthorizationEndpointDiscoveryDocument.model_validate(discovery)
     except ValidationError as exc:
         raise ValueError("OIDC discovery document must provide a non-empty string 'authorization_endpoint'") from exc
-    return document.authorization_endpoint
+    return validate_oidc_authorization_endpoint(document.authorization_endpoint, issuer=issuer)
 
 
 def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
@@ -238,21 +250,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Resolve OIDC authorization_endpoint from discovery or explicit config
     if settings.auth_provider in ("oidc", "entra"):
-        if settings.oidc_authorization_endpoint:
-            app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
+        if settings.oidc_issuer:
+            issuer = validate_oidc_issuer(settings.oidc_issuer)
+        elif settings.auth_provider == "entra" and settings.entra_tenant_id:
+            issuer = validate_oidc_issuer(f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0")
         else:
-            if settings.oidc_issuer:
-                issuer = settings.oidc_issuer.rstrip("/")
-            elif settings.auth_provider == "entra" and settings.entra_tenant_id:
-                issuer = f"https://login.microsoftonline.com/{settings.entra_tenant_id}/v2.0"
-            else:
-                raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
+            raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
+
+        if settings.oidc_authorization_endpoint:
+            app.state.oidc_authorization_endpoint = validate_oidc_authorization_endpoint(
+                settings.oidc_authorization_endpoint,
+                issuer=issuer,
+            )
+        else:
             discovery_url = f"{issuer}/.well-known/openid-configuration"
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                     resp = await client.get(discovery_url)
                     resp.raise_for_status()
-                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(resp.json())
+                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(
+                        resp.json(),
+                        issuer=issuer,
+                    )
             except (httpx.HTTPError, ValueError) as exc:
                 raise SystemExit(
                     f"FATAL: OIDC discovery failed for issuer {issuer!r}: {exc}. "
@@ -333,34 +352,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # endpoint. Closes the validate/runtime drift bug where the bundled
     # litellm catalog still listed models OpenRouter has retired (e.g.
     # ``anthropic/claude-3.5-sonnet``), letting the value-source compliance
-    # walker pass configs that 404 at runtime preflight. Probe is graceful:
-    # on failure we log a warning and the catalog falls back to the bundled
-    # litellm slice — staging must still boot for non-LLM features.
+    # walker pass configs that 404 at runtime preflight. The request-level
+    # probe is graceful inside ``prime_openrouter_catalog_from_live``; failures
+    # before the request boundary (client construction/context management) are
+    # startup failures rather than undocumented fallback decisions.
     probe_start = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
 
-            async def _probe_get(url: str) -> httpx.Response:
-                # ``request("GET", ...)`` rather than ``.get(...)``: identical
-                # httpx semantics, but avoids the L3 walker's token-level
-                # false match on the literal ``.get`` (R1 targets defensive
-                # ``dict.get`` reads, not HTTP client method calls).
-                return await _probe_client.request("GET", url)
+        async def _probe_get(url: str) -> httpx.Response:
+            # ``request("GET", ...)`` rather than ``.get(...)``: identical
+            # httpx semantics, but avoids the L3 walker's token-level
+            # false match on the literal ``.get`` (R1 targets defensive
+            # ``dict.get`` reads, not HTTP client method calls).
+            return await _probe_client.request("GET", url)
 
-            primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
-    except (httpx.HTTPError, OSError) as probe_exc:
-        # ``prime_openrouter_catalog_from_live`` catches its own
-        # ``httpx.RequestError`` internally; this wrapper covers failures
-        # from ``AsyncClient(...)`` construction or ``__aenter__`` —
-        # ``httpx.HTTPError`` (full httpx hierarchy) or ``OSError``
-        # (socket-level). Programming errors (NameError, TypeError) are
-        # NOT caught: those must crash boot so the bug surfaces.
-        slog.warning(
-            "openrouter_catalog_prime_unexpected_error",
-            exc_class=type(probe_exc).__name__,
-            action="falling back to bundled litellm catalog",
-        )
-        primed = False
+        primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
     probe_latency_ms = int((time.monotonic() - probe_start) * 1000)
     if primed:
         slog.info(
@@ -373,6 +379,67 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             latency_ms=probe_latency_ms,
             action="serving bundled litellm catalog (may include retired models)",
         )
+
+    if settings.composer_boot_probe_enabled:
+        from elspeth.web.composer.boot_probe import ComposerBootConfigError, probe_composer_config
+
+        probe_models = [settings.composer_model]
+        if settings.composer_advisor_enabled:
+            probe_models.append(settings.composer_advisor_model)
+        for model in probe_models:
+            composer_probe_start = time.monotonic()
+            probe_status = "started"
+            attributes: dict[str, AttributeValue] = {
+                "composer_model": settings.composer_model,
+                "composer_temperature": str(settings.composer_temperature),
+                "composer_seed": str(settings.composer_seed),
+                "composer_advisor_model": settings.composer_advisor_model,
+                "composer_advisor_enabled": settings.composer_advisor_enabled,
+                "probed_model": model,
+                "probe_status": probe_status,
+            }
+            try:
+                ok = await asyncio.wait_for(
+                    probe_composer_config(
+                        model=model,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
+                    ),
+                    timeout=_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS,
+                )
+                if ok:
+                    probe_status = "success"
+                if not ok:
+                    probe_status = "transient_failure"
+                    slog.warning(
+                        "composer_boot_probe_transient_failure",
+                        model=model,
+                        failure_class="provider_or_transport_error",
+                        action="booting; composer LLM calls will be exercised at first use",
+                    )
+            except TimeoutError:
+                probe_status = "transient_failure"
+                slog.warning(
+                    "composer_boot_probe_transient_failure",
+                    model=model,
+                    failure_class="TimeoutError",
+                    timeout_seconds=_COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS,
+                    action="booting; composer LLM calls will be exercised at first use",
+                )
+            except ComposerBootConfigError:
+                probe_status = "rejected"
+                raise
+            except asyncio.CancelledError:
+                probe_status = "cancelled"
+                raise
+            except Exception:
+                probe_status = "local_error"
+                raise
+            finally:
+                attributes["probe_status"] = probe_status
+                composer_probe_latency_ms = int((time.monotonic() - composer_probe_start) * 1000)
+                _COMPOSER_BOOT_CONFIG_COUNTER.add(1, attributes)
+                _COMPOSER_BOOT_CONFIG_PROBE_LATENCY.record(composer_probe_latency_ms, attributes)
 
     # Resolve the catalog snapshot id (always populated — bundled fallback
     # is always available) and stash on ``app.state``. Run-create writes

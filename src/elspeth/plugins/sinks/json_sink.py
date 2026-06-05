@@ -104,7 +104,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:392d93200c10b2e1"
+    source_file_hash: str | None = "sha256:f901bcbaf8a7c658"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -362,6 +362,15 @@ class JSONSink(BaseSink):
             # THIS batch individually: divert the rows whose values can't be encoded
             # (per-row Tier-2 fault) and buffer only the good ones, so one bad value
             # doesn't drop the whole batch. row_index is relative to the current batch.
+            # Record the committed buffer length so this batch's rows can be
+            # rolled back if the write fails. The atomic temp-file rename
+            # protects the on-disk file, but self._rows is extended in memory
+            # BEFORE the write — without rollback, a failed write (serialization,
+            # fsync, or os.replace) leaves this batch buffered, and the next
+            # successful write would emit it: a row from a failed write appearing
+            # in a later artifact with no matching success outcome
+            # (elspeth-813611aad6).
+            committed_row_count = len(self._rows)
             for i, output_row in enumerate(output_rows):
                 try:
                     json.dumps(output_row, allow_nan=False)
@@ -370,8 +379,14 @@ class JSONSink(BaseSink):
                     continue
                 self._rows.append(output_row)
             # Write immediately (file is rewritten on each write for JSON format).
-            # JSON array uses atomic temp-file writes (already safe), no rollback needed.
-            self._write_json_array()
+            # The file write is atomic (temp + os.replace); on failure we restore
+            # the in-memory buffer to its pre-batch state so the failed rows are
+            # not replayed into a later write.
+            try:
+                self._write_json_array()
+            except Exception:
+                del self._rows[committed_row_count:]
+                raise
 
             content_hash = self._compute_file_hash()
             size_bytes = self._path.stat().st_size

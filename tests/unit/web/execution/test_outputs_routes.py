@@ -12,6 +12,7 @@ artefact, gated by a path-allowlist guard that enforces
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.routing import Route
@@ -191,7 +192,8 @@ class TestRunOutputContentEndpoint:
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         sink_file = outputs_dir / "results.jsonl"
-        sink_file.write_bytes(b'{"interaction_id":"INT-1001"}\n')
+        sink_bytes = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(sink_bytes)
 
         svc = MagicMock()
         svc.get_status = AsyncMock(return_value=_running_status(run_id))
@@ -206,7 +208,7 @@ class TestRunOutputContentEndpoint:
                         sink_node_id="results",
                         artifact_type="file",
                         path_or_uri=f"file://{sink_file}",
-                        content_hash="a" * 64,
+                        content_hash=hashlib.sha256(sink_bytes).hexdigest(),
                         size_bytes=sink_file.stat().st_size,
                         created_at=datetime.now(UTC),
                         exists_now=True,
@@ -240,6 +242,79 @@ class TestRunOutputContentEndpoint:
         assert isinstance(response, FileResponse)
         assert response.path == sink_file
         assert sink_file.read_bytes() == b'{"interaction_id":"INT-1001"}\n'
+
+    @pytest.mark.asyncio
+    async def test_409_when_file_content_drifts_under_same_size(self, monkeypatch, tmp_path) -> None:
+        """An overwritten in-allowlist file must not be served as the audited artifact.
+
+        Regression for elspeth-50189c547c: the endpoint streamed the file after a
+        path-allowlist + existence check but never compared the current bytes
+        against the audit-recorded content_hash/size_bytes. A same-size byte
+        substitution (swap content, keep length) would otherwise be served under
+        the artifact's identity. The content endpoint must verify the whole-file
+        hash and reject drift with 409.
+        """
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        original = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(original)
+        recorded_hash = hashlib.sha256(original).hexdigest()
+        recorded_size = len(original)
+
+        # Tamper: overwrite with DIFFERENT bytes of the SAME length, so a size
+        # check alone would pass — only the content hash catches it.
+        tampered = b'{"interaction_id":"INT-9999"}\n'
+        assert len(tampered) == len(original)
+        sink_file.write_bytes(tampered)
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-1",
+                        sink_node_id="results",
+                        artifact_type="file",
+                        path_or_uri=f"file://{sink_file}",
+                        content_hash=recorded_hash,
+                        size_bytes=recorded_size,
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        endpoint = _route_endpoint(app, "get_run_output_content")
+        request = MagicMock()
+        request.app = app
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id=run_id,
+                artifact_id="art-1",
+                request=request,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["error_type"] == "artifact_content_drift"
 
     @pytest.mark.asyncio
     async def test_403_when_path_outside_sink_allowlist(self, monkeypatch, tmp_path) -> None:

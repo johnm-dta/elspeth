@@ -574,7 +574,7 @@ def test_bound_rebinding_satisfies_predicate() -> None:
 # finding (TBS2) was silently masked. After the fix, ClassDef short-
 # circuits the walk and TBS2 fires.
 #
-# Symmetric coverage in tier_model's compute_derived_names lives in
+# Symmetric coverage in tier_model's live derived-name visitor lives in
 # tests/unit/elspeth_lints/test_tier_model_decorator_suppression.py
 # (TestClassBodyScopeLeakRegression). Both walkers consume the shared
 # _NESTED_SCOPE_TYPES tuple in ast_walker.py, so the fix lands in one

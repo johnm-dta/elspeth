@@ -26,11 +26,7 @@ from elspeth.web.composer.llm_response_parsing import (
     attach_llm_calls,
     build_llm_call_record,
 )
-from elspeth.web.composer.service import (
-    _COMPOSER_LLM_TEMPERATURE,
-    _composer_llm_seed_for_model,
-    _litellm_acompletion,
-)
+from elspeth.web.composer.service import _litellm_acompletion
 
 
 class ChainSolverResponseShapeError(Exception):
@@ -139,6 +135,8 @@ async def solve_chain(
     recipe_match: RecipeMatch | None = None,
     repair_context: str | None = None,
     recorder: BufferingRecorder | None = None,
+    temperature: float | None,
+    seed: int | None,
 ) -> ChainProposal:
     """Invoke the LLM with the guided skill, expect a propose_chain turn back.
 
@@ -178,15 +176,15 @@ async def solve_chain(
         system_prompt = f"{skill}\n\n{context_block}\n\n{repair_addendum}"
     else:
         system_prompt = f"{skill}\n\n{context_block}"
-    seed = _composer_llm_seed_for_model(model)
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "tools": _GUIDED_LLM_TOOLS,
         "tool_choice": {"type": "function", "function": {"name": "emit_turn"}},
-        "temperature": _COMPOSER_LLM_TEMPERATURE,
     }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
 
@@ -321,7 +319,7 @@ async def solve_chain(
                     status=status,
                     started_at=started_at,
                     started_ns=started_ns,
-                    temperature=_COMPOSER_LLM_TEMPERATURE,
+                    temperature=temperature,
                     seed=seed,
                     response=response,
                     error_class=error_class,

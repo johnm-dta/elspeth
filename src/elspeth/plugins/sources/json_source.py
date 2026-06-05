@@ -147,7 +147,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:aa88b98404585569"
+    source_file_hash: str | None = "sha256:6209c0674e1192a5"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -183,7 +183,7 @@ class JSONSource(BaseSource):
 
         # Store quarantine routing destination
         self._on_validation_failure = cfg.on_validation_failure
-        # on_success is injected by the instantiation bridge (cli_helpers.py)
+        # on_success is injected by the instantiation bridge (runtime_factory.py)
 
         # CRITICAL: allow_coercion=True for sources (external data boundary)
         # Sources are the ONLY place where type coercion is allowed
@@ -518,6 +518,19 @@ class JSONSource(BaseSource):
             # Pydantic's extra="allow" accepts any type for extras — the contract
             # knows the inferred types from the first row and enforces them here.
             contract = self.require_schema_contract()
+            if self._contract_builder is not None and contract.mode in ("OBSERVED", "FLEXIBLE"):
+                # Sparse JSON records can introduce optional fields after the
+                # first valid row. If we emit those fields, the row contract must
+                # own their original-name/type metadata before validation and
+                # audit recording.
+                if self._field_resolution is None:
+                    raise ValueError("field_resolution must be established before sparse-field contract inference")
+                contract = self._contract_builder.process_sparse_fields(
+                    validated_row,
+                    self._field_resolution.resolution_mapping,
+                )
+                self.set_schema_contract(contract)
+
             if contract.locked:
                 violations = contract.validate(validated_row)
                 if violations:

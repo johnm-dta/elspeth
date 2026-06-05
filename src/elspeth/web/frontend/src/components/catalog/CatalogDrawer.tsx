@@ -263,7 +263,7 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           });
         });
     },
-    [schemaCache, loadingSchemas, schemaErrors],
+    [schemaCache, loadingSchemas],
   );
 
   // Get plugins for current tab — used as the input for both the

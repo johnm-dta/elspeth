@@ -44,6 +44,7 @@ from elspeth.web.execution.errors import (
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
+    hash_and_size_of_file,
     load_run_outputs_for_settings,
     path_or_uri_to_filesystem_path,
 )
@@ -71,7 +72,6 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
-    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
@@ -169,7 +169,7 @@ async def _load_run_status_snapshot_with_accounting(
         raise _RunStatusNotFoundError from exc
 
     accounting = None
-    if run_record.landscape_run_id and run_record.status in OPERATOR_COMPLETION_RUN_STATUS_VALUES:
+    if run_record.landscape_run_id and run_record.status in RUN_STATUS_TERMINAL_VALUES:
         try:
             accounting_by_run_id = await run_sync_in_worker(
                 load_run_accounting_for_settings,
@@ -1070,6 +1070,28 @@ def create_execution_router() -> APIRouter:
                 detail={
                     "error_type": "artifact_purged_or_moved",
                     "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        # Audit-evidence integrity: the artifact row and the on-disk file are
+        # read-mutable in principle, so an in-allowlist file can be overwritten
+        # after the run. Verify the current bytes match the audit-recorded size
+        # AND content_hash before streaming; otherwise we would serve
+        # non-audited content under the artifact's identity, breaking the
+        # audit-evidence retrieval contract (elspeth-50189c547c). content_hash is
+        # the whole-file SHA-256 for every file-streamable sink, so a whole-file
+        # comparison is correct — and catches same-size byte substitution, which
+        # a size check alone would miss.
+        actual_hash, actual_size = await run_sync_in_worker(hash_and_size_of_file, resolved)
+        if actual_size != artifact.size_bytes or actual_hash != artifact.content_hash:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_type": "artifact_content_drift",
+                    "path_or_uri": artifact.path_or_uri,
+                    "expected_size_bytes": artifact.size_bytes,
+                    "actual_size_bytes": actual_size,
+                    "expected_content_hash": artifact.content_hash,
                 },
             )
 

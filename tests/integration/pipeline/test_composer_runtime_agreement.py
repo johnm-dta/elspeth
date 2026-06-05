@@ -137,7 +137,7 @@ from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.web.blobs.protocol import BlobIntegrityError
+from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobIntegrityError
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import (
     CompositionState,
@@ -3233,7 +3233,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
 
         try:
@@ -3272,7 +3272,7 @@ sinks:
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
         cast(Any, service)._blob_service = blob_service
 
         async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:

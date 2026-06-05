@@ -187,6 +187,10 @@ class _SessionsTelemetry:
     # under-firing after a model upgrade without waiting for offline eval
     # refresh.
     interpretation_placeholder_unresolved_at_runtime_total: _Counter
+    # Execution progress broadcast drops are telemetry-only operational
+    # degradation: the Landscape run row remains primary, while WebSocket
+    # progress delivery is an ephemeral client-notification channel.
+    progress_broadcast_dropped_total: _Counter
     # ── Phase 8 (mode / session-switched / tutorial / B3 cohort / B5) ──
     # Counters added unconditionally to the container even when the
     # consuming emit-site is conditional on an earlier-phase surface
@@ -255,6 +259,7 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             audit_access_log_write_failed_total=_FakeCounter(),
             interpretation_rate_cap_exceeded_total=_FakeCounter(),
             interpretation_placeholder_unresolved_at_runtime_total=_FakeCounter(),
+            progress_broadcast_dropped_total=_FakeCounter(),
             # Phase 8 counters.
             mode_opted_out_total=_FakeCounter(),
             mode_opted_in_total=_FakeCounter(),
@@ -284,6 +289,12 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         interpretation_rate_cap_exceeded_total=meter.create_counter("composer.interpretation_rate_cap_exceeded_total"),
         interpretation_placeholder_unresolved_at_runtime_total=meter.create_counter(
             "composer.interpretation_placeholder_unresolved_at_runtime_total"
+        ),
+        progress_broadcast_dropped_total=meter.create_counter(
+            "execution.progress.broadcast_dropped_total",
+            description=(
+                "Execution progress WebSocket broadcasts dropped because the serving event loop had already closed. Attributes: reason."
+            ),
         ),
         # ── Phase 8 wire names (real-meter branch) ──
         # Naming: ``composer.<domain>.<verb>_total``. The

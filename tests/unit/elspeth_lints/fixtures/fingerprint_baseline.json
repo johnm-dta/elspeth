@@ -21,23 +21,19 @@
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "033d2c51778f64b1"
-    },
-    {
-      "file_path": "cli.py",
       "fingerprint": "221bdcf91322b83f"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "22f285aba2205491"
+      "fingerprint": "3585db2655875081"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "23afd40ba8f23278"
+      "fingerprint": "3632373d520c154b"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "415daf4019b0ce06"
+      "fingerprint": "429447e9ad09afb0"
     },
     {
       "file_path": "cli.py",
@@ -53,19 +49,27 @@
     },
     {
       "file_path": "cli.py",
+      "fingerprint": "5b505e84b5b936fc"
+    },
+    {
+      "file_path": "cli.py",
       "fingerprint": "6035b2aa7dedb2bb"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "672febe3c56dae3a"
+      "fingerprint": "6be24773d70c62ab"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "6dc81aa15090acfb"
+      "fingerprint": "7107f87827ccbc30"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "8ae5d6522c263d61"
+      "fingerprint": "739e7350d28a4c51"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "7e4acff2ccb9243f"
     },
     {
       "file_path": "cli.py",
@@ -73,15 +77,11 @@
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "9858dd3faf6fed3a"
-    },
-    {
-      "file_path": "cli.py",
       "fingerprint": "9b59e188503db090"
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "a606604efe50b325"
+      "fingerprint": "bf44fb5c8ddd005c"
     },
     {
       "file_path": "cli.py",
@@ -89,11 +89,7 @@
     },
     {
       "file_path": "cli.py",
-      "fingerprint": "cce2082beec6d734"
-    },
-    {
-      "file_path": "cli.py",
-      "fingerprint": "d561ece1d92f92a4"
+      "fingerprint": "d1363734b4fceab6"
     },
     {
       "file_path": "cli.py",
@@ -105,11 +101,15 @@
     },
     {
       "file_path": "cli.py",
+      "fingerprint": "e01f18c9b5dfede4"
+    },
+    {
+      "file_path": "cli.py",
       "fingerprint": "f4f0b8e93d34fe0d"
     },
     {
       "file_path": "cli_helpers.py",
-      "fingerprint": "9f8a901a0dbf5e00"
+      "fingerprint": "44c7f62bef1bafd1"
     },
     {
       "file_path": "composer_mcp/server.py",
@@ -121,7 +121,7 @@
     },
     {
       "file_path": "composer_mcp/server.py",
-      "fingerprint": "98007a473ebfd71b"
+      "fingerprint": "a187f54762a062cc"
     },
     {
       "file_path": "composer_mcp/server.py",
@@ -129,7 +129,7 @@
     },
     {
       "file_path": "composer_mcp/server.py",
-      "fingerprint": "bbe2757f46dc0db3"
+      "fingerprint": "b2caae76fe340e14"
     },
     {
       "file_path": "composer_mcp/server.py",
@@ -1121,195 +1121,207 @@
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "0d88d581cbbd51d1"
+      "fingerprint": "037cb0413e05f93f"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "14b86ddeed131914"
+      "fingerprint": "08de7691b1e098e7"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "1576cc79d52cca92"
+      "fingerprint": "08e18e34e41d49f8"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "20f2fbb004b25484"
+      "fingerprint": "17c4952d5ca09e3a"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "20f65047ccdaa41e"
+      "fingerprint": "265a37386dc6c880"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "2145712e9457503d"
+      "fingerprint": "2e114b4882f4a0ee"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "2274f66a2c3edf07"
+      "fingerprint": "30e19147092bfc92"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "263300bd073361c3"
+      "fingerprint": "38b5e008de0b7a81"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "26b73e0b6dd9831e"
+      "fingerprint": "3a92074c0598740f"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "2817bb647aed8695"
+      "fingerprint": "53784a5c894ed7e1"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "2a54b85f3d81252a"
+      "fingerprint": "54cc55982e15bd9e"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "304b3cdccdf508e6"
+      "fingerprint": "5817b97fecbc7541"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "30977a32cf247c8f"
+      "fingerprint": "5ac4e86e78879153"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "3bc7c47f5ee9ff7b"
+      "fingerprint": "5b4186cb99e94d92"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "43ac7a5838288f7c"
+      "fingerprint": "5e3e100b5926036b"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "55de4e7c48c49cef"
+      "fingerprint": "700b520e61e9b7b1"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "583b300981111bd9"
+      "fingerprint": "70b73036b7b810ec"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "5d5a5f5d05ca1aa6"
+      "fingerprint": "7d43eaf8624c1eda"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "5dfd395156c9401f"
+      "fingerprint": "7f8d4b3cc09dbf1a"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "6097ceb8451ad208"
+      "fingerprint": "85cb4ca5d6fc3dc5"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "646cba7ed370a23f"
+      "fingerprint": "860944fd95304748"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "6d427bce88c9dbb8"
+      "fingerprint": "86abf232b3f87de3"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "73c661bcd21c7e92"
+      "fingerprint": "90916b6481285384"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "753a10fef814ac89"
+      "fingerprint": "9143e053d408da9f"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "7ce7403d7167bc5d"
+      "fingerprint": "94e74038e21a5e0c"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "8bff971da4e16ca1"
+      "fingerprint": "a887b43f045b149a"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "8d728aba6654ea79"
+      "fingerprint": "a9a5e0a8ebead160"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "94cce9c1d4cdc45a"
+      "fingerprint": "aa81f10c1168403c"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "9a90835f7a818367"
+      "fingerprint": "ae18588c8572d96d"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "9e51a119bcd26138"
+      "fingerprint": "b025b93b6b0cec32"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "a9d282c7c7e127d9"
+      "fingerprint": "b517f523bb38c081"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "abc0006be44c149c"
+      "fingerprint": "b7d4d7b0cc3bcd95"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "ac2f0c854dca4273"
+      "fingerprint": "b9a4e8cefb09c63c"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "aec66d0b14a57603"
+      "fingerprint": "be50e8424e629cb5"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "b907c5517a01d8bb"
+      "fingerprint": "c3a601daee702769"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "b9673df8b24661a7"
+      "fingerprint": "c8054204158530aa"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "b9e263a276af747d"
+      "fingerprint": "cb1778072719ab7e"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "bb16b34552a8c8f4"
+      "fingerprint": "cb1cbf0e856c3248"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "bbf991d784cdf633"
+      "fingerprint": "df21b9b2f3de598c"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "c5b2a35c5b8e3875"
+      "fingerprint": "df3bb0abe670cd5c"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "cbd6c8dd08ef206d"
+      "fingerprint": "e5f3b1c07d4ccbbe"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "d77b1745c565fbac"
+      "fingerprint": "e6789dfa86647044"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "d7d5a176b3b51adb"
+      "fingerprint": "e9f5c9edc896ece1"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "e5d101f4b70c7d3c"
+      "fingerprint": "ea2632b2034bbbb1"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "ef6e6ba82ed76a52"
+      "fingerprint": "eaa9be746fffe4bc"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "f2261b307dfc11c9"
+      "fingerprint": "eacee40c66cd60d5"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "f525eec3a4826469"
+      "fingerprint": "ee4d71827a19c845"
     },
     {
       "file_path": "core/config.py",
-      "fingerprint": "f8f28ae6b491b479"
+      "fingerprint": "f2f45879e8ec2ad7"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "fabc9fe18ffceab9"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "fac31bd847f1bde6"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "fecea9ceab9502af"
     },
     {
       "file_path": "core/dag/builder.py",
@@ -1445,7 +1457,7 @@
     },
     {
       "file_path": "core/landscape/database.py",
-      "fingerprint": "82e1ad5791af3c88"
+      "fingerprint": "9483ca522ea82305"
     },
     {
       "file_path": "core/landscape/execution_repository.py",
@@ -1632,6 +1644,10 @@
       "fingerprint": "d5cef0272959b730"
     },
     {
+      "file_path": "core/security/web.py",
+      "fingerprint": "82650ca4aa6dc216"
+    },
+    {
       "file_path": "core/templates.py",
       "fingerprint": "0c7d72fbee4d77cd"
     },
@@ -1797,15 +1813,11 @@
     },
     {
       "file_path": "engine/executors/transform.py",
-      "fingerprint": "29c0eb433f05f97b"
+      "fingerprint": "9925d6c864d58101"
     },
     {
       "file_path": "engine/executors/transform.py",
-      "fingerprint": "7e11a7025d5e2b59"
-    },
-    {
-      "file_path": "engine/executors/transform.py",
-      "fingerprint": "98dcd0390a62068f"
+      "fingerprint": "fec3adf68538b54b"
     },
     {
       "file_path": "engine/orchestrator/aggregation.py",
@@ -1985,31 +1997,23 @@
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "188d682d00e17ea1"
+      "fingerprint": "443d069fd81386c2"
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "24666a1e729638d7"
+      "fingerprint": "781da1282d945b7e"
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "2f93bd40222e5b89"
+      "fingerprint": "ba03beb6f92aa4ff"
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "44635c7d2b4b541c"
+      "fingerprint": "bf027f2d61c56c68"
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "9b67bbe4194832ff"
-    },
-    {
-      "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "cb11639929a462ac"
-    },
-    {
-      "file_path": "plugins/infrastructure/batching/mixin.py",
-      "fingerprint": "e7a832f8c64e2c4e"
+      "fingerprint": "f6b5a60d4c2ae50c"
     },
     {
       "file_path": "plugins/infrastructure/clients/dataverse.py",
@@ -2073,6 +2077,10 @@
     },
     {
       "file_path": "plugins/infrastructure/clients/http.py",
+      "fingerprint": "54961c9c041be486"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/http.py",
       "fingerprint": "588df931d0f0d1f1"
     },
     {
@@ -2133,39 +2141,39 @@
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "1f302628b74016c1"
+      "fingerprint": "10205aaa456c8663"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "243918e12128f142"
+      "fingerprint": "1499680aab08244f"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "5551552311d288c2"
+      "fingerprint": "49b720e076e6df6c"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "76c5f24e4e40a7c5"
+      "fingerprint": "4f20a492be87974b"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "a65c899e73722949"
+      "fingerprint": "549100c865fb5c41"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "bb2dd0f674f6a511"
+      "fingerprint": "65da9502859ef625"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "d0cd78d20173f5ea"
+      "fingerprint": "9e6fc2828928ab09"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "e46590f3467b48c7"
+      "fingerprint": "be4e34a58bd18999"
     },
     {
       "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
-      "fingerprint": "fd801529b9af8435"
+      "fingerprint": "dc66aa80072e33eb"
     },
     {
       "file_path": "plugins/infrastructure/config_base.py",
@@ -2417,15 +2425,15 @@
     },
     {
       "file_path": "plugins/transforms/azure/base.py",
-      "fingerprint": "699d136adcf37eb7"
+      "fingerprint": "7574a53aa4adb9ae"
     },
     {
       "file_path": "plugins/transforms/azure/base.py",
-      "fingerprint": "9a9ec030916d9d1c"
+      "fingerprint": "79da8d654b3f086e"
     },
     {
       "file_path": "plugins/transforms/azure/base.py",
-      "fingerprint": "fe069bead7e3ca1b"
+      "fingerprint": "997d5aa2e0625d21"
     },
     {
       "file_path": "plugins/transforms/azure/content_safety.py",
@@ -3265,31 +3273,27 @@
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "2de630b45978d685"
+      "fingerprint": "4cfa0bef5fce8c3f"
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "7ce3ee8e08561e45"
+      "fingerprint": "92dd4b5a184dc62a"
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "91b3559b942c0040"
+      "fingerprint": "99b1d84eb65cf352"
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "9519401fd195b0ac"
+      "fingerprint": "bf72ca4a84a3c2e7"
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "961011006d9c0cda"
+      "fingerprint": "cace50c86a32e828"
     },
     {
       "file_path": "web/app.py",
-      "fingerprint": "d1e9538947095df3"
-    },
-    {
-      "file_path": "web/app.py",
-      "fingerprint": "f228499fcfff4222"
+      "fingerprint": "f23aed5fee50ba7b"
     },
     {
       "file_path": "web/auth/entra.py",
@@ -3305,31 +3309,31 @@
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "134755c5b096d126"
+      "fingerprint": "0f53e42520d69291"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "14c606709324b9c3"
+      "fingerprint": "17e744ee8eac8f15"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "4df8c39f8dbaf59b"
+      "fingerprint": "259588b46a36c3b8"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "54a0a436e8a89380"
+      "fingerprint": "72b55a0e5849c256"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "98c3e6a2eb0fb6bd"
+      "fingerprint": "7f739b2cc0f07da8"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "c1b4c0a9254bce2f"
+      "fingerprint": "a68b05f4f0c1f28e"
     },
     {
       "file_path": "web/auth/oidc.py",
-      "fingerprint": "d508bf2c1e144939"
+      "fingerprint": "c4d5f2fd3de9ec42"
     },
     {
       "file_path": "web/blobs/service.py",
@@ -3549,15 +3553,7 @@
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "3ab295118371c363"
-    },
-    {
-      "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "4e2ec0402671ae1e"
-    },
-    {
-      "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "7ac9c954381a870b"
+      "fingerprint": "5d97b61453ab95a5"
     },
     {
       "file_path": "web/composer/source_inspection.py",
@@ -3565,7 +3561,7 @@
     },
     {
       "file_path": "web/composer/source_inspection.py",
-      "fingerprint": "a85e490edf063a75"
+      "fingerprint": "c2684be8b907db64"
     },
     {
       "file_path": "web/composer/state.py",
@@ -3641,27 +3637,27 @@
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "0d486255de228823"
+      "fingerprint": "1b9dcb6c67012333"
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "1498557d416fbe12"
+      "fingerprint": "aeb96f37d5542f37"
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "1ed37d0b88a0151f"
+      "fingerprint": "bef7c39129fb23b8"
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "54356b4332bf5c63"
+      "fingerprint": "c829a0906e9b3e29"
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "9a7b25e2fc96514d"
+      "fingerprint": "e86afcd6f1854544"
     },
     {
       "file_path": "web/composer/tool_batch.py",
-      "fingerprint": "e7084dd7e4c42da5"
+      "fingerprint": "f9210a049b673c20"
     },
     {
       "file_path": "web/composer/tools/_common.py",
@@ -4045,63 +4041,39 @@
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "07f7b1d9599f9e03"
+      "fingerprint": "08f79725af00b7e8"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "3195518183f4604c"
+      "fingerprint": "3c935d81224534c9"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "59949748426d05a0"
+      "fingerprint": "825abd046bed0898"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "6ae11216cb6427ab"
+      "fingerprint": "99a68378ad3d14fc"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "76aac7aeed5d2790"
+      "fingerprint": "b5a321ad3a8cf21a"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "a91add5d5970814d"
+      "fingerprint": "bfc061ccd5a7c11f"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "ae8955d9fc074acc"
+      "fingerprint": "c14188b71e435f3d"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "b4fdef35d6621b71"
+      "fingerprint": "c717fbe5f3b88ee3"
     },
     {
       "file_path": "web/execution/service.py",
-      "fingerprint": "c58de878b78c532e"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "d458fff4dd2be32e"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "e0c1cd46e0b80ba5"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "f6eeabcecd608c77"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "f75d502d14f8d197"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "fc0b10cc4927e3e0"
-    },
-    {
-      "file_path": "web/execution/service.py",
-      "fingerprint": "feb9afce47dffee1"
+      "fingerprint": "f06a8245e2f3c1af"
     },
     {
       "file_path": "web/execution/validation.py",

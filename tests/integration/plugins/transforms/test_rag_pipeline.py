@@ -11,10 +11,13 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from elspeth.contracts.probes import CollectionReadinessResult
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+from elspeth.core.security.web import SSRFSafeRequest
+from elspeth.plugins.infrastructure.clients.retrieval.azure_search import AzureSearchProvider
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 from elspeth.plugins.transforms.rag.transform import RAGRetrievalTransform
 
@@ -26,6 +29,18 @@ def _ready_result(collection="test-index", count=10):
         reachable=True,
         count=count,
         message=f"Collection '{collection}' has {count} documents",
+    )
+
+
+def _safe_azure_count_request() -> SSRFSafeRequest:
+    return SSRFSafeRequest(
+        original_url="https://test.search.windows.net/indexes/test-index/docs/$count?api-version=2024-07-01",
+        resolved_ip="93.184.216.34",
+        host_header="test.search.windows.net",
+        port=443,
+        path="/indexes/test-index/docs/$count?api-version=2024-07-01",
+        scheme="https",
+        bare_hostname="test.search.windows.net",
     )
 
 
@@ -74,13 +89,14 @@ def _create_transform_with_lifecycle(**config_overrides):
     config.update(config_overrides)
     transform = RAGRetrievalTransform(config)
     # Mock readiness I/O; no real Azure endpoint or DNS is available in tests.
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.text = "10"
-    mock_resp.raise_for_status = MagicMock()
+    mock_resp = httpx.Response(
+        200,
+        text="10",
+        request=httpx.Request("GET", _safe_azure_count_request().connection_url),
+    )
     with (
-        patch("elspeth.core.security.web.validate_url_for_ssrf"),
-        patch("httpx.get", return_value=mock_resp),
+        patch("elspeth.core.security.web.validate_url_for_ssrf", return_value=_safe_azure_count_request()),
+        patch.object(AzureSearchProvider, "_readiness_get", return_value=mock_resp),
     ):
         transform.on_start(_mock_lifecycle_ctx())
     return transform
@@ -165,13 +181,14 @@ class TestRAGPipelineIntegration:
             "schema_config": {"mode": "observed"},
         }
         transform = RAGRetrievalTransform(config)
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "10"
-        mock_resp.raise_for_status = MagicMock()
+        mock_resp = httpx.Response(
+            200,
+            text="10",
+            request=httpx.Request("GET", _safe_azure_count_request().connection_url),
+        )
         with (
-            patch("elspeth.core.security.web.validate_url_for_ssrf"),
-            patch("httpx.get", return_value=mock_resp),
+            patch("elspeth.core.security.web.validate_url_for_ssrf", return_value=_safe_azure_count_request()),
+            patch.object(AzureSearchProvider, "_readiness_get", return_value=mock_resp),
         ):
             transform.on_start(lifecycle_ctx)
         transform.on_complete(lifecycle_ctx)

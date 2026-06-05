@@ -1516,6 +1516,38 @@ class TestJSONSourceKeyNormalization:
         assert mapping["Order ID"] == "order_id"
         assert version is not None
 
+    def test_observed_sparse_keys_are_added_to_emitted_row_contract(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Later sparse JSON keys must be under schema-contract custody."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"a": 1}, {"a": 2, "b": "new"}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert rows[0].is_quarantined is False
+        assert rows[1].is_quarantined is False
+        assert rows[1].row == {"a": 2, "b": "new"}
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        assert mapping == {"a": "a", "b": "b"}
+
+        second_contract = rows[1].contract
+        assert second_contract is not None
+        assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
+        assert second_contract.get_field("b").original_name == "b"
+
     def test_first_row_quarantined_key_rebuild(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When first row is quarantined and second row has different keys, resolution rebuilds.
 

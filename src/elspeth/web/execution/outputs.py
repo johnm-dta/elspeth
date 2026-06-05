@@ -17,6 +17,7 @@ or moved file is a fact, not an error.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from sqlalchemy import select
@@ -75,6 +76,24 @@ def path_or_uri_to_filesystem_path(path_or_uri: str) -> Path | None:
     if "://" in path_or_uri:
         return None
     return Path(path_or_uri)
+
+
+def hash_and_size_of_file(path: Path) -> tuple[str, int]:
+    """Return ``(sha256_hex, byte_size)`` of ``path`` by streaming its bytes.
+
+    ``content_hash`` recorded by every file-streamable sink is the SHA-256 of
+    the WHOLE file (JSONSink hashes the whole file; CSVSink re-seeds its hasher
+    from the existing file content in append mode), so this whole-file digest is
+    directly comparable to the audited ``content_hash``. Used by the content
+    endpoint to verify on-disk bytes against the audit record before streaming.
+    """
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def load_run_outputs_from_db(

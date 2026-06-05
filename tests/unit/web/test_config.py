@@ -172,6 +172,47 @@ class TestWebSettingsValidation:
 
         assert settings.composer_model == "gpt-5.5"
 
+    def test_composer_sampling_defaults_to_none_and_probe_enabled(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.composer_temperature is None
+        assert settings.composer_seed is None
+        assert settings.composer_boot_probe_enabled is True
+
+    def test_composer_temperature_accepts_in_range_and_rejects_out_of_range(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_temperature=0.0).composer_temperature == 0.0
+        assert WebSettings(**base, composer_temperature=1.5).composer_temperature == 1.5
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=2.5)
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=-0.1)
+
+    def test_composer_seed_accepts_int_and_none(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_seed=42).composer_seed == 42
+        assert WebSettings(**base, composer_seed=None).composer_seed is None
+
     def test_max_upload_bytes_zero_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(
@@ -641,6 +682,52 @@ class TestAuthFieldValidationContinued:
         assert settings.entra_tenant_id == "my-tenant-id"
 
 
+class TestOIDCIssuerValidation:
+    """OIDC issuer config must be safe before startup discovery can fetch it."""
+
+    _COMPOSER_DEFAULTS: typing.ClassVar[dict[str, object]] = {
+        "composer_max_composition_turns": 15,
+        "composer_max_discovery_turns": 10,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
+    }
+
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            "http://issuer.example.com",
+            "https://user:pass@issuer.example.com",
+            "https://127.0.0.1",
+            "https://169.254.169.254",
+            "https://issuer.example.com?tenant=default",
+            "https://issuer.example.com#fragment",
+        ],
+    )
+    def test_oidc_provider_rejects_unsafe_issuer(self, issuer: str) -> None:
+        with pytest.raises(ValidationError):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer=issuer,
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_provider_accepts_path_issuer_and_same_origin_authorization_endpoint(self) -> None:
+        settings = WebSettings(
+            auth_provider="oidc",
+            oidc_issuer="https://issuer.example.com/tenant/v2.0/",
+            oidc_audience="my-audience",
+            oidc_client_id="my-client-id",
+            oidc_authorization_endpoint="https://issuer.example.com/oauth2/authorize",
+            **self._COMPOSER_DEFAULTS,
+        )
+
+        assert settings.oidc_issuer == "https://issuer.example.com/tenant/v2.0"
+        assert settings.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
+
+
 class TestOIDCBlankStringRejection:
     """Blank/whitespace-only OIDC/Entra fields must be rejected at config time."""
 
@@ -720,6 +807,39 @@ class TestOIDCBlankStringRejection:
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 oidc_authorization_endpoint="",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_http_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="must be an HTTPS URL"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint="http://issuer.example.com/oauth2/authorize",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_cross_origin_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="same origin as issuer"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_entra_cross_origin_authorization_endpoint_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="same origin as issuer"):
+            WebSettings(
+                auth_provider="entra",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                entra_tenant_id="test-tenant-id",
+                oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
                 **self._COMPOSER_DEFAULTS,
             )
 

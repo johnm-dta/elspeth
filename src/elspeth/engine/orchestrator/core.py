@@ -1484,7 +1484,7 @@ class Orchestrator:
             # NOTE — value-source compliance is enforced at the entry-point
             # boundary, NOT here. The walker
             # (``engine/orchestrator/preflight.validate_value_source_compliance``)
-            # runs inside ``cli_helpers.instantiate_plugins_from_config`` and
+            # runs inside ``runtime_factory.instantiate_plugins_from_config`` and
             # the composer/web-execution validate paths
             # (``web/execution/validation.validate_pipeline``,
             # ``web/execution/service._run_pipeline``). Every legitimate caller

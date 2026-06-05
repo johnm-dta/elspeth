@@ -43,7 +43,7 @@ import ast
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from elspeth_lints.core.ast_walker import iter_own_scope, walk_function_own_scope
+from elspeth_lints.core.ast_walker import iter_own_scope
 
 # Closed set of rule IDs the ``@trust_boundary`` decorator is permitted to
 # silence. Mirrors the runtime decorator's ``BoundaryRule = Literal["R1",
@@ -559,97 +559,3 @@ def _expr_contains_derived_reference(node: ast.AST, derived_names: frozenset[str
     change the value).
     """
     return any(isinstance(sub, ast.Name) and sub.id in derived_names for sub in iter_own_scope(node))
-
-
-def _comprehension_target_names(generator: ast.comprehension) -> list[str]:
-    return _assignment_targets(generator.target)
-
-
-def compute_derived_names(
-    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
-    source_param: str,
-) -> frozenset[str]:
-    """Compute names derived from ``source_param`` at the end of a function.
-
-    This helper is statement-order aware: a local name becomes derived only
-    after an assignment whose RHS depends on a currently derived name, and a
-    later safe assignment clears that local taint. Suppression during the
-    visitor walk uses :class:`DerivedNameState` directly so findings are checked
-    against the state at their own call site, not this final summary.
-
-    Propagation rules:
-
-    * ``Assign`` / ``AugAssign`` / ``AnnAssign``: if the RHS expression
-      mentions any derived name (anywhere in the subtree), every LHS Name
-      target becomes derived; otherwise those targets are cleared.
-    * ``For`` / ``AsyncFor``: if the iter is rooted at a derived name, the
-      loop target name(s) become derived.
-    * ``With`` / ``AsyncWith``: if the context expression is rooted, the
-      ``as`` target becomes derived.
-    * ``NamedExpr`` (walrus): if the value is rooted/contains-derived, the
-      target name becomes derived.
-    * Comprehensions (list/set/dict/gen): if the generator's iter is rooted
-      at a derived name, the comprehension target becomes derived within
-      that comprehension scope. (We add it to the global set; comprehensions
-      in Python 3 have their own scope but we conservatively treat the
-      target name as derived if it's later referenced.)
-
-    The walk is deliberately not a fixed point. Future assignments must not
-    taint earlier findings, and safe reassignments must remove local taint.
-    """
-    state = DerivedNameState.from_source_param(source_param)
-
-    # Walk only the outer function's own lexical scope. The previous
-    # implementation used ``ast.walk(func_node)`` with a ``sub is not
-    # func_node`` guard, but ``ast.walk`` had already yielded every descendant
-    # of any nested function *before* the guard could fire — only the inner
-    # FunctionDef AST node itself was skipped, not its body.
-    for sub in walk_function_own_scope(func_node):
-        if sub is func_node:
-            continue
-        snapshot = state.snapshot()
-        if isinstance(sub, ast.Assign):
-            state.assign_targets(sub.targets, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
-        elif isinstance(sub, ast.AnnAssign):
-            if sub.value is not None:
-                state.assign_target(sub.target, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
-        elif isinstance(sub, ast.AugAssign):
-            is_derived = subject_is_rooted(sub.target, snapshot) or _expr_contains_derived_reference(sub.value, snapshot)
-            state.assign_target(sub.target, is_derived=is_derived)
-        elif isinstance(sub, (ast.For, ast.AsyncFor)):
-            state.assign_target(sub.target, is_derived=subject_is_rooted(sub.iter, snapshot))
-        elif isinstance(sub, (ast.With, ast.AsyncWith)):
-            for item in sub.items:
-                if item.optional_vars is None:
-                    continue
-                state.assign_target(item.optional_vars, is_derived=subject_is_rooted(item.context_expr, snapshot))
-        elif isinstance(sub, ast.NamedExpr):
-            state.assign_target(sub.target, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
-        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            for generator in sub.generators:
-                if subject_is_rooted(generator.iter, snapshot):
-                    for name in _comprehension_target_names(generator):
-                        state.assign_target_names((name,), is_derived=True)
-
-    return state.snapshot()
-
-
-def _local_bindable_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    """Return names this function's own scope can bind through supported flows."""
-    names: set[str] = set()
-    for sub in walk_function_own_scope(func_node):
-        if isinstance(sub, ast.Assign):
-            for target in sub.targets:
-                names.update(_assignment_targets(target))
-        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
-            names.update(_assignment_targets(sub.target))
-        elif isinstance(sub, (ast.With, ast.AsyncWith)):
-            for item in sub.items:
-                if item.optional_vars is not None:
-                    names.update(_assignment_targets(item.optional_vars))
-        elif isinstance(sub, ast.NamedExpr):
-            names.update(_assignment_targets(sub.target))
-        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            for generator in sub.generators:
-                names.update(_comprehension_target_names(generator))
-    return names

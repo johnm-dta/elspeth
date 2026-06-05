@@ -7,6 +7,27 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+_EXCLUDED_WALK_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".uv-cache",
+        ".venv",
+        ".worktrees",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+)
+
 # Nested-scope AST node types that a "lexical scope of this function" walker
 # must short-circuit at: descending into their children would conflate names
 # bound in the inner scope with names bound in the outer scope.
@@ -195,7 +216,7 @@ def iter_python_files(root: Path, files: Iterable[Path] | None = None) -> Iterat
         return
 
     for file_path in sorted(root.rglob("*.py")):
-        if "__pycache__" not in file_path.parts:
+        if not _EXCLUDED_WALK_DIRS.intersection(file_path.parts):
             yield file_path
 
 

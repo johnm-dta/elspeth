@@ -47,6 +47,40 @@ class TestJSONSink:
         assert len(data) == 2
         assert data[0]["name"] == "alice"
 
+    def test_json_array_failed_write_does_not_leak_rows_into_later_write(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A failed array write must roll back its buffered rows (elspeth-813611aad6).
+
+        JSON array mode extends self._rows before the atomic file write. The
+        temp-file rename protects the on-disk file, but without an in-memory
+        rollback a failed write leaves that batch's rows buffered, and a later
+        successful write emits them — a row from a failed write appearing in a
+        later artifact with no matching success outcome.
+        """
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
+
+        sink.write([{"id": 1}], ctx)
+        assert json.loads(output_file.read_text()) == [{"id": 1}]
+
+        # Second write fails at the atomic replace — the file stays at [{"id": 1}]
+        # and the buffer must roll back so {"id": 2} is not retained.
+        with (
+            patch("elspeth.plugins.sinks.json_sink.os.replace", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            sink.write([{"id": 2}], ctx)
+
+        assert json.loads(output_file.read_text()) == [{"id": 1}]
+        assert sink._rows == [{"id": 1}]
+
+        # Third write succeeds — must NOT contain the row from the failed write.
+        sink.write([{"id": 3}], ctx)
+        sink.flush()
+        sink.close()
+        assert json.loads(output_file.read_text()) == [{"id": 1}, {"id": 3}]
+
     def test_json_array_fail_if_exists_collision_policy_refuses_existing_target(
         self,
         tmp_path: Path,

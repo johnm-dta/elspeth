@@ -4,10 +4,12 @@ Handles SQLite (development) and PostgreSQL (production) backends
 with appropriate settings for each.
 """
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import quote
 
 from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -150,6 +152,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
+    ("runs", "ck_runs_openrouter_catalog_source"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.
@@ -249,6 +252,7 @@ class LandscapeDB:
         self._engine: Engine | None = None
         self._journal: LandscapeJournal | None = None
         self._require_existing_schema = False
+        self._read_only = False
         if dump_to_jsonl:
             journal_path = dump_to_jsonl_path or self._derive_journal_path(connection_string)
             self._journal = LandscapeJournal(
@@ -280,13 +284,14 @@ class LandscapeDB:
             self._journal.attach(self._engine)
 
     @staticmethod
-    def _configure_sqlite(engine: Engine) -> None:
+    def _configure_sqlite(engine: Engine, *, read_only: bool = False) -> None:
         """Configure SQLite engine for reliability.
 
         Registers a connection event hook that sets:
-        - PRAGMA journal_mode=WAL (better concurrency)
+        - PRAGMA journal_mode=WAL (better concurrency, writable engines only)
         - PRAGMA foreign_keys=ON (referential integrity)
         - PRAGMA busy_timeout=5000 (contention tolerance)
+        - PRAGMA query_only=ON (read-only engines only)
 
         For SQLCipher engines, these PRAGMAs execute AFTER the creator callback
         returns (where PRAGMA key is issued), preserving the required ordering.
@@ -298,8 +303,11 @@ class LandscapeDB:
         @event.listens_for(engine, "connect")
         def set_sqlite_pragma(dbapi_connection: object, connection_record: object) -> None:
             cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]  # SQLAlchemy event passes DBAPI connection (has .cursor()) typed as object
-            # Enable WAL mode for better concurrency
-            cursor.execute("PRAGMA journal_mode=WAL")
+            if read_only:
+                cursor.execute("PRAGMA query_only=ON")
+            else:
+                # Enable WAL mode for better concurrency on writer-capable DBs.
+                cursor.execute("PRAGMA journal_mode=WAL")
             # Enable foreign key enforcement
             cursor.execute("PRAGMA foreign_keys=ON")
             # Set busy timeout to avoid immediate SQLITE_BUSY errors under contention
@@ -690,6 +698,7 @@ class LandscapeDB:
         passphrase: str | None = None,
         journal: LandscapeJournal | None = None,
         require_existing_schema: bool = False,
+        read_only: bool = False,
     ) -> Self:
         """Construct instance from pre-created components.
 
@@ -702,6 +711,7 @@ class LandscapeDB:
         instance._engine = engine
         instance._journal = journal
         instance._require_existing_schema = require_existing_schema
+        instance._read_only = read_only
         return instance
 
     @classmethod
@@ -720,6 +730,34 @@ class LandscapeDB:
         instance._sync_sqlite_schema_epoch()
         return instance
 
+    @staticmethod
+    def _sqlite_read_only_url(url: str) -> str:
+        """Return a SQLite URI URL that opens the existing file read-only.
+
+        SQLite ``immutable=1`` is only safe for static, read-only-directory
+        snapshots with no WAL sidecar. Live WAL-mode audit databases may have
+        committed schema or rows in the ``-wal`` file that immutable
+        connections intentionally ignore.
+        """
+        parsed = make_url(url)
+        if not parsed.drivername.startswith("sqlite"):
+            return url
+
+        database = parsed.database
+        if database is None or database == ":memory:":
+            raise ValueError("read_only=True requires a file-backed SQLite database")
+        if database.startswith("file:"):
+            raise ValueError("read_only=True expects a plain SQLite file path, not an existing file: URI")
+
+        db_path = Path(database)
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        immutable = not Path(f"{db_path}-wal").exists() and not os.access(db_path.parent, os.W_OK)
+        uri_path = quote(str(db_path), safe="/:")
+        if immutable:
+            return f"{parsed.drivername}:///file:{uri_path}?mode=ro&immutable=1&uri=true"
+        return f"{parsed.drivername}:///file:{uri_path}?mode=ro&uri=true"
+
     @classmethod
     def from_url(
         cls,
@@ -727,6 +765,7 @@ class LandscapeDB:
         *,
         passphrase: str | None = None,
         create_tables: bool = True,
+        read_only: bool = False,
         dump_to_jsonl: bool = False,
         dump_to_jsonl_path: str | None = None,
         dump_to_jsonl_fail_on_error: bool = False,
@@ -741,6 +780,11 @@ class LandscapeDB:
                 database is opened with AES-256 encryption via sqlcipher3.
             create_tables: Whether to create tables if they don't exist.
                            Set to False when connecting to an existing database.
+            read_only: Open an existing database for inspection only. SQLite
+                uses a ``mode=ro`` URI so the database file itself is not
+                writable. Static read-only-directory snapshots with no WAL
+                sidecar use ``immutable=1``; live WAL databases do not, so
+                committed WAL contents remain visible.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
             dump_to_jsonl_path: Optional override path for JSONL journal
             dump_to_jsonl_fail_on_error: Fail if journal write fails
@@ -750,14 +794,20 @@ class LandscapeDB:
         Returns:
             LandscapeDB instance
         """
+        if read_only and create_tables:
+            raise ValueError("read_only=True requires create_tables=False")
+        if read_only and dump_to_jsonl:
+            raise ValueError("read_only=True cannot enable dump_to_jsonl")
+
         if passphrase is not None:
             engine = cls._create_sqlcipher_engine(url, passphrase)
-            cls._configure_sqlite(engine)
+            cls._configure_sqlite(engine, read_only=read_only)
         else:
-            engine = create_engine(url, echo=False)
+            engine_url = cls._sqlite_read_only_url(url) if read_only and url.startswith("sqlite") else url
+            engine = create_engine(engine_url, echo=False)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
-                cls._configure_sqlite(engine)
+                cls._configure_sqlite(engine, read_only=read_only)
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:
@@ -776,6 +826,7 @@ class LandscapeDB:
             passphrase=passphrase,
             journal=journal,
             require_existing_schema=not create_tables,
+            read_only=read_only,
         )
 
         # Validate BEFORE create_all - catches old schema with missing columns
@@ -812,6 +863,11 @@ class LandscapeDB:
                 conn.execute(runs_table.insert().values(...))
             # Committed automatically if no exception raised
         """
+        if self._read_only:
+            with self.read_only_connection() as conn:
+                yield conn
+            return
+
         with self.engine.begin() as conn:
             yield conn
 

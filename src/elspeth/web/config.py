@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator,
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -50,6 +51,16 @@ class WebSettings(BaseModel):
     # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
     tutorial_cache_dir: Path | None = Field(default=None)
     composer_model: str = "gpt-5.5"
+    # Operator-set LLM sampling. Default None means omitted from the
+    # provider request, which is the coherent default for reasoning-model
+    # defaults like gpt-5.5 that reject non-default temperature values.
+    # Sent verbatim when set; provider rejection is the operator's config
+    # error and is validated at boot. See
+    # docs/superpowers/specs/2026-06-03-composer-operator-set-sampling-config-design.md.
+    composer_temperature: float | None = Field(default=None, ge=0, le=2)
+    composer_seed: int | None = None
+    # Tests/offline development can disable the real provider boot probe.
+    composer_boot_probe_enabled: bool = True
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
@@ -414,6 +425,17 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
+            assert self.oidc_issuer is not None
+            object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
+            if self.oidc_authorization_endpoint is not None:
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=self.oidc_issuer,
+                    ),
+                )
         elif self.auth_provider == "entra":
             # oidc_issuer is NOT required — EntraAuthProvider derives it
             # from entra_tenant_id (login.microsoftonline.com/{tid}/v2.0).
@@ -428,6 +450,16 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
+            if self.oidc_authorization_endpoint is not None:
+                assert self.entra_tenant_id is not None
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
+                    ),
+                )
         return self
 
     @model_validator(mode="after")

@@ -99,6 +99,54 @@ class TestSchemaCompatibilityGuards:
         assert ("calls", "resolved_prompt_template_hash") in database_module._REQUIRED_COLUMNS
         assert ("calls", "ix_calls_resolved_prompt_template_hash") in database_module._REQUIRED_INDEXES
 
+    def test_openrouter_catalog_source_check_is_required_schema_contract(self) -> None:
+        """OpenRouter catalog source validity must participate in stale-DB detection."""
+        assert ("runs", "openrouter_catalog_sha256") in database_module._REQUIRED_COLUMNS
+        assert ("runs", "openrouter_catalog_source") in database_module._REQUIRED_COLUMNS
+        assert ("runs", "ck_runs_openrouter_catalog_source") in database_module._REQUIRED_CHECK_CONSTRAINTS
+
+    def test_from_url_rejects_runs_table_missing_openrouter_catalog_source_check(self, tmp_path: Path) -> None:
+        """A stale runs table must fail before SQLite schema epoch stamping."""
+        db_path = tmp_path / "stale_openrouter_catalog_check.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE runs")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE runs (
+                        run_id TEXT PRIMARY KEY,
+                        source_schema_json TEXT,
+                        source_field_resolution_json TEXT,
+                        schema_contract_json TEXT,
+                        schema_contract_hash TEXT,
+                        runtime_val_manifest_json TEXT,
+                        llm_call_count INTEGER,
+                        seeded_from_cache BOOLEAN NOT NULL DEFAULT 0,
+                        cache_key TEXT,
+                        openrouter_catalog_sha256 TEXT NOT NULL,
+                        openrouter_catalog_source TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.exec_driver_sql("PRAGMA user_version = 0")
+        engine.dispose()
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            LandscapeDB.from_url(f"sqlite:///{db_path}")
+
+        msg = str(exc_info.value)
+        assert "Missing check constraints:" in msg
+        assert "runs.ck_runs_openrouter_catalog_source" in msg
+
+        verify_engine = create_engine(f"sqlite:///{db_path}")
+        with verify_engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        verify_engine.dispose()
+        assert epoch == 0
+
     def test_checkpoint_sequence_uniqueness_is_required_schema_contract(self) -> None:
         """Per-run checkpoint ordering must be mechanically unique in fresh and stale DBs."""
         assert ("checkpoints", "ix_checkpoints_run_sequence_unique") in database_module._REQUIRED_INDEXES

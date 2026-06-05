@@ -409,6 +409,32 @@ class TestDatabaseSinkIfExistsReplace:
         # Both rows should exist
         assert self._get_row_count(db_url, "output") == 2
 
+    def test_append_into_incompatible_table_is_rejected(self, db_url: str, ctx: PluginContext) -> None:
+        """A fixed-schema append into a drifted target table must be rejected.
+
+        Regression for elspeth-bed11173bf: validate_output_target() detects the
+        mismatch, but write() must enforce it. A fixed ['id','name'] sink must
+        NOT silently insert into an existing output(id, name, extra) table
+        (which would leave extra NULL) just because no external caller ran
+        validate_output_target() first.
+        """
+        from sqlalchemy import Column, Integer, Text
+
+        # Precreate an incompatible target table with an extra column.
+        engine = create_engine(db_url)
+        md = MetaData()
+        Table("output", md, Column("id", Integer), Column("name", Text), Column("extra", Text))
+        md.create_all(engine)
+        engine.dispose()
+
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA, "if_exists": "append"}))
+
+        with pytest.raises(ValueError, match="incompatible"):
+            sink.write([{"id": 1, "name": "alice"}], ctx)
+
+        # No partial insert into the drifted table.
+        assert self._get_row_count(db_url, "output") == 0
+
     def test_if_exists_replace_works_when_table_does_not_exist(self, db_url: str, ctx: PluginContext) -> None:
         """if_exists='replace' works correctly when table doesn't exist yet.
 

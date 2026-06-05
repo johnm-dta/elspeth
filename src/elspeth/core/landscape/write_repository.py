@@ -14,8 +14,8 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
-from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex, validate_run_attribution
+from elspeth.core.landscape.schema import nodes_table, rows_table, run_attributions_table, runs_table
 
 # Re-export for back-compat with existing import sites (``from
 # elspeth.core.landscape.write_repository import SynthesisedNodeSpec``).
@@ -41,6 +41,8 @@ class LandscapeWriteRepository:
         metadata: Mapping[str, Any],
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        initiated_by_user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> str:
         """Insert a cache-replay run plus row/node audit facts.
 
@@ -51,8 +53,12 @@ class LandscapeWriteRepository:
         role. Structural invariants (exactly one SOURCE at index 0, at least
         one SINK) are enforced offensively before any write — a misshapen
         sequence is a caller bug, not an audit anomaly to silently absorb.
+        When requester attribution is supplied, it is written in the same
+        transaction as the run row so audit/export queries see cache replays
+        the same way they see live executions.
         """
         self._validate_node_specs(node_specs)
+        validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
         seeded_from_cache = metadata["seeded_from_cache"]
         cache_key = metadata["cache_key"]
         if type(seeded_from_cache) is not bool:
@@ -104,6 +110,15 @@ class LandscapeWriteRepository:
                         openrouter_catalog_source=openrouter_catalog_source,
                     )
                 )
+                if initiated_by_user_id is not None and auth_provider_type is not None:
+                    conn.execute(
+                        run_attributions_table.insert().values(
+                            run_id=run_id,
+                            recorded_at=started_at,
+                            initiated_by_user_id=initiated_by_user_id,
+                            auth_provider_type=auth_provider_type,
+                        )
+                    )
                 for index, spec in enumerate(node_specs):
                     node_config = {"plugin_name": spec.plugin_name, "plugin_version": spec.plugin_version}
                     conn.execute(

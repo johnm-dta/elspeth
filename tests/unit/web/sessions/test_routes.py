@@ -2981,6 +2981,15 @@ class TestLiteLLMErrorRedaction:
         exc.__cause__ = RuntimeError(f"upstream: {self._CANARY_CAUSE}")
         return exc
 
+    def _make_bad_request_error(self) -> Exception:
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        return _BadRequestLLMError(
+            "LLM request rejected (BadRequestError)",
+            provider_detail="Provider rejected composer prompt: model does not support temperature",
+            provider_status_code=400,
+        )
+
     def _assert_redacted(self, resp, expected_error_type: str, expected_exc_class: str) -> None:
         """Assert the 502 body is class-name-only and contains no canary strings."""
         assert resp.status_code == 502
@@ -3044,6 +3053,31 @@ class TestLiteLLMErrorRedaction:
             json={"content": "Hello"},
         )
         self._assert_redacted(msg_resp, "llm_unavailable", "APIError")
+
+    def test_send_message_bad_request_provider_detail_is_exposed_when_enabled(self, tmp_path) -> None:
+        """_BadRequestLLMError must use its dedicated provider-detail carrier at the route layer."""
+        mock_composer = AsyncMock()
+        mock_composer.compose = AsyncMock(side_effect=self._make_bad_request_error())
+
+        app, _ = _make_app(tmp_path)
+        app.state.settings = app.state.settings.model_copy(update={"composer_expose_provider_errors": True})
+        app.state.composer_service = mock_composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Test"})
+        session_id = resp.json()["id"]
+
+        msg_resp = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Hello"},
+        )
+
+        assert msg_resp.status_code == 502
+        detail = msg_resp.json()["detail"]
+        assert detail["error_type"] == "llm_unavailable"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert detail["provider_detail"] == "Provider rejected composer prompt: model does not support temperature"
+        assert detail["provider_status_code"] == 400
 
     def test_api_error_debug_detail_is_exposed_when_enabled(self) -> None:
         """Opt-in debug mode exposes scrubbed provider detail for staging triage."""
@@ -3205,6 +3239,36 @@ class TestLiteLLMErrorRedaction:
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
         self._assert_redacted(recompose_resp, "llm_unavailable", "APIError")
+
+    def test_recompose_bad_request_provider_detail_is_exposed_when_enabled(self, tmp_path) -> None:
+        """recompose must mirror send_message for _BadRequestLLMError provider detail."""
+        import asyncio
+
+        mock_composer = AsyncMock()
+        mock_composer.compose = AsyncMock(side_effect=self._make_bad_request_error())
+
+        app, service = _make_app(tmp_path)
+        app.state.settings = app.state.settings.model_copy(update={"composer_expose_provider_errors": True})
+        app.state.composer_service = mock_composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Test"})
+        session_id = resp.json()["id"]
+
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message")
+        )
+        loop.close()
+
+        recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
+
+        assert recompose_resp.status_code == 502
+        detail = recompose_resp.json()["detail"]
+        assert detail["error_type"] == "llm_unavailable"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert detail["provider_detail"] == "Provider rejected composer prompt: model does not support temperature"
+        assert detail["provider_status_code"] == 400
 
 
 class TestRecomposeConvergencePartialState:

@@ -90,7 +90,7 @@ def is_valid_sha256_hex(value: str) -> bool:
     return _SHA256_HEX_RE.fullmatch(value) is not None
 
 
-def _validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider_type: str | None) -> None:
+def validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider_type: str | None) -> None:
     if initiated_by_user_id is None and auth_provider_type is None:
         return
     if type(initiated_by_user_id) is not str or not initiated_by_user_id.strip():
@@ -172,7 +172,7 @@ class RunLifecycleRepository:
             raise AuditIntegrityError(
                 "begin_run() cannot create a COMPLETED run. Use complete_run() so completed_at is recorded in the audit trail."
             )
-        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
         _validate_openrouter_catalog_snapshot(
             sha256=openrouter_catalog_sha256,
             source=openrouter_catalog_source,
@@ -339,7 +339,7 @@ class RunLifecycleRepository:
             return None
         initiated_by_user_id = row.initiated_by_user_id
         auth_provider_type = row.auth_provider_type
-        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
         return initiated_by_user_id, auth_provider_type
 
     def get_source_schema(self, run_id: str) -> str:

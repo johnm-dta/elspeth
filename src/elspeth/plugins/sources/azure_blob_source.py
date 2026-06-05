@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cc423ddf05e26ab8"
+    source_file_hash: str | None = "sha256:d87e86de4a9a5fbc"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -512,19 +512,6 @@ class AzureBlobSource(BaseSource):
             # Azure SDK errors (ResourceNotFoundError, ClientAuthenticationError, etc.)
             # are external system errors - propagate with context
             raise RuntimeError(f"Failed to download blob '{self._blob_path}' from container '{self._container}': {e}") from e
-
-        # Log blob download for operator visibility
-        blob_size_kb = len(blob_data) / 1024
-        if blob_size_kb >= 1024:
-            size_str = f"{blob_size_kb / 1024:.1f} MB"
-        else:
-            size_str = f"{blob_size_kb:.1f} KB"
-        logger.info(
-            "blob_downloaded",
-            blob_path=self._blob_path,
-            container=self._container,
-            size=size_str,
-        )
 
         # Parse blob content based on format
         if self._format == "csv":
@@ -785,9 +772,6 @@ class AzureBlobSource(BaseSource):
             row = dict(zip(headers, values, strict=True))
             yield from self._validate_and_yield(row, ctx)
 
-        # Log row count for operator visibility
-        logger.info("csv_blob_parsed", rows_encountered=row_count, blob_path=self._blob_path)
-
     def _load_json_array(self, blob_data: bytes, ctx: SourceContext) -> Iterator[SourceRow]:
         """Load rows from JSON array blob data.
 
@@ -853,9 +837,6 @@ class AzureBlobSource(BaseSource):
             error_msg = f"Expected JSON array, got {type(data).__name__}"
             yield from _record_file_level_error(error_msg, "parse")
             return
-
-        # Log row count for operator visibility
-        logger.info("json_blob_parsed", row_count=len(data), blob_path=self._blob_path)
 
         for row in data:
             yield from self._validate_and_yield(row, ctx)
@@ -958,8 +939,6 @@ class AzureBlobSource(BaseSource):
                     destination=self._on_validation_failure,
                 )
             return
-
-        logger.info("jsonl_blob_parsed", line_count=non_empty_count, blob_path=self._blob_path)
 
     def _normalize_row_keys(self, row: Any) -> Mapping[str, Any]:
         """Normalize JSON/JSONL object keys at the source boundary."""
@@ -1073,6 +1052,18 @@ class AzureBlobSource(BaseSource):
             # fields. Pydantic extra="allow" accepts any type for extras — the
             # contract knows inferred types from the first row and enforces here.
             contract = self.require_schema_contract()
+            if self._format in ("json", "jsonl") and self._contract_builder is not None and contract.mode in ("OBSERVED", "FLEXIBLE"):
+                # JSON/JSONL blobs can be sparse. If a later row emits a new
+                # normalized key, the row contract must own its original-name
+                # and type metadata before validation and yield.
+                if self._field_resolution is None:
+                    raise ValueError("field_resolution must be established before sparse-field contract inference")
+                contract = self._contract_builder.process_sparse_fields(
+                    validated_row,
+                    self._field_resolution.resolution_mapping,
+                )
+                self.set_schema_contract(contract)
+
             if contract.locked:
                 violations = contract.validate(validated_row)
                 if violations:

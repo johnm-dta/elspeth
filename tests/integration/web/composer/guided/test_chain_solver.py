@@ -111,6 +111,8 @@ async def test_returns_chain_proposal() -> None:
                     ),
                 )
             ),
+            temperature=None,
+            seed=None,
         )
 
     assert len(proposal.steps) == 1
@@ -165,6 +167,8 @@ async def test_repair_context_appears_in_system_prompt() -> None:
                 )
             ),
             repair_context=repair_error,
+            temperature=None,
+            seed=None,
         )
 
     assert len(captured_calls) == 1
@@ -214,6 +218,8 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
                     ),
                 )
             ),
+            temperature=None,
+            seed=None,
         )
 
     assert len(captured_calls) == 1
@@ -291,6 +297,8 @@ def _make_solve_chain_args() -> dict:
                 ),
             )
         ),
+        "temperature": None,
+        "seed": None,
     }
 
 
@@ -507,8 +515,8 @@ async def test_solve_chain_empty_tool_calls_raises_shape_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_and_temperature_passed_to_litellm() -> None:
-    """solve_chain passes the supplied model and temperature=0.0 to _litellm_acompletion.
+async def test_model_and_operator_sampling_passed_to_litellm() -> None:
+    """solve_chain passes the supplied model and caller-supplied sampling.
 
     Asymmetry probe: if model=model is reverted to a hard-coded string, the
     ``captured_calls[0]["model"] == TEST_MODEL`` assertion fails.
@@ -551,14 +559,17 @@ async def test_model_and_temperature_passed_to_litellm() -> None:
                     ),
                 )
             ),
+            temperature=0.0,
+            seed=42,
         )
 
     assert len(captured_calls) == 1
     call = captured_calls[0]
     # Model must be the caller-supplied value, not any hard-coded string.
     assert call["model"] == TEST_MODEL
-    # Temperature must match the composer constant (0.0) for deterministic output.
+    # Sampling must be caller-supplied, not an internal constant/probe.
     assert call["temperature"] == 0.0
+    assert call["seed"] == 42
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +638,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert proposal.steps[0]["plugin"] == "type_coerce"
@@ -667,6 +680,8 @@ class TestSolveChainLLMCallAudit:
                 model="openai/gpt-4o-mini",
                 source=source,
                 sink=sink,
+                temperature=None,
+                seed=None,
                 # recorder defaults to None
             )
 
@@ -693,6 +708,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -726,6 +743,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -760,6 +779,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -795,6 +816,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -831,6 +854,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -862,6 +887,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -908,6 +935,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -969,6 +998,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         # The underlying KeyError is preserved on __cause__ for forensics.
@@ -1022,6 +1053,8 @@ class TestSolveChainLLMCallAudit:
                 source=source,
                 sink=sink,
                 recorder=recorder,
+                temperature=None,
+                seed=None,
             )
 
         assert len(recorder.llm_calls) == 1
@@ -1054,6 +1087,8 @@ class TestSolveChainLLMCallAudit:
                     source=source,
                     sink=sink,
                     recorder=recorder,
+                    temperature=None,
+                    seed=None,
                 )
             except TimeoutError as exc:
                 captured = exc

@@ -95,6 +95,19 @@ class TestSessionManager:
         with pytest.raises(SessionNotFoundError):
             manager.load(sid)
 
+    def test_delete_session_preserves_events_sidecar(self, manager: SessionManager, scratch_dir: Path) -> None:
+        """Session deletion removes mutable state, not append-only audit evidence."""
+        from elspeth.composer_mcp.audit import events_sidecar_path
+
+        sid, state = manager.new_session()
+        manager.save(sid, state)
+        sidecar = events_sidecar_path(scratch_dir, sid)
+        sidecar.write_text('{"tool_name":"save_session"}\n', encoding="utf-8")
+        manager.delete(sid)
+        with pytest.raises(SessionNotFoundError):
+            manager.load(sid)
+        assert sidecar.read_text(encoding="utf-8") == '{"tool_name":"save_session"}\n'
+
     def test_saved_file_is_valid_json(self, manager: SessionManager, scratch_dir: Path) -> None:
         sid, state = manager.new_session(name="json-check")
         manager.save(sid, state)

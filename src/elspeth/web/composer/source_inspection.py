@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import re
 from collections import Counter
 from collections.abc import Mapping
@@ -32,6 +31,7 @@ from uuid import UUID
 
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict
 from elspeth.plugins.sources.field_normalization import resolve_field_names
 from elspeth.web.composer.guided.errors import InvariantError
 
@@ -463,10 +463,11 @@ def _inspect_jsonl(
         line = raw_line.strip()
         if not line:
             continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
+        value, parse_error = _parse_inspection_json(line)
+        if parse_error is not None:
             parse_failures += 1
+            if not any(parse_error in warning for warning in warnings):
+                warnings.append(f"jsonl parse error: {parse_error}")
             continue
         if not isinstance(value, dict):
             parse_failures += 1
@@ -499,9 +500,8 @@ def _inspect_json(
             f"binary_or_non_utf8_content: {decode_replacements} replacement char(s) introduced while decoding sample bytes — declare encoding explicitly or treat as binary"
         )
     objects: list[dict[str, Any]] = []
-    try:
-        loaded = json.loads(text)
-    except json.JSONDecodeError as exc:
+    loaded, parse_error = _parse_inspection_json(text)
+    if parse_error is not None:
         # Two distinct cases: (a) the sample was truncated mid-document at
         # the 8 KiB peek boundary on a larger file — incomplete sample is
         # the expected failure mode; (b) the document is complete but
@@ -509,9 +509,9 @@ def _inspect_json(
         # is real. Conflating them in the message hides the second case
         # from the operator/LLM.
         if truncated:
-            warnings.append(f"json parse error (sample truncated at {_MAX_BYTES} bytes; full document may be larger): {exc.msg}")
+            warnings.append(f"json parse error (sample truncated at {_MAX_BYTES} bytes; full document may be larger): {parse_error}")
         else:
-            warnings.append(f"json parse error (full content sampled, document is malformed): {exc.msg}")
+            warnings.append(f"json parse error (full content sampled, document is malformed): {parse_error}")
         loaded = None
 
     if isinstance(loaded, list):
@@ -548,6 +548,14 @@ def _inspect_json(
         extra_warnings=warnings,
         sample_text=text,
     )
+
+
+def _parse_inspection_json(text: str) -> tuple[Any, str | None]:
+    """Parse source-inspection JSON using the runtime strict JSON policy."""
+    try:
+        return parse_json_strict(text)
+    except RecursionError as exc:
+        return None, f"JSON nesting exceeds parser recursion limit: {exc.__class__.__name__}"
 
 
 def _facts_from_objects(

@@ -226,15 +226,7 @@ def test_provider_reasoning_fields_default_to_none() -> None:
 
 
 def test_composer_llm_call_records_temperature_and_seed() -> None:
-    """temperature and seed are required audit fields and round-trip through to_dict().
-
-    The composer hardcodes ``temperature=0.0`` and uses ``seed=42`` when the
-    provider supports it (RGR investigation 2026-05-06 §4.4 — uncontrolled
-    sampling at LiteLLM/OpenRouter default ~1.0 was the largest single
-    explanation for schema-construction nondeterminism). The audit row records
-    the values actually sent so a reviewer can correlate any individual
-    failure with the precise sampling regime that produced it.
-    """
+    """Configured temperature and seed round-trip through to_dict()."""
     call = _make_call(temperature=0.0, seed=42)
 
     payload = call.to_dict()
@@ -243,6 +235,15 @@ def test_composer_llm_call_records_temperature_and_seed() -> None:
     assert call.seed == 42
     assert payload["temperature"] == 0.0
     assert payload["seed"] == 42
+
+
+def test_temperature_accepts_none_for_omitted_request_parameter() -> None:
+    call = _make_call(temperature=None)
+
+    payload = call.to_dict()
+
+    assert call.temperature is None
+    assert payload["temperature"] is None
 
 
 def test_composer_llm_call_allows_seed_none_when_provider_omits_it() -> None:

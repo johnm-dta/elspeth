@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry, FindingKey, load_allowlist, verify_entry_binding_against_finding
+from elspeth_lints.core.allowlist_governance import allowlist_governance_findings
 from elspeth_lints.core.protocols import Finding, RuleMetadata
 
 _TRUST_BOUNDARY_EXPORT = "elspeth.contracts.trust_boundary"
@@ -385,9 +386,27 @@ def load_honesty_gate_allowlist(
     return allowlist
 
 
-def filter_allowlisted_findings(findings: list[Finding], allowlist: Allowlist) -> list[Finding]:
+def filter_allowlisted_findings(
+    findings: list[Finding],
+    allowlist: Allowlist,
+    *,
+    allowlist_dir: Path | None = None,
+    governance_emitted_dirs: set[str] | None = None,
+    emit_allowlist_governance: bool = True,
+) -> list[Finding]:
     """Return findings not covered by the trust-boundary allowlist."""
-    return [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    active = [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    if allowlist_dir is None:
+        return active
+    return [
+        *active,
+        *allowlist_governance_findings(
+            allowlist,
+            allowlist_dir,
+            emitted_dirs=governance_emitted_dirs,
+            enabled=emit_allowlist_governance,
+        ),
+    ]
 
 
 def _validate_honesty_gate_allowlist(allowlist: Allowlist, *, valid_rule_ids: frozenset[str]) -> None:

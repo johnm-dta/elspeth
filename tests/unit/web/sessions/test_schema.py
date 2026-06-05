@@ -11,7 +11,11 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
-from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
+from elspeth.web.sessions.schema import (
+    SessionSchemaError,
+    _validate_current_schema,
+    initialize_session_schema,
+)
 
 
 @pytest.fixture
@@ -19,6 +23,24 @@ def engine():
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)
     return eng
+
+
+def test_validator_rejects_same_named_unique_index_with_wrong_columns(engine) -> None:
+    """A same-named unique index with a different column set must be rejected.
+
+    Regression for elspeth-97bedcd9c4: _validate_named_unique_constraints compared
+    only index/constraint NAMES, so dropping uq_chat_messages_tool_call_id (unique
+    on (session_id, tool_call_id)) and recreating it under the same name on just
+    (session_id) was accepted as "current" — silently over-restricting the
+    intended "unique (session_id, tool_call_id) for tool rows" invariant to "at
+    most one tool row per session".
+    """
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX uq_chat_messages_tool_call_id"))
+        conn.execute(text("CREATE UNIQUE INDEX uq_chat_messages_tool_call_id ON chat_messages (session_id) WHERE role = 'tool'"))
+
+    with pytest.raises(SessionSchemaError, match="column mismatch"):
+        _validate_current_schema(engine)
 
 
 def test_initialize_session_schema_creates_current_schema_without_alembic_table() -> None:
@@ -45,6 +67,26 @@ def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
     assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
     assert not any("CREATE TRIGGER" in statement for statement in emitted)
     assert not any("SELECT RAISE" in statement for statement in emitted)
+
+
+def test_postgres_schema_uses_postgres_non_blank_check_syntax() -> None:
+    """ASCII-whitespace non-blank CHECKs must compile to PostgreSQL syntax."""
+    emitted: list[str] = []
+    engine = create_mock_engine(
+        "postgresql://",
+        lambda sql, *_, **__: emitted.append(str(sql.compile(dialect=engine.dialect))),
+    )
+
+    metadata.create_all(engine)
+
+    ddl = "\n".join(emitted)
+    assert "ck_composition_proposals_composer_provenance_all_or_none" in ddl
+    assert "ck_blobs_creating_llm_provenance_nullability" in ddl
+    assert "btrim(composer_model_identifier" in ddl
+    assert "btrim(creating_model_identifier" in ddl
+    assert "chr(9)" in ddl
+    assert "char(9)" not in ddl
+    assert " NOT GLOB " not in ddl
 
 
 def test_initialize_session_schema_is_idempotent_for_current_schema() -> None:

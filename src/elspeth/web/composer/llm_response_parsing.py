@@ -266,7 +266,7 @@ def build_llm_call_record(
     status: ComposerLLMCallStatus,
     started_at: datetime,
     started_ns: int,
-    temperature: float,
+    temperature: float | None,
     seed: int | None,
     response: Any | None = None,
     error_class: str | None = None,

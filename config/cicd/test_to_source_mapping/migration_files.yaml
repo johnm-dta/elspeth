@@ -5,9 +5,6 @@
 # for deliberate compatibility fixtures, mapping-table tests, and commentary.
 
 per_file_rules:
-  - pattern: "tests/unit/contracts/test_enums.py"
-    rules: ["manifest.test_to_source_mapping"]
-    reason: "ADR-019 compatibility and mapping-table tests intentionally exercise RowOutcome until Stage 5 deletes the enum."
   - pattern: "tests/fixtures/cicd/symbol_inventory/positive.py"
     rules: ["manifest.test_to_source_mapping"]
     reason: "ADR-019 source-inventory positive fixture intentionally keeps stale value comparisons for guard coverage."

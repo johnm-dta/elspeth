@@ -27,7 +27,7 @@ content-addressing covers the readiness fingerprint.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -448,6 +448,101 @@ async def test_mark_ready_for_review_audit_first_ordering(
 
 
 @pytest.mark.asyncio
+async def test_get_shareable_link_requires_mark_ready_for_current_snapshot(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+    monkeypatch,
+):
+    """Re-minting before mark-ready must not create an unaudited share artifact."""
+    snapshot = _readiness_snapshot(session_record.id)
+    service, *_ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=snapshot,
+    )
+
+    store_calls: list[bytes] = []
+
+    def tracking_store(content: bytes) -> str:
+        store_calls.append(content)
+        return "unused"
+
+    monkeypatch.setattr(payload_store, "store", tracking_store)
+
+    with pytest.raises(CompositionNotRunnableError) as exc_info:
+        await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
+
+    assert exc_info.value.reason == "not_marked_ready"
+    assert store_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_shareable_link_rejects_state_drift_even_when_digest_matches(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    """The prior mark must match both current state_id and payload_digest."""
+    snapshot = _readiness_snapshot(session_record.id)
+    service, session_service, *_ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=snapshot,
+    )
+
+    await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+
+    drifted_state = replace(state_record, id=uuid4())
+    session_service.get_current_state = AsyncMock(return_value=drifted_state)
+
+    with pytest.raises(CompositionNotRunnableError) as exc_info:
+        await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
+
+    assert exc_info.value.reason == "not_marked_ready"
+
+
+@pytest.mark.asyncio
+async def test_get_shareable_link_requires_existing_mark_ready_blob(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    """An audit attempt row without the blob is not a successful share mark."""
+    snapshot = _readiness_snapshot(session_record.id)
+    service, *_ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=snapshot,
+    )
+    response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+    payload_store.delete(response.payload_digest.removeprefix("sha256:"))
+
+    with pytest.raises(CompositionNotRunnableError) as exc_info:
+        await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
+
+    assert exc_info.value.reason == "not_marked_ready"
+
+
+@pytest.mark.asyncio
 async def test_get_shareable_link_remints_with_stable_digest(
     session_engine_with_row,
     payload_store,
@@ -467,6 +562,7 @@ async def test_get_shareable_link_remints_with_stable_digest(
         validation=_ok_validation(),
         readiness=snapshot,
     )
+    await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
     r1 = await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
     r2 = await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
     assert r1.payload_digest == r2.payload_digest

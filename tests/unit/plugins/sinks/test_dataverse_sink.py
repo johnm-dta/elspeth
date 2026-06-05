@@ -395,6 +395,38 @@ class TestFieldMappingAndLookups:
         # The mapped column name should NOT appear -- it's replaced by the bind key
         assert "ignored_column" not in payload
 
+    def test_lookup_bind_value_rejects_odata_injection(self) -> None:
+        """Lookup values with OData/URI structural chars are rejected (elspeth-e7d31117df).
+
+        The @odata.bind value sits in the unquoted /entity(value) key position, so
+        a row value like "abc)/contacts(emailaddress1='victim')" could change the
+        bind URI's navigation shape (injection). _map_row must reject such values
+        clearly at the sink boundary rather than emit an ambiguous/injectable
+        outbound payload. Validate-and-reject is safe regardless of whether
+        Dataverse percent-decodes the bind reference.
+        """
+        sink = self._make_sink(
+            field_mapping={
+                "email": "emailaddress1",
+                "account_id": "ignored_column",
+            },
+            lookups={
+                "account_id": {
+                    "target_entity": "accounts",
+                    "target_field": "parentcustomerid",
+                }
+            },
+        )
+        for malicious in (
+            "abc)/contacts(emailaddress1='victim')",
+            "guid'/x",
+            "a b",
+            "id=1",
+            "../accounts(x)",
+        ):
+            with pytest.raises(ValueError, match="not a valid record reference"):
+                sink._map_row({"email": "a@b.com", "account_id": malicious})
+
     def test_lookup_none_value_excluded(self) -> None:
         sink = self._make_sink(
             field_mapping={

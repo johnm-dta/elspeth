@@ -31,6 +31,7 @@ from elspeth.core.security.web import (
     NetworkError,
     SSRFBlockedError,
     SSRFSafeRequest,
+    validate_literal_ip_for_ssrf,
     validate_url_for_ssrf,
     validate_url_scheme,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "get_fingerprint_key",
     "load_secrets_from_config",
     "secret_fingerprint",
+    "validate_literal_ip_for_ssrf",
     "validate_url_for_ssrf",
     "validate_url_scheme",
 ]

@@ -1027,8 +1027,18 @@ _DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
 
 _SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
     "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
-    "Any other value, including 'quarantine', must match a configured output/sink name."
+    "Any other value, including 'quarantine', must match a configured output/sink name. "
+    "Sink names may contain only letters, digits, underscores, and hyphens."
 )
+
+_SOURCE_VALIDATION_FAILURE_PATTERN: Final[str] = r"^(?:discard|[a-zA-Z0-9_][a-zA-Z0-9_-]{0,63})$"
+
+_SOURCE_VALIDATION_FAILURE_JSON_SCHEMA: Final[dict[str, Any]] = {
+    "type": "string",
+    "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+    "pattern": _SOURCE_VALIDATION_FAILURE_PATTERN,
+    "maxLength": 64,
+}
 
 
 def _credential_wiring_contract_failure(

@@ -14,6 +14,7 @@ Example usage:
     path = cfg.path  # Direct access, fails fast if missing
 """
 
+import re
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Self
 
@@ -23,6 +24,37 @@ from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.schema import SchemaConfig
 
 OutputCollisionPolicy = Literal["fail_if_exists", "auto_increment", "append_or_create"]
+
+# Source validation-failure routing is serialized into runtime YAML under
+# source.options. Runtime YAML loading expands ${VAR} templates before plugin
+# config validation, so this field must be restricted to engine route/sink
+# identifiers rather than arbitrary text. Keep this local instead of importing
+# core.config private helpers: plugin infrastructure is a lower-level shared
+# surface and must not depend on the full settings module.
+_MAX_SOURCE_VALIDATION_FAILURE_DESTINATION_LENGTH = 64
+_SOURCE_VALIDATION_FAILURE_DESTINATION_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$")
+_SOURCE_VALIDATION_FAILURE_RESERVED_DESTINATIONS = frozenset({"continue", "fork", "on_success"})
+
+
+def validate_source_validation_failure_destination(value: str) -> str:
+    """Validate source validation-failure routing destination syntax."""
+    if not value or not value.strip():
+        raise ValueError("on_validation_failure must be a sink name or 'discard'")
+    destination = value.strip()
+    if destination == "discard":
+        return destination
+    if len(destination) > _MAX_SOURCE_VALIDATION_FAILURE_DESTINATION_LENGTH:
+        raise ValueError("on_validation_failure sink name exceeds max length 64")
+    if not _SOURCE_VALIDATION_FAILURE_DESTINATION_RE.match(destination):
+        raise ValueError(
+            "on_validation_failure must be 'discard' or a sink name containing only "
+            "letters, digits, underscores, and hyphens"
+        )
+    if destination in _SOURCE_VALIDATION_FAILURE_RESERVED_DESTINATIONS:
+        raise ValueError("on_validation_failure sink name is reserved for engine routing")
+    if destination.startswith("__"):
+        raise ValueError("on_validation_failure sink name must not start with '__'")
+    return destination
 
 
 def _plugin_config_field_title(field_name: str, _field_info: Any) -> str:
@@ -376,10 +408,8 @@ class SourceDataConfig(PathConfig):
     @field_validator("on_validation_failure")
     @classmethod
     def validate_on_validation_failure(cls, v: str) -> str:
-        """Ensure on_validation_failure is not empty."""
-        if not v or not v.strip():
-            raise ValueError("on_validation_failure must be a sink name or 'discard'")
-        return v.strip()
+        """Ensure on_validation_failure is a safe route/sink destination."""
+        return validate_source_validation_failure_destination(v)
 
 
 class TabularSourceDataConfig(SourceDataConfig):

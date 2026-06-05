@@ -34,7 +34,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
-    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+    _SOURCE_VALIDATION_FAILURE_JSON_SCHEMA,
     ToolContext,
     ToolResult,
     _apply_merge_patch,
@@ -122,10 +122,7 @@ _SET_SOURCE_DECLARATION = ToolDeclaration(
                 "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
             },
             "options": {"type": "object", "description": "Plugin-specific config."},
-            "on_validation_failure": {
-                "type": "string",
-                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-            },
+            "on_validation_failure": dict(_SOURCE_VALIDATION_FAILURE_JSON_SCHEMA),
         },
         "required": ["plugin", "on_success", "options", "on_validation_failure"],
     },
@@ -533,8 +530,7 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
                 "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
             },
             "on_validation_failure": {
-                "type": "string",
-                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                **_SOURCE_VALIDATION_FAILURE_JSON_SCHEMA,
                 "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
             },
             "options": {

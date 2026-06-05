@@ -33,7 +33,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
     DataversePageResponse,
     validate_additional_domain,
 )
-from elspeth.plugins.infrastructure.config_base import DataPluginConfig
+from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_source_validation_failure_destination
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
@@ -168,9 +168,8 @@ class DataverseSourceConfig(DataPluginConfig):
     @field_validator("on_validation_failure")
     @classmethod
     def validate_on_validation_failure(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("on_validation_failure must be a sink name or 'discard'")
-        return v.strip()
+        """Ensure on_validation_failure is a safe route/sink destination."""
+        return validate_source_validation_failure_destination(v)
 
     @field_validator("fetch_xml")
     @classmethod

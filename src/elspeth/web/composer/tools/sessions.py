@@ -45,7 +45,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
-    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+    _SOURCE_VALIDATION_FAILURE_JSON_SCHEMA,
     ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
@@ -808,10 +808,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         ),
                         "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
                     },
-                    "on_validation_failure": {
-                        "type": "string",
-                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-                    },
+                    "on_validation_failure": dict(_SOURCE_VALIDATION_FAILURE_JSON_SCHEMA),
                     "inline_blob": {
                         "type": "object",
                         "description": (

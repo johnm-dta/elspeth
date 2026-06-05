@@ -441,6 +441,28 @@ class TestSetSource:
         assert result.updated_state.source is not None
         assert result.updated_state.source.on_validation_failure == "bad_rows_sink"
 
+    def test_on_validation_failure_rejects_env_template(self) -> None:
+        """Reject env-template routing before generated YAML can expand secrets."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "${ELSPETH_LEAK_TEST}",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert result.data is not None
+        assert "on_validation_failure" in result.data["error"]
+        assert "ELSPETH_LEAK_TEST" not in result.data["error"]
+        assert "${" not in result.data["error"]
+
     def test_unknown_plugin_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -537,10 +559,11 @@ class TestSetSource:
 class TestVfDestinationAdvisory:
     """Advisory note when on_validation_failure references an unknown output.
 
-    The set_source tool schema accepts any string for on_validation_failure
-    (not just 'discard'/'quarantine'). When the value doesn't match a
-    configured output, ToolResult.data includes a note so the LLM can
-    self-correct before pipeline validation fails at engine startup.
+    The set_source tool schema accepts valid sink-name strings for
+    on_validation_failure (not just 'discard'/'quarantine'). When the
+    value doesn't match a configured output, ToolResult.data includes a
+    note so the LLM can self-correct before pipeline validation fails at
+    engine startup.
     """
 
     def test_set_source_unknown_vf_sink_includes_note(self) -> None:
@@ -625,6 +648,20 @@ class TestVfDestinationAdvisory:
         assert result.success is True
         assert result.data is not None
         assert "typo_sink" in result.data["note"]
+
+    def test_set_pipeline_rejects_env_template_vf_destination(self) -> None:
+        """set_pipeline rejects env-template source failure routes before YAML generation."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["source"]["on_validation_failure"] = "${ELSPETH_LEAK_TEST}"
+        result = execute_tool("set_pipeline", args, state, catalog)
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert result.data is not None
+        assert "on_validation_failure" in result.data["error"]
+        assert "ELSPETH_LEAK_TEST" not in result.data["error"]
+        assert "${" not in result.data["error"]
 
     def test_set_pipeline_vf_matches_output_no_note(self) -> None:
         """set_pipeline with on_validation_failure matching an output — no note."""
@@ -1964,6 +2001,18 @@ class TestToolDefinitions:
         for defn in get_tool_definitions():
             self._assert_no_enum_on_validation_failure(defn.get("parameters", {}), defn["name"])
 
+    def test_on_validation_failure_schema_rejects_env_templates_without_enum(self) -> None:
+        """Tool schemas allow sink names but not arbitrary env-template strings."""
+        schemas: list[tuple[str, dict[str, object]]] = []
+        for defn in get_tool_definitions():
+            self._collect_on_validation_failure_schemas(defn.get("parameters", {}), defn["name"], schemas)
+
+        assert schemas, "expected at least one on_validation_failure schema"
+        for tool_name, schema in schemas:
+            assert "enum" not in schema, tool_name
+            assert schema.get("pattern") == r"^(?:discard|[a-zA-Z0-9_][a-zA-Z0-9_-]{0,63})$", tool_name
+            assert schema.get("maxLength") == 64, tool_name
+
     def test_on_validation_failure_descriptions_match_runtime_contract(self) -> None:
         """Tool docs must not advertise a non-existent built-in quarantine sink."""
         descriptions: list[tuple[str, str]] = []
@@ -1976,6 +2025,7 @@ class TestToolDefinitions:
             assert "built-in quarantine" not in lowered, tool_name
             assert "discard" in description, tool_name
             assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
+            assert "letters, digits, underscores, and hyphens" in description, tool_name
 
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
@@ -2032,6 +2082,23 @@ class TestToolDefinitions:
         elif isinstance(schema, list):
             for item in schema:
                 self._assert_no_enum_on_validation_failure(item, tool_name)
+
+    def _collect_on_validation_failure_schemas(
+        self,
+        schema: object,
+        tool_name: str,
+        schemas: list[tuple[str, dict[str, object]]],
+    ) -> None:
+        """Collect on_validation_failure schemas from nested tool schemas."""
+        if isinstance(schema, dict):
+            for key, value in schema.items():
+                if key == "on_validation_failure" and isinstance(value, dict):
+                    schemas.append((tool_name, value))
+                elif isinstance(value, (dict, list)):
+                    self._collect_on_validation_failure_schemas(value, tool_name, schemas)
+        elif isinstance(schema, list):
+            for item in schema:
+                self._collect_on_validation_failure_schemas(item, tool_name, schemas)
 
     def _collect_on_validation_failure_descriptions(
         self,

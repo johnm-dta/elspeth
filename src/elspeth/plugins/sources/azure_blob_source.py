@@ -30,7 +30,7 @@ from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
-from elspeth.plugins.infrastructure.config_base import DataPluginConfig
+from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_source_validation_failure_destination
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
@@ -297,10 +297,8 @@ class AzureBlobSourceConfig(DataPluginConfig):
     @field_validator("on_validation_failure")
     @classmethod
     def validate_on_validation_failure(cls, v: str) -> str:
-        """Ensure on_validation_failure is not empty."""
-        if not v or not v.strip():
-            raise ValueError("on_validation_failure must be a sink name or 'discard'")
-        return v.strip()
+        """Ensure on_validation_failure is a safe route/sink destination."""
+        return validate_source_validation_failure_destination(v)
 
 
 # Rebuild model to resolve forward references for dynamic module loading

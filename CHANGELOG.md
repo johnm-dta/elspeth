@@ -10,6 +10,118 @@ _No unreleased changes recorded._
 
 ---
 
+## [0.5.3] - 2026-06-05 (RC-5.3 — Correctness, Audit Integrity, and Release Gating)
+
+RC-5.3 is a correctness and hardening release on top of the RC-5.2 composer
+train. It carries one new composer capability (operator-set sampling), tightens
+the release pipeline so images cannot publish ahead of their required checks,
+and lands a broad body of audit-integrity, trust-tier, output-contract, and
+frontend recovery fixes. The theme is evidence integrity under failure: audit
+rows are no longer written before the work they describe is real, output
+contracts reject sparse or malformed rows at the sink boundary rather than
+downstream, trust-tier error semantics raise typed faults instead of crashing
+or fabricating, and the web composer no longer renders stale responses after
+navigation. No schema migrations are introduced.
+
+### Added
+
+- **Operator-set sampling configuration (ADR-027)** — the web composer now
+  sources its LLM sampling parameters from operator-set configuration rather
+  than per-call defaults, threaded through the guided chain/chat solvers, the
+  boot probe, and auto-title. The `ComposerLLMCall` audit contract records the
+  resolved sampling so an auditor can reconstruct exactly how each model call
+  was parameterised. See
+  `docs/architecture/adr/027-composer-operator-set-sampling.md`.
+- **Release required-checks gate** — `scripts/cicd/check_release_required_checks.py`
+  gates container-image publication in `build-push.yaml` on the release's
+  required checks having passed, so an image can no longer be pushed ahead of
+  its CI evidence.
+- **Large-scale checkpoint policy** — documented checkpoint behaviour for
+  large-scale runs (`docs/reference/configuration.md`, the
+  `examples/large_scale_test` settings) with a policy test pinning it.
+- **OpenRouter catalog source check** — Landscape database-compatibility guards
+  now require an OpenRouter catalog source check before relying on catalog
+  provenance.
+
+### Changed
+
+- **Trust-tier branch-join correctness** — the `tier_model` rule and its
+  `trust_boundary` suppression now resolve branch joins correctly; the
+  `core` / `plugins` / `web` enforce-tier allowlists were reconciled to match.
+- **Fail closed on conflicting original headers** — `display_headers` now fails
+  closed when original headers conflict instead of silently picking one.
+- **Stale allowlists fail the gate** — non-tier stale allowlist entries now fail
+  CI rather than passing silently.
+- **Repo hygiene** — `AGENTS.md` and `CLAUDE.md` are no longer tracked; the
+  session hook regenerates them on disk, so tracking them only produced
+  perpetual churn.
+
+### Fixed
+
+#### Audit integrity and determinism
+
+- **Artifact streaming verifies bytes against the audit hash** before streaming,
+  so a tampered or truncated artifact cannot be served as audited evidence.
+- **Composer MCP delete preserves audit history** rather than dropping the
+  delete from the trail.
+- **`resolved_prompt_template_hash` is preserved** across the read and export
+  surfaces; the Landscape prompt-hash anchor is validated *before* insert so no
+  bad row is ever committed.
+- **SSRF-safe request success is recorded outside the network try** to avoid a
+  duplicate audit row; empty-corpus Chroma retrievals are now recorded in the
+  audit trail.
+- **Replayer sequence advances only after a concrete result**, and failed-run
+  accounting is hydrated when the data is available.
+
+#### Output contracts and sink/source boundaries
+
+- **Sparse-field output contracts** fixed for Azure Blob, Dataverse, and
+  `JSONSource`; the narrative-summary transform's output contract is corrected.
+- **Custom CSV headers are enforced completely** for the CSV and Azure Blob
+  sinks; Azure Blob CSV custom headers are honoured.
+- **Sink write safety** — the database sink enforces target-table compatibility
+  before appending, the Chroma sink preflights a full batch for duplicates
+  before any add (error mode), the JSON sink rolls back its array buffer on a
+  failed write, and Chroma persistent sink paths are guarded.
+- **Dataverse rejects OData-unsafe lookup bind values** at the sink boundary.
+
+#### Trust-tier and web error semantics
+
+- **Web session Tier-1 error semantics** now raise typed, upstream-interpretable
+  errors instead of crashing or coercing.
+- **Composer routes surface the provider detail** on a bad request, and the boot
+  probe bounds its transient handling.
+- **Redaction masks both the path and file blob storage-path carriers**, closing
+  a storage-path leak.
+
+#### Web composer recovery and stale-response guards
+
+- Guarded stale responses across session selection, navigation, blob loads,
+  execution-start, YAML refetch, and run-outputs artifact state; guided turn
+  widgets remount on payload changes; blob and secret stores clear on logout;
+  loop closure during progress scheduling is treated as shutdown; shared-inspect
+  401 auth is preserved.
+
+#### Sessions, Landscape, and CI/CD
+
+- **Session index/constraint validation** checks column *sets*, not just names.
+- **Landscape read-only mode** keeps live WAL audit DBs visible.
+- **CI/CD gate repairs** — restored the adapter-budget gate, repaired the
+  cicd-judge gates and cleared stale judge allowlist blockers, refreshed judge
+  signatures for RC5.3 allowlist drift, narrowed `fingerprint_params` to a
+  scalar value type to green `check_contracts`, fixed staging web-unit safety
+  flags, and aligned release-PDF distribution labels.
+
+> **Known issue at release cut.** `test_baseline_capture_is_self_consistent`
+> is red at the RC-5.3 HEAD: `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json` drifted
+> (+6 raw `trust_tier.tier_model` findings) as RC-5.3 commits landed without the
+> mechanical baseline regeneration. Regenerating it safely requires the
+> operator-held `ELSPETH_JUDGE_METADATA_HMAC_KEY` to confirm the enforce gate is
+> green first, so it is deferred to an operator step before the release is
+> tagged.
+
+---
+
 ## [0.5.2] - 2026-05-19 (RC-5.2 — Guided Composer, Durable Progress, and Recovery UX)
 
 RC-5.2 is the large Web Composer release train that folds the guided-mode

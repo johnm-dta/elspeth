@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-5.2](https://img.shields.io/badge/status-RC--5.2-yellow.svg)
+![Status: RC-5.3](https://img.shields.io/badge/status-RC--5.3-yellow.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -28,6 +28,7 @@ artifact that the executor runs directly.
 - [What Changed In RC-5](#what-changed-in-rc-5)
   - [RC-5.1 Updates](#rc-51-updates)
   - [RC-5.2 Updates](#rc-52-updates)
+  - [RC-5.3 Updates](#rc-53-updates)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -228,7 +229,38 @@ RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
   gating, CodeQL, and `elspeth-lints` checks make the release train easier to
   review and repeat.
 
-The RC-5.2 release documentation is intentionally explicit:
+### RC-5.3 Updates
+
+RC-5.3 is a correctness and hardening follow-up to RC-5.2 rather than a new
+authoring surface. The theme is evidence integrity under failure. The notable
+deltas:
+
+- **Operator-set sampling (ADR-027)** — the Web Composer sources its LLM
+  sampling parameters from operator-set configuration, threaded through the
+  guided solvers, boot probe, and auto-title, and recorded on the
+  `ComposerLLMCall` audit contract.
+- **Audit rows follow real work** — artifact bytes are verified against the
+  audit hash before streaming, the Landscape prompt-hash anchor is validated
+  before insert (no committed bad row), SSRF-safe request success and
+  empty-corpus retrievals are recorded without duplicate rows, and the replayer
+  advances its sequence only after a concrete result.
+- **Output contracts reject bad rows at the boundary** — sparse-field contract
+  fixes for Azure Blob, Dataverse, and `JSONSource`; complete custom-header
+  enforcement for the CSV and Azure Blob sinks; database-sink target-table
+  compatibility, Chroma duplicate preflight, and JSON-sink buffer rollback on a
+  failed write.
+- **Trust-tier and error semantics** — corrected trust-boundary branch joins
+  and reconciled enforce-tier allowlists; web session Tier-1 errors raise typed
+  faults instead of crashing; `display_headers` fails closed on conflicting
+  original headers; redaction masks both path and file blob storage-path
+  carriers.
+- **Frontend recovery hardening** — stale-response guards across session
+  selection, navigation, blob loads, execution start, YAML refetch, and
+  run-outputs state; blob and secret stores clear on logout.
+- **Release gating** — container-image publication is gated on the release's
+  required checks passing, so an image cannot publish ahead of its CI evidence.
+
+The RC-5.3 release documentation is intentionally explicit:
 
 - [Executive Summary](docs/release/executive-summary.md) is the current
   public-sector evaluation brief.
@@ -550,7 +582,7 @@ paths over a single high-assurance substrate, richer run evidence, declared
 plugin contracts, a stronger terminal outcome model, and more mechanical CI
 policy around audit integrity.
 
-Current RC-5.2 behaviour:
+Current RC-5.3 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,

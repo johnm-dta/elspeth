@@ -1,6 +1,6 @@
 # `docs/release/` — Release Histories and Snapshots
 
-**Last reviewed:** 2026-05-19 (RC-5.2)
+**Last reviewed:** 2026-06-05 (RC-5.3)
 **Audience:** Anyone navigating to release-level documentation
 **Register:** Lightly technical / directory-index
 
@@ -9,7 +9,7 @@ velocity records, public-sector evaluation material, and the long-lived
 assurance narrative.
 
 The directory is intentionally small. **Current** documents reflect the latest
-release (RC-5.2). Superseded point-in-time release docs and frozen historical
+release (RC-5.3). Superseded point-in-time release docs and frozen historical
 snapshots were relocated to the
 [2026-05-19 docs cleanout archive](../../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md);
 that archive's MANIFEST is the relocation map. New readers should start with the
@@ -41,14 +41,14 @@ Before diving into the documents below, know which sources they aggregate. **If 
 
 ---
 
-## Current documents (RC-5.2, May 2026)
+## Current documents (RC-5.3, June 2026)
 
 | Document | What it answers | Intended reader |
 |----------|-----------------|-----------------|
 | [`executive-summary.md`](executive-summary.md) *(DRAFT — awaiting operator sign-off)* | Capability and assurance summary; what the platform does, what it does not yet guarantee, what an evaluator should consider next. | **Public-service executives, programme sponsors, assurance and risk staff.** Australian public-service / institutional register. |
 | [`composer-guide.md`](composer-guide.md) | What the Composer can do, how guided/freeform authoring works, what readiness checks mean, and how a user completes or recovers a composition. | **Evaluators, programme teams, operators, and technical reviewers.** Public-facing / lightly technical. |
 | [`platform-architecture.md`](platform-architecture.md) | Current runtime surfaces, trust boundaries, audit-first behaviour, configuration validation, external-system boundaries, and adopter responsibilities. | **Evaluators, technical leaders, architects, and assurance reviewers.** Public-facing / technical. |
-| [`assessment-mapping.md`](assessment-mapping.md) | How the RC-5.2 evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
+| [`assessment-mapping.md`](assessment-mapping.md) | How the RC-5.3 evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
 | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) | What has the project shipped between RC-1 and RC-5? Period-by-period, capability-by-capability, with cumulative commit counts. | **Engineering team and engineering leadership.** Detailed engineering content; not written for non-engineering stakeholders. |
 | [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) | How much work was completed per day? Per-day commit volume across all 123 active days, with peak-day attribution. | **Engineering team and engineering leadership.** Per-commit cadence detail; commit count is a tempo signal, not a value signal. |
 

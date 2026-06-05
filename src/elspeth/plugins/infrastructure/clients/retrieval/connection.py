@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from elspeth.core.security.web import NetworkError, SSRFBlockedError, validate_url_for_ssrf
+from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 
 _LOOPBACK_HOSTS = {"localhost"}
 _LOOPBACK_ALLOWED_RANGES = (
@@ -121,5 +122,9 @@ class ChromaConnectionConfig(BaseModel):
                     f"got host={self.host!r} with ssl=False. "
                     f"Non-SSL connections are only permitted for localhost."
                 )
-            _validate_chroma_http_target(self.host, self.port, ssl=self.ssl)
+            # The SSRF check resolves DNS, so it must not run during preflight
+            # (preflight validates config purely, without network I/O). It runs
+            # at real runtime — before the Chroma SDK opens any connection.
+            if not plugin_preflight_mode_enabled():
+                _validate_chroma_http_target(self.host, self.port, ssl=self.ssl)
         return self

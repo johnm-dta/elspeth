@@ -246,9 +246,6 @@ allowed_dict_patterns:
   - "src/elspeth/core/config.py:resolve_config:return"
   - "src/elspeth/core/config.py:_expand_env_vars:config"
   - "src/elspeth/core/config.py:_expand_env_vars:return"
-  # Thin public wrapper over _expand_env_vars; same arbitrary config-tree shape.
-  - "src/elspeth/core/config.py:expand_env_vars_in_config:config"
-  - "src/elspeth/core/config.py:expand_env_vars_in_config:return"
   - "src/elspeth/core/config.py:_fingerprint_secrets:options"
   - "src/elspeth/core/config.py:_fingerprint_secrets:return"
   - "src/elspeth/core/config.py:_expand_config_templates:raw_config"

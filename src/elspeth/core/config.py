@@ -2186,20 +2186,6 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def expand_env_vars_in_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Expand ``${VAR}`` placeholders across an operator-authored config tree.
-
-    Thin public wrapper over the module-private :func:`_expand_env_vars` so the
-    web execution service can expand the operator-authored YAML tree exactly
-    once, *before* it splices in runtime-only values (resolved web secrets,
-    fetched inline-blob bytes). Those runtime values are NOT operator-authored
-    and must never be passed through env expansion — attacker-supplied blob
-    text such as ``${OPENAI_API_KEY}`` must remain literal data, not a host
-    environment lookup.
-    """
-    return _expand_env_vars(config)
-
-
 def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
@@ -2214,11 +2200,12 @@ def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool =
         yaml_content: YAML configuration as a string.
         expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
             patterns from the host environment. Keep this enabled for
-            operator-authored YAML. Web execution disables it when the YAML
-            already carries runtime-substituted values (resolved secrets or
-            inline blob bytes) that were either expanded earlier on the
-            operator tree or must stay literal, so user-authored blob bytes
-            cannot resolve host secrets after the preflight access controls.
+            operator-authored, CLI-loaded config files (see load_settings()).
+            The web execution and validation paths pass ``False``: web-authored
+            YAML is user-controlled, known secret inventory names are resolved
+            via the audited resolve_secret_refs() path beforehand, and any
+            remaining ``${VAR}`` must stay literal data rather than become a
+            host-environment lookup.
 
     Returns:
         Validated ElspethSettings instance.

@@ -1243,7 +1243,11 @@ def validate_pipeline(
             )
             settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
 
-        elspeth_settings = load_settings_from_yaml_string(settings_yaml)
+        # Web-authored pipeline YAML must never expand host ${VAR} placeholders
+        # (parity with the execution path). Known secret inventory names are
+        # resolved above via resolve_secret_refs; any remaining ${VAR} is
+        # user-authored data, not a host-environment lookup.
+        elspeth_settings = load_settings_from_yaml_string(settings_yaml, expand_env_vars=False)
         checks.append(
             ValidationCheck(
                 name=_CHECK_SETTINGS,

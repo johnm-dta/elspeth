@@ -13,7 +13,12 @@ import yaml
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 from elspeth.web.execution.protocol import ValidationSettings
-from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, SOURCE_LOCAL_PATH_OPTION_KEYS, resolve_data_path
+from elspeth.web.paths import (
+    NESTED_LOCAL_PATH_OPTION_KEYS,
+    SINK_LOCAL_PATH_OPTION_KEYS,
+    SOURCE_LOCAL_PATH_OPTION_KEYS,
+    resolve_data_path,
+)
 
 RUNTIME_CHECK_PLUGIN_INSTANTIATION = "plugin_instantiation"
 RUNTIME_CHECK_GRAPH_STRUCTURE = "graph_structure"
@@ -93,6 +98,27 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
                 for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     if key in opts and not Path(str(opts[key])).is_absolute():
                         opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+
+    # Nested transform provider_config paths (RAG retrieval transforms carry a
+    # local Chroma persist_directory under options.provider_config). Confine
+    # the same way as sink paths: rewrite relative values to absolute under
+    # data_dir so the allowlist approves what the plugin actually reads/writes.
+    transforms = config.get("transforms")
+    if transforms is not None:
+        if not isinstance(transforms, list):
+            raise TypeError(f"YAML generator produced non-list 'transforms' value (got {type(transforms).__name__})")
+        for transform in transforms:
+            if not isinstance(transform, dict):
+                continue
+            opts = transform.get("options")
+            if not isinstance(opts, dict):
+                continue
+            provider_config = opts.get("provider_config")
+            if not isinstance(provider_config, dict):
+                continue
+            for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+                if key in provider_config and not Path(str(provider_config[key])).is_absolute():
+                    provider_config[key] = str(resolve_data_path(str(provider_config[key]), data_dir))
 
     return yaml.dump(config, default_flow_style=False)
 

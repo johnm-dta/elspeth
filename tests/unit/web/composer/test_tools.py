@@ -5752,6 +5752,174 @@ class TestPatchOutputPathSecurity:
         assert result.success is True
 
 
+class TestTransformProviderConfigPathSecurity:
+    """S2: nested transform provider_config persist_directory must be confined.
+
+    RAG retrieval transforms carry a local Chroma persist_directory under
+    options.provider_config. Mirrors the sink-path guard: confined to the
+    allowed output directories.
+    """
+
+    @staticmethod
+    def _catalog_with_rag() -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="rag_retrieval",
+                description="RAG retrieval transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
+    @staticmethod
+    def _rag_options(persist_directory: str) -> dict[str, Any]:
+        return {
+            "provider": "chroma",
+            "provider_config": {"persist_directory": persist_directory, "collection": "docs"},
+            "schema": {"mode": "observed"},
+            "output_prefix": "rag_",
+            "query_field": "text",
+        }
+
+    def test_helper_rejects_persist_directory_outside_allowed(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {"provider": "chroma", "provider_config": {"persist_directory": "/tmp/elspeth-outside"}},
+            data_dir="/data",
+        )
+        assert error is not None
+        assert "persist_directory" in error
+
+    def test_helper_allows_persist_directory_under_outputs(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {"provider": "chroma", "provider_config": {"persist_directory": "/data/outputs/chroma"}},
+            data_dir="/data",
+        )
+        assert error is None
+
+    def test_helper_skips_non_rag_transform(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path({"some_field": "value"}, data_dir="/data")
+        assert error is None
+
+    def test_upsert_node_rejects_persist_directory_outside_allowed(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._rag_options("/etc/cron.d/backdoor"),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "persist_directory" in result.data["error"]
+
+    def test_upsert_node_accepts_persist_directory_under_outputs(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._rag_options("/data/outputs/chroma"),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is True
+
+    def test_patch_node_options_rejects_persist_directory_outside_allowed(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._rag_options("/data/outputs/chroma"),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert created.success is True
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "rag",
+                "patch": {"provider_config": {"persist_directory": "/etc/passwd", "collection": "docs"}},
+            },
+            created.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "persist_directory" in result.data["error"]
+
+    def test_set_pipeline_rejects_persist_directory_outside_allowed(self) -> None:
+        """Parity: a bulk set_pipeline must reject an escaping transform path,
+        not just escaping sink paths."""
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "nodes": [
+                {
+                    "id": "rag",
+                    "node_type": "transform",
+                    "plugin": "rag_retrieval",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": self._rag_options("/etc/cron.d/backdoor"),
+                }
+            ],
+            "edges": [{"id": "e1", "from_node": "source", "to_node": "rag", "edge_type": "on_success", "label": None}],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+        assert result.success is False
+        assert "persist_directory" in result.data["error"]
+
+
 # ---------------------------------------------------------------------------
 # set_pipeline tool tests
 # ---------------------------------------------------------------------------

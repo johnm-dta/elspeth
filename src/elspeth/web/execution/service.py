@@ -552,6 +552,33 @@ class ExecutionServiceImpl:
                                 f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
                             )
 
+        # Nested transform provider_config path allowlist — RAG retrieval
+        # transforms carry a local Chroma persist_directory under
+        # options.provider_config. It is a read/write target like a sink, so it
+        # is confined to the allowed SINK directories.
+        if composition_state.nodes:
+            from elspeth.web.paths import (
+                NESTED_LOCAL_PATH_OPTION_KEYS,
+                allowed_sink_directories,
+                resolve_data_path,
+            )
+
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            for node in composition_state.nodes:
+                if node.node_type != "transform":
+                    continue
+                provider_config = node.options.get("provider_config")
+                if not isinstance(provider_config, Mapping):
+                    continue
+                for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+                    value = provider_config.get(key)
+                    if value is not None:
+                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
+                            raise PathAllowlistViolationError(
+                                f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
+                            )
+
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 
         # Resolve relative source/sink paths to absolute in the YAML so

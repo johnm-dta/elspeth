@@ -71,6 +71,7 @@ from elspeth.web.interpretation_state import (
     strip_authoring_options,
 )
 from elspeth.web.paths import (
+    NESTED_LOCAL_PATH_OPTION_KEYS,
     SINK_LOCAL_PATH_OPTION_KEYS,
     SOURCE_LOCAL_PATH_OPTION_KEYS,
     allowed_sink_directories,
@@ -1182,6 +1183,41 @@ def _validate_sink_path(
                     f"Path violation (S2): '{key}' value '{options[key]}' is outside the "
                     f"allowed directories. Sink output paths "
                     f"must be under {data_dir}/outputs/ or {data_dir}/blobs/."
+                )
+    return None
+
+
+def _validate_transform_provider_config_path(
+    options: Mapping[str, Any],
+    data_dir: str | None,
+) -> str | None:
+    """Validate nested provider_config path options are under allowed dirs.
+
+    RAG retrieval transforms carry a local Chroma persist_directory under
+    ``options["provider_config"]``. It is a read/write target like a sink, so
+    it is confined to the allowed sink directories. Non-RAG transforms have no
+    provider_config dict and are skipped cleanly.
+
+    Returns an error message if validation fails, None if OK.
+    """
+    if data_dir is None:
+        return None
+
+    provider_config = options.get("provider_config")
+    if not isinstance(provider_config, Mapping):
+        return None
+
+    allowed = allowed_sink_directories(data_dir)
+
+    for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+        if key in provider_config:
+            resolved = resolve_data_path(provider_config[key], data_dir)
+            if not any(resolved.is_relative_to(d) for d in allowed):
+                return (
+                    f"Path violation (S2): provider_config '{key}' value "
+                    f"'{provider_config[key]}' is outside the allowed directories. "
+                    f"Transform provider paths must be under {data_dir}/outputs/ "
+                    f"or {data_dir}/blobs/."
                 )
     return None
 

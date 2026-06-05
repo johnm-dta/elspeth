@@ -11,6 +11,11 @@ from pathlib import Path
 
 SOURCE_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file")
 SINK_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file", "persist_directory")
+# Local filesystem keys to confine inside a transform's
+# ``options["provider_config"]`` dict (RAG retrieval transforms carry a
+# Chroma persist_directory there). Confined like sink paths — persist_directory
+# is a local read/write target.
+NESTED_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("persist_directory",)
 
 
 def resolve_data_path(value: str, data_dir: str) -> Path:

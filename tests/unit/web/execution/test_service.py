@@ -3856,6 +3856,144 @@ class TestSinkPathRestriction:
         assert isinstance(run_id, UUID)
 
 
+class TestTransformProviderConfigPathRestriction:
+    """Nested transform provider_config persist_directory must be confined to
+    the allowed output directories.
+
+    RAG retrieval transforms carry a local Chroma persist_directory under
+    options.provider_config. Without this, a client can set it to an arbitrary
+    absolute or ../ path and /execute will read/write Chroma files there —
+    escaping the data_dir sandbox.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with provider_config.persist_directory outside data_dir/outputs must be rejected."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/etc/cron.d/backdoor"},
+                },
+            }
+        ]
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_traversal_rejected(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with ../ traversal in provider_config.persist_directory must be rejected."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/../../etc/secret"},
+                },
+            }
+        ]
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_under_outputs_accepted(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with provider_config.persist_directory under data_dir/outputs is allowed."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/chroma"},
+                },
+            }
+        ]
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+
+    @pytest.mark.asyncio
+    async def test_non_rag_transform_without_provider_config_passes(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform without provider_config (non-RAG) skips the nested check cleanly."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "vt",
+                "node_type": "transform",
+                "plugin": "value_transform",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {"some_field": "value"},
+            }
+        ]
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+
+
 # ── Transform Framing Restriction ─────────────────────────────────────
 
 
@@ -4933,6 +5071,47 @@ class TestResolveYamlPaths:
         )
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "/srv/data/outputs/chroma-store" in result
+
+    def test_transform_provider_persist_directory_relative_path_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "source:\n"
+            "  plugin: csv\n"
+            "  options:\n"
+            "    path: /abs/in.csv\n"
+            "transforms:\n"
+            "  - name: rag\n"
+            "    plugin: rag_retrieval\n"
+            "    options:\n"
+            "      provider: chroma\n"
+            "      provider_config:\n"
+            "        persist_directory: outputs/chroma-index\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-index" in result
+
+    def test_transform_provider_persist_directory_absolute_path_unchanged(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "transforms:\n"
+            "  - name: rag\n"
+            "    plugin: rag_retrieval\n"
+            "    options:\n"
+            "      provider: chroma\n"
+            "      provider_config:\n"
+            "        persist_directory: /srv/data/outputs/chroma-index\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-index" in result
+
+    def test_non_rag_transform_without_provider_config_is_noop(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "transforms:\n  - name: vt\n    plugin: value_transform\n    options:\n      some_field: value\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "plugin: value_transform" in result
 
     def test_sink_without_options_is_noop(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths

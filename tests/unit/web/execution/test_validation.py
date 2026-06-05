@@ -661,6 +661,68 @@ class TestValidatePipelineSinkPathAllowlist:
         assert path_check.passed is True
 
 
+class TestValidatePipelineTransformProviderConfigPathAllowlist:
+    """Nested transform provider_config path allowlist — RAG retrieval
+    transforms carry a local Chroma persist_directory under
+    options.provider_config; it must be confined like a sink path."""
+
+    def test_transform_provider_persist_directory_outside_blocked(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={"provider": "chroma", "provider_config": {"persist_directory": "/etc/cron.d/backdoor"}},
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+        assert result.is_valid is False
+        assert any("Path traversal" in e.message for e in result.errors)
+        assert any(e.component_type == "transform" for e in result.errors)
+        assert any("persist_directory" in e.message for e in result.errors)
+
+    def test_transform_provider_persist_directory_traversal_blocked(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={
+                "provider": "chroma",
+                "provider_config": {"persist_directory": "/tmp/test_data/outputs/../../etc/secret"},
+            },
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+        assert result.is_valid is False
+
+    def test_transform_provider_persist_directory_under_outputs_passes(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={"provider": "chroma", "provider_config": {"persist_directory": "/tmp/test_data/outputs/chroma"}},
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is True
+
+    def test_non_rag_transform_without_provider_config_skips_check(self) -> None:
+        node = _make_node(plugin="value_transform", options={"some_field": "value"})
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+        # No path option anywhere → check is recorded as passed (skipped-style).
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is True
+
+
 class TestValidatePipelineSemanticContractsLegacy:
     """Validation must catch transform pairings that violate line framing.
 

@@ -25,7 +25,6 @@ from textwrap import dedent
 from elspeth_lints.core.cli import main
 from elspeth_lints.rules.trust_tier.tier_model.rule import Finding, TierModelVisitor
 from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
-    compute_derived_names,
     extract_boundary_metadata,
 )
 
@@ -247,12 +246,20 @@ class TestSuppressionPositive:
         assert _findings_by_rule(findings, "R1") == []
 
 
-class TestComputeDerivedNames:
-    """Direct coverage for the fixed-point dataflow helper."""
+class TestLiveDerivedNameSuppression:
+    """Derived-name coverage through the production visitor path."""
 
-    def test_annotation_augassign_with_and_namedexpr_branches(self) -> None:
-        func = _first_function(
-            """
+    def test_annotation_augassign_with_and_namedexpr_suppress_live_findings(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
             def handler(arguments, total):
                 annotated: object = arguments["annotated"]
                 total += arguments["delta"]
@@ -260,39 +267,37 @@ class TestComputeDerivedNames:
                     pass
                 if (chosen := arguments["maybe"]):
                     pass
-            """
-        )
+                annotated.get("a")
+                total.get("b")
+                ctx.get("c")
+                chosen.get("d")
+        """)
 
-        derived = compute_derived_names(func, "arguments")
+        assert _findings_by_rule(_findings(source), "R1") == []
 
-        assert {"annotated", "total", "ctx", "chosen"} <= derived
+    def test_async_for_async_with_and_comprehension_suppress_live_findings(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
 
-    def test_async_for_async_with_and_comprehension_branches(self) -> None:
-        func = _first_function(
-            """
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
             async def handler(arguments):
                 async for item in arguments["items"]:
-                    pass
+                    item.get("id")
                 async with arguments["ctx"] as ctx:
-                    pass
-                list_items = [row for row in arguments["rows"]]
-                set_items = {tag for tag in arguments["tags"]}
-                dict_items = {key: value for key, value in arguments["pairs"]}
-                gen_items = (part for part in arguments["parts"])
-            """
-        )
+                    ctx.get("id")
+                [row.get("id") for row in arguments["rows"]]
+                {tag.get("id") for tag in arguments["tags"]}
+                {key.get("id"): value.get("id") for key, value in arguments["pairs"]}
+                (part.get("id") for part in arguments["parts"])
+        """)
 
-        derived = compute_derived_names(func, "arguments")
-
-        assert {"item", "ctx", "row", "tag", "key", "value", "part"} <= derived
-
-    def test_fixed_point_bound_scales_with_local_name_count(self) -> None:
-        chain = "\n".join(f"    n{index} = {'arguments' if index == 0 else f'n{index - 1}'}" for index in range(40))
-        func = _first_function(f"def handler(arguments):\n{chain}\n")
-
-        derived = compute_derived_names(func, "arguments")
-
-        assert "n39" in derived
+        assert _findings_by_rule(_findings(source), "R1") == []
 
 
 # =============================================================================
@@ -407,6 +412,96 @@ class TestSuppressionNegative:
         r1 = _findings_by_rule(findings, "R1")
         assert len(r1) == 1
         assert 'raw.get("safe")' in r1[0].code_snippet
+
+    def test_if_branch_derived_name_only_on_one_path_does_not_suppress_after_join(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload, use_external):
+                if use_external:
+                    raw = {}
+                else:
+                    raw = payload["raw"]
+                return raw.get("id")
+        """)
+
+        r1 = _findings_by_rule(_findings(source), "R1")
+        assert len(r1) == 1
+        assert 'raw.get("id")' in r1[0].code_snippet
+
+    def test_if_branch_derived_name_on_every_path_suppresses_after_join(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload, choose_a):
+                if choose_a:
+                    raw = payload["a"]
+                else:
+                    raw = payload["b"]
+                return raw.get("id")
+        """)
+
+        assert _findings_by_rule(_findings(source), "R1") == []
+
+    def test_try_branch_derived_name_only_on_handler_path_does_not_suppress_after_join(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload):
+                try:
+                    raw = {}
+                except ValueError:
+                    raw = payload["raw"]
+                return raw.get("id")
+        """)
+
+        r1 = _findings_by_rule(_findings(source), "R1")
+        assert len(r1) == 1
+        assert 'raw.get("id")' in r1[0].code_snippet
+
+    def test_while_body_derived_name_does_not_suppress_after_zero_iteration_join(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload, keep_going):
+                raw = {}
+                while keep_going:
+                    raw = payload["raw"]
+                    break
+                return raw.get("id")
+        """)
+
+        r1 = _findings_by_rule(_findings(source), "R1")
+        assert len(r1) == 1
+        assert 'raw.get("id")' in r1[0].code_snippet
 
 
 # =============================================================================
@@ -829,21 +924,12 @@ class TestAsyncFunction:
 
 
 # =============================================================================
-# Regression: B1 — nested-function scope leak in compute_derived_names
+# Regression: B1 — nested-function scope leak in live derived-name suppression
 # =============================================================================
 #
-# Before the fix, ``compute_derived_names`` used ``ast.walk(func_node)`` with
-# a ``sub is not func_node`` guard. ``ast.walk`` had already yielded every
-# descendant of any nested function *before* the guard fired — only the
-# inner FunctionDef AST node itself was skipped, not its body. Names
-# bound inside inner-scope assignments from a name colliding with an
-# outer-scope variable falsely tainted the outer ``derived`` set, and
-# R1/R5 findings on the unrelated outer-scope variable were silently
-# suppressed.
-#
-# The fix replaces the walk with ``walk_function_own_scope`` which
-# short-circuits at nested-scope AST boundaries — the inner function's
-# body is not visited at all by the outer function's taint walk.
+# The visitor must not let nested scopes inherit an outer function's active
+# ``@trust_boundary`` suppression state. A finding in a nested function or
+# lambda is only suppressible by that nested callable's own decorator.
 # =============================================================================
 
 
@@ -928,28 +1014,12 @@ class TestNestedScopeLeakRegression:
 
 
 # =============================================================================
-# Regression: C5-1 — class-body scope leak in walk_function_own_scope
+# Regression: C5-1 — class-body scope does not inherit boundary suppression
 # =============================================================================
 #
-# Before the fix, ``walk_function_own_scope`` short-circuited only at
-# ``FunctionDef``, ``AsyncFunctionDef``, and ``Lambda`` boundaries. A
-# nested ``class`` definition inside a decorated function was descended
-# into — its class-body assignments (``raw = arguments["x"]``) were seen
-# as if they bound names in the outer function's scope. The outer
-# ``derived`` set grew to include the class-attribute name, and any
-# outer-scope ``raw.get(...)`` was then falsely treated as rooted at
-# ``arguments`` and suppressed.
-#
-# Python class bodies execute in a fresh namespace: assignments become
-# class attributes, NOT bindings in the enclosing function's locals. A
-# scope-respecting walker for the outer function's own scope must
-# short-circuit at ``ClassDef`` exactly as it does at ``FunctionDef``.
-#
-# The fix adds ``ast.ClassDef`` to the short-circuit tuple in
-# ``ast_walker._NESTED_SCOPE_TYPES``. Both ``walk_function_own_scope``
-# (used by tier_model's ``compute_derived_names``) and ``iter_own_scope``
-# (used by the scope and tests rules) consume the shared tuple, so the
-# fix lands in every analyzer that walks function bodies.
+# Python class bodies execute in a fresh namespace: assignments become class
+# attributes, not bindings in the enclosing function's locals. The live visitor
+# therefore clears inherited boundary state while visiting nested classes.
 # =============================================================================
 
 
@@ -960,18 +1030,8 @@ class TestClassBodyScopeLeakRegression:
         """Outer fn defines a nested class that assigns from ``arguments``;
         the outer ``raw`` must NOT inherit that taint.
 
-        Before the fix: ``walk_function_own_scope`` descended into the
-        ``class Helper`` body, saw ``raw = arguments["x"]``, and added
-        ``raw`` to the outer function's ``derived`` set. The outer
-        ``raw.get("k")`` was then falsely treated as rooted at
-        ``arguments`` and the R1 finding was suppressed.
-
-        After the fix: the class body is never visited by the outer
-        walk, so ``raw`` is bound only as a class attribute (in the
-        class's own namespace). The outer-scope ``raw = {"k": "v"}``
-        is an ordinary literal-dict assignment; ``raw.get("k")`` on
-        the outer ``raw`` is NOT rooted at ``arguments`` and the R1
-        finding fires.
+        The class-body ``raw`` is a class attribute, not an outer local. The
+        outer ``raw.get("k")`` must therefore remain visible as an R1 finding.
         """
         source = dedent("""
             from elspeth.contracts import trust_boundary

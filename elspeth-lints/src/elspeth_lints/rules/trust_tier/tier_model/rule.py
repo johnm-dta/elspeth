@@ -27,7 +27,7 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -1228,6 +1228,34 @@ class TierModelVisitor(ast.NodeVisitor):
             return
         state.assign_targets(targets, is_derived=self._value_depends_on_boundary(value, snapshot))
 
+    def _set_current_derived_names(self, names: frozenset[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        state.names.clear()
+        state.names.update(names)
+
+    def _visit_statement_sequence_from_snapshot(
+        self,
+        field_name: str,
+        statements: Sequence[ast.stmt],
+        snapshot: frozenset[str],
+    ) -> frozenset[str]:
+        self._set_current_derived_names(snapshot)
+        for index, statement in enumerate(statements):
+            self._visit_ast_list_item(field_name, index, statement)
+        state = self._current_derived_state()
+        return frozenset() if state is None else state.snapshot()
+
+    @staticmethod
+    def _intersect_snapshots(snapshots: Sequence[frozenset[str]]) -> frozenset[str]:
+        if not snapshots:
+            return frozenset()
+        joined = set(snapshots[0])
+        for snapshot in snapshots[1:]:
+            joined.intersection_update(snapshot)
+        return frozenset(joined)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         state = self._current_derived_state()
         snapshot = frozenset() if state is None else state.snapshot()
@@ -1271,6 +1299,64 @@ class TierModelVisitor(ast.NodeVisitor):
 
         if state is not None:
             state.assign_target(node.target, is_derived=is_derived)
+
+    def visit_If(self, node: ast.If) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+
+        self._visit_ast_child("test", node.test)
+        branch_start = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, branch_start)
+        orelse_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, branch_start) if node.orelse else branch_start
+        self._set_current_derived_names(self._intersect_snapshots((body_end, orelse_end)))
+
+    def _visit_try_like(self, node: ast.Try | ast.TryStar) -> None:
+        state = self._current_derived_state()
+        if state is None or not node.handlers:
+            self.generic_visit(node)
+            return
+
+        branch_start = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, branch_start)
+        if node.orelse:
+            body_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, body_end)
+        branch_ends = [body_end]
+
+        for index, handler in enumerate(node.handlers):
+            self.path_stack.append(f"handlers[{index}]")
+            try:
+                if handler.type is not None:
+                    self._visit_ast_child("type", handler.type)
+                branch_ends.append(self._visit_statement_sequence_from_snapshot("body", handler.body, branch_start))
+            finally:
+                self.path_stack.pop()
+
+        self._set_current_derived_names(self._intersect_snapshots(tuple(branch_ends)))
+        for index, statement in enumerate(node.finalbody):
+            self._visit_ast_list_item("finalbody", index, statement)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try_like(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try_like(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+
+        self._visit_ast_child("test", node.test)
+        loop_entry = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, loop_entry)
+        joined = self._intersect_snapshots((loop_entry, body_end))
+        if node.orelse:
+            orelse_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, joined)
+            joined = self._intersect_snapshots((joined, orelse_end))
+        self._set_current_derived_names(joined)
 
     def _visit_for_like(self, node: ast.For | ast.AsyncFor) -> None:
         state = self._current_derived_state()

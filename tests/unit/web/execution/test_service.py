@@ -4925,6 +4925,13 @@ class TestResolveYamlPaths:
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "/srv/data/outputs/chroma-store" in result
 
+    def test_sink_without_options_is_noop(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "sinks:\n  primary:\n    plugin: csv\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "plugin: csv" in result
+
     def test_non_string_input_raises_type_error(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
 

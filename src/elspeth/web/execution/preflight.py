@@ -59,8 +59,8 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     if not isinstance(config, dict):
         raise TypeError(f"YAML generator produced non-dict top-level value (got {type(config).__name__})")
 
-    source = config.get("source")
-    if source is not None:
+    if "source" in config:
+        source = config["source"]
         if not isinstance(source, dict):
             raise TypeError(f"YAML generator produced non-dict 'source' value (got {type(source).__name__})")
         # yaml_generator always emits 'options' under a present source
@@ -77,21 +77,22 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
             if key in opts and not Path(str(opts[key])).is_absolute():
                 opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
 
-    sinks = config.get("sinks")
-    if sinks is not None:
+    if "sinks" in config:
+        sinks = config["sinks"]
         if not isinstance(sinks, dict):
             raise TypeError(f"YAML generator produced non-dict 'sinks' value (got {type(sinks).__name__})")
         for sink_name, sink_cfg in sinks.items():
             if sink_cfg is not None:
                 if not isinstance(sink_cfg, dict):
                     raise TypeError(f"YAML generator produced non-dict sink '{sink_name}' value (got {type(sink_cfg).__name__})")
-                opts = sink_cfg.get("options")
-                if opts is not None:
-                    if not isinstance(opts, dict):
-                        raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
-                    for key in SINK_LOCAL_PATH_OPTION_KEYS:
-                        if key in opts and not Path(str(opts[key])).is_absolute():
-                            opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+                if "options" not in sink_cfg:
+                    continue
+                opts = sink_cfg["options"]
+                if not isinstance(opts, dict):
+                    raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
+                for key in SINK_LOCAL_PATH_OPTION_KEYS:
+                    if key in opts and not Path(str(opts[key])).is_absolute():
+                        opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
 
     return yaml.dump(config, default_flow_style=False)
 

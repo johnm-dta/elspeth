@@ -440,25 +440,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[31]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:cb39658ab7596e3552eb6a622341cfa59393f714e711069e47072aae2cc68e94'
-- key: web/execution/outputs.py:R6:_is_path_in_sink_allowlist:fp=0cedc3792a8a7287
-  owner: john
-  reason: |-
-    _is_path_in_sink_allowlist (outputs.py:46) wraps a single fs_path.resolve() — an OS filesystem call (Tier-3 boundary) that can raise OSError on symlink loops, missing intermediates, or permission errors — and returns False on failure. The function computes a UI Download-button hint; the actual security boundary is reapplied at the /content endpoint with its own resolve(), so conservatively treating an unresolvable path as not-downloadable is safe-by-default and meaning-preserving. The catch is narrow (OSError around one resolve call). The existing rationale identifies the precise failure modes and the compensating control.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:53:30.582148+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE FIRES, CODE IS THE PRESCRIBED LEGITIMATE FORM at a Tier-3 OS boundary. Path.resolve() is a filesystem syscall whose contract ELSPETH does not own — OSError on symlink loops / missing intermediates / EACCES is canonical external-origin failure, not a first-party invariant break. The except is narrow (OSError around a single resolve()) and returns an explicit False (not a coercion or fabricated value): the function is a UI download-button hint, so 'path not verifiable as allowlisted' and 'path not allowlisted' have the same correct UI semantics. The rationale names the compensating control (/content endpoint reapplies resolve() under its own guard at the real security boundary), which is the part that prevents a silent-recovery anti-pattern from reading the bool as proof of safety. R6's concern (swallowed errors with no explicit result) is addressed by the boolean return + documented contract.
-  judge_signature_version: 2
-  scope_fingerprint: db8938b0647d62f833ebd5ffc0e53c6990b5e4e5d2b61a4b1f1b31c150a28cd4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[12]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:12fe587f1e8311ad52d538ff47a50dd62ff9abfef16f0ff9fcd43f105daa5b4f'
 - key: web/composer/implicit_decisions.py:R5:_flatten_options:fp=24bbd76d54ccfe33
   owner: john
   reason: |-
@@ -1119,44 +1100,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[20]/body[8]/value'
   judge_metadata_signature: 'hmac-sha256:v2:154bf7c40d75da168741c4313c350d1f563c30ba956fd1c171704afde692c716'
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=be313c147c5a50be
-  owner: john
-  reason: |-
-    At messages.py:769, contextlib.suppress(asyncio.CancelledError) wraps an `await asyncio.shield(...)` inside send_message's CancelledError handler. asyncio.shield decouples the persist coroutine from the cancelling outer task; the outer await re-raises CancelledError on the cancelling task while the shielded coroutine completes in the background, persisting the partial llm_calls audit record. Suppressing that re-raised CancelledError is the documented idiom letting control reach the cancelled-progress publish below, before the `raise` at line 795 restores the cancel chain. The suppression is narrow (CancelledError only) and the audit-first ordering is consistent with the Auditability Standard. The existing rationale matches the code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:37:18.828267+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R7 fires on contextlib.suppress, but the code is the documented asyncio.shield-in-CancelledError-handler idiom: we are already inside `except asyncio.CancelledError` (line 757), shield decouples the audit persist from the cancelling outer task so the partial llm_calls record reaches storage before teardown, the `await` on the shielded coroutine re-raises CancelledError on the cancelling task, and the narrow `contextlib.suppress(asyncio.CancelledError)` absorbs only that re-raise so control can reach the unconditional `raise` at line 795 which restores the cancel chain. Suppression scope is tight (CancelledError only), audit-first ordering matches the Auditability Standard primacy (persist before propagate), and the cancel chain is provably restored by the visible `raise`. Rationale states the why plainly and the surrounding code corroborates every load-bearing claim.
-  judge_signature_version: 2
-  scope_fingerprint: d9761bac8172544779d694b971a502820a7d80268de6b4f0e4608f4dbf16e7d4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[3]/body[0]/body[6]/body[11]/handlers[1]/body[1]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:ae73da944ad5e3dd704d1f77d35805014e80b49705d05148fe204ab9b5ed63b2'
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=1a85561c51205f0c
-  owner: john
-  reason: |-
-    In send_message (line 779), `with contextlib.suppress(asyncio.CancelledError)` wraps an asyncio.shield()-protected progress publish during the CancelledError handler. The shield lets the publish (the discriminated client_cancelled_progress_event reaching the progress registry) run to completion in the background while `await asyncio.shield` re-raises CancelledError on the cancelling task; suppress absorbs that re-raise so the explicit `raise` at line 795 can restore the original cancel chain. This is the standard asyncio cancellation idiom — it preserves cancellation semantics rather than swallowing business logic. The existing rationale matches the visible code. No data loss: the terminal-state publish is delivered, the cancel propagates.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:51:05.015760+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R7 fires on contextlib.suppress, and here the suppress is the standard asyncio shield+cancel idiom: asyncio.shield lets the discriminated client_cancelled_progress_event publish complete in the background while the outer await re-raises CancelledError on the cancelling task; contextlib.suppress(asyncio.CancelledError) is narrowly scoped to that re-raise so the explicit `raise` at line 795 restores the original cancel chain. This is not silent business-logic swallowing — the exception type is precisely the one shield re-raises by construction, the terminal-state publish is delivered, and cancellation propagates. The rationale explains the why (shield semantics + re-raise restoring the chain) and the visible code (lines 779–795, including the `raise` and the comments) corroborates it.
-  judge_signature_version: 2
-  scope_fingerprint: d9761bac8172544779d694b971a502820a7d80268de6b4f0e4608f4dbf16e7d4
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[3]/body[0]/body[6]/body[11]/handlers[1]/body[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:9c82aca77377b7fd05196c1d70eeaaf0cdbc33103a4413f6a1ff9f21e4d0ba30'
 - key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=64df0c1899440c17
   owner: john
   reason: |-
@@ -1241,44 +1184,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[3]/body[7]/value/test'
   judge_metadata_signature: 'hmac-sha256:v2:15fb3f701bb9a3fdcd58b1540eb5e5aa222b2636aed884df8b6689ca61203e8b'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=65afef4550e989c5
-  owner: john
-  reason: |-
-    In recompose (composer.py:1044), with contextlib.suppress(asyncio.CancelledError) wraps a best-effort asyncio.shield(_persist_llm_calls(...)) on the client-cancellation path. This is the canonical asyncio-shield idiom: re-cancellation of the shielded coroutine must not prevent the outer cancellation from propagating, and the handler re-raises the CancelledError at line 1065 so the cancellation is not lost. The suppress is narrowly typed to asyncio.CancelledError (not bare), targets exactly the known-benign re-cancellation signal during shielded cleanup, and the surrounding code preserves the primary cancellation. This is offensive control-flow handling of a known signal, not silent error swallowing. Existing rationale verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:24:06.279884+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The R7 fires correctly — contextlib.suppress is used — and the code handles it the way asyncio cancellation cleanup prescribes. Inside an `except asyncio.CancelledError` handler, the suppress is narrowly typed (only CancelledError, not bare Exception) and wraps `asyncio.shield(_persist_llm_calls(...))`: the shielded coroutine must be allowed to complete its best-effort cleanup, but a re-delivered cancellation on the outer await must not abort that shielded work; the suppress absorbs only that benign re-cancellation signal. The primary cancellation is preserved by the explicit `raise` at line 1065, so cancellation propagation is not lost. This is the canonical shield+suppress idiom for critical cleanup on the cancellation path, not silent error swallowing, and the rationale states this clearly with reference to the mirroring send_message handler.
-  judge_signature_version: 2
-  scope_fingerprint: e30c511468e3c86d5567bf23c376c3cae9a14b745e9f43e4e65efc748a735131
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[7]/body[6]/body[15]/handlers[1]/body[1]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:3638f65f3ac0f5b39cf861a1770b1dbfa4bcfa29afb40f5568a35921dfd0e271'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=b22f01dc72b4660b
-  owner: john
-  reason: |-
-    At line 1054 in the recompose handler's asyncio.CancelledError path, `with contextlib.suppress(asyncio.CancelledError)` wraps an `await asyncio.shield(_publish_progress(...))` best-effort cancellation-notice broadcast. The suppress is narrowed to exactly asyncio.CancelledError (not Exception): during a cancelled request the shielded publish may itself be re-cancelled, and that re-cancellation must not prevent the handler from reaching its `raise` (line 1065) which re-propagates the original cancellation. This is the documented control-flow handling of cancellation at an async boundary — the original CancelledError is deliberately re-raised, so nothing is swallowed; only the redundant inner cancel of the shielded best-effort publish is suppressed. Legitimate EAFP/cancellation pattern.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:46:31.687580+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R7 fires on `contextlib.suppress(asyncio.CancelledError)`, but the visible code shows the prescribed async-cancellation control-flow pattern, not silent swallowing: the handler is inside `except asyncio.CancelledError as exc:` and ends with a bare `raise` at line 1065 that re-propagates the original cancellation; the suppress is narrowed to exactly `asyncio.CancelledError` (not `Exception`); and it wraps an `await asyncio.shield(_publish_progress(...))` best-effort cancellation-notice broadcast whose only failure mode under re-cancellation is itself a `CancelledError`. Suppressing that inner re-cancel is what guarantees the handler reaches the outer `raise`, so the original CancelledError is preserved end-to-end — nothing is laundered. Rationale plainly states the why (best-effort notify; protect path to re-raise) and matches the code; mirror block-comment at lines 1040-1041 references the documented send_message rationale.
-  judge_signature_version: 2
-  scope_fingerprint: e30c511468e3c86d5567bf23c376c3cae9a14b745e9f43e4e65efc748a735131
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[7]/body[6]/body[15]/handlers[1]/body[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:10a2769c54145c9c35a580fd8d4f4355b286bcd7cc27b49b78d1586c5be5ad12'
 - key: web/sessions/routes/composer.py:R4:register_composer_routes:get_guided:fp=f09febcda74c85ae
   owner: john
   reason: |-
@@ -1355,158 +1260,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[7]/body[14]/body[6]/body[1]/finalbody[1]/orelse[1]/handlers[0]/body[0]'
   judge_metadata_signature: 'hmac-sha256:v2:f40fe693bab1817dff504890fe35d83eb2ac5e4915b37e3fb50a14c74823fed1'
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=65b078af067fd26a
-  owner: john
-  reason: |-
-    In post_guided_respond's `finally` block, the exception-unwind branch (`primary_exc is not None`) drains the recorder via _persist_tool_invocations / _persist_llm_calls, each wrapped in a broad `except Exception as persist_exc` whose only action is a best-effort `slog.error` (itself under contextlib.suppress) reporting the audit-system failure under the B1 convention (exc_class + frames; no Tier-bearing strings). The breadth is required and correct here: the block runs inside a `finally` during exception unwind, where Python lets any exception raised in the block REPLACE the primary exception (the 400/409/500 the operator must see). Letting a cleanup-time persist failure — or a programmer error in redaction/envelope construction — propagate would mask that primary failure, violating ELSPETH's audit-primacy doctrine. The expected SQLAlchemyError is handled narrowly INSIDE the helpers via plugin_crash_pending=True (persist-failed-during-unwind counter + slog + continue); this outer broad catch is the belt-and-suspenders net for the unanticipated, and every catch is surfaced via the guided.audit_persist_failed_during_exception_handling slog event. It is not a silent swallow and touches no audit/pipeline data path. Mirrors the reviewed _persist_chat_turns unwind pattern in post_guided_chat.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:25:14.361110+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. R4 fires correctly (broad-except), and the code is the policy-prescribed shape for an exception-unwind `finally` block where any escaping exception would replace the primary HTTP failure the operator must see — the inverse failure mode (masking the real error) is the worse audit outcome. The rationale's load-bearing claim is verified in the excerpt and in _helpers.py:1478-1522 / 1551-1594: the expected SQLAlchemyError is handled narrowly INSIDE the helpers, where `plugin_crash_pending=True` selects the documented record-and-continue disposition (unwind counter + slog). The outer broad-except therefore catches only the residual unanticipated (e.g. AuditIntegrityError from corrupt canonical payloads in _load_canonical_mapping, redaction/envelope construction defects), and surfaces each via the `guided.audit_persist_failed_during_exception_handling` slog event with exc_class+frames — not silent suppression. slog is the policy-correct channel here because the audit system itself is the thing that just failed (Telemetry/Logging primacy: log is the last-resort when audit is broken). No fabrication, no Tier-2 redress, mirrors the reviewed `_persist_chat_turns` unwind pattern at _helpers.py:1640+.
-  judge_signature_version: 2
-  scope_fingerprint: eb6f920ee042aa2d40fc572600dd923d19a5a559d975ab50679811f57e33a5ce
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:a8efc854918da8efc8c6855d3902469b9fce106621f4a33a369bf9e353ec30a6'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=90d1459942d2afe8
-  owner: john
-  reason: |-
-    At line 2454 in post_guided_respond, `with contextlib.suppress(Exception)` wraps a single slog.error() call inside the `except Exception as persist_exc` handler for an audit-persist failure during request unwinding (lines 2453-2463). The suppress protects only the diagnostic logging of an already-failed best-effort audit persist during exception unwind: if the logger itself raises, that must not mask the original in-flight exception that is being unwound. No pipeline/audit data is swallowed here — the audit failure is precisely what is being logged; the suppress just guarantees the unwind continues to the real error. This is the legitimate 'don't let logging-during-unwind shadow the primary failure' pattern at an HTTP request boundary.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:46:52.449464+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. R7 fires on a contextlib.suppress, but the suppression is narrowly scoped to a single slog.error diagnostic call inside an `except persist_exc` handler on the unwind path (a primary exception is already in flight, per the surrounding comments at 2452-2458). The pattern is the standard 'don't let a diagnostic logger raise during exception unwinding and shadow the primary failure' — no audit/pipeline data is swallowed; the audit-persist failure is exactly what is being logged, and `plugin_crash_pending=True` was already chosen to deliberately not raise AuditIntegrityError so the primary surfaces. The rationale is site-specific and the visible code (single-call scope, inside the unwind branch) corroborates it; broadening the suppress or wrapping business logic would be a different matter.
-  judge_signature_version: 2
-  scope_fingerprint: eb6f920ee042aa2d40fc572600dd923d19a5a559d975ab50679811f57e33a5ce
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[0]/handlers[0]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:5f48b33dc1d0492414c91b52a9b446ffea80d55361fc5ce1f85bbf5aab317b98'
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=459203baa79b869f
-  owner: john
-  reason: |-
-    At composer.py:2472 the except Exception as persist_exc wraps the _persist_llm_calls recorder-drain on the exception-unwind path of post_guided_respond's finally block. Identical pattern to the get_guided site: it preserves the primary in-flight exception (so a 400/409 is not masked by a 500 from a finally-block persistence failure) and records the failure via slog with exc_class + bounded frames only — the documented audit-system-failure logging exemption — rather than swallowing silently. Broad-except is correct because any persistence/serialization error class can arise during the drain and re-raising it would replace the routed error. Success-path drains (separate branch) propagate failures. Not silent data loss; the audit-persist failure is explicitly recorded. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T06:10:02.263957+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    PRESCRIBED FORM. R4 fires legitimately — this is an unqualified `except Exception` — but the code is the policy-prescribed shape for an audit-persist failure on the exception-unwind path. The primary in-flight exception is the operator-visible signal; allowing a finally-block `_persist_llm_calls` failure to propagate would mask it, so the broad catch is structurally required (any serialization/DB class can arise). The handler does not silently swallow: it emits a structured slog record with event name, session/user identifiers, channel, exc_class, and bounded frames — the documented audit-system-failure logging exemption (logging-as-last-resort when the audit channel itself failed) — and `plugin_crash_pending=True` upstream signals the integrity state. The rationale specifically names the broad-except concern, the alternative (re-raise) and why it's wrong here, and contrasts the success-path drain which does propagate; the visible code corroborates each claim. Decorator nudge inapplicable (R4 is not in the {R1,R5} suppressible set).
-  judge_signature_version: 2
-  scope_fingerprint: eb6f920ee042aa2d40fc572600dd923d19a5a559d975ab50679811f57e33a5ce
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:3dc6b9cdf385a61e8df8fc261218e658bcb643e91cb6de1cef97029608ff0486'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=647eaaa3142057a0
-  owner: john
-  reason: |-
-    At composer.py:2473, contextlib.suppress(Exception) wraps a single slog.error() call inside an `except Exception as persist_exc` handler recording a guided llm_calls audit-persist failure during exception handling. Identical structure to the get_guided sibling: the real persist failure is captured and logged via slog (exc_class + frames); the suppress only guards the structlog emission itself, the logger of last resort, for which no safer channel exists if structlog raises. The persist failure is recorded, not silently dropped to a default value, and this is the audit/telemetry-system-degradation logging case the policy permits.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:40:00.741423+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The contextlib.suppress(Exception) wraps a single slog.error() call inside an except handler that is already recording an audit-persist failure during exception handling. Per policy primacy order, slog is the logger of last resort; if structlog itself raises during the act of recording an audit-persistence failure, there is no safer channel to fall back to, and re-raising would mask the primary exception the operator needs to see (the comment at 2457-2458 makes this constraint explicit). The persist failure itself is not swallowed silently — the outer except handler captures it with exc_class and frames; the suppress only guards the emission mechanism of the logger of last resort. This is the audit/telemetry-system-degradation case the policy permits, and the rule's concern (silent exception swallowing of operational data) does not apply at this site.
-  judge_signature_version: 2
-  scope_fingerprint: eb6f920ee042aa2d40fc572600dd923d19a5a559d975ab50679811f57e33a5ce
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[1]/handlers[0]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:7d49644c0e4b6d2da85f4ead37262351ce55e1ddd6453c323c0ea13c9acf3f7a'
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=4aac0c4c0b044ec2
-  owner: john
-  reason: |-
-    In post_guided_chat (line 3040), the broad `except Exception as persist_exc` is in the `else` branch taken only when primary_exc is not None (an exception is unwinding, line 3031). It drains tool_invocations to the audit trail best-effort; the success branch (primary_exc is None, line 3016) persists WITHOUT this guard so success-path audit failures propagate and create no evidence gap. During an unwind, a failed audit drain must not mask the primary HTTPException, so the broad catch records exc_class + frames via slog (channel of last resort) rather than swallowing silently. This is the documented persistence-fallback / audit-system-failure exemption, identical to the get_guided sibling. Not silent swallowing.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:54:47.733957+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. The broad except sits in the `else:` branch where `primary_exc is not None` (visible at lines 3045-3055, with the comment explicitly identifying this as the unwind/finally path), guarding `_persist_tool_invocations` — the audit-persist itself. Per the Telemetry/Logging primacy order, slog is the legitimate last-resort channel precisely when the audit system is the failing component, which is exactly this site; re-raising would mask the primary in-flight exception and corrupt which fault future auditors see as the cause. The except records exc_class + frames (not silent), wraps the slog call itself in contextlib.suppress so logging cannot itself become a new masking failure, and is narrowly scoped to a single audit-persist call. R4 is not in the @trust_boundary decorator's suppressible set (R1/R5 only), so no structural alternative applies.
-  judge_signature_version: 2
-  scope_fingerprint: 146f585f1b1a3b11424bdd4199ca7c8b7e275d28a57c3d262667c959a03adb37
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:8999649bf93ea85cb9b066bc3f39545dd4fff4c8b036d1978937c6d70bccc100'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=fda975b0625f46e8
-  owner: john
-  reason: |-
-    At composer.py:3041 (inside post_guided_chat), `with contextlib.suppress(Exception):` wraps a `slog.error(...)` terminal logger-of-last-resort emitted only when an audit-persist attempt failed during exception handling. This is the final channel in the primacy order — if structlog raises here, no safer channel exists — and suppressing prevents the last-resort log from masking the original handled exception. It does not hide pipeline/audit activity: the persist failure being reported is already handled in the enclosing try/except, and the suppress guards only this terminal log emission. Same documented pattern as the get_guided sibling. Narrowly purposed and correct.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:56:09.574944+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The suppress wraps a terminal slog.error inside an except handler that is itself running on the unwind path (plugin_crash_pending=True branch, primary exception already in flight per the explanatory comment at 3046-3054). Per the primacy order, slog is the last-resort channel; audit has already failed here (that's what persist_exc represents), so there is no safer channel to escalate to. Allowing the last-resort log to raise would mask the primary in-flight exception — exactly the failure mode the unwind path exists to prevent. The suppress is narrowly scoped to the log emission only and does not paper over the persist failure (which is already captured as persist_exc and being recorded). Rule R7 fires by shape; the code is the correctly-scoped legitimate form.
-  judge_signature_version: 2
-  scope_fingerprint: 146f585f1b1a3b11424bdd4199ca7c8b7e275d28a57c3d262667c959a03adb37
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[0]/handlers[0]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:272a9818d057fc0f5154066762dec07ab9213c71a5bb000f62188d29cadf9007'
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=6a812675536c1066
-  owner: john
-  reason: |-
-    In post_guided_chat (composer.py:3059), except Exception as persist_exc wraps a best-effort _persist_chat_turns call on the exception-unwind path (the `primary_exc is not None` branch of the finally block). The call correctly passes request_unwinding=True (line 3057), so the helper itself already does the right thing internally: on SQLAlchemyError or any Exception during unwind it counts/slogs and continues (_helpers.py:1640/1659) — broad-swallow-during-unwind being an accepted, reviewed ELSPETH pattern that protects the primary HTTP exception. This outer catch fires only for throws OUTSIDE the helper's per-turn try (e.g. json.dumps of turn fields, chat_turn_audit_envelope), and exists to prevent a secondary audit-persist failure from replacing the primary 400/409 exception the operator needs to see. The failure is recorded via slog (the CLAUDE.md-permitted channel for audit-system failures) with exc_class + frames only (no Tier-bearing strings). No primary error is masked and no audit truth is fabricated. The suppression is consistent with the helper's own unwind disposition.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:25:44.161701+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. Verified at composer.py:3029-3091: this is the `else` branch of `if primary_exc is None` inside a `finally`, i.e. the exception-unwind path with a primary HTTPException in flight. The in-source comment block (lines 3018-3028, 3045-3054) already documents the discipline the rationale invokes: during unwind, a secondary audit-persist failure must not mask the primary exception, and slog is permitted as last-resort channel exactly because the audit-persist itself just failed (CLAUDE.md primacy order). The except records only exc_class + safe frames — no Tier-bearing payload — and does not re-raise, preserving the primary exception the operator needs to see. R4's concern (broad-except suppressing bugs) is the case the rule's policy carve-out is designed for: the alternative (let the secondary throw) would replace the primary 400/409 with an audit-persist error, which is worse for auditability. Decorator nudge inapplicable (R4 is not in {R1, R5}).
-  judge_signature_version: 2
-  scope_fingerprint: 146f585f1b1a3b11424bdd4199ca7c8b7e275d28a57c3d262667c959a03adb37
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:1704e13712ea3cb9d603c1a1bf776f1fc29e0e23f42cb208dd32db014df91869'
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=89713c5bac9cbaa5
-  owner: john
-  reason: |-
-    At line 3060 in post_guided_chat, `with contextlib.suppress(Exception)` wraps a single slog.error() call inside the `except Exception as persist_exc` handler for a chat-turn-persist failure during request unwinding (lines 3059-3068). Identical pattern to the post_guided_respond site: the suppress guards only the diagnostic logging of an already-failed best-effort persist while an exception is unwinding, so a logger failure cannot mask the original error. The audit-persist failure is being recorded, not swallowed; the suppress preserves the primary exception's propagation. Legitimate logging-during-unwind protection at the HTTP boundary.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:47:25.936084+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. R7 fires on a contextlib.suppress(Exception) whose scope is exactly one slog.error() call sitting inside an `except Exception as persist_exc` handler for a best-effort _persist_chat_turns(..., request_unwinding=True) during an outer request unwind. The suppress does not swallow persist_exc itself (which is the inner failure being logged) — it only prevents a secondary logger failure from clobbering the already-propagating outer exception. This matches CLAUDE.md's primacy order: audit failed, telemetry is unavailable mid-unwind, slog is the last-resort diagnostic, and a last-resort diagnostic must not itself raise during an unwind. The rationale states the scope plainly and the visible code confirms it (suppress envelope is exactly the slog call; no return/pass that would mute downstream flow). Not an R1/R5 rule, so the @trust_boundary decorator nudge does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: 146f585f1b1a3b11424bdd4199ca7c8b7e275d28a57c3d262667c959a03adb37
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[1]/handlers[0]/body[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:81c1b406228ab6bf29eee1ae4e6c5cf642495bd1fc324644fee13f5dd5e5da5a'
 - key: web/composer/tools/blobs.py:R5:_execute_wire_blob_inline_ref:fp=2ef2bf69d0781cc3
   owner: john
   reason: |-
@@ -1691,63 +1444,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[34]/body[3]/value/test'
   judge_metadata_signature: 'hmac-sha256:v2:00be5184ff5f939a9db6941ff98704fd47f2c31d343dbc01f7f48abc875b2845'
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=1708f112cf7702e2
-  owner: john
-  reason: |-
-    At line 1796 in persist_compose_turn, `asyncio.get_running_loop()` is wrapped in try/except RuntimeError as an EAFP control-flow probe: asyncio raises RuntimeError specifically when there is no running event loop, and that absence is the expected, intended case (we are in a worker thread or sync test context) so `pass` proceeds. The else branch raises a loud RuntimeError instructing callers to use the async variant (lines 1800-1806). This is the documented EAFP pattern using a specific expected exception as a presence signal — not swallowing a failure to a default; both outcomes are explicit (proceed when absent, hard-error when a loop is present to prevent blocking it). Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:58:03.130527+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. The try/except is not silent-except — it is the canonical EAFP probe for `asyncio.get_running_loop()`, which raises `RuntimeError` precisely as a presence signal when no loop is running. The `except RuntimeError: pass` branch is the *expected, intended* outcome (sync/worker context → proceed), and the `else` branch raises a loud, informative `RuntimeError` when a loop IS present (lines 1801-1806) instructing the caller to use the async variant. Both outcomes are explicit: no error is swallowed to a default, no fabrication occurs, and the only suppressed exception is the documented sentinel that asyncio itself uses to signal absence. R6's concern (swallowing failures without re-raise or explicit result) does not apply to a presence-probe whose 'failure' is the API's documented success signal.
-  judge_signature_version: 2
-  scope_fingerprint: 1f44dcc89c86d974ac95cfcd4ba084a7ff268a903e6aed587d3a9932f887c92c
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[71]/body[12]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:0648be5d28d6cb1a5d9f3320839a9fb57970755753567d49e252d675ea57f95d'
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=69d4c22527c9a7f2
-  owner: john
-  reason: |-
-    archive_session._sync (service.py:2243) catches except OSError as restore_exc inside the rollback handler that runs after the primary DB transaction already failed (primary_exc captured at the outer except, line 2238). The restore is a best-effort filesystem rename of the staged blob directory back to its original location; if that rename itself fails with OSError (disk full, permission, FS race, vanished parent), the code attaches a diagnostic note to primary_exc (RecoveryFailed[...] with type, paths, and "manual cleanup required") and the outer handler unconditionally re-raises primary_exc (line 2250). It does NOT swallow — both failures surface to the operator, and re-raising restore_exc instead would mask the original DB cause. Narrow OSError catch on a recovery-path filesystem op (Tier-3 boundary) with annotate-and-propagate. Existing rationale verified and accurate (minor line drift only). Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:51:26.343326+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.93
-  judge_rationale: |-
-    PRESCRIBED FORM. The R6 finding flags an `except OSError` block, but the excerpt shows the handler does not swallow: it attaches a diagnostic note to `primary_exc` (lines 2244-2249) describing the failed restore with type, paths, and 'manual cleanup required', then falls through to the unconditional `raise` at line 2250 which re-raises `primary_exc`. Both the original DB failure and the recovery failure surface to the operator — re-raising `restore_exc` would mask the primary cause, so annotate-and-propagate is the correct shape here. This is a Tier-3 filesystem-boundary recovery op (rename can fail for disk-full/permission/race reasons outside our control), narrow OSError catch, and the audit trail is preserved via the chained exception note. Rationale is site-specific and accurately describes the code.
-  judge_signature_version: 2
-  scope_fingerprint: f334b3cd1cff2fd80273e67111a3ea027cb92a7ef6b2079db3c75e40eb0cf454
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[71]/body[18]/body[2]/body[3]/handlers[0]/body[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:f34eefa8298ea75880d3fb1053cae35b15bab1d28f4ed8186bce861f67b94dd8'
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=8aadfa2550cfc8c9
-  owner: john
-  reason: |-
-    At service.py:2261, contextlib.suppress(OSError) wraps a best-effort quarantine_root.rmdir() of the shared parent directory after the session-scoped staged dir was already removed via shutil.rmtree above. rmdir raises ENOTEMPTY when other sessions still have quarantined data under the same root, and may raise transient OSErrors under concurrent purge — neither changes the archive outcome (already committed) and neither must propagate. The suppression is narrow (OSError on a single rmdir) at a filesystem boundary; the session's own cleanup already succeeded, so this is not silent data loss. Existing rationale matches.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T14:44:37.899348+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The session's own staged blob directory was removed by shutil.rmtree at line 2258 — that is the actual cleanup. The suppressed call at 2261 targets the SHARED parent quarantine_root, where rmdir's expected 'failure' (ENOTEMPTY) is the normal signal that other sessions still hold data under the same root; suppressing OSError there is opportunistic housekeeping on a shared resource, not silent data loss. The scope is narrow (a single rmdir, OSError only), the archive transaction is already committed, and the meaningful failure modes (cleanup of the session's own staged dir, rollback restore) are handled with raises and add_note above. The rationale plainly states why suppression here doesn't violate R7's concern and matches the visible code.
-  judge_signature_version: 2
-  scope_fingerprint: f334b3cd1cff2fd80273e67111a3ea027cb92a7ef6b2079db3c75e40eb0cf454
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[71]/body[18]/body[2]/body[4]/body[2]'
-  judge_metadata_signature: 'hmac-sha256:v2:590c388503d4ac5b8925782fa7cd67e1c38015e230d46ba426a3b743188bbd2c'
 - key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=6f346528de4eff44
   owner: john
   reason: |-
@@ -1849,69 +1545,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[54]/body[4]/value'
   judge_metadata_signature: 'hmac-sha256:v2:3b36241c3a193ab0a0586d59e8133220c995173425612321da55001afd1a3d5c'
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=5f1f81fee41e3e1a
-  owner: john
-  reason: |-
-    In resolve_runtime_yaml_paths (preflight.py:62/66/74/82), `config.get("source")`, `source.get("options")`, `config.get("sinks")`, `sink_cfg.get("options")` read OPTIONAL structural sections of the YAML our own YamlGenerator produced; a pipeline legitimately may omit a section, and `.get`-returns-None followed by `if X is not None` makes 'absent section -> nothing to rewrite' explicit. This is first-party structure traversal: the surrounding `if not isinstance(...): raise TypeError(...)` guards are OFFENSIVE checks that crash on our generator emitting a malformed shape, not Tier-3 rejections. The bare `.get(key)` is the idiomatic optional-section read; a membership-subscript rewrite adds key-repetition and surfaces no decision. R1 over-fires; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=pipeline_yaml, tier=3) is a MISLABEL and INFEASIBLE: pipeline_yaml is our YamlGenerator output (first-party), not a zero-trust external boundary, and the function NEVER raises on a missing section (it raises TypeError only on our generator's malformed shape — a first-party offensive check). A boundary that does not raise a malformed-input rejection on its source_param cannot satisfy TBE1's raising-test mandate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T16:40:35.497963+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES. Verified at yaml_generator.py:85 and :184 that `doc["source"]` and `doc["sinks"]` are conditionally emitted by our own generator, so a missing top-level key is the documented valid case, not a hidden bug — R1's premise does not hold. `pipeline_yaml` is first-party (callers service.py:559 and validation.py:1143 feed generate_yaml() output here), so the @trust_boundary(tier=3) nudge would mislabel first-party serialization-roundtrip data as external. The function consistently uses `.get()` only for documented-optional top-level keys and offensive `isinstance(...)`/`in`-then-`raise TypeError` everywhere else (preflight.py:64,71,74,82,86,90), which matches the prescribed shape: optional reads where absence is valid, loud crash on shape violation. Duplicate rationale count of 1 is the prior pre-rotation entry on the same site, not boilerplate cribbed from a different location.
-  judge_signature_version: 2
-  scope_fingerprint: df8b5e3bc9f6259c4c1f78353a8036c404bd77b4ffe299a3aef8b9625dc2709d
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[18]/body[6]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:5ffad03f4f66df91d5c232a1fd8c5c1dd66fed4c80e8339ad0d89bf58fbd08bd'
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=c876a96667c425f7
-  owner: john
-  reason: |-
-    In resolve_runtime_yaml_paths (preflight.py:62/66/74/82), `config.get("source")`, `source.get("options")`, `config.get("sinks")`, `sink_cfg.get("options")` read OPTIONAL structural sections of the YAML our own YamlGenerator produced; a pipeline legitimately may omit a section, and `.get`-returns-None followed by `if X is not None` makes 'absent section -> nothing to rewrite' explicit. This is first-party structure traversal: the surrounding `if not isinstance(...): raise TypeError(...)` guards are OFFENSIVE checks that crash on our generator emitting a malformed shape, not Tier-3 rejections. The bare `.get(key)` is the idiomatic optional-section read; a membership-subscript rewrite adds key-repetition and surfaces no decision. R1 over-fires; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=pipeline_yaml, tier=3) is a MISLABEL and INFEASIBLE: pipeline_yaml is our YamlGenerator output (first-party), not a zero-trust external boundary, and the function NEVER raises on a missing section (it raises TypeError only on our generator's malformed shape — a first-party offensive check). A boundary that does not raise a malformed-input rejection on its source_param cannot satisfy TBE1's raising-test mandate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T16:42:47.530485+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.75
-  judge_rationale: |-
-    RULE MISFIRES. Verified at yaml_generator.py:184-193 that sink 'options' is conditionally emitted only when truthy (`if output["options"]: sink_entry["options"] = ...`), so absence on the `sink_cfg.get("options")` read at preflight.py:88 is a contracted first-party state, not a hidden missing-key bug — R1's premise (a .get() masking a required-key invariant) does not hold. The data flow `YamlGenerator.generate_yaml() -> yaml.safe_load() -> traverse` is wholly first-party with unbroken in-process custody; the surrounding `isinstance(...): raise TypeError(...)` guards are offensive Plugin-Ownership checks against our own generator emitting a malformed shape, not Tier-3 boundary validation. The @trust_boundary decorator nudge correctly does not apply: `pipeline_yaml` is first-party YamlGenerator output (Q1 of the 3-question test is no), so emitting `should_use_decorator` would be a mislabel. The rationale's weakest point is that the same file's source path (lines 71-73) prefers membership-check + direct access over .get for optional fields, but that is a stylistic consistency observation, not an R1 enforcement matter.
-  judge_signature_version: 2
-  scope_fingerprint: df8b5e3bc9f6259c4c1f78353a8036c404bd77b4ffe299a3aef8b9625dc2709d
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[18]/body[7]/body[1]/body[0]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:c8038e040d4041f40fdf87aeb39f450c01930cef72d67bb611ffdb199d822eda'
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=42996be95a89dd56
-  owner: john
-  reason: |-
-    In resolve_runtime_yaml_paths (preflight.py:62/66/74/82), `config.get("source")`, `source.get("options")`, `config.get("sinks")`, `sink_cfg.get("options")` read OPTIONAL structural sections of the YAML our own YamlGenerator produced; a pipeline legitimately may omit a section, and `.get`-returns-None followed by `if X is not None` makes 'absent section -> nothing to rewrite' explicit. This is first-party structure traversal: the surrounding `if not isinstance(...): raise TypeError(...)` guards are OFFENSIVE checks that crash on our generator emitting a malformed shape, not Tier-3 rejections. The bare `.get(key)` is the idiomatic optional-section read; a membership-subscript rewrite adds key-repetition and surfaces no decision. R1 over-fires; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=pipeline_yaml, tier=3) is a MISLABEL and INFEASIBLE: pipeline_yaml is our YamlGenerator output (first-party), not a zero-trust external boundary, and the function NEVER raises on a missing section (it raises TypeError only on our generator's malformed shape — a first-party offensive check). A boundary that does not raise a malformed-input rejection on its source_param cannot satisfy TBE1's raising-test mandate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T16:44:32.242442+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES. R1 fires on .get() shape, but at each site the semantic is 'is this optional section present?', not 'defensively recover from a missing required field'. YamlGenerator emits 'source' only when state_dict['source'] is not None (yaml_generator.py:85-93), 'sinks' only when outputs is truthy (yaml_generator.py:184), and sink 'options' only when output['options'] is truthy (yaml_generator.py:191-192) — these are conditional-emission contracts, so absence is a legitimate signal handled by 'if X is not None: ...'. The accompanying isinstance→raise TypeError checks (lines 64,74,82,86,90) are offensive guards crashing on generator misbehaviour, and 'options' under a present source is explicitly enforced by 'if "options" not in source: raise' (lines 71-72) — not a .get(). The decorator nudge is inapplicable: pipeline_yaml is first-party in-process YamlGenerator output handed directly from service.py:553 to :559 with no boundary crossing, so question 1 of the three-question test fails (no external parameter).
-  judge_signature_version: 2
-  scope_fingerprint: df8b5e3bc9f6259c4c1f78353a8036c404bd77b4ffe299a3aef8b9625dc2709d
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[18]/body[4]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:589e6539d3e4bda1b78a8af7eda1f75735e1e3199104e0a165da2570f4c8963b'
 - key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=020df37cc90810ad
   owner: john
   reason: |-
@@ -1954,48 +1587,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[35]/body[7]/body[1]/body[1]/value'
   judge_metadata_signature: 'hmac-sha256:v2:2600f9d646d04213fa2d1009dfb4d6d9658d46ea71799381ee9f8a0411ba7b28'
-- key: web/execution/validation.py:R1:validate_pipeline:fp=733611406e3fefe3
-  owner: john
-  reason: |-
-    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T15:47:02.258497+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    RULE MISFIRES. state.source.options is composer/user-authored config re-read from our DB — Tier-3 at this read site per the custody doctrine — and the two checked keys ("path", "file") are genuinely optional: a source need not carry either. The pattern `value = source_options.get(key); if value is not None: ...` is the prescribed optional-presence test at a Tier-3 boundary: no default is supplied, no value is fabricated, absence simply means "no path slot to allowlist-check for this source" while a present value IS validated. R1's premise (".get() hides a missing-key bug") does not apply — absence here is a first-class, explicitly-handled state, not a hidden defect. Because `key` is a loop variable, a `key in source_options`/`source_options[key]` rewrite gains no clarity and adds a redundant lookup. The decorator nudge is correctly declined: validate_pipeline's contract is to return a ValidationResult, not raise on malformed input, so a @trust_boundary suppression on a raising invariant does not fit this site.
-  judge_signature_version: 2
-  scope_fingerprint: c72148c567900a32e1c21214e6c12e994a903b2bef10a23e54c4cb7c299f1961
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[64]/body[9]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:e88ad4cf0b26cb5b27228db8295a3ae4350ac5a50e0ccfa31022cf2e2e2016d4'
-- key: web/execution/validation.py:R1:validate_pipeline:fp=0c7d6399be7e8ecd
-  owner: john
-  reason: |-
-    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T15:48:14.289114+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. output.options is composer/user-authored sink configuration re-read from our store (Tier-3 at the read site per custody doctrine), and path/file are genuinely optional sink keys (a DB or HTTP sink has neither). validation.py:775 reads with .get(key) and at line 776 guards `if value is not None:` — absence means 'no path-allowlist check applies to this slot', which is honest (no fabricated default), and a configured value IS resolved and checked against allowed_sink_dirs with a structured ValidationResult on failure (lines 779-805). Loop-variable key makes a subscript rewrite strictly worse (membership + lookup) with no semantic gain. The @trust_boundary nudge is correctly ruled infeasible: validate_pipeline returns ValidationResult on every failure path and never raises, so the decorator's test_ref 'raising assertion for malformed-input rejection' gate (trust_boundary.py:22-24) cannot be satisfied here.
-  judge_signature_version: 2
-  scope_fingerprint: c72148c567900a32e1c21214e6c12e994a903b2bef10a23e54c4cb7c299f1961
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[64]/body[10]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:40f98b0108ebf74798b29026c64bd1c7b25568998f26d7eaa5170e49974cbb69'
 - key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3aba7cf3d76c43d9
   owner: john
   reason: |-
@@ -2696,120 +2287,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[139]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:129b5914f291d367f1befba96b9721d1a8f61545585531b8ab71967530357057'
-- key: web/sessions/routes/_helpers.py:R5:_dispatch_guided_respond:fp=a241c1a56bb89c0d
-  owner: john
-  reason: |-
-    Tier-3 re-read boundary shape-check; NOT redundant on guaranteed first-party data. In _dispatch_guided_respond (formerly _dispatch_guided_respond_impl; renamed when the routes test-seam was removed — body unchanged), `options = step["options"]` reads from `step = dict(guided.step_3_proposal.steps[edit_step_index])`. Trust status of that value: ChainProposal.steps is typed `Sequence[Mapping[str, Any]]`, so each STEP is a mapping, but `step["options"]` is `Any` — the options VALUE's shape is NOT guaranteed by ChainProposal's contract. The options are composer-LLM-authored config (Tier-3 origin). step_3_proposal is populated two ways: (1) freshly from chain_solver, which DOES validate `isinstance(options, Mapping)` (chain_solver.py:160) before constructing the ChainProposal; and (2) reconstructed from persisted session state via `ChainProposal.from_dict` (state_machine.py:444), which does `steps=tuple(dict(s) for s in d["steps"])` and DOES NOT re-validate the options value's shape. Path (2) is the classic Tier-3 re-read boundary (persisted external-origin/composer-authored config, custody interrupted by storage; "validated once" on the fresh path does not promote it on read-back). So `if not isinstance(options, Mapping)` is load-bearing precisely for the persisted-restore path — it is NOT redundant defensive code on a contractually-guaranteed first-party value; it is the shape validation at the boundary where an externally-sourced/persisted options could be non-conformant. It surfaces the anomaly by RAISING InvariantError (not silent recovery, no coercion, no fabrication); the Mapping (not exact `type() is dict`) form is required because freeze_fields wraps the staged step as MappingProxyType, so an exact-type check would wrongly reject our own valid frozen mapping (the sibling `plugin` check uses exact `type() is str` deliberately, since str subclasses are unwanted). @trust_boundary is not applied because _dispatch_guided_respond is a large multi-branch dispatcher with no single source_param and an existing test contract is not raise-keyed to this site; the per-line allowlist with this explicit boundary statement is the prescribed mechanism.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-01'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-03T04:26:13.048862+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    PRESCRIBED FORM. The rationale identifies a Tier-3 re-read boundary: ChainProposal.steps is typed Sequence[Mapping[str, Any]], so step['options'] is Any and its shape is not contractually guaranteed; ChainProposal.from_dict reconstructs from persisted composer-authored session state without re-validating the options value shape. The isinstance(options, Mapping) check raises InvariantError on malformed input — no coercion, no fabrication, no silent recovery — which is the prescribed offensive shape-check at a Tier-3 boundary. The Mapping (not exact dict) form is justified by the MappingProxyType freezing, and the rationale plausibly explains why @trust_boundary doesn't fit (multi-branch dispatcher, no single source_param), so the per-line entry is the appropriate mechanism here.
-  judge_signature_version: 2
-  scope_fingerprint: d972e5948221ddd60d85dc37c960e2696092055dfecc451ed6280d51d1c6e45a
-  judge_transport: openrouter
-  ast_path: 'body[152]/body[7]/body[0]/body[3]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:8d3a592fc5e065c66c46ab8ebee342394a4f45e871828a270350a04cc2ed3302'
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=4cfa0bef5fce8c3f
-  owner: john
-  reason: |-
-    In _periodic_orphan_cleanup (line 180), the catch is narrowed to (SQLAlchemyError, OSError) — recoverable DB-layer transients and SQLite file-level I/O failures from cancel_all_orphaned_runs at a true external boundary (DB engine + filesystem). The correct behaviour for this periodic background loop is to absorb the transient and retry on the next interval. Programmer-bug exceptions (AttributeError, TypeError, AssertionError) are deliberately NOT caught and terminate the task so they surface at lifespan shutdown — the offensive-programming stance. exc_info is omitted to avoid the documented SQLAlchemy __cause__ credential-leak vector. The existing rationale is accurate. Not silent swallowing of bugs; consistent with sibling cleanup sites.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:23:32.187627+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. The except clause is narrowed to (SQLAlchemyError, OSError) — these are genuine external-boundary failures (DB engine + SQLite filesystem) in a periodic background loop where absorb-and-retry-next-interval is the correct semantics. Programmer-bug exception types (AttributeError/TypeError/AssertionError) are deliberately left uncaught so they terminate the task and surface at lifespan shutdown, preserving the offensive-programming stance. The error is recorded via structured logging with a documented credential-leak reason for omitting exc_info, and the inline comment explains the routing decision. This is not silent swallowing — it is a typed, scoped catch matching the structural routing of a background retry loop.
-  judge_signature_version: 2
-  scope_fingerprint: e01b8fc50322bbae8528c468cd187e4b5bdc052660584de9702362694b874432
-  judge_transport: openrouter
-  ast_path: 'body[81]/body[3]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:689db47e339a1dcf94e87f56547cd4f4a1b81af69e9cf9221eabd0044611896d'
-- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=92dd4b5a184dc62a
-  owner: john
-  reason: |-
-    In _BodySizeLimitMiddleware.dispatch (line 501), `request.headers.get("content-length")` reads an optional HTTP header from untrusted client input — Tier 3. content-length is optional and clients may omit it (comment lines 491-495); None means no declared size, in which case the request proceeds to the per-field Pydantic caps which are the actual contract. Notably the int(content_length) conversion at line 502 is deliberately NOT wrapped, so a malformed header propagates to Starlette's 400 handling rather than being defended — absence is handled honestly (skip the early 413) and bad values still crash. This is correct Tier-3 optional-header handling, not bug-hiding.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:35:06.769829+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.95
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM: request.headers is HTTP request data from untrusted clients — Tier-3 external input, not first-party typed data. The Content-Length header is genuinely optional per HTTP spec, and .get() correctly distinguishes absence (None → skip early check, fall through to Pydantic per-field caps which are the real contract) from presence. The code is honest about its trust posture: int(content_length) is deliberately unwrapped so malformed headers crash to Starlette's 400 handler, and the docstring explicitly documents this design. This is the prescribed Tier-3 boundary form: validate-at-border, record absence as None, no fabrication.
-  judge_signature_version: 2
-  scope_fingerprint: 6727b0ede9bf6fed69e150333bf482a723144515f4a33fdc1de1c2dae1a75bfd
-  judge_transport: openrouter
-  ast_path: 'body[85]/body[2]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:0bc64f8966c6891558687a9e4e162211f69e651ed5a14c86d80bdd894dc6a481'
-- key: web/app.py:R1:create_app:fp=f23aed5fee50ba7b
-  owner: john
-  reason: |-
-    create_app (app.py:706) reads os.environ.get("ELSPETH_ENV") != "test" as one clause of the production secret_key guard (the guard hard-crashes via SystemExit when secret_key is the default value on a non-local host outside tests). os.environ is a Tier-3 external boundary (process environment, not first-party data); .get() returns None when ELSPETH_ENV is unset and the != "test" comparison correctly treats absence as "not the test environment" without fabricating a substitute. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind. This is the canonical shape-safe read of an optional env var with explicit None handling. (Note: existing rationale's "WEB_CONCURRENCY" label is stale — the actual var is ELSPETH_ENV in the secret-key production guard; rewritten from current code.)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:35:12.701635+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    RULE MISFIRES: os.environ is a Tier-3 external boundary (process environment, not first-party data under an ELSPETH typed contract). The .get("ELSPETH_ENV") != "test" comparison correctly treats absence as 'not test' without fabricating a substitute value — None propagates through the != comparison honestly. The decorator nudge does not apply because os.environ is module-level state, not a function parameter that @trust_boundary(source_param=...) could bind to. The guard itself is offensive (raises SystemExit on misconfiguration), and the .get() is the shape-safe read at the env-var boundary.
-  judge_signature_version: 2
-  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
-  judge_transport: openrouter
-  ast_path: 'body[86]/body[21]/test/values[3]/left'
-  judge_metadata_signature: 'hmac-sha256:v2:1353152d8d8f7e18e4ae41eb730c1a6285a3238f9c9cce5e12ac2f8221669fa4'
-- key: web/app.py:R1:create_app:fp=bf72ca4a84a3c2e7
-  owner: john
-  reason: |-
-    At app.py:797, os.environ.get("WEB_CONCURRENCY", "1") reads an optional process-environment variable — a genuine Tier-3 boundary external to ELSPETH. The default "1" is meaning-preserving: absence of WEB_CONCURRENCY documents single-worker, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") which rejects non-integers. This is an optional env-var read with a documented absence default, not a defensive .get() on a typed first-party object. (Note: the existing existing_reason text mislabels the variable as ELSPETH_ENV, but the code and the verified existing_rationale both correctly describe WEB_CONCURRENCY.)
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:35:18.730143+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    RULE MISFIRES. os.environ is the process-environment boundary — a genuine Tier-3 external source whose shape ELSPETH does not control. The .get("WEB_CONCURRENCY", "1") reads an optional env var with a meaning-preserving default (absence documents single-worker intent, identical to the explicit "1" case), and the result is immediately validated by _parse_worker_count which rejects non-integers. This is the prescribed boundary form (validate-at-border, with absence handled honestly), not a defensive .get on first-party typed data.
-  judge_signature_version: 2
-  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
-  judge_transport: openrouter
-  ast_path: 'body[86]/body[50]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:74784f85d0b36d9d84020bc915540ddb7291b6bcde26cef4413dee3c82b1cc24'
-- key: web/app.py:R4:create_app:_prometheus_metrics:fp=cace50c86a32e828
-  owner: john
-  reason: |-
-    In _prometheus_metrics (app.py), the broad `except Exception` wraps generate_latest(), which walks the global Prometheus REGISTRY and runs third-party collector code we do not own — a genuine external boundary at a public /metrics scrape endpoint. A corrupted collector raising would otherwise reach Starlette's default 500 handler and leak the traceback into the response body; the handler instead records the failure via `_handler_slog.error("prometheus_scrape_failed", exc_class=..., detail=str(scrape_exc)[:200])` and returns a fixed 503 with a one-line '# scrape failed' body, so scrapers retry gracefully. Audit-primacy (CLAUDE.md): this endpoint reads in-memory OTel counter state only, so a scrape failure is a telemetry-system failure — operational, not legal — which is the sanctioned use of slog (logged, not audited); no Landscape audit event is swallowed. Logging a bounded message is safe here, unlike the secret-bearing DB exceptions in execution/service.py: generate_latest() only formats global-REGISTRY state, every value of which /metrics already serves publicly, so the message identifies which collector broke without exposing anything not already public. Broad except is the correct width for unknown third-party collector failures at an external boundary; the error is recorded for operators, not dropped.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T03:35:26.067620+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The broad except wraps generate_latest(), which runs third-party Prometheus collector code at an external HTTP scrape boundary — exactly the kind of unknown-third-party failure mode where narrow exception types cannot be enumerated. The handler records the failure structurally (exc_class + bounded detail) and returns a fixed 503, which is the correct operational disposition for a telemetry-scrape failure (not a Landscape audit event — no first-party invariant is being swallowed). The rationale correctly identifies the tier (telemetry/operational, not Tier-1 audit) and addresses why a bounded log message is safe here (REGISTRY state is already publicly served on /metrics). R4's concern — suppressing bugs — is mitigated by the structured error record plus distinct 503 status, so operators can observe the failure.
-  judge_signature_version: 2
-  scope_fingerprint: 3b9b06bfdec2daf353f82af2ecd2e832c436e2ef06be4d5f8406e785c29a116b
-  judge_transport: openrouter
-  ast_path: 'body[86]/body[75]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:8123dda774a76277460da4018cacdc68066e92201afee25af62fe4543e4f46dc'
 - key: web/composer/tool_batch.py:R4:run_tool_batch:fp=c829a0906e9b3e29
   owner: john
   reason: |-
@@ -2867,25 +2344,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[26]/body[39]/body[4]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:c6b76c2283a1857aa217071083b1a40591d4cfc9fff3dcb3a2eed376b04a7491'
-- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=ae6883ce1915b729
-  owner: john
-  reason: |-
-    PRESCRIBED FORM — first-party sum-type dispatch, now mechanically declared. `_serialize_response_via_walker` accepts `_ToolOutcome`, whose `_ToolOutcomeResponse` type alias is `ToolResult | Mapping[str, Any] | None` in web/composer/_compose_loop_carriers.py. P3 constructs `_ToolOutcome` records only through `tool_batch.run_tool_batch._append_tool_outcome`; normal execute-tool, cache-hit, proposal, and session-aware success paths store a `ToolResult`, while the `request_advisor_hint` interception path intentionally stores first-party Mapping envelopes because that tool is outside `execute_tool` and performs an async advisor LLM call. Those Mapping envelopes are the disabled/budget-exhausted/advisor-error/timeout/success payloads produced in tool_batch.py and are redacted by the manifest entry for `request_advisor_hint`, whose known response keys include the sensitive `guidance` field. The external advisor text crosses its Tier-3 boundary in `_call_advisor_with_audit`, which validates non-empty content and records an inner ComposerLLMCall before building the first-party envelope. The `isinstance(response, Mapping)` branch therefore dispatches a declared internal union so P4 can either deep-thaw the advisor Mapping envelope or call `ToolResult.to_dict()`; it is not masking an unexpected contract violation or fabricating data.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T06:31:30.776412+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM — the rationale plainly states that `_ToolOutcome.response` is a first-party union type `ToolResult | Mapping[str, Any] | None`, and the visible code dispatches on that union: the Mapping branch calls `deep_thaw` and the else branch `cast`s to `ToolResult` and calls `.to_dict()`. This is sum-type discrimination of a declared internal union, not a defensive shape guard against an unexpected contract violation, and it is not a Tier-3 boundary case (no external parameter, R5 here is structural dispatch). The isinstance is the prescribed way to fork on a Python union with no common method, and the rationale identifies which producers store Mappings vs ToolResults consistent with the code.
-  judge_signature_version: 2
-  scope_fingerprint: c87af842e6b25373cf6c3666950e45cef7ddbc0c7845e23029f21dbb9642d803
-  judge_transport: openrouter
-  ast_path: 'body[94]/body[3]/body[4]/body[1]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:5d84861e092a02dbdb184cdc59a4d49e7f467054d99510c52f38dc41eaf25dc4'
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=7f739b2cc0f07da8
   owner: john
   reason: |-
@@ -3085,101 +2543,6 @@ allow_hits:
     - pattern: dotenv_secret_assignment
       byte_count: 23
       redacted_hash: 1cf041d475e40d17
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=f06a8245e2f3c1af
-  owner: john
-  reason: |-
-    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T07:08:39.403893+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES — this is tagged-union dispatch on a first-party sum-type return (`CompositionState | InterpretationReviewPending`) from `materialize_state_for_execution()`, which is the canonical Python pattern for discriminating union variants. The isinstance check is not a defensive shape guard against external data nor a redundant re-check of a guaranteed type; it is the structural discriminator that selects which arm to execute. The pending arm emits telemetry and raises a typed error (offensive), and the resolved arm narrows the type for downstream use. R5's concern (masking contract violations) does not apply: there is no contract being violated — the union IS the contract.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[10]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:bdcc80d82cdc0838f039c77a52047ca101ac4dd080043fc075e40e440e2e3b00'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=08f79725af00b7e8
-  owner: john
-  reason: |-
-    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T07:08:47.013962+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM: composition_state.source.options carries composer/user-authored config persisted and re-read from state — Tier-3 external-origin content per the policy's persisted-config rule, regardless of its dataclass courier. The keys 'path' and 'file' are genuinely optional (a non-file source declares neither), so absence legitimately means 'not used' and skipping is meaning-preserving, not fabrication; present values are strictly enforced with a hard PathAllowlistViolationError before reaching the engine. This is the prescribed Tier-3 boundary guard pattern, and the rationale correctly identifies the tier and the optionality. The function does not take the external data as a parameter (it's reached via self/composition_state), so @trust_boundary's source_param mechanism does not cleanly apply here.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[12]/body[2]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:806c8acd546505054e6b207b49972f28ac31f4dde2a93ffec321a8ec3ebd53fb'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b5a321ad3a8cf21a
-  owner: john
-  reason: |-
-    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T07:08:54.064849+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    RULE MISFIRES — output.options is composer/operator-authored sink config (Tier-3 external-origin per policy: persisted external-origin config re-read is Tier-3 at the read site, container dataclass notwithstanding). The 'path'/'file' keys are genuinely optional (non-filesystem sinks legitimately have neither), so .get() returning None is meaning-preserving absence, not fabrication, and is immediately guarded by `if value is not None`. When present, the value is offensively resolved and hard-rejected via PathAllowlistViolationError if it escapes allowed directories — this is the prescribed Tier-3 boundary form. The rationale correctly identifies the tier and the security semantics match the visible code.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:e9dc6a91969c42d0dbbb8862d73500ddf9e9ba7aa569b58d7ae2611a86870e39'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=99a68378ad3d14fc
-  owner: john
-  reason: |-
-    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T07:09:01.180251+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    RULE MISFIRES on tier classification. composition_state.source.options carries composer-authored config re-read from our store — Tier-3 per policy ('persisted external-origin config re-read from our DB: still Tier-3'). blob_ref is an optional key whose absence is a legitimate state (non-blob-backed sources), and the code handles None by skipping the UUID/ownership block, then validates the present case with UUID() raising MalformedBlobRefError and a cross-session ownership check raising BlobNotFoundError. This is meaning-preserving Tier-3 navigation of an optional key, not fabrication or silent recovery; absence is preserved as None rather than substituted.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[17]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:c8caf542abc462e33c37e079136dac4c3fef78234eaec7ef416d7ee8ded13d79'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=bfc061ccd5a7c11f
-  owner: john
-  reason: |-
-    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-02'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-04T07:09:09.407294+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The except block is narrowly scoped to SQLAlchemyError/OSError (cleanup-path failures during a setup-failure recovery), records the failure via slog with class-name-only payload to avoid credential leakage through SQLAlchemy's str() expansion, and is immediately followed by a bare `raise` on line 705 that re-propagates the original exception unmasked. This is the canonical record-then-reraise pattern at a cleanup boundary, not silent swallowing — R6's concern (errors disappearing without re-raise) does not apply because the original exception continues to propagate. The narrow catch correctly lets programmer bugs (AttributeError/TypeError) surface per the offensive stance, and the rationale speaks directly to the flagged pattern with site-specific detail.
-  judge_signature_version: 2
-  scope_fingerprint: d876e15ad683fbd97dbbd8f7d466dcf80b5ebabbad632c67197d2fd9fff09cd8
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[24]/handlers[0]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:50d6e72534da410fd458d9b927900efd54d090817a44f564b0618ea151e0cf04'
 - key: web/execution/service.py:R6:ExecutionServiceImpl:validate_state:_blob_get_metadata:fp=3c935d81224534c9
   owner: john
   reason: |-
@@ -3218,6 +2581,694 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[59]/body[13]/body[1]/body[0]/value'
   judge_metadata_signature: 'hmac-sha256:v2:411bc0d352f526426836f7db767f544972d510f45a21fd4392d2cd1abaca7817'
+- key: web/execution/outputs.py:R6:_is_path_in_sink_allowlist:fp=e1f745424d4e5c84
+  owner: john
+  reason: |-
+    _is_path_in_sink_allowlist (outputs.py:46) wraps a single fs_path.resolve() — an OS filesystem call (Tier-3 boundary) that can raise OSError on symlink loops, missing intermediates, or permission errors — and returns False on failure. The function computes a UI Download-button hint; the actual security boundary is reapplied at the /content endpoint with its own resolve(), so conservatively treating an unresolvable path as not-downloadable is safe-by-default and meaning-preserving. The catch is narrow (OSError around one resolve call). The existing rationale identifies the precise failure modes and the compensating control.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:44:40.129532+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The except wraps a single OS filesystem call (fs_path.resolve()) — a Tier-3 boundary where OSError (symlink loops, permission errors, missing intermediates) is a real, expected failure mode. The function computes a UI hint for whether to show a Download button; returning False on failure is meaning-preserving (unresolvable → not-downloadable) and the actual security check is reapplied at the /content endpoint with its own resolve(). The except is narrow (OSError only) around exactly one call, and the rationale identifies the precise failure modes and the compensating control. This is not silent swallowing of first-party invariants; it is conservative safe-by-default handling at an OS boundary with a downstream authoritative check.
+  judge_signature_version: 2
+  scope_fingerprint: db8938b0647d62f833ebd5ffc0e53c6990b5e4e5d2b61a4b1f1b31c150a28cd4
+  judge_transport: openrouter
+  ast_path: 'body[13]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c438e9c69b5526059d55ddd8bdc8a7fa9f6e35d8d400d4bbbae2e1d291152b4f'
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=be313c147c5a50be
+  owner: john
+  reason: |-
+    At messages.py:769, contextlib.suppress(asyncio.CancelledError) wraps an `await asyncio.shield(...)` inside send_message's CancelledError handler. asyncio.shield decouples the persist coroutine from the cancelling outer task; the outer await re-raises CancelledError on the cancelling task while the shielded coroutine completes in the background, persisting the partial llm_calls audit record. Suppressing that re-raised CancelledError is the documented idiom letting control reach the cancelled-progress publish below, before the `raise` at line 795 restores the cancel chain. The suppression is narrow (CancelledError only) and the audit-first ordering is consistent with the Auditability Standard. The existing rationale matches the code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:44:46.942942+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The site is inside an `except asyncio.CancelledError` handler that re-raises at line 828 to restore the cancel chain; the `contextlib.suppress(asyncio.CancelledError)` is narrowly scoped to the `await asyncio.shield(...)` call, which by design re-raises CancelledError on the cancelling task while the shielded coroutine continues to completion in the background. This is the documented asyncio idiom for ensuring an audit-critical persist/publish runs during teardown, and the cancel signal is not lost because the outer `raise` two lines below propagates it. The suppression is type-narrow (CancelledError only, not bare Exception), the audit-first ordering matches the Auditability Standard, and the rationale speaks directly to R7's concern (it explains why this suppress is not silent error-swallowing).
+  judge_signature_version: 2
+  scope_fingerprint: 2ed40f2c86a57387ccabc8541e313d9fe16f62003d26835fae1efc4353eb3b0d
+  judge_transport: openrouter
+  ast_path: 'body[3]/body[0]/body[6]/body[11]/handlers[1]/body[1]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:44177191bc21172e380bc30520e14df974d47592f577c1d21638b4082d44d099'
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=1a85561c51205f0c
+  owner: john
+  reason: |-
+    In send_message (line 779), `with contextlib.suppress(asyncio.CancelledError)` wraps an asyncio.shield()-protected progress publish during the CancelledError handler. The shield lets the publish (the discriminated client_cancelled_progress_event reaching the progress registry) run to completion in the background while `await asyncio.shield` re-raises CancelledError on the cancelling task; suppress absorbs that re-raise so the explicit `raise` at line 795 can restore the original cancel chain. This is the standard asyncio cancellation idiom — it preserves cancellation semantics rather than swallowing business logic. The existing rationale matches the visible code. No data loss: the terminal-state publish is delivered, the cancel propagates.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:44:53.196678+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the standard asyncio.shield + contextlib.suppress(CancelledError) idiom: shield lets the progress publish complete in the background while the outer await re-raises CancelledError on the cancelling task; the suppress absorbs only that re-raise so the explicit `raise` two lines below can propagate the original cancellation. The suppressed exception type is narrowly CancelledError (not bare Exception), the cancel chain is restored by the trailing `raise`, and no business-logic error is being swallowed. The code and comments visibly match the rationale.
+  judge_signature_version: 2
+  scope_fingerprint: 2ed40f2c86a57387ccabc8541e313d9fe16f62003d26835fae1efc4353eb3b0d
+  judge_transport: openrouter
+  ast_path: 'body[3]/body[0]/body[6]/body[11]/handlers[1]/body[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:be6a84d368efdeea2f8b827a2d374623ff48a9e5722f56a62ddaeedb515a4c7d'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=65afef4550e989c5
+  owner: john
+  reason: |-
+    In recompose (composer.py:1044), with contextlib.suppress(asyncio.CancelledError) wraps a best-effort asyncio.shield(_persist_llm_calls(...)) on the client-cancellation path. This is the canonical asyncio-shield idiom: re-cancellation of the shielded coroutine must not prevent the outer cancellation from propagating, and the handler re-raises the CancelledError at line 1065 so the cancellation is not lost. The suppress is narrowly typed to asyncio.CancelledError (not bare), targets exactly the known-benign re-cancellation signal during shielded cleanup, and the surrounding code preserves the primary cancellation. This is offensive control-flow handling of a known signal, not silent error swallowing. Existing rationale verified accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:44:59.308397+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The contextlib.suppress is the canonical asyncio.shield idiom: when the outer task is cancelled, awaiting the shielded coroutine re-raises CancelledError in the awaiter even though the shielded work continues; suppressing that re-cancellation is required to let the shielded persist/publish complete. The suppress is narrowly scoped to asyncio.CancelledError (not bare Exception), and the visible code at line 1096 re-raises the original CancelledError so cancellation is not lost. This is offensive control-flow handling of a known asyncio signal at a cancellation boundary, not silent error swallowing of a data/logic exception.
+  judge_signature_version: 2
+  scope_fingerprint: f68ffdde121880bbdbbdec3abe2b21b8a84690cb9f7a18690da87116c753708f
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[7]/body[6]/body[15]/handlers[1]/body[1]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:8cf5ab34c6d35af68597736994755fe3c33cd277cfa8d2e01f54a3131f191d72'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=b22f01dc72b4660b
+  owner: john
+  reason: |-
+    At line 1054 in the recompose handler's asyncio.CancelledError path, `with contextlib.suppress(asyncio.CancelledError)` wraps an `await asyncio.shield(_publish_progress(...))` best-effort cancellation-notice broadcast. The suppress is narrowed to exactly asyncio.CancelledError (not Exception): during a cancelled request the shielded publish may itself be re-cancelled, and that re-cancellation must not prevent the handler from reaching its `raise` (line 1065) which re-propagates the original cancellation. This is the documented control-flow handling of cancellation at an async boundary — the original CancelledError is deliberately re-raised, so nothing is swallowed; only the redundant inner cancel of the shielded best-effort publish is suppressed. Legitimate EAFP/cancellation pattern.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:05.409718+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The rule (R7: contextlib.suppress) fires on a real suppress, and the code is the prescribed legitimate form for async cancellation handling: the suppress is narrowed to exactly asyncio.CancelledError (not Exception), wraps a shielded best-effort publish of a cancellation-notice progress event, and the enclosing except re-raises the original CancelledError on line 1096. Nothing is swallowed — only a redundant re-cancellation of the inner shielded publish during an already-cancelling request is absorbed, so the outer cancellation continues to propagate. This is the documented control-flow pattern for async cancellation boundaries and does not silence any error condition.
+  judge_signature_version: 2
+  scope_fingerprint: f68ffdde121880bbdbbdec3abe2b21b8a84690cb9f7a18690da87116c753708f
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[7]/body[6]/body[15]/handlers[1]/body[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:e1f39b498911bd16a3fdb264495a820813adffbdc5052386d57b1c1102503f39'
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=65b078af067fd26a
+  owner: john
+  reason: |-
+    In post_guided_respond's `finally` block, the exception-unwind branch (`primary_exc is not None`) drains the recorder via _persist_tool_invocations / _persist_llm_calls, each wrapped in a broad `except Exception as persist_exc` whose only action is a best-effort `slog.error` (itself under contextlib.suppress) reporting the audit-system failure under the B1 convention (exc_class + frames; no Tier-bearing strings). The breadth is required and correct here: the block runs inside a `finally` during exception unwind, where Python lets any exception raised in the block REPLACE the primary exception (the 400/409/500 the operator must see). Letting a cleanup-time persist failure — or a programmer error in redaction/envelope construction — propagate would mask that primary failure, violating ELSPETH's audit-primacy doctrine. The expected SQLAlchemyError is handled narrowly INSIDE the helpers via plugin_crash_pending=True (persist-failed-during-unwind counter + slog + continue); this outer broad catch is the belt-and-suspenders net for the unanticipated, and every catch is surfaced via the guided.audit_persist_failed_during_exception_handling slog event. It is not a silent swallow and touches no audit/pipeline data path. Mirrors the reviewed _persist_chat_turns unwind pattern in post_guided_chat.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:12.141707+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. The broad except sits inside a `finally` unwind branch where a propagating exception from cleanup-time audit persistence would REPLACE the primary HTTP failure the operator must see — this is the policy-prescribed shape for exception-unwind cleanup. The narrow expected SQLAlchemyError path is handled INSIDE the helpers via `plugin_crash_pending=True`; this outer broad catch is the belt-and-suspenders net for unanticipated programmer errors (e.g. redaction/envelope construction), and each catch is surfaced via a structured `guided.audit_persist_failed_during_exception_handling` slog event — not a silent swallow. The code excerpt's comments corroborate the rationale's framing (plugin_crash_pending semantics, primary-exception masking concern), and no audit/pipeline data path is touched by the suppression itself.
+  judge_signature_version: 2
+  scope_fingerprint: d2ad1a45f067e6d2d05fb24405efc11b8e8c8cae0cbf1e525e53a415a3005bd9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:eb5b3f92e0baebc4589b7ae19a425e73994494f6e58a0bbb4a0017bec710d94c'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=90d1459942d2afe8
+  owner: john
+  reason: |-
+    At line 2454 in post_guided_respond, `with contextlib.suppress(Exception)` wraps a single slog.error() call inside the `except Exception as persist_exc` handler for an audit-persist failure during request unwinding (lines 2453-2463). The suppress protects only the diagnostic logging of an already-failed best-effort audit persist during exception unwind: if the logger itself raises, that must not mask the original in-flight exception that is being unwound. No pipeline/audit data is swallowed here — the audit failure is precisely what is being logged; the suppress just guarantees the unwind continues to the real error. This is the legitimate 'don't let logging-during-unwind shadow the primary failure' pattern at an HTTP request boundary.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:18.356782+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The contextlib.suppress wraps only the slog.error diagnostic call inside an except handler during exception unwind (the finally branch with plugin_crash_pending=True). The primary in-flight exception is what the operator needs to see; if the logger itself raises, suppressing that secondary failure prevents it from masking the primary failure being unwound. No pipeline or audit data is swallowed — the audit-persist failure has already been recorded via the unwind disposition selected by plugin_crash_pending=True, and slog is best-effort logging (last-resort channel per primacy order). This is the legitimate 'don't let logging-during-unwind shadow the primary failure' pattern at an HTTP boundary.
+  judge_signature_version: 2
+  scope_fingerprint: d2ad1a45f067e6d2d05fb24405efc11b8e8c8cae0cbf1e525e53a415a3005bd9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[0]/handlers[0]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:75f7eed3a1cfe8095b996b72ac8eef395a0bd29d54e9f432973e3e2723454fc7'
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=459203baa79b869f
+  owner: john
+  reason: |-
+    At composer.py:2472 the except Exception as persist_exc wraps the _persist_llm_calls recorder-drain on the exception-unwind path of post_guided_respond's finally block. Identical pattern to the get_guided site: it preserves the primary in-flight exception (so a 400/409 is not masked by a 500 from a finally-block persistence failure) and records the failure via slog with exc_class + bounded frames only — the documented audit-system-failure logging exemption — rather than swallowing silently. Broad-except is correct because any persistence/serialization error class can arise during the drain and re-raising it would replace the routed error. Success-path drains (separate branch) propagate failures. Not silent data loss; the audit-persist failure is explicitly recorded. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:25.106330+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an exception-unwind finally-block persistence drain: the primary in-flight exception must surface to the operator, and a secondary failure from the audit-persist drain would mask it if re-raised. The broad except preserves the routed error, records the audit-system failure via slog with exc_class and bounded frames (the documented audit-system-failure logging exemption), and the inner contextlib.suppress guards only the logging call itself. This matches the policy's prescribed shape for record-and-continue on the exception-unwind path; the success-path drains are separate and propagate. The rule fires on shape but the code is the legitimate form.
+  judge_signature_version: 2
+  scope_fingerprint: d2ad1a45f067e6d2d05fb24405efc11b8e8c8cae0cbf1e525e53a415a3005bd9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f284170fdd96070930f58e245c87f6a58ca977c0019ad75dbff742df2fec9660'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=647eaaa3142057a0
+  owner: john
+  reason: |-
+    At composer.py:2473, contextlib.suppress(Exception) wraps a single slog.error() call inside an `except Exception as persist_exc` handler recording a guided llm_calls audit-persist failure during exception handling. Identical structure to the get_guided sibling: the real persist failure is captured and logged via slog (exc_class + frames); the suppress only guards the structlog emission itself, the logger of last resort, for which no safer channel exists if structlog raises. The persist failure is recorded, not silently dropped to a default value, and this is the audit/telemetry-system-degradation logging case the policy permits.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:30.867477+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The suppress guards only the last-resort structlog emission itself within an except handler that is already recording a persist failure during primary-exception handling. The persist exception is captured with class and frames and routed to slog; nothing is silently coerced or fabricated, and there is no safer channel if structlog itself raises. This matches the policy's allowance for guarding the logger of last resort when audit/telemetry have already failed, and the surrounding code shows the structure plainly.
+  judge_signature_version: 2
+  scope_fingerprint: d2ad1a45f067e6d2d05fb24405efc11b8e8c8cae0cbf1e525e53a415a3005bd9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[16]/body[6]/body[1]/finalbody[1]/orelse[1]/handlers[0]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:21dc43d8d2d9e99a190f837a8546238c464249caeab1709294da9b9494eb01c3'
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=4aac0c4c0b044ec2
+  owner: john
+  reason: |-
+    In post_guided_chat (line 3040), the broad `except Exception as persist_exc` is in the `else` branch taken only when primary_exc is not None (an exception is unwinding, line 3031). It drains tool_invocations to the audit trail best-effort; the success branch (primary_exc is None, line 3016) persists WITHOUT this guard so success-path audit failures propagate and create no evidence gap. During an unwind, a failed audit drain must not mask the primary HTTPException, so the broad catch records exc_class + frames via slog (channel of last resort) rather than swallowing silently. This is the documented persistence-fallback / audit-system-failure exemption, identical to the get_guided sibling. Not silent swallowing.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:37.249063+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The broad except sits in the unwind branch where a primary exception is already in flight; allowing an audit-persist failure to raise here would mask the primary HTTPException, which is the worse outcome. The success path (visible in lines 3087-3093) deliberately does NOT carry this guard, so success-path audit failures still propagate — confirming the asymmetry the rationale claims. The handler records exc_class and frames via slog (last-resort channel, appropriate when audit itself is the failing subsystem) rather than swallowing silently, matching the documented audit-system-failure exemption. The rationale speaks directly to R4's concern and the code corroborates it.
+  judge_signature_version: 2
+  scope_fingerprint: 6b5a5df8d3a4de4fd2c2820a4e1c043eb339fee1a166a7109caecf306ac1d3c9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:26977370da10d97756684cd161754432922f4373c1fe2d35aa900c4da0d18ebd'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=fda975b0625f46e8
+  owner: john
+  reason: |-
+    At composer.py:3041 (inside post_guided_chat), `with contextlib.suppress(Exception):` wraps a `slog.error(...)` terminal logger-of-last-resort emitted only when an audit-persist attempt failed during exception handling. This is the final channel in the primacy order — if structlog raises here, no safer channel exists — and suppressing prevents the last-resort log from masking the original handled exception. It does not hide pipeline/audit activity: the persist failure being reported is already handled in the enclosing try/except, and the suppress guards only this terminal log emission. Same documented pattern as the get_guided sibling. Narrowly purposed and correct.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:45:43.225123+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the last-resort logger channel in the primacy order (Audit -> Telemetry -> Logging), wrapped only around slog.error emitted from within an except handler that is itself reacting to an audit-persist failure during unwind of a primary exception. Per policy, the last-resort log must not mask the primary in-flight exception; suppressing a structlog failure on this terminal emission is the narrow, correct shape. The suppress scope is tightly bounded to the single slog.error call, not pipeline or audit activity, and the persist failure itself is already handled in the enclosing try/except.
+  judge_signature_version: 2
+  scope_fingerprint: 6b5a5df8d3a4de4fd2c2820a4e1c043eb339fee1a166a7109caecf306ac1d3c9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[0]/handlers[0]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:fb0c3cefd8b29462772a154849d15069e2c50aa5bc2460a3b98f179aac4a2f90'
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=6a812675536c1066
+  owner: john
+  reason: |-
+    In post_guided_chat (composer.py:3059), except Exception as persist_exc wraps a best-effort _persist_chat_turns call on the exception-unwind path (the `primary_exc is not None` branch of the finally block). The call correctly passes request_unwinding=True (line 3057), so the helper itself already does the right thing internally: on SQLAlchemyError or any Exception during unwind it counts/slogs and continues (_helpers.py:1640/1659) — broad-swallow-during-unwind being an accepted, reviewed ELSPETH pattern that protects the primary HTTP exception. This outer catch fires only for throws OUTSIDE the helper's per-turn try (e.g. json.dumps of turn fields, chat_turn_audit_envelope), and exists to prevent a secondary audit-persist failure from replacing the primary 400/409 exception the operator needs to see. The failure is recorded via slog (the CLAUDE.md-permitted channel for audit-system failures) with exc_class + frames only (no Tier-bearing strings). No primary error is masked and no audit truth is fabricated. The suppression is consistent with the helper's own unwind disposition.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:01:01.535054+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a broad-except on the exception-unwind path of a finally block where a primary exception is already in flight — the explicit purpose is to prevent a secondary audit-persist failure from replacing the primary HTTP error the operator needs to see. The rationale ties the catch to a specific structural concern (unwind protection), explains that the inner helper already handles its own per-turn errors, and shows that the failure is recorded via slog with exception class and frames (an audit-system failure channel, not a pipeline event). The Telemetry/Audit primacy concern doesn't apply here because this IS the audit-persist failure itself — slog is the correct last-resort channel when audit persistence has just failed. The code excerpt confirms the structure (request_unwinding=True, error logging with exc_class + frames) the rationale describes.
+  judge_signature_version: 2
+  scope_fingerprint: 6b5a5df8d3a4de4fd2c2820a4e1c043eb339fee1a166a7109caecf306ac1d3c9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:9c642fdc0b7566e6b7840edd7d2163414ef29cd57cda840c07f56eddb712eaca'
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=89713c5bac9cbaa5
+  owner: john
+  reason: |-
+    At the R7 site in post_guided_chat, contextlib.suppress(Exception) wraps only the final route-level slog.error call in the exception-unwind branch after _persist_chat_turns has already failed. This code is executing inside finally with sys.exception() non-None; Python semantics are that a new exception raised from the finally block replaces the active primary exception and leaves the primary only as __context__. For this route that means a structlog processor or sink failure could replace the sanitized HTTPException raised by the chat InvariantError handler, and the browser would see the logger failure or a generic 500 instead of the intended safe 500 detail. slog.error is not infallible because structlog executes configured processors and output sinks; the regression test tests/integration/web/composer/guided/test_step_chat.py::TestStepChatServerInvariants::test_chat_audit_unwind_preserves_primary_error_if_slog_raises patches the chat audit persist helper to fail and patches only the guided.chat_turn_persist_failed_during_exception_handling log event to raise, then asserts the original sanitized HTTP error still wins. The suppress does not hide normal audit failure on the success path, does not wrap application logic, and does not fabricate audit state. It only contains failure of the last-resort logger after the audit channel has already failed during active exception unwind.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:18:10.328962+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The suppress wraps only a last-resort slog.error call inside an except handler that itself sits in the exception-unwind path after audit persistence has already failed. Per policy, audit fires first (already attempted and failed here) and logging is last-resort; if the logger raised, it would replace the active primary exception via Python's finally/unwind semantics and clobber the sanitized HTTPException the user should see. The suppress is narrowly scoped to the logger call (not application logic, not the audit write), does not fabricate audit state, and the rationale names a specific regression test pinning the behavior. This matches the legitimate pattern of protecting primary-exception fidelity during unwind.
+  judge_signature_version: 2
+  scope_fingerprint: 6b5a5df8d3a4de4fd2c2820a4e1c043eb339fee1a166a7109caecf306ac1d3c9
+  judge_transport: openrouter
+  ast_path: 'body[7]/body[17]/body[6]/body[2]/finalbody[1]/orelse[1]/handlers[0]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:6e6acf15bc65a86198f5199f0893f5a9e7114d8cf478facf4472c6f6ae6bcb40'
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=4e1d05343997dcab
+  owner: john
+  reason: |-
+    At line 1796 in persist_compose_turn, `asyncio.get_running_loop()` is wrapped in try/except RuntimeError as an EAFP control-flow probe: asyncio raises RuntimeError specifically when there is no running event loop, and that absence is the expected, intended case (we are in a worker thread or sync test context) so `pass` proceeds. The else branch raises a loud RuntimeError instructing callers to use the async variant (lines 1800-1806). This is the documented EAFP pattern using a specific expected exception as a presence signal — not swallowing a failure to a default; both outcomes are explicit (proceed when absent, hard-error when a loop is present to prevent blocking it). Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:46:12.723836+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. The try/except RuntimeError around asyncio.get_running_loop() is not swallowing an error to a default — it is the canonical EAFP probe for loop presence (asyncio's documented contract is that this call raises RuntimeError when no loop is running). The 'absence' branch proceeds intentionally (sync/worker-thread context), and the 'presence' branch raises a loud RuntimeError refusing the call. Both outcomes are explicit and audible; R6's concern (silent swallow without re-raise or explicit result) does not apply here. The exception is also narrowly scoped to RuntimeError, not bare Exception.
+  judge_signature_version: 2
+  scope_fingerprint: 1f44dcc89c86d974ac95cfcd4ba084a7ff268a903e6aed587d3a9932f887c92c
+  judge_transport: openrouter
+  ast_path: 'body[72]/body[12]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:8dc8465f4ca59c87f49ddad9c986ec58195624234ace22b54034cb2bea476f15'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=733611406e3fefe3
+  owner: john
+  reason: |-
+    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
+
+    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:46:19.836112+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES. The source_options dict originates from state.source.options — Tier-3 composer/user-authored configuration re-read from our DB (the persisted-external-config case explicitly named in policy). The loop iterates over a set of OPTIONAL path keys; .get() returning None followed by `if value is not None` is a meaning-preserving 'absent -> skip this allowlist slot', not a fabricated default, and there is no schema guarantee that every key in SOURCE_LOCAL_PATH_OPTION_KEYS is present. The decorator nudge doesn't fit: source_param would be `state` (not the dict subject), and validate_pipeline's contract is to return a ValidationResult, not to raise on absent optional keys. R1 fires on shape but the data is genuinely Tier-3 and the handling is honest.
+  judge_signature_version: 2
+  scope_fingerprint: ef9935887e51a4f9baf85d1182314043fd0f3a84a1dc619487d6fb7875aae1d0
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[9]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:1ce118edd53d5b000056aea83dd20e2406491f7d025bb9bb34418195bf19bbb1'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=0c7d6399be7e8ecd
+  owner: john
+  reason: |-
+    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
+
+    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:46:27.090796+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.83
+  judge_rationale: |-
+    RULE MISFIRES. The `.get(key)` is reading optional path/file keys from `output.options`, which is Tier-3 external-origin sink configuration (composer/user-authored, re-read from storage — explicitly Tier-3 per the persisted-config policy). The key is genuinely optional: absence means 'no path to allowlist-check for this slot', and the `if value is not None` guard makes that explicit without fabricating a default. The loop variable `key` makes a `key in options` + subscript rewrite a strictly worse double-lookup with no semantic gain. The decorator nudge is correctly ruled out: this function converts structural failures into a ValidationResult rather than raising, so it doesn't satisfy the @trust_boundary raising-invariant model.
+  judge_signature_version: 2
+  scope_fingerprint: ef9935887e51a4f9baf85d1182314043fd0f3a84a1dc619487d6fb7875aae1d0
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[10]/body[0]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:0f16e8699009aec7fd028c89e2878db6b0417b309a7b1d4647a4c79b5ad75f1f'
+- key: web/sessions/routes/_helpers.py:R5:_dispatch_guided_respond:fp=a241c1a56bb89c0d
+  owner: john
+  reason: |-
+    Tier-3 re-read boundary shape-check; NOT redundant on guaranteed first-party data. In _dispatch_guided_respond (formerly _dispatch_guided_respond_impl; renamed when the routes test-seam was removed — body unchanged), `options = step["options"]` reads from `step = dict(guided.step_3_proposal.steps[edit_step_index])`. Trust status of that value: ChainProposal.steps is typed `Sequence[Mapping[str, Any]]`, so each STEP is a mapping, but `step["options"]` is `Any` — the options VALUE's shape is NOT guaranteed by ChainProposal's contract. The options are composer-LLM-authored config (Tier-3 origin). step_3_proposal is populated two ways: (1) freshly from chain_solver, which DOES validate `isinstance(options, Mapping)` (chain_solver.py:160) before constructing the ChainProposal; and (2) reconstructed from persisted session state via `ChainProposal.from_dict` (state_machine.py:444), which does `steps=tuple(dict(s) for s in d["steps"])` and DOES NOT re-validate the options value's shape. Path (2) is the classic Tier-3 re-read boundary (persisted external-origin/composer-authored config, custody interrupted by storage; "validated once" on the fresh path does not promote it on read-back). So `if not isinstance(options, Mapping)` is load-bearing precisely for the persisted-restore path — it is NOT redundant defensive code on a contractually-guaranteed first-party value; it is the shape validation at the boundary where an externally-sourced/persisted options could be non-conformant. It surfaces the anomaly by RAISING InvariantError (not silent recovery, no coercion, no fabrication); the Mapping (not exact `type() is dict`) form is required because freeze_fields wraps the staged step as MappingProxyType, so an exact-type check would wrongly reject our own valid frozen mapping (the sibling `plugin` check uses exact `type() is str` deliberately, since str subclasses are unwanted). @trust_boundary is not applied because _dispatch_guided_respond is a large multi-branch dispatcher with no single source_param and an existing test contract is not raise-keyed to this site; the per-line allowlist with this explicit boundary statement is the prescribed mechanism.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:46:37.977719+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: The rationale identifies a genuine Tier-3 re-read boundary — ChainProposal.steps types options as Any (composer-LLM-authored config), and the from_dict reconstruction path does not re-validate the options value's shape, so this is the persisted external-origin re-read case the policy explicitly addresses. The isinstance(Mapping) check raises InvariantError rather than silently coercing or fabricating, which is the prescribed offensive form at the boundary. The Mapping (not exact-type) check is justified by the MappingProxyType freezing of staged steps, and the asymmetry with the sibling plugin exact-type check is consistent. The decorator nudge does not apply: this is not a function with a single external source_param — it's a multi-branch dispatcher and the subject is derived from self-state, not a parameter.
+  judge_signature_version: 2
+  scope_fingerprint: 90039d12f3840bd7574316c814d54af419ad3648cab1831997aec8fc53417178
+  judge_transport: openrouter
+  ast_path: 'body[152]/body[7]/body[0]/body[3]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:d4f917ee2439a6f7b9f8f596aebddf66571c1748d622c5825e6b14044835d5eb'
+- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=b75bbc00d19cc0ff
+  owner: john
+  reason: |-
+    In _BodySizeLimitMiddleware.dispatch (line 501), `request.headers.get("content-length")` reads an optional HTTP header from untrusted client input — Tier 3. content-length is optional and clients may omit it (comment lines 491-495); None means no declared size, in which case the request proceeds to the per-field Pydantic caps which are the actual contract. Notably the int(content_length) conversion at line 502 is deliberately NOT wrapped, so a malformed header propagates to Starlette's 400 handling rather than being defended — absence is handled honestly (skip the early 413) and bad values still crash. This is correct Tier-3 optional-header handling, not bug-hiding.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:46:55.069701+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES — this is a genuine Tier-3 boundary: HTTP request headers from untrusted clients, where Content-Length is an optional header that clients legitimately may omit. The `.get()` returns None for absent header, which is correctly handled by skipping the early 413 check and falling through to the Pydantic per-field caps that are the real contract. The rationale correctly notes that the int() conversion is deliberately unwrapped so malformed values still crash to Starlette's 400 handler — only absence is tolerated, which matches honest Tier-3 optional-field handling. The docstring at lines 558-562 documents this design explicitly.
+  judge_signature_version: 2
+  scope_fingerprint: 6727b0ede9bf6fed69e150333bf482a723144515f4a33fdc1de1c2dae1a75bfd
+  judge_transport: openrouter
+  ast_path: 'body[89]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:ceeabc0ce98550d7facb8650ead973d6fef640b5b34f34d458040fdd0b1215d8'
+- key: web/app.py:R1:create_app:fp=ccd26826d209c2e3
+  owner: john
+  reason: |-
+    create_app (app.py:706) reads os.environ.get("ELSPETH_ENV") != "test" as one clause of the production secret_key guard (the guard hard-crashes via SystemExit when secret_key is the default value on a non-local host outside tests). os.environ is a Tier-3 external boundary (process environment, not first-party data); .get() returns None when ELSPETH_ENV is unset and the != "test" comparison correctly treats absence as "not the test environment" without fabricating a substitute. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind. This is the canonical shape-safe read of an optional env var with explicit None handling. (Note: existing rationale's "WEB_CONCURRENCY" label is stale — the actual var is ELSPETH_ENV in the secret-key production guard; rewritten from current code.)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:00.950359+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. os.environ is a Tier-3 external boundary (process environment, not first-party data under an ELSPETH contract), and the .get() with explicit != "test" comparison treats absence as 'not test env' without fabricating any value — None flows through the comparison honestly. The guard's purpose is to hard-crash on default secret_key in production, and reading the env var defensively here is the prescribed boundary pattern. The decorator nudge correctly does not apply: os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind to.
+  judge_signature_version: 2
+  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
+  judge_transport: openrouter
+  ast_path: 'body[90]/body[21]/test/values[3]/left'
+  judge_metadata_signature: 'hmac-sha256:v2:6c89c8fe06ca47c4af01330b458824a3087a59512f3fdabdf0b08b414f0d9389'
+- key: web/app.py:R1:create_app:fp=45f26e96395b6717
+  owner: john
+  reason: |-
+    At app.py:797, os.environ.get("WEB_CONCURRENCY", "1") reads an optional process-environment variable — a genuine Tier-3 boundary external to ELSPETH. The default "1" is meaning-preserving: absence of WEB_CONCURRENCY documents single-worker, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") which rejects non-integers. This is an optional env-var read with a documented absence default, not a defensive .get() on a typed first-party object. (Note: the existing existing_reason text mislabels the variable as ELSPETH_ENV, but the code and the verified existing_rationale both correctly describe WEB_CONCURRENCY.)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:07.136584+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. os.environ is a genuine Tier-3 external boundary (process environment, not first-party typed data), and the .get with default "1" is meaning-preserving for an optional env var: absence documents single-worker, and the string is immediately validated by _parse_worker_count which will raise on non-integers. This is the prescribed Tier-3 boundary read pattern, not a defensive guard on first-party data. The default is not fabrication of a missing external value into our audit trail — it is a documented operational default for an optional configuration signal.
+  judge_signature_version: 2
+  scope_fingerprint: 5967f80956b29bf5ff2935020193584aa4556f55d1ba100fc8322ecccb55092e
+  judge_transport: openrouter
+  ast_path: 'body[90]/body[50]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:506b801d49c76b76bf512a4c4a916a7fc8536f2613ddcd7dcfc169bfd27d1900'
+- key: web/app.py:R4:create_app:_prometheus_metrics:fp=a6332da4c591d30f
+  owner: john
+  reason: |-
+    In _prometheus_metrics (app.py), the broad `except Exception` wraps generate_latest(), which walks the global Prometheus REGISTRY and runs third-party collector code we do not own — a genuine external boundary at a public /metrics scrape endpoint. A corrupted collector raising would otherwise reach Starlette's default 500 handler and leak the traceback into the response body; the handler instead records the failure via `_handler_slog.error("prometheus_scrape_failed", exc_class=..., detail=str(scrape_exc)[:200])` and returns a fixed 503 with a one-line '# scrape failed' body, so scrapers retry gracefully. Audit-primacy (CLAUDE.md): this endpoint reads in-memory OTel counter state only, so a scrape failure is a telemetry-system failure — operational, not legal — which is the sanctioned use of slog (logged, not audited); no Landscape audit event is swallowed. Logging a bounded message is safe here, unlike the secret-bearing DB exceptions in execution/service.py: generate_latest() only formats global-REGISTRY state, every value of which /metrics already serves publicly, so the message identifies which collector broke without exposing anything not already public. Broad except is the correct width for unknown third-party collector failures at an external boundary; the error is recorded for operators, not dropped.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:15.066482+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: generate_latest() walks the global Prometheus REGISTRY which executes third-party collector code at an external/public scrape boundary — not first-party code under our typed contract. A broad except at this kind of boundary is the prescribed shape: the failure is recorded via slog with bounded detail, a safe 503 is returned to prevent Starlette's default 500 from leaking tracebacks to scrapers, and the rationale correctly identifies this as a telemetry-system operational failure (not an audit/Landscape event being swallowed). The rationale addresses R4 specifically (why broad width is correct here: unknown third-party collector failure modes) and explains why the bounded log message is safe given /metrics already serves the same REGISTRY state publicly.
+  judge_signature_version: 2
+  scope_fingerprint: 3b9b06bfdec2daf353f82af2ecd2e832c436e2ef06be4d5f8406e785c29a116b
+  judge_transport: openrouter
+  ast_path: 'body[90]/body[75]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1f09fad9a33137363240120c283b1db3a8e7c891edaac0528575f873d85a30c9'
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=f06a8245e2f3c1af
+  owner: john
+  reason: |-
+    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:31.136545+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The isinstance check discriminates a sum-type return (CompositionState | InterpretationReviewPending) from materialize_state_for_execution — this is tagged-union dispatch on a first-party typed contract, which is the canonical Python idiom for sum types and not a defensive shape guard. The pending arm emits telemetry per site and raises a typed UnresolvedInterpretationPlaceholderError, which is offensive programming: detect invalid runtime state, raise a meaningful exception. The code visible in the excerpt is consistent with the rationale's claim about the union return.
+  judge_signature_version: 2
+  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[10]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:114c4ca09a336ffdcfd75dac572f49931baf0f4b307127a796ee65f9394b7912'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=08f79725af00b7e8
+  owner: john
+  reason: |-
+    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:41.712313+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. `composition_state.source.options` is composer/user-authored config persisted and re-read — Tier-3 external-origin data per policy (persisted external-origin config re-read from our DB stays Tier-3, the typed dataclass is just the courier). The loop iterates over a set of optional path-option keys where absence legitimately means 'this source doesn't use that key' (a non-file source has neither path nor file), so `None` is meaning-preserving honest handling, not fabrication; present values are strictly enforced with a hard `PathAllowlistViolationError`. This is the prescribed Tier-3 boundary form: validate-or-raise on present values, record absence as absence.
+  judge_signature_version: 2
+  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[12]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:55d2f3e1792e160f57052902c6f469b24c19433e6f4f6c965fe2b43ddbc4bc69'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b5a321ad3a8cf21a
+  owner: john
+  reason: |-
+    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:48.323435+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES at a Tier-3 boundary. output.options is composer/operator-authored sink config — externally-sourced data whose shape is not guaranteed by a first-party contract at this read site (per policy, persisted composer/user config re-read is Tier-3). Not every sink has a local path option, so absence of the key is a legitimate signal meaning 'no path to check', handled by the `if value is not None` guard followed by strict offensive enforcement (PathAllowlistViolationError) when a value is present. This is the prescribed boundary-guard form: read optional external config as absent-is-None, then enforce strictly on present values — no fabrication, no silent recovery.
+  judge_signature_version: 2
+  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:a8ce7af3bc931e33bbfeb9a21997c9bc6f645fe78e3a903d73d7438a45a6c39b'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=99a68378ad3d14fc
+  owner: john
+  reason: |-
+    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:47:55.599414+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES at a Tier-3 boundary. composition_state.source.options carries composer-authored config re-read from our store; per policy, persisted external-origin config is Tier-3 at the read site, and blob_ref is documented as legitimately optional. The code does not fabricate: absence -> None -> skip the UUID/IDOR block; presence -> UUID parse with explicit raise and cross-session ownership check. This is the prescribed Tier-3 navigation-of-optional-key pattern, not a defensive read of a first-party typed object.
+  judge_signature_version: 2
+  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[17]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:36540700b64fece77a29e9ae7e75680e739d0dc421b52d1448d94a74717641ea'
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=bfc061ccd5a7c11f
+  owner: john
+  reason: |-
+    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T04:48:04.870453+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except block catches a narrow (SQLAlchemyError, OSError) during best-effort cleanup of a failed setup, logs the cleanup failure with class-name-only fields (avoiding credential leaks via SQLAlchemy's str() expansion), and then the outer `raise` on line 705 re-raises the original exception unmasked. R6's concern is silent swallowing without re-raise or explicit error result; here the original exception propagates and the cleanup failure is recorded structurally — this is the prescribed record-then-reraise pattern at a cleanup boundary, not silent suppression. Programmer-bug exception types are deliberately not caught, preserving the offensive stance.
+  judge_signature_version: 2
+  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[24]/handlers[0]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:d99354f04f39f6675912b68dffafe7650cdae327ad68bdcc5f6fdc6b476b6ebb'
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=b974df3ac749dbcb
+  owner: john
+  reason: |-
+    In _periodic_orphan_cleanup (line 180), the catch is narrowed to (SQLAlchemyError, OSError) — recoverable DB-layer transients and SQLite file-level I/O failures from cancel_all_orphaned_runs at a true external boundary (DB engine + filesystem). The correct behaviour for this periodic background loop is to absorb the transient and retry on the next interval. Programmer-bug exceptions (AttributeError, TypeError, AssertionError) are deliberately NOT caught and terminate the task so they surface at lifespan shutdown — the offensive-programming stance. exc_info is omitted to avoid the documented SQLAlchemy __cause__ credential-leak vector. The existing rationale is accurate. Not silent swallowing of bugs; consistent with sibling cleanup sites.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:01:18.791186+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The catch is narrowed to (SQLAlchemyError, OSError) at a genuine external boundary (DB engine + SQLite filesystem) inside a periodic background loop where the prescribed behaviour is absorb-and-retry. Programmer-bug exception types (AttributeError, TypeError, AssertionError) are deliberately not caught and will terminate the task, matching the offensive-programming stance. The failure is recorded via structured logging with a documented credential-leak rationale for omitting exc_info, and the comment explains the typed-routing structure consistent with sibling cleanup sites. This is not silent swallowing — it is a typed, recoverable-transient catch at a true Tier-3/external boundary.
+  judge_signature_version: 2
+  scope_fingerprint: e01b8fc50322bbae8528c468cd187e4b5bdc052660584de9702362694b874432
+  judge_transport: openrouter
+  ast_path: 'body[85]/body[3]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:a3066a37b908b0e88ce2182882bb6556bf35c098796ceb032e849cbe0694e10a'
+- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=dee426c4be1398fc
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — first-party sum-type dispatch, now mechanically declared. `_serialize_response_via_walker` accepts `_ToolOutcome`, whose `_ToolOutcomeResponse` type alias is `ToolResult | Mapping[str, Any] | None` in web/composer/_compose_loop_carriers.py. P3 constructs `_ToolOutcome` records only through `tool_batch.run_tool_batch._append_tool_outcome`; normal execute-tool, cache-hit, proposal, and session-aware success paths store a `ToolResult`, while the `request_advisor_hint` interception path intentionally stores first-party Mapping envelopes because that tool is outside `execute_tool` and performs an async advisor LLM call. Those Mapping envelopes are the disabled/budget-exhausted/advisor-error/timeout/success payloads produced in tool_batch.py and are redacted by the manifest entry for `request_advisor_hint`, whose known response keys include the sensitive `guidance` field. The external advisor text crosses its Tier-3 boundary in `_call_advisor_with_audit`, which validates non-empty content and records an inner ComposerLLMCall before building the first-party envelope. The `isinstance(response, Mapping)` branch therefore dispatches a declared internal union so P4 can either deep-thaw the advisor Mapping envelope or call `ToolResult.to_dict()`; it is not masking an unexpected contract violation or fabricating data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:01:26.144719+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM — the type annotation `_ToolOutcomeResponse = ToolResult | Mapping[str, Any] | None` is a first-party sum type, and the `isinstance(response, Mapping)` is the dispatch arm of a union discrimination, not a defensive shape-check against an untrusted contract. The rationale identifies the two construction sites (normal paths producing `ToolResult`, the `request_advisor_hint` interception path producing first-party Mapping envelopes after Tier-3 validation in `_call_advisor_with_audit`), and the code shows the branches feed structurally different downstream handling (`deep_thaw` vs `to_dict()`), which is exactly the work a union dispatch must do. The check is not masking a bug — removing it would itself be the defect.
+  judge_signature_version: 2
+  scope_fingerprint: c87af842e6b25373cf6c3666950e45cef7ddbc0c7845e23029f21dbb9642d803
+  judge_transport: openrouter
+  ast_path: 'body[90]/body[3]/body[4]/body[1]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:ee2fc4bf8ce6606010ef5b62840988dd14f5aff722b1c5c5a22433013960275b'
+- key: web/app.py:R6:lifespan:fp=76403a2e2a09af74
+  owner: john
+  reason: |-
+    In create_app's composer boot probe, except TimeoutError handles only asyncio.wait_for timing out while probing an external LLM/provider at startup. This is not a row-level/audit decision and not a programmer-bug catch: ComposerBootConfigError is re-raised as rejected config, asyncio.CancelledError is re-raised, and all other unexpected exceptions are re-raised. Timeout is classified as probe_status='transient_failure', emits a structured warning with timeout_seconds and provider/model metadata, and the finally block records the composer boot probe telemetry status/latency. The explicit result is "boot the web app; first real composer call will exercise the provider again", preserving non-LLM web availability while making the transient probe failure observable.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:33:30.610848+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The except TimeoutError catches an external-boundary failure (asyncio.wait_for around a probe of an external LLM provider at startup) — Tier-3 territory, not first-party code. The handler does not silently swallow: it records probe_status='transient_failure', emits a structured warning with provider/model/timeout metadata, and the finally block records telemetry counter+latency. Programmer-bug categories are correctly re-raised (ComposerBootConfigError, CancelledError, bare Exception), so only the specific transient-network case is absorbed — the documented, intentional behavior of booting the web app and deferring provider exercise to first real use. This matches the policy's recorded-quarantine/transient-failure boundary pattern.
+  judge_signature_version: 2
+  scope_fingerprint: efbba62e7e146fbda0f275e3950a878f9015657573d1dcce64e56e4f4f127ced
+  judge_transport: openrouter
+  ast_path: 'body[86]/body[23]/body[3]/body[3]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:1b0e956bd65dc504d9097fee4d73f4d90f8e496e978b32134b4dad8287f0e1c2'
+- key: web/app.py:R7:lifespan:fp=f93be0936744fc54
+  owner: john
+  reason: |-
+    In create_app lifespan shutdown, contextlib.suppress(asyncio.CancelledError) wraps only awaiting orphan_task after orphan_task.cancel(). This is the standard task-cancellation acknowledgement path: cancellation is requested intentionally during server shutdown before execution_service shutdown/dispose, and suppressing exactly CancelledError prevents the expected cancellation from being reported as a shutdown failure. The suppress does not catch Exception or BaseException broadly; any unexpected task failure type still propagates from await orphan_task. There is no audit or row-level decision here, only lifecycle cleanup ordering for a background periodic cleanup task.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:33:37.175532+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the canonical asyncio task-cancellation acknowledgement idiom: after explicitly calling orphan_task.cancel(), awaiting the task will raise CancelledError by design, and suppressing exactly that one exception type is how you collect the cancelled task without misreporting expected cancellation as a shutdown failure. The suppress is narrowly scoped to CancelledError (not Exception/BaseException) and wraps only the single await, so any other task failure still propagates. No external data, no audit decision, no fabrication — purely lifecycle cleanup ordering.
+  judge_signature_version: 2
+  scope_fingerprint: efbba62e7e146fbda0f275e3950a878f9015657573d1dcce64e56e4f4f127ced
+  judge_transport: openrouter
+  ast_path: 'body[86]/body[29]/finalbody[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:49a99b4e9790cfdf458fd0800dc9102c3618eeb599ae07c94170be4bbe82c258'
+- key: web/composer/boot_probe.py:R6:probe_composer_config:fp=17f8a88608915344
+  owner: john
+  reason: |-
+    probe_composer_config returns an explicit bool status for boot-time composer provider probing. BadRequestError is converted to ComposerBootConfigError because it indicates operator-set sampling config was rejected and must fail boot. The except (LiteLLMAPIError, OpenAIProviderError, TimeoutError, httpx.HTTPError) catches only expected external provider/network/transient failures and returns False, which the caller records as probe_status='transient_failure' with structured warning/telemetry. This is an external-call boundary with an explicit result, not silent swallowing or bug hiding; unexpected local exceptions are not caught here and propagate to the caller.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:33:43.601454+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an external-call boundary (LiteLLM provider probe) where the except clause catches a narrow, enumerated set of expected provider/network/transient exception types and returns an explicit False — which the docstring documents and the caller converts to a structured probe_status='transient_failure'. That is an explicit error result, exactly what R6's remediation prescribes, not silent swallowing. BadRequestError is re-raised as ComposerBootConfigError to fail boot, and unexpected local exceptions are not caught and propagate. The rationale plainly maps the code's behavior to the policy.
+  judge_signature_version: 2
+  scope_fingerprint: c23fde00a8a7e3e870526cf882d2db0a437d0b38ac3807f76d3ef87f5b2f3937
+  judge_transport: openrouter
+  ast_path: 'body[5]/body[7]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:74521b9b33c39b46b4a5c4c0eeaa0334a1661c83ade5a79843ca4ea08cc805d6'
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=d81afea31c28d1a5
+  owner: john
+  reason: |-
+    In SessionServiceImpl.archive_session._sync, the except OSError as restore_exc is inside the rollback path after a primary archive exception is already being handled. It attempts to restore the staged blob directory; if that restore fails, the code calls primary_exc.add_note(...) with the restore exception class, source path, destination path, and manual-cleanup instruction, then the outer block immediately re-raises the original primary exception. The restore failure is therefore attached to the exception the operator sees rather than swallowed, and it deliberately avoids replacing the primary archive failure with a secondary cleanup failure. This is record-on-primary-and-reraise cleanup semantics, not silent exception swallowing.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:33:50.180796+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except OSError block does not swallow the restore failure: it attaches it as a note to the primary archive exception via add_note(), and the outer handler immediately re-raises the primary exception (line 2256). This is correct rollback semantics — the operator sees both the primary failure and the restore failure with manual-cleanup instructions, and the code deliberately preserves the primary cause rather than masking it with a secondary cleanup error. The visible code matches the rationale exactly.
+  judge_signature_version: 2
+  scope_fingerprint: 21e1aeed4960e603d65d5c926bef2545466d7bbab2dec5db0e5e658982d7cd1c
+  judge_transport: openrouter
+  ast_path: 'body[72]/body[18]/body[2]/body[3]/handlers[0]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:38096554f633816baab0b66c8e783d5c0d10368a2ff7485a7328194cd31a8df0'
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=95f763e000c264b0
+  owner: john
+  reason: |-
+    In SessionServiceImpl.archive_session._sync, contextlib.suppress(OSError) wraps only quarantine_root.rmdir() after the session delete has committed and the staged blob directory has already been purged successfully. rmdir is a best-effort empty-directory cleanup: OSError here means the quarantine root is non-empty, absent, or otherwise not removable, and none of those states changes the committed archive/delete outcome or the already-completed staged directory cleanup. The preceding shutil.rmtree(staged_blob_dir) failure path raises QuarantineCleanupError; only the parent directory tidy-up is suppressed. This is a narrow idempotent filesystem cleanup suppress, not hiding archive failure or data loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:33:58.314099+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The suppress wraps only the parent quarantine_root.rmdir() — a best-effort empty-directory tidy after the staged_blob_dir has already been successfully rmtree'd and the session delete has committed. The real failure modes (staged dir cleanup failure) are handled offensively just above with an explicit raise QuarantineCleanupError from exc. OSError on rmdir of the parent (non-empty because a concurrent session staged into it, or already absent) does not represent data loss or hidden archive failure; suppressing it is the meaning-preserving idempotent-cleanup pattern, not silent error swallowing. The rationale plainly identifies the narrow scope and the code corroborates it.
+  judge_signature_version: 2
+  scope_fingerprint: 21e1aeed4960e603d65d5c926bef2545466d7bbab2dec5db0e5e658982d7cd1c
+  judge_transport: openrouter
+  ast_path: 'body[72]/body[18]/body[2]/body[4]/body[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:79bab01765ddfd2fe077bb17784b918aca364962cb3d9c6f23066510fae25c5d'
+- key: web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=819a9041915266f8
+  owner: john
+  reason: |-
+    maybe_generate_auto_title is a best-effort UI metadata helper, not part of the legal audit path or session correctness. The except (LiteLLMAPIError, TimeoutError, asyncio.CancelledError) catches expected provider/scheduling failures from the external title-generation call, records the failure through _record_auto_title_failure(exc), and returns without changing the session title. Unexpected local exceptions are not caught. The explicit outcome is "auto title unavailable; keep existing title", with operational failure accounting, so the handler does not silently drop a user-visible or audit-significant decision.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:34:05.446315+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The except clause is narrowly typed to expected external-call failure modes (LiteLLM provider error, timeout, asyncio cancellation) from a Tier-3 LLM call, not a bare/broad swallow. The failure is recorded via _record_auto_title_failure(exc) — an explicit operational signal, not silent suppression — and the docstring notes that programmer bugs and DB write failures intentionally propagate. This matches the policy's prescribed Tier-3 boundary handling: record what we got, do not poison downstream, do not fabricate a title. R6's concern (errors swallowed without re-raise or explicit error result) is met by the explicit recorded-failure path.
+  judge_signature_version: 2
+  scope_fingerprint: b22ebc47c5cff4e780b6e5981966078c0c8fe207b562393fdab92301f401c334
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[5]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:ce39911fedc58062ace2a812af3a32aa54c0c9597c66c9175d5d6c21f9f683bf'
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=617c4ef5b9e590fc
+  owner: john
+  reason: |-
+    In _build_state_from_set_pipeline_args, isinstance(resolved, ToolResult) dispatches on the declared first-party return union of _resolve_source_blob: either ToolResult for a user/tool-facing failure result or a resolved source-blob object carrying plugin/options for the success path. The value is produced by our own helper after validating LLM/tool arguments and blob/session context; this branch is not validating arbitrary Tier-3 shape or hiding a contract violation. It is structural sum-type discrimination so the caller can return an explicit ToolResult failure unchanged or continue with resolved.plugin/resolved.options on success.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:34:13.014245+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM / RULE MISFIRES. The isinstance check discriminates a first-party sum-type return (ToolResult | _ResolvedSourceBlob) from _resolve_source_blob — this is structural union dispatch, not a Tier-3 shape guard nor a defensive recheck of data we already control. Python lacks pattern-matching enforcement on union returns at the type level, so isinstance is the prescribed runtime discriminator for sum types. The rationale plainly identifies the union and the branch semantics, and the visible code (returning resolved unchanged on the ToolResult arm, then accessing .plugin/.options on the other arm) is consistent.
+  judge_signature_version: 2
+  scope_fingerprint: 57b7613247565297a46824f4708431848926492addeb74b408e995c6603301ec
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[24]/body[1]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:45fc6563f9e61c7eace52ebd7dc1ba9c37b986cf621a638886638919a968c491'
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=232e4ea0f36b1135
+  owner: john
+  reason: |-
+    In _build_state_from_set_pipeline_args, isinstance(n.branches, Mapping) discriminates the validated internal node-branches union before constructing NodeSpec. The set-pipeline argument model has already parsed and validated node fields; branches may be a mapping form for named branch routing or a sequence form for branch lists. The branch normalizes that declared internal union to dict(...) or tuple(...), while None remains None. This is not accepting unknown external shape or fabricating defaults; malformed composer/tool input is handled upstream by the validated argument model and downstream NodeSpec/CompositionState invariants. The isinstance is the Python union dispatch point for two legitimate first-party branch representations.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T05:34:19.554508+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM. The isinstance here is a union-dispatch on a first-party Pydantic-validated field (`n.branches`) whose declared type is a union of Mapping form and sequence form. The check discriminates between the two legitimate shapes to normalize each to its canonical container (dict vs tuple), not a defensive guard against unknown external shape. This is the standard Pythonic way to branch on a tagged union at a construction boundary, and the rationale plainly identifies the union and what each arm produces; the visible code matches that description.
+  judge_signature_version: 2
+  scope_fingerprint: 57b7613247565297a46824f4708431848926492addeb74b408e995c6603301ec
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[35]/body[1]/value/test'
+  judge_metadata_signature: 'hmac-sha256:v2:8f074981c0690d895157c09b87b28c32bea66d835d4ead4604235b1372df3301'
 per_file_rules:
 - pattern: web/composer/tools/_common.py
   rules:

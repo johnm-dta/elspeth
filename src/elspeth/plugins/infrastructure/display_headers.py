@@ -144,9 +144,9 @@ def resolve_contract_from_context_if_needed(sink: DisplayHeaderHost, ctx: SinkCo
     existing_original_by_normalized = {field.normalized_name: field.original_name for field in existing.fields}
     conflicts: list[str] = []
     for field in incoming.fields:
-        existing_original = existing_original_by_normalized.get(field.normalized_name)
-        if existing_original is None:
+        if field.normalized_name not in existing_original_by_normalized:
             continue
+        existing_original = existing_original_by_normalized[field.normalized_name]
         if existing_original != field.original_name:
             conflicts.append(f"{field.normalized_name}: {existing_original!r} != {field.original_name!r}")
 

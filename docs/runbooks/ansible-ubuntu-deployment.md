@@ -342,6 +342,11 @@ Put shared variables in `group_vars/elspeth_web.yml`:
 ```yaml
 elspeth_user: elspeth
 elspeth_group: elspeth
+# Dedicated reverse-proxy socket group. Do NOT reuse elspeth_group here:
+# elspeth_group owns app data, while this group only grants access to
+# /run/elspeth/uvicorn.sock. Caddy must never receive app-secret/data group
+# membership just to reach the Unix-domain socket.
+elspeth_socket_group: elspeth-web-socket
 elspeth_app_dir: /opt/elspeth
 elspeth_repo_url: https://github.com/johnm-dta/elspeth.git
 # Pin to a tag or commit SHA, never a branch. Branch references are not
@@ -937,6 +942,11 @@ file, and restart systemd only when inputs change.
     name: "{{ elspeth_group }}"
     system: true
 
+- name: Create ELSPETH socket-access group
+  ansible.builtin.group:
+    name: "{{ elspeth_socket_group }}"
+    system: true
+
 - name: Create ELSPETH user
   ansible.builtin.user:
     name: "{{ elspeth_user }}"
@@ -1161,17 +1171,19 @@ file, and restart systemd only when inputs change.
   become_user: "{{ elspeth_user }}"
   notify: restart elspeth web
 
-- name: Add caddy user to elspeth group (UDS access)
+- name: Add caddy user to socket-access group (UDS access only)
   ansible.builtin.user:
     name: caddy
-    groups: "{{ elspeth_group }}"
+    groups: "{{ elspeth_socket_group }}"
     append: true
   notify: restart caddy
-  # The systemd unit creates the UDS at /run/elspeth/uvicorn.sock with
-  # UMask=0007, so the socket is mode 0660 owned by elspeth:elspeth.
-  # Debian's Caddy package runs as user `caddy`; without group membership
-  # the reverse_proxy returns 502s on every request. The corresponding
-  # handler:
+  # The systemd unit runs with Group={{ elspeth_socket_group }} and
+  # UMask=0007, so uvicorn creates /run/elspeth/uvicorn.sock as mode
+  # 0660 owned by elspeth:{{ elspeth_socket_group }}. Debian's Caddy
+  # package runs as user `caddy`; membership in this dedicated group is
+  # enough for reverse_proxy UDS access without granting Caddy read access
+  # to /etc/elspeth/elspeth-web.env or app data owned by elspeth_group.
+  # The corresponding handler:
   #
   #   - name: restart caddy
   #     ansible.builtin.systemd:
@@ -1237,7 +1249,9 @@ AZURE_OPENAI_API_KEY={{ vault_azure_openai_api_key }}
 AZURE_OPENAI_ENDPOINT={{ vault_azure_openai_endpoint }}
 ```
 
-Install it with:
+Install it with root-only permissions. systemd reads `EnvironmentFile=` as root
+before dropping privileges to `User={{ elspeth_user }}`, so neither the
+service user nor Caddy needs direct filesystem read access to this file.
 
 ```yaml
 - name: Create environment directory
@@ -1245,16 +1259,16 @@ Install it with:
     path: /etc/elspeth
     state: directory
     owner: root
-    group: "{{ elspeth_group }}"
-    mode: "0750"
+    group: root
+    mode: "0700"
 
 - name: Install web environment file
   ansible.builtin.template:
     src: elspeth-web.env.j2
     dest: /etc/elspeth/elspeth-web.env
     owner: root
-    group: "{{ elspeth_group }}"
-    mode: "0640"
+    group: root
+    mode: "0600"
   no_log: true
   notify: restart elspeth web
 ```
@@ -1269,7 +1283,7 @@ Wants=network-online.target
 
 [Service]
 User={{ elspeth_user }}
-Group={{ elspeth_group }}
+Group={{ elspeth_socket_group }}
 WorkingDirectory={{ elspeth_app_dir }}
 RuntimeDirectory=elspeth
 EnvironmentFile=/etc/elspeth/elspeth-web.env
@@ -1287,10 +1301,10 @@ ExecStart={{ elspeth_app_dir }}/.venv/bin/uvicorn elspeth.web.app:create_app \
     --limit-concurrency 100
 # --forwarded-allow-ips takes IP CIDRs (or '*'), not socket paths. For a
 # UDS deployment, trust is established by filesystem permissions on the
-# socket (mode 0660, elspeth group); the only peer that can connect is
-# Caddy, so '*' is the correct value. Without this, X-Forwarded-For and
-# X-Forwarded-Proto from Caddy are dropped and the audit trail records
-# the wrong remote_addr.
+# socket (mode 0660, {{ elspeth_socket_group }} group); the only peer that
+# can connect is Caddy, so '*' is the correct value. Without this,
+# X-Forwarded-For and X-Forwarded-Proto from Caddy are dropped and the
+# audit trail records the wrong remote_addr.
 #
 # --limit-max-requests is deliberately omitted: it causes uvicorn to
 # exit 0 after N requests, which Restart=on-failure does *not* catch.
@@ -3661,7 +3675,7 @@ database, mounted payload store) is unchanged.
 | Front Door caching enabled on WebSocket routes | WebSocket upgrade fails | Set `disable_cache_configuration: true` on app routes |
 | `elspeth_repo_version` set to a branch | Deploy is not reproducible; re-runs ship different code | "Refuse to deploy with an unpinned repo version" assert task; default is a SHA |
 | `--forwarded-allow-ips` set to the socket path | `X-Forwarded-For` from Caddy is dropped; audit records wrong remote_addr | Systemd unit uses `--forwarded-allow-ips='*'` (trust established by UDS filesystem permissions) |
-| Caddy cannot open the elspeth UDS | First deploy returns 502 on every request | "Add caddy user to elspeth group" task in the VM role |
+| Caddy cannot open the elspeth UDS | First deploy returns 502 on every request | "Add caddy user to socket-access group" task plus `Group={{ elspeth_socket_group }}` in the systemd unit |
 | `--limit-max-requests` causes uvicorn to exit 0 mid-traffic | Periodic outage; `Restart=on-failure` does not catch a clean exit | `--limit-max-requests` removed; if re-introduced, switch to `Restart=always` |
 | Multi-worker SQLite bypass via `WEB_CONCURRENCY` override | Next restart trips the startup guard and the service refuses to start | Systemd unit pins `Environment=WEB_CONCURRENCY=1`; verification asserts worker count |
 | Schema-incompatible upgrade overwrites session DB | In-flight composer sessions lost; audit DB unrecoverable if conflated | "Snapshot session and audit databases before upgrade" task; Database Lifecycle section documents the operator-deletes policy for sessions only |
@@ -3694,7 +3708,7 @@ HSTS max-age and includeSubDomains/preload rows further down). -->
 | Audit-row-loss on VM rollback is undocumented | Auditor querying the rollback window sees no rows but no signal that any were discarded | Database Lifecycle now has "What Rollback Does To The Audit Trail" section prescribing pre-rollback boundary capture, post-rollback attestation row, and off-host shipping of the pre-rollback `audit.db` |
 | Raw `cp` of SQLite under WAL produces a torn snapshot | Snapshot is the rollback target; if it's torn (committed-but-not-checkpointed rows missing), rollback restores corrupt state | Snapshot task uses `sqlite3 ".backup"` (Online Backup API serializes against writers); restore task stops the service, copies the snapshot, removes stale `.db-wal`/`.db-shm`, restarts |
 | Stale WAL replays over a restored DB | Sidecars (`.db-wal`/`.db-shm`) from the failing version are replayed on first open, re-corrupting the restored file with the failing version's writes | Rollback role removes both sidecars after the restore copy, before service restart |
-| Caddy in elspeth group gets incidental read on audit DB via `elspeth_data_dir` group-read | Operational reverse proxy can read the legal record on disk; an edge compromise leaks audit data | `elspeth_data_dir` and contents at mode 0700 (owner-only) — UDS access at `/run/elspeth/` is unaffected because it's a separate path under systemd's `RuntimeDirectory` |
+| Caddy receives app-secret/data group membership for UDS access | Operational reverse proxy can read `/etc/elspeth/elspeth-web.env` or app data; an edge compromise crosses into app authentication and provider-key custody | `elspeth_socket_group` is dedicated to `/run/elspeth/uvicorn.sock`; Caddy is not added to `elspeth_group`, app data remains 0700, and the env directory/file are root-only |
 | Caddy ACME HTTP-01 fails because port 80 is closed | First Caddy reload floods logs with ACME failures; operator misreads this as "playbook broken"; cert never issues so HTTPS never works | "Caddy TLS Provisioning Modes" section names four mutually-exclusive modes (HTTP-01, DNS-01, `tls internal`, pre-provisioned) and assigns each to a deployment posture; preflight `assert` refuses to render the site template when zero or more than one mode is selected |
 | Schema-change deploy proceeds without operator acknowledgement | Service starts against an incompatible `sessions.db`, crashes on first session-DB write, or silently corrupts in-flight rows | Sidecar deploy-SHA marker `.last-deploy-sha` records the SHA that last touched the DB; preflight refuses to proceed when SHA differs unless the operator sets `elspeth_acknowledge_schema_compatible=true` (code-only) or `elspeth_force_session_db_delete=true` (schema-change, drop in-flight sessions) |
 | Local socket probe passes but public edge is broken | Play reports green; users see 502/503; "verification" was theatre | "Public-edge verification" block now uses `ansible.builtin.uri` delegated to the Ansible controller (not the VM), exercising the real DNS + TLS + ingress path with `retries: 6 delay: 10` and `validate_certs` gated on TLS mode; the play fails fast on any non-200 |

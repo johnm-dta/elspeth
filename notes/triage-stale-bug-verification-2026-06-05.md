@@ -1,0 +1,375 @@
+# Stale-bug verification triage — 2026-06-05
+
+Verification of 279 un-triaged (`triage`-status) LLM-generated bug reports against the current working tree.
+Method: 154-agent workflow (one per cited file + orphan batches), Sonnet, read-only, structured verdicts; high-confidence closes spot-checked against code.
+
+## Tally
+
+- superseded: 13
+- fixed: 56
+- not_a_bug: 2
+- **live (still present): 198**
+- uncertain: 10
+
+Closed this pass: 68 high-confidence (superseded+fixed+not_a_bug). 3 medium-confidence held for review. 198 live + 10 uncertain left in `triage`.
+
+## Closed — evidence
+
+### superseded
+- `elspeth-b12ee48d84` — gone
+  - src/elspeth/web/sessions/migrations/ does not exist in the current tree. The Alembic migration infrastructure was removed entirely; web session schema management is now in schema.py which uses SQLAlchemy metadata.create_all() directly with a delete-and-recreate policy (no migration pathway). The docstring at schema.py:1-7 makes this explicit.
+- `elspeth-9738349228` — /home/john/elspeth/src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx:285-289
+  - Bug was filed against the multi-source-token-scheduler worktree branch. Main's CompositionState (types/index.ts:159-170) has only `source: SourceSpec | null` — no `sources` dict/map field. `sortedSourceEntries` and the multi-source `readBlobRef` loop exist only in the worktree; main's readBlobRef (ChatPanel.tsx:285-289) reads the single `state.source` only. Multi-source feature not merged to main.
+- `elspeth-8fe6fc5f24` — /home/john/elspeth/src/elspeth/web/execution/validation.py:471-572 (_find_identity_node_advisories), /home/john/elspeth/src/elspeth/web/composer/state.py:1779
+  - CompositionState (state.py:1761) still has only a single 'source: SourceSpec | None' field — no 'sources' plural. The multi-source-token-scheduler feature (feat/multi-source-token-scheduler branch) has not merged to main. The condition the bug requires (multiple named sources) cannot arise in the current main codebase; the advisory gap it describes is moot until multi-source lands.
+- `elspeth-af612d0470` — gone
+  - Current service.py lines 573-652 handle only a single parsed_blob_id (singular), not a list of named-source blob IDs. The bug originated in .worktrees/multi-source-token-scheduler which was never merged. No parsed_blob_ids list or multi-source named blob path exists anywhere in the current execution/service.py.
+- `elspeth-af13a34ccd` — gone
+  - The token_work_items table and rows(row_id, run_id) uniqueness target cited in the bug do not exist in current schema.py. SQLITE_SCHEMA_EPOCH=11 (not 12). _REQUIRED_COMPOSITE_FOREIGN_KEYS in database.py has no token_work_items entry. The multi-source-token-scheduler worktree changes never merged; the schema inconsistency described cannot occur.
+- `elspeth-e22a476972` — src/elspeth/web/shareable_reviews/models.py:164-180 (CompositionStateResponse), src/elspeth/web/composer/state.py:1875-1953 (to_dict)
+  - Current main: CompositionStateResponse (models.py:175-180) has only `source: SourceSpecResponse | None` (singular). to_dict() (state.py:1882-1953) emits {version, metadata, source, nodes, edges, outputs} — no `sources` key. The multi-source `sources` field exists only on feat/multi-source-token-scheduler branch (not merged). Frontend isCompositionSnapshot and tests are consistent with current backend shape. Bug cannot manifest in current working tree.
+- `elspeth-6db715b7c3` — src/elspeth/web/sessions/protocol.py:370-405, src/elspeth/web/composer/tutorial_service.py:166-197
+  - Current CompositionStateData (protocol.py:370-405) has only a single `source` field — no `sources` field. The multi-source named-source concept (feat/multi-source-token-scheduler branch) has not merged to main. Tutorial service at lines 183-196 passes source=current_state.source with no sources field to drop.
+- `elspeth-b0fe0ec050` — src/elspeth/web/sessions/protocol.py:408-449, tests/unit/web/sessions/test_converters.py:23-52
+  - CompositionStateRecord.source IS still required positional (line 418), but the G4 fixture change that was supposed to flip tests to `sources=` only has NOT landed. All test sites (test_converters.py:29, test_protocol.py:184, etc.) still pass `source=`, so the described TypeError cluster does not exist in current code.
+- `elspeth-42424587cd` — gone
+  - .inspector-action-btn class is entirely absent from the current codebase (grep confirms zero matches). Validate/Execute workflow is now in the sidebar as .side-rail-execute-btn, which inherits .btn with min-height: var(--size-control) = 44px (tokens.css line 189), meeting the WCAG 2.5.5 target.
+- `elspeth-0263f87c2b` — gone
+  - scripts/cicd/enforce_plugin_hashes.py was deleted in commit 907f65ce8 ('chore: cut over plugin contract lints'). The file does not exist anywhere in the working tree. The plugin hash check is now performed exclusively by the elspeth-lints rule (no module-invocation docstring to misread).
+- `elspeth-789aeefa47` — gone
+  - scripts/codex_bug_hunt.py was deleted in commit c4e2f69cd ('Fix composer and session bug regressions'). The file does not exist anywhere in the working tree. No equivalent generate_summary(output_dir) pattern was found in the remaining codex scripts (codex_audit_common.py, codex_integration_seam_hunt.py, codex_test_defect_hunt.py, codex_exemption_validator.py).
+- `elspeth-a80393286c` — gone
+  - scripts/cicd/rotate_tier_model_fingerprints.py does not exist in current HEAD (ls scripts/cicd/ confirmed: file absent). Git log shows its last appearance was commit 86125d28e; it was subsequently deleted. The defective write-before-check code path cannot execute.
+- `elspeth-50e54343eb` — /home/john/elspeth/docs/release/guarantees.md:117-127 (main has old RC-3 wording; branch edit never landed)
+  - The §2.4 change (idle-timeout wording) exists only on the unmerged feat/multi-source-token-scheduler branch. Main's guarantees.md line 124 still reads 'Fires when next row arrives after timeout period*' (old RC-3 wording with footnote), consistent with the header's preservation claim — no contradiction exists in the current working tree.
+
+### fixed
+- `elspeth-e1bc54198b` — /home/john/elspeth/src/elspeth/web/sessions/models.py:101-215
+  - models.py epoch note 18 (line 101-103): 'forked_from_session_id self-referential foreign key constraint removed to allow physical deletion of parent sessions'. Column at line 211-215 has comment 'deliberately is not a live ForeignKey(sessions.id)' with no FK arg — the restrictive FK is gone.
+- `elspeth-02264f1d6a` — /home/john/elspeth/src/elspeth/web/sessions/routes/sessions.py:41-85
+  - sessions/routes/sessions.py lines 50-55 raises AuditIntegrityError for non-string old_ref; lines 66-71 raises AuditIntegrityError when old_uuid not in blob_map. Both silent-skip paths now crash loudly via _copied_blob_for_inline_marker.
+- `elspeth-64908a0865` — src/elspeth/web/frontend/src/components/inspector/GraphView.tsx:813
+  - Line 813: `<Background gap={16} size={1} color="var(--color-canvas-grid)" />`. Token `--color-canvas-grid` defined in tokens.css for both dark (rgba(170,220,220,0.28)) and light (rgba(15,45,53,0.20)) themes.
+- `elspeth-d42360f518` — .worktrees/multi-source-token-scheduler/src/elspeth/web/frontend/src/components/inspector/GraphView.tsx
+  - Worktree GraphView now iterates `sortedSourceEntries(compositionState)` (line 552) for all sources, uses `sourceComponentId()` for stable node IDs, selects source config by matching `sourceComponentId(sourceName)===selectedNodeId` (line 113), and registers producers per named source (line 645). All four cited defect sites are gone.
+- `elspeth-7eb905e194` — /home/john/elspeth/src/elspeth/web/frontend/src/components/chat/ComposingIndicator.tsx
+  - ComposingIndicator.tsx: isTerminalPhase() explicitly includes 'cancelled' (line 26), terminalStatusLabel() returns 'Stopped' for cancelled (line 33), and JSX renders composing-indicator--terminal class + terminal mark (no spinner) when isTerminal=true. Test at line 97-116 of ComposingIndicator.test.tsx verifies cancelled phase shows 'Last composer update'/'Stopped' and NOT 'Working on...'.
+- `elspeth-c33c71aafe` — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/tools/secrets.py:172-192
+  - Judged against branch feat/multi-source-token-scheduler. worktree secrets.py:172-192: _execute_wire_secret_ref() now routes target=='source' through state.sources[source_name] and state.with_named_source(source_name, new_source). No phantom legacy source path remains.
+- `elspeth-04980fc019` — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/service.py:880
+  - Judged against branch feat/multi-source-token-scheduler. worktree service.py:880: _proof_repair_is_applicable() now uses `return any('blob_ref' in source.options for source in state.sources.values())` covering all named sources.
+- `elspeth-9e083c57fe` — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/tools/sources.py:267-269,521
+  - Judged against branch feat/multi-source-token-scheduler. _source_component_id() exists at sources.py:267-269 and is called at sources.py:521 in _execute_set_source_from_blob. Returns 'source' for legacy single-source and 'source:<name>' for named sources.
+- `elspeth-80671c0eb3` — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/tools/_common.py:657-664
+  - Judged against branch feat/multi-source-token-scheduler. worktree _common.py:657-664: diff_states() now compares baseline.sources != current.sources and computes full added/removed/modified named-source diffs in sources_changed field.
+- `elspeth-37c1dde240` — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/tools/secrets.py:172-192
+  - Judged against branch feat/multi-source-token-scheduler. worktree secrets.py:172-192: _execute_wire_secret_ref() routes target=='source' via state.sources[source_name] lookup; single-source states fall back to first source. No phantom legacy source created.
+- `elspeth-506b025b36` — /home/john/elspeth/src/elspeth/web/frontend/src/App.tsx:87-89 and hooks/useHashRouter.ts:80,156,176,193,218
+  - App.tsx:87-89 passes `enabled: isAuthenticated && sharedToken === null` to useHashRouter. Every useEffect in useHashRouter.ts guards with `if (!enabled) return` (lines 157,177,194,219), so selectSession/applyHash cannot fire until auth resolves.
+- `elspeth-64f3380b47` — /home/john/elspeth/src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx:1088-1204
+  - ChatPanel.tsx lines 1096-1098: `{error && <GuidedErrorBanner error={error} onDismiss={clearError} />}` is rendered at the top of the guided-active branch (lines 1088-1204), before GuidedTurn/ChatInput. The completed branch also has the same guard at lines 1079-1081. The old early-return without error banner is gone.
+- `elspeth-65421fda51` — src/elspeth/web/frontend/src/components/chat/guided/SchemaFormTurn.tsx + src/elspeth/web/catalog/knob_schema.py
+  - RecipeOfferTurn.tsx replaced by SchemaFormTurn.tsx (mode=recipe_decision). knob_schema.py:281 maps str_list→string-list. SchemaFormTurn.tsx:160 initializes string-list as [], submittedValue() at lines 181-185 ensures arrays are submitted (splits newline strings or passes arrays). No string submission possible.
+- `elspeth-e7463a935b` — /home/john/elspeth/.worktrees/multi-source-token-scheduler/src/elspeth/core/landscape/scheduler_repository.py:724-733
+  - Commit 1bdd5cfed 'fix(scheduler): add work_item_id ORDER BY tiebreaker on three scheduler queries (elspeth-6cb89db535)' added work_item_id as 4th ORDER BY key in claim_ready() at scheduler_repository.py:724-733. Comment at line 728 explicitly cites this fix and the filigree issue.
+- `elspeth-d64f90d99b` — src/elspeth/web/sessions/service.py:2192-2276, src/elspeth/web/sessions/engine.py:28-119, src/elspeth/web/sessions/models.py:1143-1150
+  - archive_session() now does a single delete(sessions_table) and relies on schema-owned cascades (line 2243). blobs has ondelete='CASCADE' (models.py:1150). FK enforcement enabled via create_session_engine() in engine.py:76 (PRAGMA foreign_keys=ON with startup assertion at line 94-101). forked_from_session_id is deliberately not a FK by design (models.py:208-210 comment: 'deliberately is not a live ForeignKey so no-durable-history archive can physically delete a parent session while preserving child fork provenance').
+- `elspeth-86d869563f` — src/elspeth/web/sessions/service.py:2263-2274
+  - Current code at service.py:2266-2270 raises QuarantineCleanupError (defined at line 518) on shutil.rmtree OSError instead of silently returning. test_service.py:241 now asserts pytest.raises(QuarantineCleanupError, match=r'delete committed.*quarantine cleanup failed'), the opposite of the bug's 'silent success' shape.
+- `elspeth-3bc6c6c0ef` — /home/john/elspeth/src/elspeth/web/frontend/src/stores/executionStore.ts (applyRunEvent lines 245-280), src/elspeth/web/frontend/src/components/execution/ProgressView.tsx lines 196-207
+  - RunProgress.tokens_quarantined and tokens_succeeded are fully plumbed: applyRunEvent computes them at lines 245-258, newProgress includes them at lines 272-273, and ProgressView renders tokens_quarantined at line 207 and tokens_succeeded at line 175. The old 'rows_*' field names cited in the bug no longer exist; the renaming was accompanied by end-to-end wiring.
+- `elspeth-9f7f9d5787` — /home/john/elspeth/src/elspeth/web/composer/service.py lines 216-235 (_BadRequestLLMError class), 2699-2704 (_call_llm), 2731-2736 (_call_text_llm); /home/john/elspeth/src/elspeth/web/sessions/routes/_helpers.py:437-482 (_litellm_error_detail)
+  - _call_llm/_call_text_llm now raise _BadRequestLLMError (service.py:2700,2732) with provider_detail+provider_status_code; _litellm_error_detail in routes/_helpers.py:466-481 reads those fields gated on expose_provider_errors; composer route (composer.py:740,764,767) passes expose_provider_errors=settings.composer_expose_provider_errors.
+- `elspeth-eacaf1cd5d` — /home/john/elspeth/evals/composer-harness/hardmode/post_message.sh lines 85-149; /home/john/elspeth/evals/composer-rgr/run_scenario.sh line 81
+  - evals/composer-harness/hardmode/post_message.sh (modified May 11, after bug filed May 8) now calls evals_get_messages_with_raw and writes msg.t<N>.raw.json capturing raw_content; comment explicitly cites elspeth-861b0c58f5. New composer-rgr harness also uses include_raw_content=true on the messages endpoint.
+- `elspeth-ab3ad30e87` — /home/john/elspeth/src/elspeth/web/composer/service.py lines 1464-1484 (explain_run_diagnostics)
+  - explain_run_diagnostics (service.py:1464-1484) now imports and catches BudgetExceededError, BlockedPiiEntityError, and GuardrailRaisedException in a single except clause, wrapping them as ComposerServiceError. Route handler (execution/routes.py:712-716) catches ComposerServiceError → 502.
+- `elspeth-67936c1bdd` — src/elspeth/web/execution/failure_samples.py:64-80 (_classify function)
+  - _classify() at line 72 uses details["reason"] (raises KeyError on {}) and line 73 uses 'in' check falling back to reason, not .get("error_type","UnknownError"). Module docstring confirms: "direct subscription, not .get()".
+- `elspeth-39a474c067` — /home/john/elspeth/src/elspeth/telemetry/exporters/otlp.py:219-226
+  - otlp.py:219-226 now captures result = self._span_exporter.export(spans) and explicitly checks `if result == SpanExportResult.FAILURE: return False`. The ignored-return defect described at line 216 is gone.
+- `elspeth-b49e024a0a` — src/elspeth/telemetry/exporters/azure_monitor.py:269-275
+  - Lines 269-275 of azure_monitor.py: result = self._azure_exporter.export(spans); if result == SpanExportResult.FAILURE: ... return False. The return value is captured and checked; failure now returns False.
+- `elspeth-f31a798799` — src/elspeth/mcp/types.py:25, src/elspeth/mcp/server.py:192, src/elspeth/mcp/analyzers/queries.py:281
+  - mcp/types.py line 25: OPERATION_TYPE_VALUES = ('source_load', 'sink_write', 'runtime_preflight'). server.py line 192 uses list(OPERATION_TYPE_VALUES) dynamically. queries.py line 281 validates against same constant — both sides now agree.
+- `elspeth-fc5d88c812` — src/elspeth/web/auth/urls.py:45-55, src/elspeth/web/app.py:140-146
+  - _validate_authorization_endpoint_discovery_document (app.py:140-146) now calls validate_oidc_authorization_endpoint(document.authorization_endpoint, issuer=issuer), which invokes _parse_https_url() (auth/urls.py:28-29) that explicitly raises ValueError if scheme != 'https', rejecting javascript: and bare non-URL values.
+- `elspeth-787b298e88` — src/elspeth/web/execution/service.py:1443-1576, 1635-1650, 1673-1703
+  - BaseException recovery now uses a 3-branch design: probe succeeds+terminal→skip update; probe succeeds+non-terminal→_persist_failed_run_status; probe fails+row-terminal→IRTE caught narrowly at line 1526 using irte.current_status as ground truth. _persist_failed_run_status (line 1635) catches SQLAlchemyError/OSError and returns exc class instead of raising, preventing original exc loss. IRTE branch (line 1526-1576) explicitly handles the 'probe-failed AND row-actually-terminal' case, resolving the exception attribution bug.
+- `elspeth-3b17f15b20` — src/elspeth/plugins/transforms/llm/providers/openrouter.py:434-442
+  - Lines 434-441: raw_model guarded with isinstance(data,dict)+key presence; then `if not isinstance(raw_model, str) or not raw_model.strip(): raise LLMClientError(...)` — null, int, list, and empty/whitespace all raise typed LLMClientError before LLMQueryResult is constructed.
+- `elspeth-a4b0c3e00f` — feat/multi-source-token-scheduler:src/elspeth/web/audit_readiness/service.py:446 and explain.py:20
+  - On feat/multi-source-token-scheduler (the branch this was filed against), service.py line 446 now iterates `for source_name, source in state.sources.items()` with stable component IDs, and explain.py iterates `state.sources.items()` for narrative. On main, CompositionState has only a single `source` field — the multi-source feature hasn't landed, so the defect cannot occur there either.
+- `elspeth-84d4680346` — /home/john/elspeth/.worktrees/multi-source-token-scheduler/src/elspeth/web/composer/state_claim_grounding.py:471-524
+  - In the multi-source worktree (where bug was filed), state_claim_grounding.py:471 now has _lookup_source_field_values() iterating state.sources.values() (not state.source). verify_state_claims:521 uses the multi-source lookup and accepts any matching source, mirroring output claim logic.
+- `elspeth-6b4b04a6cb` — tests/unit/evals/test_convergence_scenarios_mocked_llm.py:286
+  - Test renamed to test_csv_classifier_converges_in_two_repair_turns; now scripts 5 LLM calls / 2 repair turns (models interpretation-review tool calls per the bug's suggested fix). Test passes: 1 passed in 2.16s.
+- `elspeth-48aa57c3ef` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/core/judge.py
+  - JUDGE_POLICY_HASH changed from sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0 to sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da. _STATIC_POLICY_BLOCK now has an explicit 3rd disposition (lines 161-174) for 'offensive isinstance→raise' as PRESCRIBED FORM→ACCEPTED, and Plugin Ownership section (lines 444-453) explicitly states 'reject only when the data's shape IS guaranteed and guard is redundant defensive code' with a clear carve-out. All 4 sink.py guard sites have fp-neutral offensive-programming comments (lines 533-543, 546-558, 787-798, 800-813).
+- `elspeth-3f7dcbefe6` — /home/john/elspeth/src/elspeth/web/frontend/src/styles/animations.css:144-146
+  - The only CSS animation in @xyflow/react/dist/style.css is `dashdraw` on `.react-flow__edge.animated path` (line 163). The app's `animations.css` reduced-motion block (line 144-146) now suppresses it: `.react-flow__edge.animated path { animation: none; }`. `.react-flow__node`, `.react-flow__pane`, `.react-flow__viewport` carry no CSS animation/transition in xyflow's stylesheet — pan/zoom/drag are JS-driven, not CSS-driven. The bug's additional selectors would be no-ops; the only real CSS gap is already closed.
+- `elspeth-5b3c03c74d` — src/elspeth/web/composer/tools/_common.py:1236-1237, tests/unit/web/composer/test_tools.py:78-130
+  - Commit 4b2a172: 'uppercase' mock replaced with real 'passthrough' plugin across 7 test files (40 tests fixed); UnknownPluginTypeError catch changed from silent return None to returning descriptive error string. All 3 mock sources (csv/text/json) are real registered plugins.
+- `elspeth-1690eb13c8` — /home/john/elspeth/tests/unit/web/sessions/test_persist_compose_turn.py:469
+  - The named test (test_session_write_lock_serializes_sqlite_same_session_state_version_allocation) no longer exists. The current test test_file_backed_sqlite_lock_serializes_same_session_state_version_allocation at line 469 was rewritten to use file-backed SQLite via tmp_path instead of the shared in-memory StaticPool, with docstring explicitly noting StaticPool caused connection interference. The concurrent writers now both hold _session_write_lock inside separate engine.begin() contexts on a real file DB, making the NoResultFound race impossible.
+- `elspeth-9a078e2d9f` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py:943-959 and elspeth_lints/core/ast_walker.py:103-123
+  - _handler_is_silent now uses iter_own_scope(statement) (line 945) instead of ast.walk(node). iter_own_scope short-circuits at FunctionDef/AsyncFunctionDef/Lambda/ClassDef (ast_walker.py:48-53,117-122), so nested function bodies are excluded from the raise/return search.
+- `elspeth-267db88d5c` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py:1564-1580
+  - visit_ExceptHandler's reraise check at line 1568 now uses iter_own_scope(statement) rather than ast.walk(node). iter_own_scope stops at nested FunctionDef/Lambda/ClassDef boundaries (ast_walker.py), so a raise inside an inner nested function no longer falsely satisfies the reraise check.
+- `elspeth-c6403b95c1` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/core/allowlist.py:1345-1356 and :1255-1274
+  - _optional_date (line 1353-1356) raises ValueError on malformed dates rather than swallowing it. _parse_per_file_rules (line 1269) and _parse_allow_hits (line 453) both call _optional_date/_optional_date_alias; the raised ValueError propagates to the CLI main (rule.py:3066) which prints an error and returns exit code 1.
+- `elspeth-d617e311fe` — elspeth-lints/src/elspeth_lints/core/allowlist.py:1345-1356
+  - Migrated to elspeth-lints/src/elspeth_lints/core/allowlist.py:_optional_date (lines 1345-1356): malformed date strings now raise ValueError('must be YYYY-MM-DD') — no warn+store-None path exists. Verified by running the helper against 'not-a-date'.
+- `elspeth-0e1cd1f755` — elspeth-lints/src/elspeth_lints/core/allowlist.py:1345-1356
+  - _optional_date (used by _parse_per_file_rules at line 1269) raises ValueError on malformed expires strings instead of silently converting to None. The old scripts/cicd/enforce_guard_symmetry.py (with the warn-and-continue behavior) was deleted in ab9b18502; the new allowlist framework hard-fails on bad dates.
+- `elspeth-ebae722d5c` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/tier_1_decoration/rule.py
+  - Original attack required a separate temp file with local no-op tier_1_error. New scanner (_scan_candidates in elspeth-lints/.../tier_1_decoration/rule.py:86-93) exclusively scans src/elspeth/contracts/errors.py in production; arbitrary files are unreachable. The name-only match in tier_1_error_call (shared.py:104-107) remains but the file-scope restriction blocks the described spoofing vector.
+- `elspeth-bd8b97f5db` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/core/cli.py
+  - New framework's cli.py _run_check() (lines 1098-1101) emits a parse-error Finding with default Severity.ERROR for SyntaxError files, then continues. _emit_findings() returns rc=1 when any finding has severity!=NOTE. A SyntaxError in tools.py now causes rc=1 (fail-closed), not rc=0.
+- `elspeth-08ffa2c7ce` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/core/cli.py:1098-1101 + ast_walker.py:287-294
+  - Script migrated to elspeth-lints rule framework. ast_walker.py:parse_python_file() returns PythonSyntaxError; cli.py:_run_check() L1098-1101 appends a parse-error Finding (Severity.ERROR) and continues. _emit_findings() returns 1 for any non-NOTE finding — SyntaxError now causes rc=1, not rc=0.
+- `elspeth-0f7f4a4bd0` — /home/john/elspeth/.github/workflows/build-push.yaml:89-98
+  - Commit 207956006 added 'Verify required checks for image commit' step (build-push.yaml lines 89-98) that runs check_release_required_checks.py for every trigger path including tag pushes, blocking publication if ruleset-required checks have not succeeded for IMAGE_SHA.
+- `elspeth-12e3fa7ed6` — scripts/deploy-vm.sh:153-189
+  - Commit de78fe01b added elif !grep -q '^IMAGE_TAG=' .env guard (lines 157-159) that appends IMAGE_TAG to existing .env missing it, and Step 3 (lines 185-189) also handles the missing-key case via append fallback
+- `elspeth-d8508a795b` — /home/john/elspeth/scripts/smoke-test.sh:61,66,97
+  - Bug cited ((TESTS_RUN++)) post-increment (returns 0 on first call → falsy → set -e exit). Current code exclusively uses ((TESTS_PASSED += 1)), ((TESTS_FAILED += 1)), ((TESTS_RUN += 1)) — compound assignment returns new value (1 on first call → truthy → no exit).
+- `elspeth-91c0783e58` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/immutability/frozen_annotations/rule.py
+  - scripts/cicd/enforce_frozen_annotations.py deleted in commit 6e98752ed. New elspeth_lints/rules/immutability/frozen_annotations/rule.py uses load_allowlist (core/allowlist.py) + allowlist_governance_findings_for_root, which emits allowlist.expired_entry and allowlist.stale_entry findings. _optional_date raises on invalid dates; fail_on_stale/fail_on_expired default True.
+- `elspeth-42084ba2d8` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/plugin_contract/component_type/rule.py
+  - scripts/cicd/enforce_component_type.py deleted in commit 907f65ce8. New component_type/rule.py uses load_allowlist from core/allowlist.py. _optional_date (lines 1345-1356) raises ValueError on invalid date strings instead of returning None silently. Governance findings for expired/stale entries emitted via allowlist_governance_findings_for_root.
+- `elspeth-42986663ee` — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/gve_attribution/rule.py
+  - scripts/cicd/enforce_gve_attribution.py deleted in commit ab9b18502. New gve_attribution/rule.py uses load_allowlist from core/allowlist.py. Same _optional_date (raises on bad dates) and allowlist_governance_findings_for_root path as component_type. No silent expires=None fallback remains.
+- `elspeth-b1e04bea6d` — tests/integration/web/composer/guided/test_step_chat.py, tests/integration/web/composer/guided/test_respond.py
+  - All 77 tests in tests/integration/web/composer/guided/test_step_chat.py and test_respond.py pass on current HEAD (verified by running pytest: 77 passed in 8.14s). The 17 failures reported at RC5.2 HEAD fb73a4f76 are gone.
+- `elspeth-e7cc4eb28c` — tests/unit/web/composer/test_compose_loop_envelope.py, ENVELOPE_MAX_PRODUCTION_BYTES_TRIVIAL_PROMPT=300_000 at line 122
+  - ENVELOPE_MAX_PRODUCTION_BYTES_TRIVIAL_PROMPT raised from 200_000 to 300_000 with documented rationale (test_compose_loop_envelope.py lines 104-122). All 6 envelope tests pass (6 passed in 5.54s). The specific 202237B vs 200000B failure no longer occurs.
+- `elspeth-e14a064530` — docs/release/pdf/tokens.typ
+  - docs/release/pdf/tokens.typ now exists (8972 bytes, -rw-rw-r-- 1 john john 8972 May 20 04:03). executive-summary.typ:17 and theme.typ:6 import it; the build import that was reported as failing is now satisfied.
+- `elspeth-ba7060b9ee` — /home/john/elspeth/.pre-commit-config.yaml:135-161
+  - .pre-commit-config.yaml lines 148-160 have an explicit comment documenting the fix: 'NO types: filter' with explanation that `types: [python]` caused allowlist YAMLs to be excluded. The elspeth-lints-trust-tier hook (lines 135-161) now has no types: key, only a files: trigger.
+- `elspeth-fbfd374bf3` — /home/john/elspeth/config/cicd/enforce_tier_model/web.yaml
+  - The specific stale fingerprints cited (c93632f0adce9f79, 07d974974c542300, ed314e0fdc5c4326) are absent from config/cicd/enforce_tier_model/web.yaml. test_allowlist_dir_unset_uses_per_rule_defaults now passes (1 passed in 2.50s, verified by running it).
+- `elspeth-9cd4aa6007` — /home/john/elspeth/src/elspeth/web/sessions/routes/_helpers.py:1207-1250 and /home/john/elspeth/src/elspeth/web/composer/redaction.py:2789-2880
+  - Commit a80ed6900 (2026-05-24) added _redacted_tool_invocation_content_and_envelope() to _helpers.py which calls redact_tool_call_response() via MANIFEST for all tool drain rows. Commit d9264d83b (2026-05-12) added known_response_keys to the four declarative entries (upsert_node, set_metadata, set_output, request_advisor_hint). Both guards are present in current code.
+
+### not_a_bug
+- `elspeth-a40c1632e9` — src/elspeth/contracts/composer_audit.py:53-131
+  - Lines 108-113 explicitly document: 'Every field is a scalar, StrEnum, datetime, or str|None; per the CLAUDE.md Frozen Dataclass Immutability → Scalar-Only Fields Need No Guard rule, frozen=True alone is sufficient. No __post_init__ freeze guard is needed and none is defined — Do not add guards that do nothing.' The status field is typed ComposerToolStatus (StrEnum), and to_dict() calls self.status.value — the type annotation + StrEnum enforce correct usage at the call sites. The absence of a cross-field __post_init__ is intentional per documented doctrine.
+
+## Held for review (medium-confidence close candidates)
+- `elspeth-ad8b2e97ca` (fixed, medium) — Concern (1) is fixed: validateAuditReadinessSnapshot (line 184-195) explicitly checks Array.isArray(body.rows) and validates each row via isReadinessRow; validateExplain (line 207) checks typeof body.narrative !== 'string'. Concern (2) (status:200 on body-mismatch) technically remains — unexpectedShape(status) still passes through the HTTP response status — but no current callers of the audit-readiness API use err.status >= 400 discrimination; auditReadinessStore.ts error handlers use apiErr.detail only. The primary TypeError-at-render failure path is eliminated.
+- `elspeth-f75b6ff9e8` (fixed, medium) — PR #39 (RC5.2→main) merged at commit d370b0677; current main baseline has all allow_hits entries with safety fields (verified across all 16 allowlist YAML files — missing=[] for every file). The bug's own documented self-clearing condition is now satisfied. The strict loader code defect (line 742 calls parse_allow_hits not a lenient variant) was not patched, but the triggering condition cannot recur for PRs branching off current main.
+- `elspeth-7b31f37a44` (not_a_bug, medium) — Original tools.py:2529 (_prevalidate_plugin_options) used `raise AssertionError(...)` not bare `assert`. _blocking_diagnostic_dict and _walk_to_ancestor never existed in the original file. Bug's cited lines 2214/5119 map to unrelated functions. Remaining bare asserts in transforms.py:251/751 and outputs.py:269 are different sites, not the cited ones.
+
+## LIVE — confirmed still-present defects (left in triage)
+- `elspeth-60f6869285` (high) — /home/john/elspeth/src/elspeth/web/sessions/routes/_helpers.py:3187-3233
+- `elspeth-3ce27217af` (high) — /home/john/elspeth/src/elspeth/web/sessions/routes/composer.py:1950-2446
+- `elspeth-24a7fb8e54` (high) — /home/john/elspeth/src/elspeth/web/sessions/routes/composer.py:960-998
+- `elspeth-392d20dbd5` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:419-446 (tab strip), 455-503 (content div)
+- `elspeth-6379536b2e` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:219-225
+- `elspeth-8e77624538` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx:160-167,190
+- `elspeth-34045c99d7` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx:202-213
+- `elspeth-bcf6a81c2b` (high) — src/elspeth/web/frontend/src/components/inspector/GraphView.tsx:815
+- `elspeth-6ed0b23b95` (high) — src/elspeth/web/frontend/src/components/inspector/GraphView.tsx:498-518
+- `elspeth-f288f1a46b` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/settings/SecretsPanel.tsx:203-212, 245-259
+- `elspeth-9abbae820e` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/settings/SecretsPanel.tsx:45,48
+- `elspeth-d6bc38d686` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/common/CommandPalette.tsx:329-421
+- `elspeth-220980d409` (high) — src/elspeth/web/sessions/routes/messages.py (was sessions/router.py, now split into routes/ subpackage)
+- `elspeth-da09ed23d4` (high) — src/elspeth/web/composer/tools/sources.py:136-143
+- `elspeth-99f992f8bd` (high) — .worktrees/multi-source-token-scheduler/src/elspeth/web/composer/redaction.py:1016 + tools/sources.py:519
+- `elspeth-f66c49bba3` (high) — src/elspeth/web/frontend/src/components/blobs/BlobRow.tsx:78, src/elspeth/web/frontend/src/api/client.ts:1063-1074, src/elspeth/web/blobs/routes.py:249-294
+- `elspeth-de74af9b95` (high) — src/elspeth/web/frontend/src/components/execution/ValidationResult.tsx:78-79,128-129; src/elspeth/web/frontend/src/components/sidebar/SideRailValidationBanner.tsx:77-83
+- `elspeth-539db30afd` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/components/sidebar/GraphMiniView.tsx:54-65
+- `elspeth-313cd53771` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/meta_no_new_bespoke_cicd_enforcer/rule.py:118-124
+- `elspeth-c61f4a397c` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/plugin_contract/plugin_hashes/rule.py lines 45, 63, 228
+- `elspeth-4669a37774` (high) — /home/john/elspeth/elspeth-lints/README.md (skeleton text) and /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/__init__.py (BUILTIN_RULES with 19 entries)
+- `elspeth-f91f5fbce7` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/core/cli.py:1376
+- `elspeth-08e17b9253` (high) — src/elspeth/web/composer/state.py:2051-2062, src/elspeth/web/composer/tools/transforms.py:450, src/elspeth/web/composer/tools/sessions.py:409
+- `elspeth-d1ae35c3ba` (high) — /home/john/elspeth/src/elspeth/core/secrets.py:138-167 (called from validation.py:861,873,886)
+- `elspeth-501c14847b` (high) — src/elspeth/contracts/results.py:73-110 (FailureInfo class); src/elspeth/engine/processor.py:724,2229,2447,2654
+- `elspeth-66bc8ce6e0` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/stores/executionStore.ts and src/elspeth/web/frontend/src/api/websocket.ts
+- `elspeth-fd7ebb5495` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/stores/executionStore.ts lines 549-556
+- `elspeth-375995e6be` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/stores/executionStore.ts (applyRunEvent lines 197-310, connectWebSocket lines 469-518)
+- `elspeth-05a5727489` (high) — src/elspeth/contracts/plugin_context.py:405-409 (logger.warning with str(e))
+- `elspeth-f20733e8fe` (high) — src/elspeth/web/sessions/_guided_solve_chain.py:160-168
+- `elspeth-c9eb4b4444` (high) — src/elspeth/web/composer/guided/state_machine.py:597 + src/elspeth/web/sessions/routes/composer.py:2246-2269 + src/elspeth/web/sessions/routes/_helpers.py:2817-2845
+- `elspeth-f41111d84d` (high) — src/elspeth/web/composer/guided/chat_solver.py:239-297 and src/elspeth/web/sessions/routes/composer.py:2903-3000
+- `elspeth-0ef10bec3b` (high) — src/elspeth/contracts/aggregation_checkpoint.py:341,323-325,362
+- `elspeth-74686f3cf0` (high) — src/elspeth/contracts/coalesce_checkpoint.py:81,170,272
+- `elspeth-bbb73a81fa` (high) — src/elspeth/contracts/coalesce_metadata.py:64-86
+- `elspeth-f1a19fb26c` (high) — src/elspeth/contracts/composer_llm_audit.py:107-124
+- `elspeth-665fd96f28` (high) — src/elspeth/contracts/config/runtime.py:332-336, 472-475, 593-595, 556-560
+- `elspeth-f8e5685830` (high) — src/elspeth/contracts/plugin_assistance.py (PluginAssistance.__post_init__); src/elspeth/web/composer/tools/generation.py (_execute_get_plugin_assistance)
+- `elspeth-0c76889694` (high) — src/elspeth/contracts/plugin_semantics.py:74-205
+- `elspeth-13d2f5af54` (high) — src/elspeth/contracts/results.py:150-197
+- `elspeth-14f92fed80` (high) — src/elspeth/contracts/results.py:470-471
+- `elspeth-e014a1d08b` (high) — src/elspeth/contracts/value_source.py:191-237
+- `elspeth-c313ce6374` (high) — src/elspeth/contracts/call_data.py
+- `elspeth-e5f0840b08` (high) — src/elspeth/contracts/events.py
+- `elspeth-6c771ddfdc` (high) — src/elspeth/contracts/node_state_context.py
+- `elspeth-92c12922fe` (high) — src/elspeth/contracts/engine.py:68-79 (PendingOutcome.__post_init__)
+- `elspeth-83261b699c` (high) — /home/john/elspeth/src/elspeth/engine/commencement.py:94-105
+- `elspeth-b8f36e1eb2` (high) — src/elspeth/core/landscape/database.py:129-144
+- `elspeth-d3a7e8c489` (high) — src/elspeth/core/checkpoint/serialization.py:306 (_restore_types)
+- `elspeth-1073b30450` (high) — src/elspeth/web/auth/audit.py:238-257 and src/elspeth/web/auth/routes.py:131-136
+- `elspeth-e213f73e9a` (high) — src/elspeth/web/secrets/routes.py:106-159
+- `elspeth-28bb7fcacb` (high) — /home/john/elspeth/src/elspeth/web/sessions/schema.py:302-312
+- `elspeth-fb6f30c5d1` (high) — src/elspeth/web/execution/schemas.py:573-607,700-708
+- `elspeth-a67e7cfc46` (high) — /home/john/elspeth/src/elspeth/plugins/infrastructure/pooling/reorder_buffer.py:142
+- `elspeth-ee69831e4c` (high) — src/elspeth/plugins/sinks/chroma_sink.py:574-584 (on_complete)
+- `elspeth-b19ee26dc2` (high) — src/elspeth/plugins/sinks/chroma_sink.py:486-490,522-523 (write)
+- `elspeth-a2a4a0e91d` (high) — src/elspeth/plugins/infrastructure/clients/retrieval/chroma.py:123,249,304-307
+- `elspeth-c0fac78210` (high) — src/elspeth/plugins/infrastructure/clients/retrieval/chroma.py:242-246,296-300,304
+- `elspeth-1b138841d3` (high) — src/elspeth/plugins/infrastructure/clients/retrieval/azure_search.py:285-291
+- `elspeth-1afd07cb77` (high) — src/elspeth/core/config.py:178-181 (SecretsConfig.mapping) + src/elspeth/core/security/config_secrets.py:208-210 (Phase 2 apply loop)
+- `elspeth-50f5886834` (high) — src/elspeth/core/config.py:1376-1380, src/elspeth/core/dependency_config.py:22-38
+- `elspeth-1e4ca5b1db` (high) — src/elspeth/engine/orchestrator/core.py:413-434 (_safe_flush_telemetry); src/elspeth/telemetry/manager.py:504-526 (flush)
+- `elspeth-5310f58a2b` (high) — src/elspeth/cli.py:943-947 (_orchestrator_context finally block)
+- `elspeth-17836cea35` (high) — src/elspeth/cli.py:1051-1052 (_execute_pipeline_with_instances finally block)
+- `elspeth-a775d28d8c` (high) — src/elspeth/cli.py:816 (explain), 1626 (purge), 1845, 1857, 2145 (resume)
+- `elspeth-4824da5b94` (high) — src/elspeth/cli.py:805-812 (explain TUI branch)
+- `elspeth-92ed4171b0` (high) — README.md:308,665; docs/runbooks/incident-response.md:69; src/elspeth/cli.py:1738-1742
+- `elspeth-24b33b9280` (high) — src/elspeth/core/retention/purge.py:191-195
+- `elspeth-1279422ee0` (high) — src/elspeth/core/landscape/reproducibility.py:175
+- `elspeth-6e6094ba96` (high) — src/elspeth/mcp/analyzers/diagnostics.py:141
+- `elspeth-7144494104` (high) — src/elspeth/core/security/web.py:366 (validate_url_for_ssrf)
+- `elspeth-f9b8ed91a9` (high) — src/elspeth/core/config.py:1728 (_sanitize_dsn / URL.create block)
+- `elspeth-fba750d4fd` (high) — src/elspeth/core/config.py:2094 (_lowercase_schema_keys, options branch)
+- `elspeth-c9a2397270` (high) — src/elspeth/core/config.py:663-667 (GateSettings comment block) and line 1340 (ElspethSettings frozen=True)
+- `elspeth-f78e84f509` (high) — src/elspeth/core/config.py:630-661 (GateSettings.validate_boolean_routes)
+- `elspeth-3fc847c4be` (high) — src/elspeth/core/landscape/write_repository.py:173-175 (_validate_node_specs)
+- `elspeth-b657daab02` (high) — src/elspeth/engine/bootstrap.py:98-106 and src/elspeth/core/config.py:1390-1394
+- `elspeth-4cfc2e09ef` (high) — src/elspeth/core/dag/builder.py:1068 + src/elspeth/core/dag/graph.py:1131-1312
+- `elspeth-55c61540f9` (high) — src/elspeth/web/middleware/request_id.py:103-104
+- `elspeth-0e48e12db7` (high) — src/elspeth/web/app.py:536, src/elspeth/web/config.py:42
+- `elspeth-af2681944a` (high) — deploy/elspeth-web.env:10
+- `elspeth-6f205adba4` (high) — src/elspeth/web/app.py:567-575
+- `elspeth-f72b21e297` (high) — src/elspeth/web/sessions/models.py:1375 (table def); src/elspeth/web/execution/progress.py:170-174 (silent-drop path); src/elspeth/web/execution/service.py:1705-1713 (broadcast call site)
+- `elspeth-565e1348ae` (high) — src/elspeth/web/frontend/src/components/chat/ChatInput.tsx (no maxLength prop), src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx:1194-1199 (guided ChatInput), src/elspeth/web/frontend/src/stores/sessionStore.ts:1348 (chatGuided)
+- `elspeth-30cc117d0b` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/hooks/useHashRouter.ts:109-111
+- `elspeth-119519c3ce` (high) — src/elspeth/web/frontend/src/api/websocket.ts:166 (default branch); backend: src/elspeth/web/execution/routes.py:829,832,847,880
+- `elspeth-8f3b3f650d` (high) — src/elspeth/web/composer/state.py:_check_schema_contracts (lines 894-1757); src/elspeth/plugins/transforms/llm/transform.py:1251 (input_schema assignment)
+- `elspeth-f8650893f1` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/tier_1_decoration/rule.py
+- `elspeth-d876f7b31b` (high) — src/elspeth/plugins/infrastructure/config_base.py:289-304 (__init_subclass__)
+- `elspeth-93ee280da5` (medium) — elspeth-lints/src/elspeth_lints/rules/plugin_contract/plugin_hashes/rule.py:161-203 (extract_plugin_attributes + _has_name_class_attribute)
+- `elspeth-4cec1a03b9` (high) — src/elspeth/web/sessions/_guided_step_chat.py:173-181
+- `elspeth-58929c509f` (high) — src/elspeth/web/sessions/routes/composer.py and src/elspeth/web/sessions/routes/_helpers.py (refactored from the deleted routes.py)
+- `elspeth-fced44189b` (high) — src/elspeth/testing/__init__.py:254-281 (make_success_multi)
+- `elspeth-195ecb1d58` (high) — src/elspeth/web/execution/service.py:1058-1072 and src/elspeth/core/blobs_inline.py:212-251
+- `elspeth-794d38959c` (high) — src/elspeth/mcp/server.py:470-480 (_validate_tool_args optional_str/optional_str_defaults branches) and src/elspeth/mcp/server.py:649-656 (handler dispatch, no catch)
+- `elspeth-80af7e5254` (high) — src/elspeth/mcp/server.py:52-63 (_ArgSpec), src/elspeth/mcp/server.py:482-492 (_validate_tool_args int path), src/elspeth/mcp/server.py:309-323 (query tool def)
+- `elspeth-4d00b94422` (high) — src/elspeth/engine/dependency_resolver.py:135,168
+- `elspeth-29e32d9ba7` (high) — src/elspeth/web/composer/source_inspection.py:295 (_inspect_csv) and src/elspeth/web/blobs/sniff.py:56 (detect_mime_type)
+- `elspeth-82281934aa` (medium) — src/elspeth/web/blobs/service.py:408-452 (create_blob), :347-374 (_enforce_ready_finalize_quota), src/elspeth/web/sessions/engine.py:66-67
+- `elspeth-a960d22540` (high) — src/elspeth/plugins/infrastructure/clients/llm.py
+- `elspeth-98855f307a` (high) — src/elspeth/plugins/sources/dataverse.py:511 (source error audit); src/elspeth/plugins/sinks/dataverse.py:549-552 (sink error audit)
+- `elspeth-594221617d` (high) — src/elspeth/plugins/sources/dataverse.py:419-425 (_normalize_row_fields); src/elspeth/plugins/sources/field_normalization.py:258-262 (resolve_field_names)
+- `elspeth-392c13aff0` (high) — src/elspeth/plugins/infrastructure/clients/dataverse.py:657-701
+- `elspeth-2af4e98ee2` (high) — src/elspeth/core/rate_limit/registry.py:117-123 and src/elspeth/core/rate_limit/limiter.py:202
+- `elspeth-f54b6a6f55` (high) — src/elspeth/plugins/transforms/llm/tracing.py:114-122 and src/elspeth/plugins/transforms/llm/langfuse.py:257-261
+- `elspeth-2ad0cebfcd` (high) — src/elspeth/plugins/sources/json_source.py:427-433 + src/elspeth/plugins/sources/field_normalization.py:257-262
+- `elspeth-bdcdce6f58` (medium) — src/elspeth/plugins/sources/azure_blob_source.py:960-965 (_normalize_row_keys), src/elspeth/plugins/sources/field_normalization.py:258-262 (resolve_field_names)
+- `elspeth-9ca96c4e8c` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/stores/sessionStore.ts:369-381
+- `elspeth-43601f273b` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/stores/sessionStore.ts:1227-1233,1290-1292
+- `elspeth-a79a51dcda` (high) — src/elspeth/plugins/transforms/llm/providers/openrouter.py:546-587
+- `elspeth-8d5dd08851` (high) — src/elspeth/plugins/sinks/json_sink.py:537, src/elspeth/plugins/sinks/csv_sink.py:688, src/elspeth/plugins/infrastructure/config_base.py:25
+- `elspeth-98e02d5f0f` (high) — src/elspeth/contracts/tier_registry.py:103, docs/elspeth-lints/static-runtime-boundary.md:78,131, docs/runbooks/ansible-ubuntu-deployment.md:201
+- `elspeth-e517b6fcb4` (high) — /home/john/elspeth/src/elspeth/plugins/transforms/llm/transform.py:1621-1631
+- `elspeth-be715f7319` (high) — src/elspeth/mcp/analyzers/reports.py:78-161, src/elspeth/mcp/types.py:204-213
+- `elspeth-8824da0658` (high) — src/elspeth/web/frontend/tests/e2e/llm-provider-schema.spec.ts:29
+- `elspeth-12780456b5` (high) — src/elspeth/web/frontend/src/types/index.ts:304-309 (frontend type missing field); src/elspeth/web/catalog/schemas.py:87 + service.py:326 (backend populates it)
+- `elspeth-32d06976ba` (high) — src/elspeth/composer_mcp/server.py:219-269,300-341,721-735
+- `elspeth-39ccb2b59a` (high) — src/elspeth/web/composer/tutorial_run_routes.py:17-28
+- `elspeth-5a94855935` (high) — src/elspeth/web/interpretation_state.py:484-487
+- `elspeth-a22b8a2ade` (high) — /home/john/elspeth/src/elspeth/plugins/transforms/llm/model_catalog.py:238-344
+- `elspeth-abb2cb0931` (high) — src/elspeth/web/composer/skills/pipeline_composer.md (suppressed sections); src/elspeth/web/catalog/service.py (missing gating mechanism)
+- `elspeth-bd8f04b716` (high) — src/elspeth/web/sessions/routes/sessions.py:283-291
+- `elspeth-d5b3bb6ce5` (high) — tests/performance/benchmarks/test_schema_validation.py (all 3 tests)
+- `elspeth-b8ba3c0796` (medium) — tests/unit/plugins/transforms/rag/test_query.py::TestRegexMode::test_captures_first_group
+- `elspeth-b1199b2e28` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/styles/tokens.css:227
+- `elspeth-e6832e5e34` (high) — /home/john/elspeth/src/elspeth/web/frontend/src/styles/tokens.css:58-63 (dark), 292-297 (light)
+- `elspeth-884e3a604a` (medium) — /home/john/elspeth/src/elspeth/web/frontend/src/components/chat/chat.css:97-127
+- `elspeth-8bae6f3b49` (high) — src/elspeth/web/sessions/service.py:cancel_all_orphaned_runs (line 4508); src/elspeth/web/app.py:lifespan (line 245)
+- `elspeth-f555166d73` (medium) — src/elspeth/web/composer/anti_anchor.py:should_inject_hint (line 50)
+- `elspeth-b3014156d7` (high) — /home/john/elspeth/src/elspeth/web/composer/tools/sources.py:617 (_execute_inspect_source)
+- `elspeth-7e2a580d03` (high) — /home/john/elspeth/evals/lib/composer_rgr_score.py:97 (_node_plugins) and /home/john/elspeth/evals/lib/scenario_from_example.py:308 (_ordered_chain_tokens)
+- `elspeth-552ca1cc55` (medium) — /home/john/elspeth/src/elspeth/web/composer/skills/pipeline_composer.md
+- `elspeth-b8b600e213` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py:1727
+- `elspeth-b872929157` (high) — elspeth-lints/src/elspeth_lints/rules/immutability/freeze_guards/rule.py:169-177
+- `elspeth-ec6749f8da` (high) — elspeth-lints/src/elspeth_lints/rules/immutability/freeze_guards/rule.py:29-42,138-152
+- `elspeth-697788a39f` (high) — elspeth-lints/src/elspeth_lints/rules/audit_evidence/guard_symmetry/rule.py:226-238
+- `elspeth-37879426d1` (high) — elspeth-lints/src/elspeth_lints/rules/audit_evidence/audit_evidence_nominal/rule.py:87-95
+- `elspeth-584d4ea502` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/audit_evidence_nominal/rule.py:78-84
+- `elspeth-44d771caad` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/shared.py:199-209
+- `elspeth-08b0336287` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/tier_1_decoration/rule.py:96-113,154-165
+- `elspeth-2d73b966c5` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/audit_evidence/shared.py
+- `elspeth-1e8f4ece9a` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/rule.py
+- `elspeth-487dfef2ce` (high) — elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/rule.py:327-334 (_dispatch_site_marker)
+- `elspeth-07d9f8a619` (high) — elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/rule.py:362-446 (compute_findings)
+- `elspeth-99ae5c0991` (high) — elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/rule.py:84-89, 463-510 (ContractAllowlist.match, load_contract_allowlist)
+- `elspeth-a586a7212e` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/immutability/frozen_annotations/rule.py:17
+- `elspeth-fbfb9fd634` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/immutability/frozen_annotations/rule.py:17
+- `elspeth-20add2bd90` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/plugin_contract/component_type/rule.py:151-158,207-210
+- `elspeth-a2b240c29b` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/plugin_contract/component_type/rule.py
+- `elspeth-9aaa21d81c` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/composer/exception_channel/rule.py
+- `elspeth-c0c4f49981` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/composer/catch_order/rule.py:63-77
+- `elspeth-eb90341cdb` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/composer/catch_order/rule.py:13-19,44-60
+- `elspeth-c36485165b` (high) — elspeth-lints/src/elspeth_lints/rules/audit_evidence/shared.py:110-115 (graph_validation_error_call) and elspeth-lints/src/elspeth_lints/rules/audit_evidence/gve_attribution/rule.py:77-104 (scan_tree)
+- `elspeth-16f41371f8` (high) — elspeth-lints/src/elspeth_lints/rules/audit_evidence/gve_attribution/rule.py:88
+- `elspeth-3c73e49cc7` (high) — elspeth-lints/src/elspeth_lints/rules/audit_evidence/gve_attribution/rule.py:59-62 (scan_root); elspeth-lints/src/elspeth_lints/core/ast_walker.py:287-293 (parse_python_file)
+- `elspeth-83e7922d40` (high) — /home/john/elspeth/scripts/cicd/check_slot_type_cross_language.py:89
+- `elspeth-06913f39d4` (high) — /home/john/elspeth/.github/workflows/ci.yaml:459
+- `elspeth-118bf5ea8c` (high) — .github/workflows/build-push.yaml:264-408 (smoke-test job)
+- `elspeth-a57c4bd228` (high) — Dockerfile:17-43 (builder stage); .dockerignore:19; src/elspeth/web/app.py:1127-1131
+- `elspeth-4634ee39ee` (high) — /home/john/elspeth/scripts/codex_integration_seam_hunt.py:475, codex_test_defect_hunt.py:474, codex_exemption_validator.py:472
+- `elspeth-0707b6d15b` (high) — /home/john/elspeth/scripts/codex_audit_common.py:809-828,888-895,1060-1090
+- `elspeth-4f2471815e` (high) — /home/john/elspeth/scripts/check_contracts.py:485-503 (find_cross_boundary_usages method)
+- `elspeth-369a13a173` (high) — /home/john/elspeth/scripts/check_contracts.py:184-208 (find_type_definitions)
+- `elspeth-1b1e50e24b` (high) — /home/john/elspeth/scripts/skill_rgr/harness.py:219-246
+- `elspeth-aa183705e4` (high) — /home/john/elspeth/evals/lib/composer_rgr_score.py:113-133 (_check_node_chain_in_order), 560-572 (must_have_node_kinds_substring_any_of)
+- `elspeth-85f9f3ed28` (high) — /home/john/elspeth/evals/lib/composer_rgr_score.py:97-110 (_node_plugins); /home/john/elspeth/evals/composer-rgr/scenarios/audit-backend-ask/scenario.json:37
+- `elspeth-445d3d4a8b` (high) — /home/john/elspeth/evals/composer-harness/hardmode/replay.sh:104-123; /home/john/elspeth/src/elspeth/web/sessions/routes/composer.py:1172
+- `elspeth-b7ef37c4a9` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py:352-360
+- `elspeth-f2959957fc` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/immutability/freeze_guards/rule.py:28,185-198
+- `elspeth-2b5edd369e` (high) — /home/john/elspeth/elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/rule.py:327-334
+- `elspeth-4aec95f5b0` (medium) — elspeth-lints/src/elspeth_lints/rules/plugin_contract/plugin_hashes/rule.py:161
+- `elspeth-739409bfa1` (high) — /home/john/elspeth/scripts/check_contracts.py:225
+- `elspeth-538866cb7d` (high) — /home/john/elspeth/scripts/skill_rgr/scenarios/batch3_contract_loop_insist.py:80-93
+- `elspeth-db092c922f` (high) — /home/john/elspeth/scripts/skill_rgr/run.py:28 + /home/john/elspeth/scripts/skill_rgr/harness.py:72-74
+- `elspeth-1693fda370` (high) — /home/john/elspeth/evals/composer-rgr/run_all_scenarios.sh:27
+- `elspeth-fb130b8506` (high) — /home/john/elspeth/evals/composer-harness/hardmode/generate_cohort.sh:105
+- `elspeth-6d88c5cedc` (high) — /home/john/elspeth/evals/composer-harness/hardmode/sweep_simplified.sh:82
+- `elspeth-c49d7aa65f` (high) — /home/john/elspeth/docs/runbooks/ansible-ubuntu-deployment.md:200-201
+- `elspeth-06f28d1921` (high) — /home/john/elspeth/CHANGELOG.md:1574-1582
+- `elspeth-7a52617041` (high) — /home/john/elspeth/docs-archive/2026-05-19-docs-cleanout/MANIFEST.md:14
+- `elspeth-c4e0d4c650` (high) — /home/john/elspeth/docs/guides/docker.md:58,77,93,103-149,198,295,299
+- `elspeth-0def0c0404` (high) — /home/john/elspeth/.githooks/commit-msg-telemetry-backfill (lines 88-99 comment block, lines 140-142 unconditional require_trailer calls); /home/john/elspeth/config/cicd/enforce_telemetry_backfill_trailer/README.md (line 46 documents SHA-based skip)
+- `elspeth-1f9277fa0a` (high) — /home/john/elspeth/docs/release/executive-summary.md line 137
+- `elspeth-bace9a5a4d` (high) — /home/john/elspeth/evals/composer-rgr/run_scenario.sh (lines 49-70 create session then immediately POST /messages); /home/john/elspeth/evals/composer-rgr/phase5b-interpretation/README.md line 168
+- `elspeth-572743c102` (high) — /home/john/elspeth/examples/README.md (missing entry)
+- `elspeth-b1580f0cda` (high) — /home/john/elspeth/tests/unit/test_no_hasattr_branching.py and /home/john/elspeth/tests/unit/web/sessions/test_routes_split.py
+- `elspeth-a7afa79003` (high) — /home/john/elspeth/tests/unit/test_ci_workflow_xdist.py
+- `elspeth-0735454416` (high) — /home/john/elspeth/tests/unit/test_mock_discipline_baseline.py
+- `elspeth-8cb798c3fd` (high) — /home/john/elspeth/.github/workflows/build-push.yaml:264-408
+- `elspeth-a1f2ef0f82` (high) — /home/john/elspeth/.github/workflows/composer-redaction-gate.yml:21 and /home/john/elspeth/docs/runbooks/ci-branch-protection.md:17
+- `elspeth-09e858892b` (high) — /home/john/elspeth/docs/guides/redaction-policy-changes.md:47 and /home/john/elspeth/scripts/cicd/bootstrap_redaction_snapshot.py:13-16
+- `elspeth-870ee03711` (high) — /home/john/elspeth/docs/elspeth-lints/rule-author-guide.md:135 and /home/john/elspeth/docs/runbooks/ansible-ubuntu-deployment.md:200-201
+- `elspeth-261bb8687f` (high) — /home/john/elspeth/README.md:324 and /home/john/elspeth/docs/release/elspeth-progress-rc1-to-rc5.md:246
+- `elspeth-b7a0c2d42e` (high) — /home/john/elspeth/.githooks/commit-msg-telemetry-backfill (lines 88-99) and /home/john/elspeth/config/cicd/enforce_telemetry_backfill_trailer/README.md (lines 44-48)
+- `elspeth-04b7b2c008` (high) — /home/john/elspeth/.github/actionlint.yaml (exists); no enforcement wiring found
+- `elspeth-7294de558e` (high) — /home/john/elspeth/src/elspeth/engine/orchestrator/run_status.py (derive_resume_terminal_status_from_audit) and /home/john/elspeth/src/elspeth/engine/orchestrator/core.py (line 2761 graft)
+- `elspeth-e1dd5e1303` (high) — /home/john/elspeth/tests/property/audit/test_fork_join_balance.py:4227 (pin test), /home/john/elspeth/src/elspeth/engine/orchestrator/run_status.py (derive arm)
+- `elspeth-ce3adfb7b7` (medium) — /home/john/elspeth/src/elspeth/engine/orchestrator/core.py:2819-2826
+
+## Uncertain (left in triage)
+- `elspeth-3070f61a4c` (medium) — The skill prompt at pipeline_composer.md:37-38 now says "Build complete new pipelines with set_pipeline. Patch existing pipelines only for narrow edits" address
+- `elspeth-dd99915063` (medium) — No targeted fix committed for the persistence leak. Current code does not obviously produce tool_calls=null+content=empty rows (P4 only fires on tool-call branc
+- `elspeth-697b7377a7` (medium) — The /api/secrets reason taxonomy (fingerprint_resolver_not_configured) is implemented and pinned by TestComposerRuntimeSecretInventoryAgreement (test_composer_r
+- `elspeth-164d7078cb` (medium) — Eval artifact from 2026-05-07 shows tool_call_count=0 across all 4 turns — pure LLM behavioral failure, no broken code mechanism named. state_claim_grounding.py
+- `elspeth-d57eb75740` (medium) — Skill line 215-216 mandates inspect_source before declaring columns. compute_proof_diagnostics (generation.py:1236) mechanically blocks csv_source_blob_header_m
+- `elspeth-def4dd9e2b` (low) — schemas_gap computed in prompts.py:296 and injected as context tells the model which schemas are unloaded. Skill lines 33-36 say load schema for every plugin no
+- `elspeth-e41d021d59` (medium) — Skill Router table mandates 'mutate state' on build turns. service.py:880 (_empty_state_uploaded_blob_repair) is a mechanical anti-passivity injection but only 
+- `elspeth-60517d6a7f` (low) — 906c6332 commit message (which introduced the partial fix) explicitly states 'full convergence likely needs additional follow-up'; no cascade recipe added (only
+- `elspeth-7956a72c2d` (low) — Bug was filed AFTER skill rule existed (commit 906c6332); it describes the rule present AND the LLM still violating it. Finding the rule text (lines 47-54, hard
+- `elspeth-9aa2f1b212` (medium) — TestContentSafetySeverityValidation::test_valid_severity_range_accepted still exists (parametrized 0-6). The autouse fixture patches httpx.Client per-test and e

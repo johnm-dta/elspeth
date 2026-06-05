@@ -2816,6 +2816,78 @@ sinks:
         assert "url_password_fingerprint" not in result["landscape"]
         assert result["landscape"]["url_password_redacted"] is True
 
+    def test_database_sink_url_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """database sink options.url password should be fingerprinted in audit copy."""
+        from elspeth.core.config import _fingerprint_config_for_audit
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_dict = {
+            "source": {"plugin": "csv", "options": {}},
+            "sinks": {
+                "warehouse": {
+                    "plugin": "database",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        }
+
+        result = _fingerprint_config_for_audit(config_dict)
+        options = result["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "user@host" in options["url"]
+        assert "url_password_fingerprint" in options
+        assert len(options["url_password_fingerprint"]) == 64
+
+    def test_database_sink_url_password_redacted_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """database sink options.url password should be redacted in dev mode."""
+        from elspeth.core.config import _fingerprint_config_for_audit
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        config_dict = {
+            "source": {"plugin": "csv", "options": {}},
+            "sinks": {
+                "warehouse": {
+                    "plugin": "database",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        }
+
+        result = _fingerprint_config_for_audit(config_dict)
+        options = result["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "url_password_fingerprint" not in options
+        assert options["url_password_redacted"] is True
+
+    def test_resolve_config_database_sink_url_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """resolve_config must not return plaintext database sink DSN passwords."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        settings = ElspethSettings(
+            source={"plugin": "csv", "on_success": "warehouse"},
+            sinks={
+                "warehouse": {
+                    "plugin": "database",
+                    "on_write_failure": "discard",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        )
+
+        resolved = resolve_config(settings)
+        options = resolved["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "url_password_fingerprint" in options
+        assert len(options["url_password_fingerprint"]) == 64
+
     def test_dsn_unparsable_with_credentials_raises(self) -> None:
         """Unparsable URLs with credential patterns must not pass through."""
         from elspeth.core.config import SecretFingerprintError, _sanitize_dsn

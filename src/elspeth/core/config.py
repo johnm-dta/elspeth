@@ -1823,6 +1823,37 @@ def _expand_config_templates(
     return config
 
 
+def _sanitize_dsn_option_for_audit(
+    options: dict[str, Any],
+    *,
+    option_name: str,
+    fingerprint_name: str,
+    redacted_name: str,
+    fail_if_no_key: bool,
+) -> None:
+    """Sanitize a DSN-bearing option in-place for audit persistence.
+
+    Plugin-specific secret-ref policy permits some non-secret-named fields
+    (currently database sink ``options.url``) to receive resolved server/user
+    secrets. Those fields must be sanitized by placement, not by key-name
+    heuristics, before settings are written to Landscape audit storage.
+    """
+    value = options.get(option_name)
+    if not isinstance(value, str):
+        return
+
+    sanitized_url, password_fp, had_password = _sanitize_dsn(
+        value,
+        fail_if_no_key=fail_if_no_key,
+    )
+    options[option_name] = sanitized_url
+    if password_fp:
+        options[fingerprint_name] = password_fp
+    elif had_password and not fail_if_no_key:
+        # Dev mode: password was removed but not fingerprinted.
+        options[redacted_name] = True
+
+
 def _fingerprint_config_for_audit(
     config_dict: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1834,6 +1865,7 @@ def _fingerprint_config_for_audit(
     Processes:
     - source.options
     - sinks.*.options
+    - database sink options.url (DSN password)
     - transforms[*].options
     - aggregations[*].options
     - landscape.url (DSN password)
@@ -1860,19 +1892,13 @@ def _fingerprint_config_for_audit(
 
     # === Landscape URL (DSN password) ===
     if "landscape" in config and isinstance(config["landscape"], dict):
-        landscape = config["landscape"]
-        if "url" in landscape and isinstance(landscape["url"], str):
-            # _sanitize_dsn returns (sanitized_url, fingerprint, had_password)
-            sanitized_url, password_fp, had_password = _sanitize_dsn(
-                landscape["url"],
-                fail_if_no_key=fail_if_no_key,
-            )
-            landscape["url"] = sanitized_url
-            if password_fp:
-                landscape["url_password_fingerprint"] = password_fp
-            elif had_password and not fail_if_no_key:
-                # Dev mode: password was removed but not fingerprinted
-                landscape["url_password_redacted"] = True
+        _sanitize_dsn_option_for_audit(
+            config["landscape"],
+            option_name="url",
+            fingerprint_name="url_password_fingerprint",
+            redacted_name="url_password_redacted",
+            fail_if_no_key=fail_if_no_key,
+        )
 
     # === Source options ===
     if "source" in config and isinstance(config["source"], dict):
@@ -1884,7 +1910,18 @@ def _fingerprint_config_for_audit(
     if "sinks" in config and isinstance(config["sinks"], dict):
         for sink in config["sinks"].values():
             if isinstance(sink, dict) and "options" in sink and isinstance(sink["options"], dict):
-                sink["options"] = _fingerprint_secrets(sink["options"], fail_if_no_key=fail_if_no_key)
+                options = _fingerprint_secrets(sink["options"], fail_if_no_key=fail_if_no_key)
+                if sink.get("plugin") == "database":
+                    # Database sink URLs are a plugin-specific secret-ref placement:
+                    # the field is named "url" rather than a heuristic secret name.
+                    _sanitize_dsn_option_for_audit(
+                        options,
+                        option_name="url",
+                        fingerprint_name="url_password_fingerprint",
+                        redacted_name="url_password_redacted",
+                        fail_if_no_key=fail_if_no_key,
+                    )
+                sink["options"] = options
 
     # === Transform plugin options ===
     if "transforms" in config and isinstance(config["transforms"], list):

@@ -28,6 +28,8 @@ from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
 
 type BatchExperimentComparisonRow = dict[str, object]
 
+_MISSING_BASELINE_VARIANT_EXPECTED = "configured baseline_variant"
+
 _COMPARISON_OUTPUT_FIELDS = frozenset(
     {
         "baseline_count",
@@ -122,7 +124,7 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0f59970e8c643a24"
+    source_file_hash: str | None = "sha256:2ebe898bfa15361c"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 
@@ -403,8 +405,8 @@ class BatchExperimentCompare(BaseTransform):
                 {
                     "reason": "validation_failed",
                     "cause": "baseline_variant_missing",
-                    "expected": str(self._baseline_variant),
-                    "message": f"Baseline variant {self._baseline_variant!r} was not present in the batch.",
+                    "expected": _MISSING_BASELINE_VARIANT_EXPECTED,
+                    "message": "Configured baseline_variant was not present in the batch.",
                     "errors": [str(stats.value) for stats in stats_by_variant],
                 },
                 retryable=False,
@@ -427,8 +429,8 @@ class BatchExperimentCompare(BaseTransform):
                 {
                     "reason": "validation_failed",
                     "cause": "baseline_variant_missing",
-                    "expected": str(baseline_value),
-                    "message": f"Baseline variant {baseline_value!r} was not present in the batch.",
+                    "expected": _MISSING_BASELINE_VARIANT_EXPECTED,
+                    "message": "Configured baseline_variant was not present in the batch.",
                     "errors": [str(stats.value) for stats in stats_by_variant],
                 },
                 retryable=False,

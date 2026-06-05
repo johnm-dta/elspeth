@@ -185,8 +185,28 @@ class TestBatchClassifierMetrics:
         assert result.reason is not None
         assert result.reason["reason"] == "validation_failed"
         assert result.reason["cause"] == "positive_label_missing"
-        assert result.reason["expected"] == "maybe"
+        assert result.reason["expected"] == "configured positive_label"
+        assert result.reason["message"] == "Configured positive_label was not present in the batch."
         assert result.reason["errors"] == ["yes", "no"]
+
+    def test_missing_positive_label_error_does_not_echo_configured_label(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
+
+        configured_secret = "expanded-secret-positive-label"
+        transform = BatchClassifierMetrics(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "actual_field": "actual",
+                "predicted_field": "predicted",
+                "positive_label": configured_secret,
+            }
+        )
+
+        result = transform.process([_make_row({"actual": "yes", "predicted": "no"})], ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert configured_secret not in str(result.reason)
 
     def test_non_scalar_labels_raise_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics

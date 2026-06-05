@@ -174,7 +174,27 @@ class TestBatchExperimentCompare:
         assert result.reason is not None
         assert result.reason["reason"] == "validation_failed"
         assert result.reason["cause"] == "baseline_variant_missing"
-        assert result.reason["expected"] == "control"
+        assert result.reason["expected"] == "configured baseline_variant"
+        assert result.reason["message"] == "Configured baseline_variant was not present in the batch."
+
+    def test_missing_baseline_error_does_not_echo_configured_variant(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        configured_secret = "expanded-secret-baseline-variant"
+        transform = BatchExperimentCompare(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "variant_field": "variant",
+                "score_field": "score",
+                "baseline_variant": configured_secret,
+            }
+        )
+
+        result = transform.process([_make_row({"variant": "treatment", "score": 1.0})], ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert configured_secret not in str(result.reason)
 
     def test_insufficient_variants_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare

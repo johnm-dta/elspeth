@@ -48,6 +48,8 @@ _BASE_METRIC_FIELDS = frozenset(
         "weighted_f1",
     }
 )
+_MISSING_POSITIVE_LABEL_EXPECTED = "configured positive_label"
+
 _BINARY_METRIC_FIELDS = frozenset(
     {
         "binary_f1",
@@ -151,7 +153,7 @@ class BatchClassifierMetrics(BaseTransform):
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:128c9eca5770883f"
+    source_file_hash: str | None = "sha256:2be40b56a899e390"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -380,7 +382,8 @@ class BatchClassifierMetrics(BaseTransform):
             reason: TransformErrorReason = {
                 "reason": "validation_failed",
                 "cause": "positive_label_missing",
-                "expected": str(self._positive_label),
+                "expected": _MISSING_POSITIVE_LABEL_EXPECTED,
+                "message": "Configured positive_label was not present in the batch.",
                 "errors": [str(label) for label in labels],
             }
             return {}, TransformResult.error(reason, retryable=False)

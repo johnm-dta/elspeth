@@ -3595,6 +3595,37 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
+    def test_load_settings_from_yaml_string_can_skip_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Runtime-inserted values can carry literal ${...} text without host env lookup."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("ELSPETH_INLINE_BLOB_SECRET", "server-secret-value")
+
+        yaml_content = """
+source:
+  plugin: csv
+  on_success: summarize
+  options:
+    path: input.csv
+aggregations:
+  - name: summarize
+    plugin: report_assemble
+    input: summarize
+    on_error: discard
+    options:
+      title: leaked:${ELSPETH_INLINE_BLOB_SECRET}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: output.jsonl
+"""
+
+        settings = load_settings_from_yaml_string(yaml_content, expand_env_vars=False)
+
+        assert settings.aggregations[0].options["title"] == "leaked:${ELSPETH_INLINE_BLOB_SECRET}"
+
 
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""

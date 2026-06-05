@@ -2154,7 +2154,18 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
+def expand_env_vars_in_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Expand environment variables in an operator-authored config tree.
+
+    Runtime-only values such as resolved web secrets or fetched inline blob
+    content must not be passed through this helper after substitution; those
+    values are not operator-authored YAML and may contain literal ``${...}``
+    text that must remain data, not host environment lookups.
+    """
+    return _expand_env_vars(config)
+
+
+def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
     This is used by the web execution service to load pipeline configs
@@ -2164,6 +2175,11 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
 
     Args:
         yaml_content: YAML configuration as a string.
+        expand_env_vars: Whether to expand ``${VAR}`` and ``${VAR:-default}``
+            placeholders in string values. Keep this enabled for
+            operator-authored YAML; disable it only after the caller has
+            already expanded the operator-authored tree and then inserted
+            runtime-only secret or blob values.
 
     Returns:
         Validated ElspethSettings instance.
@@ -2179,7 +2195,8 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
-    raw_config = _expand_env_vars(raw_config)
+    if expand_env_vars:
+        raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 
 

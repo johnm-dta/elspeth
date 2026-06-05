@@ -893,8 +893,10 @@ class TestInlineBlobRuntimePreflight:
         mock_orch_cls: MagicMock,
         service: ExecutionServiceImpl,
         mock_session_service: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        content = b"You are an audited prompt."
+        monkeypatch.setenv("ELSPETH_INLINE_BLOB_SECRET", "server-secret-value")
+        content = b"You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}."
         blob_id = uuid4()
         run_id = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
@@ -928,9 +930,11 @@ class TestInlineBlobRuntimePreflight:
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
-        def load_settings(yaml_text: str) -> MagicMock:
+        def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> MagicMock:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
-            assert "You are an audited prompt." in yaml_text
+            assert "You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}." in yaml_text
+            assert "server-secret-value" not in yaml_text
+            assert expand_env_vars is False
             assert "blob_ref" not in yaml_text
             assert "inline_content" not in yaml_text
             order.append("load")

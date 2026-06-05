@@ -149,7 +149,7 @@ class TestChromaCollectionProbeBehavior:
 
     def test_client_mode_uses_http_client(self) -> None:
         """Client mode should use HttpClient instead of PersistentClient."""
-        probe = ChromaCollectionProbe("remote", {"mode": "client", "host": "chroma.local", "port": 8000, "ssl": True})
+        probe = ChromaCollectionProbe("remote", {"mode": "client", "host": "localhost", "port": 8000, "ssl": True})
 
         mock_collection = MagicMock()
         mock_collection.count.return_value = 5
@@ -160,7 +160,7 @@ class TestChromaCollectionProbeBehavior:
         with patch("chromadb.HttpClient", return_value=mock_client) as mock_http_cls:
             result = probe.probe()
 
-        mock_http_cls.assert_called_once_with(host="chroma.local", port=8000, ssl=True)
+        mock_http_cls.assert_called_once_with(host="localhost", port=8000, ssl=True)
         assert result.reachable is True
         assert result.count == 5
 
@@ -193,7 +193,7 @@ class TestChromaCollectionProbeConfigValidation:
 
     def test_valid_client_config_accepted(self) -> None:
         """Valid client config should construct successfully."""
-        probe = ChromaCollectionProbe("test-col", {"mode": "client", "host": "chroma.local"})
+        probe = ChromaCollectionProbe("test-col", {"mode": "client", "host": "localhost"})
         assert probe.collection_name == "test-col"
 
 

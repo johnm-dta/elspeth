@@ -80,6 +80,26 @@ class TestChromaConnectionConfig:
         )
         assert config.host == "::1"
 
+    def test_client_mode_blocks_link_local_metadata_host(self) -> None:
+        """An internal/metadata target (cloud metadata IP) is rejected by the SSRF policy."""
+        with pytest.raises(ValidationError, match=r"(?i)ssrf"):
+            ChromaConnectionConfig(
+                collection="test",
+                mode="client",
+                host="169.254.169.254",
+                ssl=True,
+            )
+
+    def test_client_mode_blocks_private_rfc1918_host(self) -> None:
+        """A private-range target is rejected by the SSRF policy (no DNS needed for an IP)."""
+        with pytest.raises(ValidationError, match=r"(?i)ssrf"):
+            ChromaConnectionConfig(
+                collection="test",
+                mode="client",
+                host="10.0.0.5",
+                ssl=True,
+            )
+
     def test_persistent_mode_valid(self) -> None:
         config = ChromaConnectionConfig(
             collection="science-facts",

@@ -12,9 +12,10 @@ from __future__ import annotations
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.local import LocalAuthProvider
@@ -42,14 +43,17 @@ class _StrictResponse(BaseModel):
 class LoginRequest(BaseModel):
     """Request body for POST /api/auth/login."""
 
-    username: str
+    # Reject oversized usernames at the boundary: the username is recorded as
+    # the auth_events principal, so an unbounded value is an unauthenticated
+    # audit-storage amplification vector. Bound matches the audit column.
+    username: str = Field(max_length=AUTH_AUDIT_PRINCIPAL_MAX_LENGTH)
     password: str
 
 
 class RegisterRequest(BaseModel):
     """Request body for POST /api/auth/register."""
 
-    username: str
+    username: str = Field(max_length=AUTH_AUDIT_PRINCIPAL_MAX_LENGTH)
     password: str
     display_name: str
     email: str | None = None

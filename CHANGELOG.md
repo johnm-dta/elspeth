@@ -112,6 +112,30 @@ navigation. No schema migrations are introduced.
   scalar value type to green `check_contracts`, fixed staging web-unit safety
   flags, and aligned release-PDF distribution labels.
 
+### Security
+
+- **Frontend dependency advisories patched** within existing semver ranges
+  (lockfile-only; no major-version or source change) — `vite` ≤6.4.1 → 6.4.3
+  (HIGH: dev-server path traversal and arbitrary file read), `dompurify`
+  ≤3.3.3 → 3.4.8 (four XSS sanitizer bypasses), `mermaid` 11.14 → 11.15 (Gantt
+  DoS and `classDef` CSS/HTML injection), and `uuid` <11.1.1 (buffer-bounds,
+  transitive). `npm audit` reports zero remaining advisories; the frontend
+  suite (1317 cases) and build remain green.
+
+### Dependencies
+
+- **Runtime image → Python 3.14** — the Docker base moves from
+  `python:3.12-slim` to `python:3.14-slim` (digest-pinned). `requires-python`
+  remains `>=3.12`; dev and CI continue to run 3.13.
+- **GitHub Actions bumped to current majors** (SHA-pinned) — `actions/checkout`
+  4→6, `actions/upload-artifact` 4→7, `docker/build-push-action` 5→7,
+  `actions/setup-python` 5→6, `actions/setup-node` 4→6, and the `docker/*`
+  setup/login/metadata actions.
+- The breaking frontend majors dependabot grouped with the security fixes
+  (React 18→19, Vite 6→8, TypeScript 5.7→6.0) are **deferred** to a dedicated
+  migration — blocked upstream by `openapi-typescript` still requiring
+  TypeScript 5.x.
+
 > **Known issue at release cut.** `test_baseline_capture_is_self_consistent`
 > is red at the RC-5.3 HEAD: `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json` drifted
 > (+6 raw `trust_tier.tier_model` findings) as RC-5.3 commits landed without the

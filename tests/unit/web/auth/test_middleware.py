@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.config import WebSettings
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 
 
 class _NoopAuthAuditRecorder:
@@ -17,8 +18,20 @@ class _NoopAuthAuditRecorder:
         return None
 
 
-def _make_request(auth_provider, authorization: str | None = None) -> Request:
-    """Create a Starlette request carrying the auth provider under app.state."""
+class _CountingAuthAuditRecorder:
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        self.failures.append(kwargs)
+
+
+def _make_app(
+    auth_provider,
+    *,
+    recorder=None,
+    auth_rate_limit: int = 100,
+) -> FastAPI:
     app = FastAPI()
     app.state.auth_provider = auth_provider
     app.state.settings = WebSettings(
@@ -29,7 +42,22 @@ def _make_request(auth_provider, authorization: str | None = None) -> Request:
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
     )
-    app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
+    app.state.auth_audit_recorder = recorder if recorder is not None else _NoopAuthAuditRecorder()
+    app.state.auth_rate_limiter = ComposerRateLimiter(limit=auth_rate_limit)
+    return app
+
+
+def _make_request(
+    auth_provider,
+    authorization: str | None = None,
+    *,
+    app: FastAPI | None = None,
+    recorder=None,
+    auth_rate_limit: int = 100,
+) -> Request:
+    """Create a Starlette request carrying the auth provider under app.state."""
+    if app is None:
+        app = _make_app(auth_provider, recorder=recorder, auth_rate_limit=auth_rate_limit)
     headers: list[tuple[bytes, bytes]] = []
     if authorization is not None:
         headers.append((b"authorization", authorization.encode("latin-1")))
@@ -40,6 +68,7 @@ def _make_request(auth_provider, authorization: str | None = None) -> Request:
             "path": "/protected",
             "headers": headers,
             "app": app,
+            "client": ("127.0.0.1", 12345),
         }
     )
     request.state.request_id = "test-request"
@@ -75,6 +104,24 @@ class TestGetCurrentUser:
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Missing or invalid Authorization header"
 
+    async def test_missing_authorization_header_rate_limits_audit_writes(self) -> None:
+        mock_provider = AsyncMock()
+        recorder = _CountingAuthAuditRecorder()
+        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+
+        first_request = _make_request(mock_provider, app=app)
+        with pytest.raises(HTTPException) as first_exc_info:
+            await get_current_user(first_request)
+
+        second_request = _make_request(mock_provider, app=app)
+        with pytest.raises(HTTPException) as second_exc_info:
+            await get_current_user(second_request)
+
+        assert first_exc_info.value.status_code == 401
+        assert second_exc_info.value.status_code == 429
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["failure_category"] == "missing_authorization_header"
+
     async def test_non_bearer_scheme(self) -> None:
         mock_provider = AsyncMock()
         request = _make_request(mock_provider, "Basic dXNlcjpwYXNz")
@@ -83,6 +130,24 @@ class TestGetCurrentUser:
             await get_current_user(request)
 
         assert exc_info.value.status_code == 401
+
+    async def test_invalid_authorization_header_rate_limits_audit_writes(self) -> None:
+        mock_provider = AsyncMock()
+        recorder = _CountingAuthAuditRecorder()
+        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+
+        first_request = _make_request(mock_provider, "Basic dXNlcjpwYXNz", app=app)
+        with pytest.raises(HTTPException) as first_exc_info:
+            await get_current_user(first_request)
+
+        second_request = _make_request(mock_provider, "Basic dXNlcjpwYXNz", app=app)
+        with pytest.raises(HTTPException) as second_exc_info:
+            await get_current_user(second_request)
+
+        assert first_exc_info.value.status_code == 401
+        assert second_exc_info.value.status_code == 429
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["failure_category"] == "invalid_authorization_header"
 
     async def test_bearer_with_no_token(self) -> None:
         mock_provider = AsyncMock()
@@ -103,6 +168,41 @@ class TestGetCurrentUser:
 
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Token expired"
+
+    async def test_authentication_error_rate_limits_audit_writes(self) -> None:
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.side_effect = AuthenticationError("Token expired")
+        recorder = _CountingAuthAuditRecorder()
+        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+
+        first_request = _make_request(mock_provider, "Bearer expired-token", app=app)
+        with pytest.raises(HTTPException) as first_exc_info:
+            await get_current_user(first_request)
+
+        second_request = _make_request(mock_provider, "Bearer expired-token", app=app)
+        with pytest.raises(HTTPException) as second_exc_info:
+            await get_current_user(second_request)
+
+        assert first_exc_info.value.status_code == 401
+        assert second_exc_info.value.status_code == 429
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["failure_category"] == "authentication_error"
+
+    async def test_valid_bearer_token_does_not_consume_auth_failure_limiter(self) -> None:
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.return_value = UserIdentity(
+            user_id="alice",
+            username="alice",
+        )
+        recorder = _CountingAuthAuditRecorder()
+        app = _make_app(mock_provider, recorder=recorder, auth_rate_limit=1)
+
+        first_user = await get_current_user(_make_request(mock_provider, "Bearer valid-token-one", app=app))
+        second_user = await get_current_user(_make_request(mock_provider, "Bearer valid-token-two", app=app))
+
+        assert first_user.user_id == "alice"
+        assert second_user.user_id == "alice"
+        assert recorder.failures == []
 
     async def test_provider_unavailable_returns_503_with_detail(self) -> None:
         mock_provider = AsyncMock()

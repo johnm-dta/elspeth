@@ -10,10 +10,12 @@ from typing import cast
 
 from fastapi import HTTPException, Request
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.config import WebSettings
+from elspeth.web.middleware.rate_limit import check_auth_rate_limit
 
 
 def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
@@ -22,6 +24,37 @@ def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
 
 def _settings(request: Request) -> WebSettings:
     return cast(WebSettings, request.app.state.settings)
+
+
+async def _record_auth_failure_after_rate_limit(
+    request: Request,
+    *,
+    provider: AuthProviderType,
+    failure_category: str,
+    failure_stage: str,
+    user_id: str | None,
+    username: str | None,
+    exception_class: str | None,
+) -> None:
+    """Rate-limit attacker-triggerable auth failure audit writes.
+
+    ``get_current_user`` is shared by protected API routes, so missing,
+    malformed, or invalid Authorization headers are reachable before a caller
+    has authenticated. Reuse the auth endpoint's per-client limiter before the
+    durable audit write so repeated unauthenticated failures cannot force
+    unbounded synchronous database work. If the limiter raises 429, the audit
+    write for that over-limit attempt is intentionally skipped.
+    """
+    await check_auth_rate_limit(request)
+    _auth_audit_recorder(request).record_auth_failure(
+        request,
+        provider=provider,
+        failure_category=failure_category,
+        failure_stage=failure_stage,
+        user_id=user_id,
+        username=username,
+        exception_class=exception_class,
+    )
 
 
 async def get_current_user(request: Request) -> UserIdentity:
@@ -36,10 +69,9 @@ async def get_current_user(request: Request) -> UserIdentity:
     Authorization header.
     """
     settings = _settings(request)
-    recorder = _auth_audit_recorder(request)
 
     if "Authorization" not in request.headers:
-        recorder.record_auth_failure(
+        await _record_auth_failure_after_rate_limit(
             request,
             provider=settings.auth_provider,
             failure_category="missing_authorization_header",
@@ -56,7 +88,7 @@ async def get_current_user(request: Request) -> UserIdentity:
 
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
-        recorder.record_auth_failure(
+        await _record_auth_failure_after_rate_limit(
             request,
             provider=settings.auth_provider,
             failure_category="invalid_authorization_header",
@@ -90,7 +122,7 @@ async def get_current_user(request: Request) -> UserIdentity:
     try:
         return await auth_provider.authenticate(token)
     except AuthProviderUnavailable as exc:
-        recorder.record_auth_failure(
+        await _record_auth_failure_after_rate_limit(
             request,
             provider=settings.auth_provider,
             failure_category="provider_unavailable",
@@ -101,7 +133,7 @@ async def get_current_user(request: Request) -> UserIdentity:
         )
         raise HTTPException(status_code=503, detail=exc.detail) from exc
     except AuthenticationError as exc:
-        recorder.record_auth_failure(
+        await _record_auth_failure_after_rate_limit(
             request,
             provider=settings.auth_provider,
             failure_category=classify_authentication_failure(exc),

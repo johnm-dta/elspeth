@@ -124,9 +124,11 @@ navigation. No schema migrations are introduced.
 
 ### Dependencies
 
-- **Runtime image → Python 3.14** — the Docker base moves from
-  `python:3.12-slim` to `python:3.14-slim` (digest-pinned). `requires-python`
-  remains `>=3.12`; dev and CI continue to run 3.13.
+- **Runtime image → Python 3.13** — the Docker base moves from
+  `python:3.12-slim` to `python:3.13-slim` (digest-pinned), aligning the
+  shipped runtime with the release interpreter that dev and CI exercise.
+  `requires-python` remains `>=3.12`. (Dependabot proposed 3.14; declined in
+  favour of the tested 3.13 baseline.)
 - **GitHub Actions bumped to current majors** (SHA-pinned) — `actions/checkout`
   4→6, `actions/upload-artifact` 4→7, `docker/build-push-action` 5→7,
   `actions/setup-python` 5→6, `actions/setup-node` 4→6, and the `docker/*`

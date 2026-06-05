@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 
+from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import auth_events_table
 from elspeth.web.auth.audit import AuthAuditRecorder
@@ -240,6 +241,33 @@ class TestLoginEndpoint:
         assert "wrong-password" not in serialized
         assert "password123" not in serialized
         assert "eyJ" not in serialized
+
+    async def test_login_invalid_credentials_bounds_persisted_username(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+        oversized_username = "a" * (AUTH_AUDIT_PRINCIPAL_MAX_LENGTH + 1)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": oversized_username, "password": "wrong-password"},
+                headers={"x-request-id": "login-failure-bounded"},
+            )
+
+        assert response.status_code == 401
+        rows = _read_auth_event_rows(audit_url)
+        assert len(rows) == 1
+        event = rows[0]
+        assert event.event_type == "login"
+        assert event.outcome == "failure"
+        assert event.user_id is None
+        assert event.username == oversized_username[:AUTH_AUDIT_PRINCIPAL_MAX_LENGTH]
+        assert len(event.username) == AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 
     async def test_login_not_available_for_oidc(self, tmp_path) -> None:
         provider = AsyncMock()

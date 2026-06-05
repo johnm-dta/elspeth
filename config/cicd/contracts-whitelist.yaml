@@ -252,6 +252,8 @@ allowed_dict_patterns:
   - "src/elspeth/core/config.py:_expand_config_templates:return"
   - "src/elspeth/core/config.py:_fingerprint_config_for_audit:config_dict"
   - "src/elspeth/core/config.py:_fingerprint_config_for_audit:return"
+  # In-place DSN-password sanitiser for audit copy (placement-based, e.g. database sink url).
+  - "src/elspeth/core/config.py:_sanitize_dsn_option_for_audit:options"
   - "src/elspeth/core/config.py:_expand_template_files:options"
   - "src/elspeth/core/config.py:_expand_template_files:return"
   - "src/elspeth/core/config.py:_recurse:d"

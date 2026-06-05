@@ -66,6 +66,7 @@ from elspeth.web.execution._semantic_helpers import (
     assistance_suggestion_for,
     serialize_semantic_contracts,
 )
+from elspeth.web.execution.chroma_boundaries import find_chroma_boundary_violations
 from elspeth.web.execution.preflight import (
     RUNTIME_CHECK_GRAPH_STRUCTURE,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
@@ -805,6 +806,38 @@ def validate_pipeline(
                             component_type="sink",
                         ),
                     )
+
+    chroma_violations = find_chroma_boundary_violations(state, data_dir=str(settings.data_dir))
+    if chroma_violations:
+        violation = chroma_violations[0]
+        return ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name=_CHECK_PATH_ALLOWLIST,
+                    passed=False,
+                    detail=violation.detail,
+                    affected_nodes=(),
+                    outcome_code=None,
+                ),
+                *_skipped_checks(_CHECK_PATH_ALLOWLIST),
+            ],
+            errors=[
+                ValidationError(
+                    component_id=violation.component_id,
+                    component_type=violation.component_type,
+                    message=violation.message,
+                    suggestion=violation.suggestion,
+                    error_code=None,
+                ),
+            ],
+            readiness=_blocked_readiness(
+                code="path_allowlist",
+                detail=violation.detail,
+                component_id=violation.component_id,
+                component_type=violation.component_type,
+            ),
+        )
 
     # B11 fix: Always record the path_allowlist check
     if path_checked:

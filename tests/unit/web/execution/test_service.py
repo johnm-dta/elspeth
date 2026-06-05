@@ -3772,6 +3772,60 @@ class TestSinkPathRestriction:
             run_id = await service.execute(session_id=uuid4())
         assert isinstance(run_id, UUID)
 
+    @pytest.mark.asyncio
+    async def test_chroma_persist_directory_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Chroma persist_directory cannot bypass /execute sink directory guards."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "chroma",
+                "plugin": "chroma_sink",
+                "options": {"mode": "persistent", "persist_directory": "/tmp/outside_chroma"},
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="persist_directory"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_chroma_client_loopback_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Chroma client hosts use the same central SSRF blocklist at /execute."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "chroma",
+                "plugin": "chroma_sink",
+                "options": {"mode": "client", "host": "169.254.169.254", "port": 8000, "ssl": True},
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="SSRF validation"):
+            await service.execute(session_id=uuid4())
+
 
 # ── Transform Framing Restriction ─────────────────────────────────────
 

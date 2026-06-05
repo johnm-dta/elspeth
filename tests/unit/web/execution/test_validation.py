@@ -660,6 +660,69 @@ class TestValidatePipelineSinkPathAllowlist:
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
 
+    def test_chroma_sink_persist_directory_outside_outputs_blocked(self) -> None:
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    name="chroma",
+                    plugin="chroma_sink",
+                    options={
+                        "mode": "persistent",
+                        "persist_directory": "/tmp/outside_chroma",
+                    },
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        result = validate_pipeline(state, settings, MagicMock(spec=YamlGenerator))
+        assert result.is_valid is False
+        assert any("persist_directory" in e.message for e in result.errors)
+        assert any("chroma" in e.message for e in result.errors)
+
+    def test_chroma_sink_client_loopback_blocked_by_ssrf_policy(self) -> None:
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    name="chroma",
+                    plugin="chroma_sink",
+                    options={
+                        "mode": "client",
+                        "host": "127.0.0.1",
+                        "port": 8000,
+                        "ssl": False,
+                    },
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        result = validate_pipeline(state, settings, MagicMock(spec=YamlGenerator))
+        assert result.is_valid is False
+        assert any("SSRF validation" in e.message for e in result.errors)
+
+    def test_rag_chroma_persist_directory_outside_outputs_blocked(self) -> None:
+        state = _make_state(
+            source_options={},
+            nodes=(
+                _make_node(
+                    plugin="rag_retrieval",
+                    options={
+                        "provider": "chroma",
+                        "provider_config": {
+                            "mode": "persistent",
+                            "persist_directory": "/tmp/outside_chroma",
+                        },
+                    },
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        result = validate_pipeline(state, settings, MagicMock(spec=YamlGenerator))
+        assert result.is_valid is False
+        assert any(e.component_type == "transform" for e in result.errors)
+        assert any("persist_directory" in e.message for e in result.errors)
+
 
 class TestValidatePipelineSemanticContractsLegacy:
     """Validation must catch transform pairings that violate line framing.

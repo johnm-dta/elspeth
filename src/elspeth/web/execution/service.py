@@ -64,6 +64,7 @@ from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
+from elspeth.web.execution.chroma_boundaries import find_chroma_boundary_violations
 from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     MalformedBlobRefError,
@@ -549,6 +550,13 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        chroma_violations = find_chroma_boundary_violations(
+            composition_state,
+            data_dir=str(self._settings.data_dir),
+        )
+        if chroma_violations:
+            raise PathAllowlistViolationError(chroma_violations[0].message)
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 

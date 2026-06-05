@@ -92,6 +92,30 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
                     for key in ("path", "file"):
                         if key in opts and not Path(str(opts[key])).is_absolute():
                             opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+                    if sink_cfg.get("plugin") == "chroma_sink" and opts.get("mode") == "persistent":
+                        key = "persist_directory"
+                        if key in opts and not Path(str(opts[key])).is_absolute():
+                            opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+
+    transforms = config.get("transforms")
+    if transforms is not None:
+        if not isinstance(transforms, list):
+            raise TypeError(f"YAML generator produced non-list 'transforms' value (got {type(transforms).__name__})")
+        for index, transform_cfg in enumerate(transforms):
+            if not isinstance(transform_cfg, dict):
+                raise TypeError(f"YAML generator produced non-dict transform at index {index} (got {type(transform_cfg).__name__})")
+            opts = transform_cfg.get("options")
+            if not isinstance(opts, dict):
+                continue
+            if opts.get("provider") != "chroma":
+                continue
+            provider_config = opts.get("provider_config")
+            if not isinstance(provider_config, dict):
+                continue
+            if provider_config.get("mode") == "persistent":
+                key = "persist_directory"
+                if key in provider_config and not Path(str(provider_config[key])).is_absolute():
+                    provider_config[key] = str(resolve_data_path(str(provider_config[key]), data_dir))
 
     return yaml.dump(config, default_flow_style=False)
 

@@ -56,29 +56,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[5]/body[5]/body[7]/value/keywords[1]/value/values[0]'
   judge_metadata_signature: 'hmac-sha256:v2:f147e416a30982592cdc0e8ddd079d99f2ca7c3b6f6cf332190c327ec9e63d6d'
-- key: web/auth/middleware.py:R6:get_current_user:fp=85ef49ad42821944
-  owner: john
-  reason: |-
-    At line 85 in get_current_user, the token is the bearer credential extracted from the HTTP Authorization header — Tier-3 external data. The _jwt.decode(..., verify_signature=False) call is an explicit best-effort UNVERIFIED parse to surface downstream metadata (iat for refresh-chain enforcement); the comment (lines 76-80) states the real trust decision happens in auth_provider.authenticate(token) below (line 91). On PyJWTError the code sets request.state.auth_claims = None — recording absence honestly so downstream can distinguish 'no iat in valid claims' from 'claims unparseable' (the fabrication-decision test). The catch is narrow (PyJWTError, not Exception) and the failure is materialized as None, not a fabricated dict. The existing rationale matches the current code.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T05:37:34.023487+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM at a Tier-3 boundary. The token is a bearer credential from an HTTP Authorization header (Tier-3 external data), and the `_jwt.decode(..., verify_signature=False)` call is an explicit unverified parse — the comment at lines 76-80 documents that the real trust decision is `auth_provider.authenticate(token)` below at line 91. The except is narrow (`PyJWTError`, not bare `Exception`), and on failure the code records `request.state.auth_claims = None` — an honest absence marker that lets downstream distinguish 'unparseable' from 'valid claims with no iat', satisfying the fabrication-decision test (no synthetic dict substituted). R6's concern (silently swallowing without explicit error result) does not apply: None is an explicit, distinguishable absence value, not a swallowed default that masks the failure, and the actual authentication failure path is structurally handled by the AuthenticationError/AuthProviderUnavailable raises below. The decorator nudge does not apply (R6 is not in the suppressible set {R1, R5}).
-  judge_signature_version: 2
-  scope_fingerprint: 58d9c5d50c62fc54935f09723572b357ca7d332c9f4e9382385dc1aaf1aa2f17
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[10]/body[10]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:ac2660983df204b1bc16b5f48edca9191ef11d67aae89aeb4b8c7f55d3f489e1'
-  judge_excerpt_redactions:
-    - pattern: dotenv_secret_assignment
-      byte_count: 24
-      redacted_hash: f6f8035725a704c4
 - key: web/secrets/user_store.py:R1:_fingerprint_key_available:fp=a93da1679d15525e
   owner: john
   reason: |-
@@ -1363,25 +1340,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[38]/body[2]/value'
   judge_metadata_signature: 'hmac-sha256:v2:22df3d81bed78a402a31ebf6bc569366c4750e562ba1af44153b88f29168068c'
-- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=28b82b3b788af6e4
-  owner: john
-  reason: |-
-    _execute_upsert_node (transforms.py:462) computes `branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)`. validated.branches is a genuine union field (Mapping-shaped named branches vs sequence-shaped branch list) on the validated request model, and the isinstance check dispatches the construction of the CoalesceBranches value by which arm of the union is present. This is legitimate isinstance type-dispatch over a real union (not isinstance hiding a bug, not coercing external data) — the only correct way to build the right container from a Mapping-or-Sequence field. Pattern unchanged across the ToolContext refactor (fp drift only). Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T12:49:50.207267+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    RULE MISFIRES. The Pydantic model declares `branches: list[str] | dict[str, str] | None` (transforms.py:62) and the destination type is `CoalesceBranches = tuple[str, ...] | Mapping[str, str]` (state.py:42) — a genuine discriminated union. The `isinstance(validated.branches, Mapping)` at line 462 is union-arm dispatch selecting which container constructor to apply (`dict(...)` vs `tuple(...)`), not a defensive shape guard hiding an upstream contract violation. R5's premise (isinstance masking a contract violation) does not apply: the contract IS the union, and isinstance is the standard Python idiom for discriminating it. The rationale states this plainly and the visible code plus the surrounding type declarations confirm it.
-  judge_signature_version: 2
-  scope_fingerprint: 4230938ce7f41294c929c69be60a543c94cc480b61a76d3409cd49b5f5c41a40
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[34]/body[14]/body[0]/value/test'
-  judge_metadata_signature: 'hmac-sha256:v2:4385eee310884e891f5c606a3399f15bbd57571c4026d5b37184ce2e6ef81797'
 - key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=8e25103e55154751
   owner: john
   reason: |-
@@ -2847,48 +2805,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[72]/body[12]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:8dc8465f4ca59c87f49ddad9c986ec58195624234ace22b54034cb2bea476f15'
-- key: web/execution/validation.py:R1:validate_pipeline:fp=733611406e3fefe3
-  owner: john
-  reason: |-
-    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:46:19.836112+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    RULE MISFIRES. The source_options dict originates from state.source.options — Tier-3 composer/user-authored configuration re-read from our DB (the persisted-external-config case explicitly named in policy). The loop iterates over a set of OPTIONAL path keys; .get() returning None followed by `if value is not None` is a meaning-preserving 'absent -> skip this allowlist slot', not a fabricated default, and there is no schema guarantee that every key in SOURCE_LOCAL_PATH_OPTION_KEYS is present. The decorator nudge doesn't fit: source_param would be `state` (not the dict subject), and validate_pipeline's contract is to return a ValidationResult, not to raise on absent optional keys. R1 fires on shape but the data is genuinely Tier-3 and the handling is honest.
-  judge_signature_version: 2
-  scope_fingerprint: ef9935887e51a4f9baf85d1182314043fd0f3a84a1dc619487d6fb7875aae1d0
-  judge_transport: openrouter
-  ast_path: 'body[64]/body[9]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:1ce118edd53d5b000056aea83dd20e2406491f7d025bb9bb34418195bf19bbb1'
-- key: web/execution/validation.py:R1:validate_pipeline:fp=0c7d6399be7e8ecd
-  owner: john
-  reason: |-
-    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
-
-    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:46:27.090796+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.83
-  judge_rationale: |-
-    RULE MISFIRES. The `.get(key)` is reading optional path/file keys from `output.options`, which is Tier-3 external-origin sink configuration (composer/user-authored, re-read from storage — explicitly Tier-3 per the persisted-config policy). The key is genuinely optional: absence means 'no path to allowlist-check for this slot', and the `if value is not None` guard makes that explicit without fabricating a default. The loop variable `key` makes a `key in options` + subscript rewrite a strictly worse double-lookup with no semantic gain. The decorator nudge is correctly ruled out: this function converts structural failures into a ValidationResult rather than raising, so it doesn't satisfy the @trust_boundary raising-invariant model.
-  judge_signature_version: 2
-  scope_fingerprint: ef9935887e51a4f9baf85d1182314043fd0f3a84a1dc619487d6fb7875aae1d0
-  judge_transport: openrouter
-  ast_path: 'body[64]/body[10]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:0f16e8699009aec7fd028c89e2878db6b0417b309a7b1d4647a4c79b5ad75f1f'
 - key: web/sessions/routes/_helpers.py:R5:_dispatch_guided_respond:fp=a241c1a56bb89c0d
   owner: john
   reason: |-
@@ -2984,101 +2900,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[90]/body[75]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:1f09fad9a33137363240120c283b1db3a8e7c891edaac0528575f873d85a30c9'
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=f06a8245e2f3c1af
-  owner: john
-  reason: |-
-    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:47:31.136545+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The isinstance check discriminates a sum-type return (CompositionState | InterpretationReviewPending) from materialize_state_for_execution — this is tagged-union dispatch on a first-party typed contract, which is the canonical Python idiom for sum types and not a defensive shape guard. The pending arm emits telemetry per site and raises a typed UnresolvedInterpretationPlaceholderError, which is offensive programming: detect invalid runtime state, raise a meaningful exception. The code visible in the excerpt is consistent with the rationale's claim about the union return.
-  judge_signature_version: 2
-  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[10]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:114c4ca09a336ffdcfd75dac572f49931baf0f4b307127a796ee65f9394b7912'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=08f79725af00b7e8
-  owner: john
-  reason: |-
-    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:47:41.712313+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. `composition_state.source.options` is composer/user-authored config persisted and re-read — Tier-3 external-origin data per policy (persisted external-origin config re-read from our DB stays Tier-3, the typed dataclass is just the courier). The loop iterates over a set of optional path-option keys where absence legitimately means 'this source doesn't use that key' (a non-file source has neither path nor file), so `None` is meaning-preserving honest handling, not fabrication; present values are strictly enforced with a hard `PathAllowlistViolationError`. This is the prescribed Tier-3 boundary form: validate-or-raise on present values, record absence as absence.
-  judge_signature_version: 2
-  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[12]/body[2]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:55d2f3e1792e160f57052902c6f469b24c19433e6f4f6c965fe2b43ddbc4bc69'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b5a321ad3a8cf21a
-  owner: john
-  reason: |-
-    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:47:48.323435+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES at a Tier-3 boundary. output.options is composer/operator-authored sink config — externally-sourced data whose shape is not guaranteed by a first-party contract at this read site (per policy, persisted composer/user config re-read is Tier-3). Not every sink has a local path option, so absence of the key is a legitimate signal meaning 'no path to check', handled by the `if value is not None` guard followed by strict offensive enforcement (PathAllowlistViolationError) when a value is present. This is the prescribed boundary-guard form: read optional external config as absent-is-None, then enforce strictly on present values — no fabrication, no silent recovery.
-  judge_signature_version: 2
-  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:a8ce7af3bc931e33bbfeb9a21997c9bc6f645fe78e3a903d73d7438a45a6c39b'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=99a68378ad3d14fc
-  owner: john
-  reason: |-
-    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:47:55.599414+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    RULE MISFIRES at a Tier-3 boundary. composition_state.source.options carries composer-authored config re-read from our store; per policy, persisted external-origin config is Tier-3 at the read site, and blob_ref is documented as legitimately optional. The code does not fabricate: absence -> None -> skip the UUID/IDOR block; presence -> UUID parse with explicit raise and cross-session ownership check. This is the prescribed Tier-3 navigation-of-optional-key pattern, not a defensive read of a first-party typed object.
-  judge_signature_version: 2
-  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[17]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:36540700b64fece77a29e9ae7e75680e739d0dc421b52d1448d94a74717641ea'
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=bfc061ccd5a7c11f
-  owner: john
-  reason: |-
-    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:48:04.870453+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The except block catches a narrow (SQLAlchemyError, OSError) during best-effort cleanup of a failed setup, logs the cleanup failure with class-name-only fields (avoiding credential leaks via SQLAlchemy's str() expansion), and then the outer `raise` on line 705 re-raises the original exception unmasked. R6's concern is silent swallowing without re-raise or explicit error result; here the original exception propagates and the cleanup failure is recorded structurally — this is the prescribed record-then-reraise pattern at a cleanup boundary, not silent suppression. Programmer-bug exception types are deliberately not caught, preserving the offensive stance.
-  judge_signature_version: 2
-  scope_fingerprint: d02bfbd0746d03667581637acf7887fd1369840108500279dd9545597ebe75b4
-  judge_transport: openrouter
-  ast_path: 'body[59]/body[8]/body[24]/handlers[0]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:d99354f04f39f6675912b68dffafe7650cdae327ad68bdcc5f6fdc6b476b6ebb'
 - key: web/app.py:R6:_periodic_orphan_cleanup:fp=b974df3ac749dbcb
   owner: john
   reason: |-
@@ -3231,6 +3052,166 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[17]/body[5]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:ce39911fedc58062ace2a812af3a32aa54c0c9597c66c9175d5d6c21f9f683bf'
+- key: web/auth/middleware.py:R6:get_current_user:fp=8d3c9a32b105fc87
+  owner: john
+  reason: |-
+    At line 85 in get_current_user, the token is the bearer credential extracted from the HTTP Authorization header — Tier-3 external data. The _jwt.decode(..., verify_signature=False) call is an explicit best-effort UNVERIFIED parse to surface downstream metadata (iat for refresh-chain enforcement); the comment (lines 76-80) states the real trust decision happens in auth_provider.authenticate(token) below (line 91). On PyJWTError the code sets request.state.auth_claims = None — recording absence honestly so downstream can distinguish 'no iat in valid claims' from 'claims unparseable' (the fabrication-decision test). The catch is narrow (PyJWTError, not Exception) and the failure is materialized as None, not a fabricated dict. The existing rationale matches the current code.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T17:35:56.463629+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The token is Tier-3 external data (bearer credential from an HTTP header), and the unverified JWT decode is explicitly a best-effort parse — the real authentication happens at auth_provider.authenticate(token) below. The narrow except catches only PyJWTError (not bare Exception) and materializes absence as None rather than fabricating a dict, which satisfies the fabrication-decision test (downstream can distinguish 'no iat' from 'unparseable'). The inline comment at lines 125-129 documents the trust-boundary intent, and the swallow is bounded — the actual trust decision is not suppressed.
+  judge_signature_version: 2
+  scope_fingerprint: f8d01f21891ff90f14838cde433153b1f884d57a58e1e49ba2575d578c56d5bc
+  judge_transport: openrouter
+  ast_path: 'body[15]/body[9]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:37f44d0578fe5996f18a1d670e20fe4f44f2956e62efc6c67916b8ab1fe7b693'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 24
+      redacted_hash: 020ad4de7d0ed11b
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=759c91236fc9a413
+  owner: john
+  reason: |-
+    In ExecutionServiceImpl._execute_locked (service.py:572), blob_ref = composition_state.source.options.get("blob_ref") reads an optional key from composer-authored source options — external-origin config (Tier 3) read back from our store, where blob_ref may legitimately be absent. Absence yields None and the UUID-parse/IDOR-ownership block is skipped via `if blob_ref is not None`; when present it is validated (UUID() in a try/except raising MalformedBlobRefError, plus a cross-session ownership check). This is meaning-preserving Tier-3 navigation of an optional key, not a defensive read of a typed first-party object.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T17:36:03.785513+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: composition_state.source.options is composer-authored config persisted in our store and re-read here — per policy, persisted external-origin config is Tier-3 at the read site even when carried in a typed SourceSpec container. blob_ref is a genuinely optional key; `.get("blob_ref")` yields None for absence (recorded, not fabricated), and when present it is validated via UUID() with a typed MalformedBlobRefError plus cross-session ownership check. This is the prescribed Tier-3 boundary navigation of an optional field, not a defensive re-check of a first-party guaranteed shape.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[18]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:300b0f69fec45efe78f0e646927c734f7a1c641044a1f62e46978c1040900a5d'
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=668d077abe8e7733
+  owner: john
+  reason: |-
+    In _execute_locked (line 696), `except (SQLAlchemyError, OSError) as cleanup_err` wraps a best-effort run-status update during setup-failure cleanup, with `raise` immediately following (line 703) so the original exception propagates unmasked. The catch is narrowed to DB-layer and disk failure classes only; programmer bugs (AttributeError/TypeError/KeyError) in update_run_status deliberately propagate per the offensive stance. The slog payload records only exception class names (original_exc_class, cleanup_exc_class), avoiding the documented str(SQLAlchemyError) credential-leak via __cause__ chains. Legitimate cleanup-around-a-trust-boundary with record-then-reraise of the original — not silent error-swallowing. Existing rationale accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T17:36:11.649334+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except block is followed by a bare `raise` on line 732 that re-raises the original exception, so this is not silent-except — it is record-then-reraise around a best-effort cleanup write. The catch is narrowed to SQLAlchemyError/OSError (DB and disk failures from the cleanup status update), allowing programmer-bug exceptions to propagate, and the slog payload deliberately records only exception class names to avoid the documented credential-leak via SQLAlchemyError __cause__ chains. The rationale accurately describes the code, addresses R6's specific concern (the original exc is not swallowed; it propagates), and the cleanup itself is a legitimate auxiliary operation around the real failure path.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[25]/handlers[0]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:48e911eb3b97fd2c0bc43976819b10652fe00b8423a7fef8b79579b2a01e16e8'
+- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=28b82b3b788af6e4
+  owner: john
+  reason: |-
+    _execute_upsert_node (transforms.py:462) computes `branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)`. validated.branches is a genuine union field (Mapping-shaped named branches vs sequence-shaped branch list) on the validated request model, and the isinstance check dispatches the construction of the CoalesceBranches value by which arm of the union is present. This is legitimate isinstance type-dispatch over a real union (not isinstance hiding a bug, not coercing external data) — the only correct way to build the right container from a Mapping-or-Sequence field. Pattern unchanged across the ToolContext refactor (fp drift only). Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T16:05:40.929490+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM / borderline RULE MISFIRES. The flagged isinstance is dispatch over a genuine declared union type (Mapping vs Sequence) on validated.branches — it selects which container constructor to use, not a defensive shape-check hiding a bug. The two arms construct semantically different CoalesceBranches forms (named-branch dict vs ordered branch tuple), so the isinstance is the only way to discriminate the arm; there is no 'fix the root cause' refactor that eliminates a union discriminant. Note also that validated is a parsed request model carrying composer-LLM-authored config, so even read as Tier-3 the isinstance is a legitimate boundary discriminator rather than a redundant first-party guard. Rationale is site-specific and consistent with the visible code.
+  judge_signature_version: 2
+  scope_fingerprint: 39bbb6238c48171fc2394144a25cd62ca7961dd9bb2d7f664c39e079aa703409
+  judge_transport: openrouter
+  ast_path: 'body[34]/body[14]/body[0]/value/test'
+  judge_metadata_signature: 'hmac-sha256:v2:e646369d696058329303cf68ea05bc3e693a03ae1c0906227cdd1c6c78b83525'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=733611406e3fefe3
+  owner: john
+  reason: |-
+    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
+
+    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T16:05:49.846505+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES. `state.source.options` is composer/user-authored config persisted and re-read — Tier-3 at this read site per policy (persistence interrupts custody; 'validated once' does not promote it). The path/file keys are genuinely optional in the source/sink option schema, so `.get(key)` followed by `if value is not None` is a meaning-preserving Tier-3 boundary read that records absence as 'no path to check' rather than fabricating a default. The decorator nudge is correctly declined: this code path is structured to return a ValidationResult rather than raise, so @trust_boundary's raising-invariant gate does not fit. The rationale speaks directly to R1's concern (optional key, no fabrication, no hidden default) and the visible code corroborates it.
+  judge_signature_version: 2
+  scope_fingerprint: a2a85b574e7a86aacb7b8afd7472becbb3868743f831825a3ad47f894006d212
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[9]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:49e312df65dfcdea2b9c87442eb8ff0b217eb63027ee38ae0721666e39b322f7'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=0c7d6399be7e8ecd
+  owner: john
+  reason: |-
+    In validate_pipeline (validation.py:738/775), `source_options.get(key)` / `output.options.get(key)` (key in ('path','file')) read OPTIONAL path/file keys from Tier-3 source/sink options to run the path-allowlist check. `.get`-returns-None followed by `if value is not None` makes 'no path/file key -> nothing to allowlist-check for this slot' explicit; a configured value IS checked. No default, no fabrication. Here `key` is a loop variable, so a membership-subscript rewrite would not even improve explicitness — it only adds a double lookup. R1 over-fires on this no-decision optional read; per-line entry is the reviewed suppression.
+
+    The @trust_boundary nudge (source_param=state, rule R1) is INFEASIBLE per TBE1: this read path NEVER raises on a missing path/file key (absent -> skip); validate_pipeline's documented behaviour is to CATCH and convert structural failures into a ValidationResult, not to raise a malformed-input rejection through source_param. A non-raising boundary cannot satisfy the raising-test gate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T16:05:57.821584+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES. `output.options` is Tier-3 external-origin configuration (composer/user-authored sink options re-read from storage); its shape at this read site is not first-party-guaranteed. The path/file keys are genuinely optional — absent means 'no local path to allowlist-check for this slot' — and `.get(key)` followed by `if value is not None` is the meaning-preserving boundary read, with no default substitution or fabrication. The @trust_boundary decorator is not a fit here because validate_pipeline's contract is to return a ValidationResult, not to raise on malformed input, so the raising-test gate cannot be satisfied. Per-line allowlist is the appropriate disposition.
+  judge_signature_version: 2
+  scope_fingerprint: a2a85b574e7a86aacb7b8afd7472becbb3868743f831825a3ad47f894006d212
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[10]/body[0]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:ba5362a411c24b0e6743a25e2c70fde0f86b5696f74ab779068cecfe273251a3'
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=f06a8245e2f3c1af
+  owner: john
+  reason: |-
+    In _execute_locked (service.py:506), if isinstance(materialized_state, InterpretationReviewPending) discriminates the sum-type return of materialize_state_for_execution(), typed CompositionState | InterpretationReviewPending. These are internal domain objects produced by code we own (not external Tier-3 data), and isinstance is the canonical Python pattern for tagged-union dispatch: the pending arm emits the interpretation_placeholder_unresolved_at_runtime_total telemetry counter per site and raises the typed UnresolvedInterpretationPlaceholderError (line 516), while the resolved arm continues with the CompositionState (line 519). This is offensive structural type-discrimination on our own union return, not a defensive shape guard. Existing rationale verified accurate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T16:06:06.093568+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The isinstance check discriminates a sum-type return (CompositionState | InterpretationReviewPending) from materialize_state_for_execution() — a tagged-union dispatch on a first-party typed return. The pending arm emits telemetry and raises a typed error; the resolved arm continues. This is the canonical offensive pattern for discriminating a union return in Python, not a defensive shape guard against malformed data. The rationale plainly states the union nature and the code shows both arms handling their case meaningfully.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[10]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:3db2f2d06d087804b6e852355ad278e279c0657974ba88e5e98eb63e847a56a0'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=08f79725af00b7e8
+  owner: john
+  reason: |-
+    At line 530 in _execute_locked, `composition_state.source.options.get(key)` reads optional 'path'/'file' keys from composer-authored source options — Tier-3 external-origin config (LLM/user authored, read back from state). The loop performs a defense-in-depth path-allowlist check (comment lines 521-524): a source may declare path OR file OR neither (e.g. a non-file source), so None means 'this key not used' and is skipped, while present values are resolved and checked against allowed directories with a hard PathAllowlistViolationError (lines 531-534). Absent optional keys are honestly skipped, present ones are strictly enforced before reaching the engine — meaning-preserving Tier-3 handling, not bug-hiding.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T16:06:15.757702+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES at a genuine Tier-3 boundary. `composition_state.source.options` is composer/user-authored config persisted and re-read — per policy this is Tier-3 at the read site (validation is in-flight, not permanent; the dataclass is a courier). The loop iterates a set of optional path keys (path/file/neither may apply for a given source kind), so `None` legitimately means 'this key not used' and is skipped; present values are strictly enforced with a hard `PathAllowlistViolationError`. This is meaning-preserving boundary handling, not fabrication or silent recovery. Decorator nudge does not apply: the external parameter (`composition_state`) is not the function's untrusted-data parameter in the @trust_boundary sense, and the suppression is one site within a security check, not a function-wide boundary pattern.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[12]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:6f0334e3052df639a6ba657ca32d0c424f7ed99e3517d16d24621823626f7661'
 - key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=617c4ef5b9e590fc
   owner: john
   reason: |-
@@ -3239,17 +3220,17 @@ allow_hits:
     Suppression gated by cicd-judge; see judge_rationale below.
   expires: '2026-09-03'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T05:34:13.014245+00:00'
+  judge_recorded_at: '2026-06-05T16:06:34.557867+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
+  judge_confidence: 0.78
   judge_rationale: |-
-    PRESCRIBED FORM / RULE MISFIRES. The isinstance check discriminates a first-party sum-type return (ToolResult | _ResolvedSourceBlob) from _resolve_source_blob — this is structural union dispatch, not a Tier-3 shape guard nor a defensive recheck of data we already control. Python lacks pattern-matching enforcement on union returns at the type level, so isinstance is the prescribed runtime discriminator for sum types. The rationale plainly identifies the union and the branch semantics, and the visible code (returning resolved unchanged on the ToolResult arm, then accessing .plugin/.options on the other arm) is consistent.
+    PRESCRIBED FORM / RULE MISFIRES borderline: the isinstance check discriminates a first-party sum-type return (ToolResult | _ResolvedSourceBlob) from _resolve_source_blob — this is structural sum-type dispatch, not Tier-3 shape validation nor a defensive guard against a contract violation. Python lacks runtime-enforced union types, so isinstance is the prescribed mechanism to discriminate union members and route the ToolResult failure case unchanged versus continuing with the resolved blob's attributes. The rationale plainly states this and the visible code is consistent: both branches use the value structurally (return resolved; or access resolved.plugin/.options), with no swallowing or coercion.
   judge_signature_version: 2
-  scope_fingerprint: 57b7613247565297a46824f4708431848926492addeb74b408e995c6603301ec
+  scope_fingerprint: 0317bb625bcfd01de6aa6be767f23645a760ee4f68fdcf276a7244ba382ad071
   judge_transport: openrouter
   ast_path: 'body[31]/body[24]/body[1]/test'
-  judge_metadata_signature: 'hmac-sha256:v2:45fc6563f9e61c7eace52ebd7dc1ba9c37b986cf621a638886638919a968c491'
+  judge_metadata_signature: 'hmac-sha256:v2:5e1834c2bfd5054e660d7b3d4a2edcbd0ebdb6a0074d20b7706be20e1760b438'
 - key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=232e4ea0f36b1135
   owner: john
   reason: |-
@@ -3258,17 +3239,131 @@ allow_hits:
     Suppression gated by cicd-judge; see judge_rationale below.
   expires: '2026-09-03'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T05:34:19.554508+00:00'
+  judge_recorded_at: '2026-06-05T16:06:42.502010+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.78
   judge_rationale: |-
-    PRESCRIBED FORM. The isinstance here is a union-dispatch on a first-party Pydantic-validated field (`n.branches`) whose declared type is a union of Mapping form and sequence form. The check discriminates between the two legitimate shapes to normalize each to its canonical container (dict vs tuple), not a defensive guard against unknown external shape. This is the standard Pythonic way to branch on a tagged union at a construction boundary, and the rationale plainly identifies the union and what each arm produces; the visible code matches that description.
+    PRESCRIBED FORM. The isinstance here dispatches on a Pydantic-validated union type (n.branches can be a Mapping form or a sequence form per the argument model), normalizing each declared shape to its canonical container for NodeSpec construction. This is union-discrimination on a first-party validated shape, not a defensive shape-guard against unknown external data — both branches of the isinstance are legitimate, expected representations, and the None case is handled explicitly. The rationale plainly states the union, the visible code is consistent (n.branches comes from validated.nodes, a parsed argument model), and R5's concern (masking contract violations) does not apply when the check is the dispatch over a declared union.
   judge_signature_version: 2
-  scope_fingerprint: 57b7613247565297a46824f4708431848926492addeb74b408e995c6603301ec
+  scope_fingerprint: 0317bb625bcfd01de6aa6be767f23645a760ee4f68fdcf276a7244ba382ad071
   judge_transport: openrouter
   ast_path: 'body[31]/body[35]/body[1]/value/test'
-  judge_metadata_signature: 'hmac-sha256:v2:8f074981c0690d895157c09b87b28c32bea66d835d4ead4604235b1372df3301'
+  judge_metadata_signature: 'hmac-sha256:v2:18884f28a4e621330169a60d0b6ab20453bbd9eb6b9214eeb2e34e8615cf2386'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b5a321ad3a8cf21a
+  owner: john
+  reason: |-
+    _execute_locked (service.py:545) reads output.options.get(key) for key in ("path", "file") where output.options is composer/operator-authored sink config — Tier 3 external-origin. This is the sink path-allowlist security check: a sink legitimately may set neither path nor file (e.g. non-filesystem sinks), so .get() returning None correctly means "this key is not present, skip the allowlist resolution for it" (guarded by `if value is not None`). When a value IS present it is offensively resolved and the run is hard-rejected (PathAllowlistViolationError) if it escapes the allowed directories. Reading an optional config key as absent-is-None at a Tier-3 boundary is correct; the security enforcement on present values is strict. Legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T17:36:20.787235+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: output.options is composer/operator-authored sink configuration re-read from persisted state — Tier-3 external-origin per the persisted-config rule. The .get() correctly treats absence as None (sinks legitimately may carry neither path nor file), and any present value is offensively resolved against an allowlist with a hard PathAllowlistViolationError raise on escape. This is the meaning-preserving boundary read pattern: absence recorded as None, present values strictly validated. The rationale plainly identifies the tier, the optionality of the keys, and the security enforcement on present values, and the code matches.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[13]/body[2]/body[0]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:c617998d2d055c7edacb1e258e391d5a749db79421e22ee34d4067b462e13211'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=cf8af7610b65558f
+  owner: john
+  reason: |-
+    _execute_locked run-start nested-path allowlist: reads optional provider_config from composer-authored node options (Tier-3). Absent -> skip (non-RAG node); present -> the nested persist_directory is confined to allowed sink directories with a hard PathAllowlistViolationError. Optional Tier-3 read feeding a security check, no fabricated default.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:05.223226+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES. The .get() at line 570 reads node.options — composer-authored configuration whose contents originate outside ELSPETH's first-party typed contracts (Tier-3 per the persisted-external-config rule). The optional provider_config field is legitimately absent for non-RAG transforms, so absence-as-skip is meaning-preserving (not fabrication of a default), and when present the nested persist_directory feeds a hard PathAllowlistViolationError security check. This is the prescribed Tier-3 boundary form: guard shape, raise on violation. The function is _execute_locked and the parameter is composition_state, not a direct external dict parameter rooted at the .get subject, so the @trust_boundary decorator's source_param model doesn't cleanly apply here.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[14]/body[2]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:9254e09217e3d1f189a223ea17f30922cecec03d840d01dfcfae28abb6bef366'
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=aed1f997c94e2d7c
+  owner: john
+  reason: |-
+    Structural shape dispatch over Tier-3 provider_config: isinstance(provider_config, Mapping); a non-Mapping value is skipped (not a RAG provider config). isinstance discriminates genuine external-config shape, it is not hiding a bug or coercing data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:15.174260+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. node.options is composer/user-authored config persisted in our DB and re-read here; per policy, persisted external-origin config is Tier-3 at the read site, and its inner provider_config has no first-party typed contract guaranteeing it is a Mapping. The isinstance check is a structural shape discriminator at the Tier-3 boundary: non-Mapping values are skipped (not coerced or defaulted), and Mapping values proceed to the path-allowlist enforcement that raises on violation. This is the legitimate boundary-guard use of isinstance, not concealment of a first-party contract bug.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[14]/body[2]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:052a4d5c4c86c8e439829259de0c5afbbf5f4d893cf7bc815653bc6022b6d684'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=49d3fd8c16782afc
+  owner: john
+  reason: |-
+    Optional persist_directory read from Tier-3 provider_config (provider_config.get(key) for key in NESTED_LOCAL_PATH_OPTION_KEYS); absent -> skip, present -> resolved and confined to allowed sink directories, rejecting escape with PathAllowlistViolationError. Meaning-preserving optional read at a security boundary.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:22.691031+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. provider_config is composer-authored Tier-3 configuration (a nested Mapping inside node.options), and its shape is not guaranteed by any first-party contract — optional path keys may or may not be present. The .get(key) is the meaning-preserving optional read at a security boundary: absent → skip, present → resolved and confined via PathAllowlistViolationError. This is exactly the Tier-3 boundary pattern policy prescribes, and absence is treated as None (skip), not fabricated. Decorator nudge does not apply: the external data is not a function parameter but a nested field of composition_state reached via attribute/subscript chains.
+  judge_signature_version: 2
+  scope_fingerprint: 3df7250f34187a149487896759f9f22b60675e20b756df94ead10b4da87467cc
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[8]/body[14]/body[2]/body[3]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:e311c0d618f607acd03bda7424c7df853699e70f696be98a58e03f1907f18983'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=cac7e4ce9d3486f2
+  owner: john
+  reason: |-
+    validate_pipeline preflight nested-path confinement: optional provider_config from composer-authored node options (Tier-3); absent -> skip, present -> the persist_directory is checked against allowed sink directories and the pipeline is rejected on escape. Optional Tier-3 read, no default.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:29.418721+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: node.options is composer-authored configuration (Tier-3), and provider_config is an optional nested key. The .get() reads an optional field at a Tier-3 boundary, followed by an isinstance shape guard and explicit path-allowlist enforcement that rejects the pipeline on escape — this is the prescribed boundary validation pattern, not silent recovery. Absence is treated as 'skip' (no fabricated default), present values are validated and rejected on failure. The decorator nudge does not apply: validate_pipeline's external data flows through state.nodes attribute traversal, not a single source_param.
+  judge_signature_version: 2
+  scope_fingerprint: a2a85b574e7a86aacb7b8afd7472becbb3868743f831825a3ad47f894006d212
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[11]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:3cd183746d89a01af4605374b6f577857963e86ebc86c2b182c6bb0953a166bc'
+- key: web/execution/validation.py:R1:validate_pipeline:fp=59d1b674edf6d8ed
+  owner: john
+  reason: |-
+    Optional persist_directory read from Tier-3 provider_config in validate_pipeline (provider_config.get(key)); absent -> skip, present -> allowlist-checked against allowed sink directories. Optional-key navigation, no fabricated default.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:37.021554+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: provider_config originates from node.options — composer/user-authored configuration persisted in our DB and re-read here, which the policy explicitly classifies as Tier-3 at the read site (chain-of-custody, not container, decides tier). The preceding isinstance(Mapping) check establishes shape, and .get(key) navigates optional keys where absence legitimately means 'skip' (no fabricated default — None short-circuits the loop). Present values are then allowlist-validated, which is the prescribed Tier-3 boundary behavior. The rationale correctly identifies the tier and the optional-navigation semantics, and the visible code matches.
+  judge_signature_version: 2
+  scope_fingerprint: a2a85b574e7a86aacb7b8afd7472becbb3868743f831825a3ad47f894006d212
+  judge_transport: openrouter
+  ast_path: 'body[64]/body[11]/body[3]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:80e9324df504fae74c45d0e5dcc16582a752fb897ace58ced2ef23a1e462199f'
 per_file_rules:
 - pattern: web/composer/tools/_common.py
   rules:
@@ -3278,17 +3373,21 @@ per_file_rules:
     via .get() and merge-patch pop-with-default are boundary-appropriate accesses.
     Collapsed from per-fingerprint entries because this high-churn file's fingerprints
     rotate on any import or body shift, so a per_file_rule ceiling is the durable form
-    (per feedback_rotate_tier_model_dup_key_dataloss).
+    (per feedback_rotate_tier_model_dup_key_dataloss). Bumped 6 to 7 on 2026-06-06
+    because fc5ec747e's _validate_transform_provider_config_path adds one optional
+    provider_config.get read in the same Tier-3 prevalidation class.
   expires: null
-  max_hits: 6
+  max_hits: 7
 - pattern: web/composer/tools/_common.py
   rules:
   - R5
   reason: isinstance() for structural dispatch over external / LLM-authored config
     dicts (Mapping and str discrimination, Pydantic validation-cause typing) at the
     composer prevalidation boundary. See the R1 entry for the per_file_rule rationale.
+    Bumped 8 to 9 on 2026-06-06 because fc5ec747e adds one isinstance(Mapping) shape
+    check in _validate_transform_provider_config_path (same class).
   expires: null
-  max_hits: 8
+  max_hits: 9
 - pattern: web/composer/guided/chat_solver.py
   rules:
   - R5

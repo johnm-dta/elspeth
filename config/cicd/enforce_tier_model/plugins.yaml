@@ -1314,3 +1314,41 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[23]/body[14]/body[5]/orelse[1]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:aed0546f6d5f49c42b17d7ba80b9acb75e4d5f2fbadd91cfb704d9bb1389ba9d'
+- key: plugins/infrastructure/clients/retrieval/connection.py:R6:_is_loopback_host:fp=b55f0564115f3188
+  owner: john
+  reason: |-
+    ipaddress.ip_address() raises ValueError when the Tier-3 host string is not an IP literal (e.g. a hostname). The except returns False = 'not a loopback IP' -- an explicit, meaning-preserving classification, not a swallowed error. The actual SSRF allow/deny decision is made by the caller (_validate_chroma_http_target).
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:43.679740+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: ipaddress.ip_address() raises ValueError specifically to signal 'not an IP literal' (e.g. a hostname like 'example.com'). The except converts that signal into the meaning-preserving classification 'not a loopback IP literal' = False, which is the correct answer to the predicate _is_loopback_host. This is not a swallowed error — it is the documented control-flow contract of the stdlib function, and the actual SSRF policy decision is made downstream by validate_url_for_ssrf. The rationale matches the code, and the classification preserves meaning rather than fabricating trust.
+  judge_signature_version: 2
+  scope_fingerprint: a04a2c257fb9c62ba6a661bc2a1875d644d5833ced11b1131b41555986d93554
+  judge_transport: openrouter
+  ast_path: 'body[10]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:9da73ba97de2e23621c4c325104bc318c14702749c632746d9ff86f3376e812c'
+- key: plugins/infrastructure/clients/retrieval/connection.py:R6:_host_url:fp=535090efcf4e5ddb
+  owner: john
+  reason: |-
+    ipaddress.ip_address() raises ValueError on a non-IP-literal host; the except falls back to using the Tier-3 host string as a hostname (IPv6 bracket normalization applies only to successfully parsed IPs). Explicit branch selection on external input, not error suppression -- host shape was already validated above (rejects scheme/path/query).
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-03'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-05T18:16:51.337443+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The except clause is not swallowing an error — it's using ValueError as a branch discriminator: ip_address() succeeded → IPv6 bracket-normalize; ip_address() failed → host is a hostname literal, use as-is. Both branches assign url_host and the function proceeds with a well-defined result; this is the documented Python idiom for 'is this string an IP?'. The host shape was already pre-validated against scheme/path/query characters on line 37, and downstream _validate_chroma_http_target enforces SSRF policy, so neither swallowing nor fabrication is occurring.
+  judge_signature_version: 2
+  scope_fingerprint: c61f192f8181bd41acf992d1f25a4d21e577a1776bc86b23f39411d19aa2ad7b
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:fa8e3b72692c1c3c04bbc7cb710f2c1285327df8f35f39e5faa5cd0b7fdf9dc3'

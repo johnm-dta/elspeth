@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 from elspeth.web.execution.protocol import ValidationSettings
@@ -48,6 +49,22 @@ class RuntimeGraphBundle:
     graph: ExecutionGraph
 
 
+@trust_boundary(
+    tier=3,
+    source=(
+        "operator/composer-authored pipeline YAML produced by YamlGenerator and re-parsed "
+        "here; carries Tier-3 source/sink/transform path options (e.g. persist_directory)"
+    ),
+    source_param="pipeline_yaml",
+    suppresses=("R1",),
+    invariant=(
+        "raises TypeError on structurally malformed generator output (non-dict top-level, "
+        "non-dict source/options/sinks, non-list transforms); optional path keys are read "
+        "with .get and confined to data_dir, never coerced or defaulted"
+    ),
+    test_ref="tests/unit/web/execution/test_service.py::TestResolveYamlPaths::test_non_dict_yaml_raises_type_error",
+    test_fingerprint="0b6962a40eb0f2ab584fb2c1de368235d046257d81da266750c8f8011e651c36",
+)
 def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     """Rewrite relative source/sink paths in pipeline YAML to absolute paths.
 

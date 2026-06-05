@@ -5127,11 +5127,18 @@ class TestResolveYamlPaths:
             _resolve_yaml_paths(123, "/srv/data")  # type: ignore[arg-type]
 
     def test_non_dict_yaml_raises_type_error(self) -> None:
-        """YAML that parses to a scalar (not a dict) is a generator bug."""
-        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+        """YAML that parses to a scalar (not a dict) is a generator bug.
+
+        Also the bound raising test for the @trust_boundary on
+        resolve_runtime_yaml_paths (source_param='pipeline_yaml'): the malformed
+        Tier-3 input is passed positionally as pipeline_yaml and the boundary
+        rejects it with TypeError. Imported unaliased so the trust_boundary.tests
+        rule matches the call to the decorated symbol.
+        """
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths
 
         with pytest.raises(TypeError, match="non-dict top-level"):
-            _resolve_yaml_paths("just a string", "/srv/data")
+            resolve_runtime_yaml_paths("just a string", "/srv/data")
 
     def test_no_source_or_sinks_is_noop(self) -> None:
         """YAML with no source/sinks passes through without error."""

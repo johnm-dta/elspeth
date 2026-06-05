@@ -70,6 +70,40 @@ class TestBuildSchemaFormTurns:
         schema_prefill = turn["payload"]["prefilled"]["schema"]
         assert schema_prefill == {"mode": "flexible", "fields": ["name: str", "age: int"]}
 
+    def test_step_1_schema_form_keeps_observed_mode_for_unsafe_inspected_header(self) -> None:
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 64),
+            sample_row_count=1,
+            observed_headers=("${AWS_SECRET_ACCESS_KEY}", "ok"),
+            inferred_types={"${AWS_SECRET_ACCESS_KEY}": "str", "ok": "int"},
+            url_candidates=(),
+            warnings=(),
+        )
+
+        turn = build_step_1_schema_form_turn("csv", _Catalog(), inspection_facts=facts)
+
+        schema_prefill = turn["payload"]["prefilled"]["schema"]
+        assert schema_prefill == {"mode": "observed"}
+
+    def test_step_1_schema_form_keeps_observed_mode_for_keyword_header(self) -> None:
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 64),
+            sample_row_count=1,
+            observed_headers=("class", "ok"),
+            inferred_types={"class": "str", "ok": "int"},
+            url_candidates=(),
+            warnings=(),
+        )
+
+        turn = build_step_1_schema_form_turn("csv", _Catalog(), inspection_facts=facts)
+
+        schema_prefill = turn["payload"]["prefilled"]["schema"]
+        assert schema_prefill == {"mode": "observed"}
+
     def test_step_2_schema_form_uses_sink_knobs(self) -> None:
         turn = build_step_2_schema_form_turn("json", _Catalog())
 

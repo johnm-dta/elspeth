@@ -1085,8 +1085,10 @@ class ExecutionServiceImpl:
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O.
-            settings = load_settings_from_yaml_string(resolved_yaml)
+            # bypassing Dynaconf file I/O. Web-authored pipeline YAML must
+            # not expand host ${VAR} placeholders; explicit secret refs were
+            # already resolved above through the audited web secret path.
+            settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=False)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

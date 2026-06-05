@@ -3595,6 +3595,79 @@ class TestEnvVarExpansion:
 
         assert result["prefix"] == ""
 
+    def test_yaml_string_loader_can_disable_env_expansion_for_web_authored_configs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Web-authored in-memory YAML must not disclose host env vars through plugin options."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("ELSPETH_WEB__SECRET_KEY", "JWT_SECRET_POC_VALUE")
+
+        yaml_content = """
+source:
+  plugin: value
+  on_success: compute_fields
+  options:
+    rows:
+      - input: attacker-controlled pipeline config
+    schema:
+      mode: observed
+transforms:
+  - name: compute_fields
+    plugin: value_transform
+    input: compute_fields
+    on_success: output
+    on_error: output
+    options:
+      schema:
+        mode: observed
+      operations:
+        - target: leaked_value
+          expression: "'${ELSPETH_WEB__SECRET_KEY}'"
+        - target: "${ELSPETH_WEB__SECRET_KEY}"
+          expression: "'field-name-expanded'"
+sinks:
+  output:
+    plugin: discard
+    on_write_failure: discard
+    options:
+      schema:
+        mode: observed
+"""
+
+        settings = load_settings_from_yaml_string(yaml_content, expand_env_vars=False)
+
+        operations = settings.transforms[0].options["operations"]
+        assert operations[0]["expression"] == "'${ELSPETH_WEB__SECRET_KEY}'"
+        assert operations[1]["target"] == "${ELSPETH_WEB__SECRET_KEY}"
+        assert "JWT_SECRET_POC_VALUE" not in repr(settings.transforms[0].options)
+
+    def test_yaml_string_loader_expands_env_vars_by_default_for_trusted_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The new opt-out preserves existing CLI/test helper behavior by default."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("VALUE_SOURCE_TEXT", "expanded-row-value")
+
+        yaml_content = """
+source:
+  plugin: value
+  on_success: output
+  options:
+    rows:
+      - input: "${VALUE_SOURCE_TEXT}"
+    schema:
+      mode: observed
+sinks:
+  output:
+    plugin: discard
+    on_write_failure: discard
+    options:
+      schema:
+        mode: observed
+"""
+
+        settings = load_settings_from_yaml_string(yaml_content)
+
+        assert settings.source.options["rows"][0]["input"] == "expanded-row-value"
+
 
 class TestSinkNameCasing:
     """Sink names must be lowercase - explicit validation, no silent transformation."""

@@ -649,8 +649,9 @@ def validate_pipeline(
     1. Source path allowlist check (C3/S2 defense-in-depth)
     1b. Secret ref validation (all referenced secrets exist)
     2. Generate YAML from CompositionState
-    3. Load settings via load_settings_from_yaml_string() — resolve secret
-       refs first if present, matching the execution service path exactly
+    3. Load settings via load_settings_from_yaml_string() with host env
+       expansion disabled — resolve secret refs first if present, matching
+       the execution service path exactly
     4. instantiate_runtime_plugins(settings, preflight_mode=True)
     5. build_runtime_graph(settings, bundle)
     6. graph.validate() + graph.validate_edge_compatibility()
@@ -1213,7 +1214,9 @@ def validate_pipeline(
     # Always uses load_settings_from_yaml_string() — the same loader the
     # execution service uses (in _run_pipeline).  This ensures validation
     # exercises the exact same code path as execution, preventing
-    # false-pass or false-fail results from loader differences.
+    # false-pass or false-fail results from loader differences. Host env
+    # expansion stays disabled for web-authored YAML; explicit secret refs
+    # are resolved through the audited web secret path before loading.
     #
     # When secret refs are present, resolve them before loading.
     # Resolved secrets stay in process memory — never written to disk.
@@ -1237,7 +1240,7 @@ def validate_pipeline(
             )
             settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
 
-        elspeth_settings = load_settings_from_yaml_string(settings_yaml)
+        elspeth_settings = load_settings_from_yaml_string(settings_yaml, expand_env_vars=False)
         checks.append(
             ValidationCheck(
                 name=_CHECK_SETTINGS,

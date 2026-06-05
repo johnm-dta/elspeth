@@ -928,7 +928,8 @@ class TestInlineBlobRuntimePreflight:
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
-        def load_settings(yaml_text: str) -> MagicMock:
+        def load_settings(yaml_text: str, *, expand_env_vars: bool) -> MagicMock:
+            assert expand_env_vars is False
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
             assert "You are an audited prompt." in yaml_text
             assert "blob_ref" not in yaml_text

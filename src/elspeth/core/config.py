@@ -2154,7 +2154,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
     return ElspethSettings(**raw_config)
 
 
-def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
+def load_settings_from_yaml_string(yaml_content: str, *, expand_env_vars: bool = True) -> ElspethSettings:
     """Load settings from a YAML string without touching disk.
 
     This is used by the web execution service to load pipeline configs
@@ -2164,6 +2164,10 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
 
     Args:
         yaml_content: YAML configuration as a string.
+        expand_env_vars: Whether to recursively expand ``${VAR}`` and
+            ``${VAR:-default}`` placeholders. Keep this enabled for trusted
+            CLI-authored config files; disable it for web-authored in-memory
+            configs after explicit secret references have already been resolved.
 
     Returns:
         Validated ElspethSettings instance.
@@ -2179,7 +2183,8 @@ def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
 
     raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
-    raw_config = _expand_env_vars(raw_config)
+    if expand_env_vars:
+        raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 
 

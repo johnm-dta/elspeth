@@ -527,6 +527,9 @@ class ResumeCoordinator:
         Raises:
             ValueError: If payload_store is not provided
         """
+        # Deferred import: core.py imports ResumeCoordinator from this module, so a
+        # module-level import here would create a cycle. These two symbols stay in
+        # core.py because the normal-run path also uses them.
         from elspeth.engine.orchestrator.core import _RunFailedWithPartialResultError, prepare_for_run
 
         if payload_store is None:
@@ -895,6 +898,7 @@ class ResumeCoordinator:
         except GracefulShutdownError:
             raise
         except Exception as exc:
+            # Deferred import: breaks the core.py <-> resume.py cycle (see reconstruct_resume_state).
             from elspeth.engine.orchestrator.core import _RunFailedWithPartialResultError
 
             raise _RunFailedWithPartialResultError(

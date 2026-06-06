@@ -401,15 +401,15 @@ class TestBuildProcessorCallsCleanupOnFailure:
             coalesce_id_map={},
         )
 
-        # _build_processor fails after on_start has been called on all plugins
+        # build_processor fails after on_start has been called on all plugins
         with (
-            patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
-            # cleanup_plugins is now a module function; patch it where core.py looks
-            # it up (the imported name in core's namespace), not on the instance.
-            patch("elspeth.engine.orchestrator.core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
+            patch.object(orch._run_core, "build_processor", side_effect=RuntimeError("processor build failed")),
+            # cleanup_plugins is now a module function; patch it where run_core.py looks
+            # it up (the imported name in run_core's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.run_core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
-            orch._initialize_run_context(
+            orch._run_core.initialize_run_context(
                 mock_factory,
                 "test-run",
                 config,

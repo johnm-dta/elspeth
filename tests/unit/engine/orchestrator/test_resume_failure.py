@@ -118,7 +118,7 @@ class TestResumeFinalizesAsFailed:
             patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
             patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=MagicMock()),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
-            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch._ceremony, "emit_telemetry"),
             pytest.raises(RuntimeError, match="test failure"),
         ):
             orch.resume(
@@ -189,7 +189,7 @@ class TestResumeFinalizesAsFailed:
                 "elspeth.engine.orchestrator.core.derive_resume_terminal_status_from_audit",
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
-            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch._ceremony, "emit_telemetry"),
             patch.object(orch, "_delete_checkpoints"),
         ):
             result = orch.resume(
@@ -306,7 +306,7 @@ class TestResumeFinalizesAsFailed:
         with (
             patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
             patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
-            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch._ceremony, "emit_telemetry"),
             patch.object(orch, "_delete_checkpoints"),
         ):
             result = orch.resume(

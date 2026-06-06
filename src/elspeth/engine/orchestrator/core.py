@@ -34,7 +34,6 @@ import structlog
 if TYPE_CHECKING:
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-    from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.events import EventBusProtocol
@@ -69,14 +68,12 @@ from elspeth.contracts.errors import (
     GracefulShutdownError,
     OrchestrationInvariantError,
     SourceQuarantineReason,
-    TelemetryExporterError,
 )
 from elspeth.contracts.events import (
     FieldResolutionApplied,
     PhaseAction,
     PhaseChanged,
     PhaseCompleted,
-    PhaseError,
     PhaseStarted,
     PipelinePhase,
     RowCreated,
@@ -114,6 +111,7 @@ from elspeth.engine.orchestrator.aggregation import (
     handle_incomplete_batches,
     rebind_checkpoint_batch_ids,
 )
+from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import (
     export_landscape,
@@ -360,6 +358,7 @@ class Orchestrator:
         self._sequence_number = 0  # Monotonic counter for checkpoint ordering
         self._current_graph: ExecutionGraph | None = None  # Set during execution for checkpointing
         self._telemetry = telemetry_manager  # Optional, disabled by default
+        self._ceremony = RunCeremony(events=self._events, telemetry=self._telemetry)
 
     def _reset_checkpoint_sequence(self) -> None:
         """Reset checkpoint ordering for a fresh run."""
@@ -368,172 +367,6 @@ class Orchestrator:
     def _rebase_checkpoint_sequence(self, sequence_number: int) -> None:
         """Continue checkpoint ordering from a previously persisted checkpoint."""
         self._sequence_number = sequence_number
-
-    def _emit_telemetry(self, event: TelemetryEvent) -> None:
-        """Emit telemetry event if manager is configured.
-
-        Telemetry is emitted AFTER Landscape recording succeeds. Landscape is
-        the legal record; telemetry is operational visibility.
-
-        Args:
-            event: The telemetry event to emit
-        """
-        if self._telemetry is not None:
-            self._telemetry.handle_event(event)
-
-    def _flush_telemetry(self) -> None:
-        """Flush telemetry events if manager is configured.
-
-        Ensures queued telemetry is exported before returning control to caller.
-        """
-        if self._telemetry is not None:
-            self._telemetry.flush()
-
-    def _emit_phase_error(
-        self,
-        phase: PipelinePhase,
-        error: BaseException,
-        target: str | None = None,
-    ) -> None:
-        """Best-effort PhaseError emission that never masks the original exception.
-
-        Called from except blocks before re-raise. If PhaseError construction
-        or EventBus.emit() fails (e.g., handler bug), the original exception
-        must take precedence — observable telemetry is secondary to preserving
-        the actual error.
-        """
-        with best_effort(
-            "PhaseError emission",
-            phase=phase.value,
-            original_error=type(error).__name__,
-            target=target,
-        ):
-            self._events.emit(PhaseError(phase=phase, error=error, target=target))
-
-    def _safe_flush_telemetry(self) -> None:
-        """Flush telemetry in a finally block, preserving any pending exception.
-
-        If _flush_telemetry() raises TelemetryExporterError (fail_on_total=True),
-        only re-raises when no other exception is pending — telemetry failures
-        must not mask run errors.
-        """
-        import sys
-
-        logger = slog
-        pending_exc = sys.exc_info()[0]
-
-        try:
-            self._flush_telemetry()
-        except TelemetryExporterError as e:
-            logger.warning(
-                "Telemetry flush failed - will raise after cleanup if no other exception pending",
-                exporter=e.exporter_name,
-                error=e.message,
-            )
-            if pending_exc is None:
-                raise
-
-    def _emit_interrupted_ceremony(
-        self,
-        run_id: str,
-        factory: RecorderFactory,
-        shutdown_exc: GracefulShutdownError,
-        start_time: float,
-    ) -> None:
-        """Emit telemetry and EventBus events for a gracefully interrupted run.
-
-        Shared between run() and resume() — the interrupted ceremony is identical
-        in both paths: finalize as INTERRUPTED, emit RunFinished, emit RunSummary.
-        """
-
-        total_duration = time.perf_counter() - start_time
-        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.INTERRUPTED)
-
-        self._emit_telemetry(
-            RunFinished(
-                timestamp=datetime.now(UTC),
-                run_id=run_id,
-                status=RunStatus.INTERRUPTED,
-                row_count=shutdown_exc.rows_processed,
-                duration_ms=total_duration * 1000,
-            )
-        )
-
-        self._events.emit(
-            RunSummary(
-                run_id=run_id,
-                status=RunCompletionStatus.INTERRUPTED,
-                total_rows=shutdown_exc.rows_processed,
-                succeeded=shutdown_exc.rows_succeeded,
-                failed=shutdown_exc.rows_failed,
-                quarantined=shutdown_exc.rows_quarantined,
-                duration_seconds=total_duration,
-                exit_code=3,
-                routed_success=shutdown_exc.rows_routed_success,
-                routed_failure=shutdown_exc.rows_routed_failure,
-                routed_destinations=tuple(shutdown_exc.routed_destinations.items()),
-            )
-        )
-
-    def _emit_failed_ceremony(
-        self,
-        run_id: str,
-        factory: RecorderFactory,
-        start_time: float,
-        result: RunResult | None = None,
-    ) -> None:
-        """Emit telemetry and EventBus events for a failed run.
-
-        Finalizes the run as FAILED, emits RunFinished telemetry and RunSummary
-        with the best available metrics. Shared between run() (when
-        run_completed=False) and resume().
-        """
-
-        failed_result = result or RunResult(
-            run_id=run_id,
-            status=RunStatus.FAILED,
-            rows_processed=0,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
-            rows_forked=0,
-            rows_coalesced=0,
-            rows_coalesce_failed=0,
-            rows_expanded=0,
-            rows_buffered=0,
-            rows_diverted=0,
-            routed_destinations={},
-        )
-        total_duration = time.perf_counter() - start_time
-        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.FAILED)
-
-        self._emit_telemetry(
-            RunFinished(
-                timestamp=datetime.now(UTC),
-                run_id=run_id,
-                status=RunStatus.FAILED,
-                row_count=failed_result.rows_processed,
-                duration_ms=total_duration * 1000,
-            )
-        )
-
-        self._events.emit(
-            RunSummary(
-                run_id=run_id,
-                status=RunCompletionStatus.FAILED,
-                total_rows=failed_result.rows_processed,
-                succeeded=failed_result.rows_succeeded,
-                failed=failed_result.rows_failed,
-                quarantined=failed_result.rows_quarantined,
-                duration_seconds=total_duration,
-                exit_code=2,  # exit_code: 0=success, 1=partial, 2=total failure
-                routed_success=failed_result.rows_routed_success,
-                routed_failure=failed_result.rows_routed_failure,
-                routed_destinations=tuple(failed_result.routed_destinations.items()),
-            )
-        )
 
     def _maybe_checkpoint(
         self,
@@ -1052,7 +885,7 @@ class Orchestrator:
                 )
 
             # Emit telemetry AFTER Landscape succeeds - Landscape is the legal record
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 RunStarted(
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
@@ -1063,7 +896,7 @@ class Orchestrator:
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.DATABASE, duration_seconds=time.perf_counter() - phase_start))
         except Exception as e:
-            self._emit_phase_error(PipelinePhase.DATABASE, e)
+            self._ceremony.emit_phase_error(PipelinePhase.DATABASE, e)
             raise  # CRITICAL: Always re-raise - database connection failure is fatal
 
         return factory, run
@@ -1100,7 +933,7 @@ class Orchestrator:
             self._events.emit(PhaseStarted(phase=PipelinePhase.EXPORT, action=PhaseAction.EXPORTING, target=export_config.sink))
 
             # Emit telemetry PhaseChanged for EXPORT
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 PhaseChanged(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
@@ -1114,7 +947,7 @@ class Orchestrator:
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
             self._events.emit(PhaseCompleted(phase=PipelinePhase.EXPORT, duration_seconds=time.perf_counter() - phase_start))
         except Exception as export_error:
-            self._emit_phase_error(PipelinePhase.EXPORT, export_error, target=export_config.sink)
+            self._ceremony.emit_phase_error(PipelinePhase.EXPORT, export_error, target=export_config.sink)
             with best_effort(
                 "Export status FAILED recording",
                 run_id=run_id,
@@ -1257,7 +1090,7 @@ class Orchestrator:
 
             # Emit telemetry AFTER Landscape finalize succeeds
             run_duration_ms = (time.perf_counter() - run_start_time) * 1000
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
@@ -1307,7 +1140,7 @@ class Orchestrator:
 
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
-                self._emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
+                self._ceremony.emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
             with best_effort(
@@ -1336,7 +1169,7 @@ class Orchestrator:
                         )
                     )
                 else:
-                    self._emit_failed_ceremony(
+                    self._ceremony.emit_failed_ceremony(
                         run.run_id,
                         factory,
                         run_start_time,
@@ -1373,10 +1206,10 @@ class Orchestrator:
                         )
                     )
                 else:
-                    self._emit_failed_ceremony(run.run_id, factory, run_start_time)
+                    self._ceremony.emit_failed_ceremony(run.run_id, factory, run_start_time)
             raise  # CRITICAL: Always re-raise - observability doesn't suppress errors
         finally:
-            self._safe_flush_telemetry()
+            self._ceremony.safe_flush_telemetry()
 
     def _register_graph_nodes_and_edges(
         self,
@@ -1441,7 +1274,7 @@ class Orchestrator:
             self._events.emit(PhaseStarted(phase=PipelinePhase.GRAPH, action=PhaseAction.BUILDING))
 
             # Emit telemetry PhaseChanged - we now have run_id from begin_run
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 PhaseChanged(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
@@ -1536,7 +1369,7 @@ class Orchestrator:
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.GRAPH, duration_seconds=time.perf_counter() - phase_start))
         except Exception as e:
-            self._emit_phase_error(PipelinePhase.GRAPH, e)
+            self._ceremony.emit_phase_error(PipelinePhase.GRAPH, e)
             raise  # CRITICAL: Always re-raise - graph validation failure is fatal
 
         return GraphArtifacts(
@@ -1601,7 +1434,7 @@ class Orchestrator:
             payload_store=factory.payload_store,
             rate_limit_registry=self._rate_limit_registry,
             concurrency_config=self._concurrency_config,
-            telemetry_emit=self._emit_telemetry,
+            telemetry_emit=self._ceremony.emit_telemetry,
             shutdown_event=shutdown_event,
         )
 
@@ -1850,7 +1683,7 @@ class Orchestrator:
         # which is a plugin-contract violation that must surface, not be masked by a
         # second, divergent hash function recorded under the same field name.
         quarantine_content_hash = stable_hash(source_item.row)
-        self._emit_telemetry(
+        self._ceremony.emit_telemetry(
             RowCreated(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
@@ -1903,7 +1736,7 @@ class Orchestrator:
             normalization_version=normalization_version,
         )
         # Emit telemetry AFTER Landscape succeeds
-        self._emit_telemetry(
+        self._ceremony.emit_telemetry(
             FieldResolutionApplied(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
@@ -2092,7 +1925,7 @@ class Orchestrator:
 
         phase_start = time.perf_counter()
         self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=config.source.name))
-        self._emit_telemetry(
+        self._ceremony.emit_telemetry(
             PhaseChanged(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
@@ -2110,7 +1943,7 @@ class Orchestrator:
                     self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
                     return iter(())
         except Exception as e:
-            self._emit_phase_error(PipelinePhase.SOURCE, e, target=config.source.name)
+            self._ceremony.emit_phase_error(PipelinePhase.SOURCE, e, target=config.source.name)
             raise
 
         self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
@@ -2178,7 +2011,7 @@ class Orchestrator:
             # PROCESS phase
             phase_start = time.perf_counter()
             self._events.emit(PhaseStarted(phase=PipelinePhase.PROCESS, action=PhaseAction.PROCESSING))
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 PhaseChanged(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
@@ -2295,7 +2128,7 @@ class Orchestrator:
                 )
 
             except Exception as e:
-                self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
+                self._ceremony.emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
                 raise
 
         return LoopResult(
@@ -2621,7 +2454,7 @@ class Orchestrator:
                 factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
 
                 # Emit RunFinished telemetry (matching the normal completion path)
-                self._emit_telemetry(
+                self._ceremony.emit_telemetry(
                     RunFinished(
                         timestamp=datetime.now(UTC),
                         run_id=run_id,
@@ -2779,7 +2612,7 @@ class Orchestrator:
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
-            self._emit_telemetry(
+            self._ceremony.emit_telemetry(
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
@@ -2814,11 +2647,11 @@ class Orchestrator:
             return result
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
-                self._emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
+                self._ceremony.emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
             with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
-                self._emit_failed_ceremony(
+                self._ceremony.emit_failed_ceremony(
                     run_id,
                     factory,
                     resume_start_time,
@@ -2830,10 +2663,10 @@ class Orchestrator:
             # permanently (which blocks future resume attempts). The outer broad-except
             # is justified — any unhandled exception during resume needs ceremony.
             with best_effort("Generic failure ceremony on resume", run_id=run_id):
-                self._emit_failed_ceremony(run_id, factory, resume_start_time)
+                self._ceremony.emit_failed_ceremony(run_id, factory, resume_start_time)
             raise
         finally:
-            self._safe_flush_telemetry()
+            self._ceremony.safe_flush_telemetry()
 
     def _process_resumed_rows(
         self,

@@ -27,12 +27,10 @@ import {
   fetchDiagnostics,
   fetchInterpretationEvents,
   harnessCtx,
-  pollRunTerminal,
   reachableSourceCount,
   resetToFirstRun,
   cleanSessions,
   scrapeNodeId,
-  startRealRun,
 } from "./helpers/tutorial-harness";
 
 const BATCH_ID = process.env.HARNESS_BATCH_ID ?? "skeleton";
@@ -84,9 +82,6 @@ function substantiveRowCount(
 // Classify a transport/error string as infra noise vs a composition fault.
 // 5xx / 429 / rate-limit / connection / timeout / DNS / target-down → infra.
 const INFRA_ERROR = /\b5\d\d\b|429|rate.?limit|throttl|timed? ?out|timeout|did not reach terminal|econn|socket hang|network|temporarily unavailable|bad gateway|service unavailable|gateway timeout/i;
-// A dead/wrong URL the composer invented (composition fault, dim d) vs a good
-// URL the network failed to fetch (infra). 404 / DNS / SSL / not found → dim d.
-const UNREACHABLE_URL_ERROR = /\b404\b|not found|name or service|no such host|getaddrinfo|enotfound|ssl|certificate|name resolution/i;
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
   test.setTimeout(420_000); // real compose + tutorial run + real-system re-run can take minutes
@@ -98,8 +93,12 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
   let outputRows: Array<Record<string, unknown>> = [];
   let discardedRowCount = 0;
 
-  let realsystemRunId: string | null = null;
-  let realStatus: string | null = null;
+  // No separate real-system re-run: when the tutorial applies NO normalization it
+  // already executed through the normal ExecutionService→Orchestrator path (re-
+  // running the same session collides on output artifacts → FileExistsError), so
+  // dim (b) derives from the tutorial run's own success + the normalization flag.
+  // realsystemRunId stays null by construction (kept for the record schema).
+  const realsystemRunId: string | null = null;
 
   let turnReached = 0; // increment after each turn's success
   let graduated = false;
@@ -184,19 +183,10 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     expect(sessionId, "session id captured").not.toBeNull();
     expect(tutorialRunId, "tutorial run id captured").not.toBeNull();
 
-    // Dimension (b): the real-system re-run via the normal execute path (Task 7).
-    if (sessionId) {
-      const ctx2 = await harnessCtx();
-      try {
-        const rid = await startRealRun(ctx2, sessionId);
-        realsystemRunId = rid;
-        realStatus = await pollRunTerminal(ctx2, rid);
-      } catch (e) {
-        realStatus = `error:${e instanceof Error ? e.message : String(e)}`;
-      } finally {
-        await ctx2.dispose();
-      }
-    }
+    // Dimension (b): NO separate re-run (it would collide on output artifacts).
+    // When normalization did not fire, the tutorial run IS the real-system path;
+    // dim (b) is derived in the finally block from graduated + rows + the
+    // normalization flag (parity principle: a fired normalization = fault).
   } catch (e) {
     hardError = e instanceof Error ? e.message : String(e);
     throw e; // rethrow so Playwright captures trace/video for this failed run
@@ -222,19 +212,6 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
           failureDetail: null,
         }))
       : { operations: [], tokens: [], failureDetail: null };
-    // Real-run diagnostics give the *why* for a clean terminal `failed` (no thrown
-    // exception): the failure_detail.error_message disambiguates infra (5xx/429/
-    // timeout) from invented-source-unreachable (404/DNS/SSL) from a true
-    // normalization gap. Only fetched when the real run did not pass.
-    const realDiag =
-      realsystemRunId && realStatus !== "completed"
-        ? await fetchDiagnostics(ctx, realsystemRunId).catch(() => ({
-            operations: [],
-            tokens: [],
-            failureDetail: null,
-          }))
-        : { operations: [], tokens: [], failureDetail: null };
-
     const raisedKinds = events.map((e) => e.kind);
     const underFlagged = ASSUMPTION_RUBRIC.expectVerify.filter(
       (k) => !raisedKinds.includes(k),
@@ -255,38 +232,33 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     const reachable = reachableSourceCount(diag.tokens, scrapeNode);
     const substantive = substantiveRowCount(outputRows, comp.sourceInputKeys);
 
-    // Dimension (b) is authoritative on the real-system re-run terminal status.
-    const realsystemPassed = realStatus === "completed";
+    // Dimension (b): tutorial-backend PARITY. When normalization did NOT fire, the
+    // tutorial run already executed through the normal ExecutionService→Orchestrator
+    // path, so a graduated run with output rows IS a passing real-system run. A
+    // fired normalization means the tutorial was treated differently from a regular
+    // run (it repaired the composed pipeline) → dim (b) FAILS. No separate re-run is
+    // issued (it would collide on the first run's output artifacts → FileExistsError).
+    const dimBPassed = !normalized && graduated && outputRows.length > 0;
 
     // Classify (spec §7). Two headline numbers depend on this: tutorial-pass-rate
     // (driven to 100%) and infra-noise rate (held separate so prompt changes are
-    // not confounded). So infra noise MUST be separated from composition faults.
+    // not confounded).
     //
     // Precedence:
-    //   1. infra noise (timeout / 5xx / 429 / scrape-target-down) — excluded from
-    //      the tutorial denominator entirely.
-    //   2. hard frontend fault (an ambiguous UI error / never-advanced turn).
-    //   3. real-run divergence (failed b) — subclass decided by the real run's
-    //      WHY: 404/DNS → invented-source-unreachable (d), 5xx/429/timeout →
-    //      infra, template-with-normalization → normalization-gap.
+    //   1. infra noise (timeout / 5xx / 429) thrown during the UI flow — excluded
+    //      from the tutorial denominator entirely.
+    //   2. hard frontend fault (ambiguous UI error / never-advanced turn).
+    //   3. parity break (b): normalization fired → tutorial ran a different pipeline
+    //      than a regular run would → normalization-gap.
     //   4. assumption faults (c).
-    //   5. mechanical solution-quality (d) — checked AFTER a/b/c so a single
-    //      metric cannot zero the headline rate.
-    //
-    // `normalized` is an ANNOTATION ONLY (recorded in landscape.normalization_fired).
-    // It is NOT a classification trigger: the tutorial path ALWAYS normalizes
-    // (spec §10), so triggering on it would brand every run normalization-gap even
-    // when the real system passed.
-    const realFailureWhy =
-      realDiag.failureDetail?.error_message ??
-      (realStatus && realStatus.startsWith("error:") ? realStatus : "");
+    //   5. mechanical solution-quality (d) — reachability / discard / substantive.
     const hardErrorIsInfra = hardError !== null && INFRA_ERROR.test(hardError);
 
     let outcome: RunRecord["outcome"] = "pass";
     let sub: FaultSubclass = null;
     let fix: string | null = null;
     if (hardErrorIsInfra) {
-      // A transport timeout / 5xx / 429 thrown during the UI or re-run flow.
+      // A transport timeout / 5xx / 429 thrown during the UI flow.
       outcome = "infra_fault";
       sub = /did not reach terminal|timed? ?out|timeout/i.test(hardError ?? "")
         ? "timeout"
@@ -301,31 +273,15 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
       outcome = "tutorial_fault";
       sub = "frontend-state-machine";
       fix = "frontend / timing";
-    } else if (graduated && !realsystemPassed) {
-      // Passed (a) but failed (b). Decide infra vs composition vs normalization
-      // from the real run's failure reason — NOT a flat normalization-gap.
-      if (INFRA_ERROR.test(realFailureWhy)) {
-        outcome = "infra_fault";
-        sub = /timed? ?out|timeout|did not reach terminal/i.test(realFailureWhy)
-          ? "timeout"
-          : /\b5\d\d\b|bad gateway|service unavailable|gateway timeout|rate.?limit|429|throttl/i.test(
-                realFailureWhy,
-              )
-            ? "llm-5xx-or-ratelimit"
-            : "staging-hiccup";
-        fix = null;
-      } else if (UNREACHABLE_URL_ERROR.test(realFailureWhy)) {
-        // A good network but a dead/wrong URL the composer invented → dim (d).
-        outcome = "tutorial_fault";
-        sub = "invented-source-unreachable";
-        fix = "composer-skill-prompt: generated-source discipline";
-      } else {
-        // The real system failed on the composer's own output where the tutorial
-        // passed: the "tutorial lies" / normalization-fidelity class (spec §10).
-        outcome = "tutorial_fault";
-        sub = "normalization-gap";
-        fix = "engine: tutorial normalization parity";
-      }
+    } else if (graduated && normalized) {
+      // Parity break (backend-parity principle + spec §10): the tutorial REPAIRED
+      // the composed pipeline before running; a regular /execute applies no such
+      // repair, so the composer's actual output is not proven to run as a regular
+      // run. Fix at source (composer emits correct templates / engine handles both)
+      // — never a tutorial-only band-aid.
+      outcome = "tutorial_fault";
+      sub = "normalization-gap";
+      fix = "remove tutorial-only normalization: make tutorial == regular run";
     } else if (underFlagged.length) {
       outcome = "tutorial_fault";
       sub = "assumption-under-flag";
@@ -362,7 +318,7 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
       realsystem_run_id: realsystemRunId,
       seeded_from_cache: seededFromCache,
       dim_a_tutorial_completed: graduated,
-      dim_b_realsystem_passed: realsystemPassed,
+      dim_b_realsystem_passed: dimBPassed,
       dim_c_assumptions_ok:
         underFlagged.length === 0 && overFlagged.length === 0,
       dim_d_solution_quality: {
@@ -380,8 +336,9 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
       output_rows: outputRows,
       landscape: {
         tutorial_failure: hardError,
-        realsystem_failure:
-          realStatus && realStatus !== "completed" ? realStatus : null,
+        realsystem_failure: normalized
+          ? "tutorial normalization repaired the pipeline; not run as a regular run"
+          : null,
         normalization_fired: normalized,
       },
       stamp: {

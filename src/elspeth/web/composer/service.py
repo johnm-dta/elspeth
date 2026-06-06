@@ -399,6 +399,7 @@ _AugmentationBranch = Literal[
     "preflight_invalid_empty_state_augmentation",
     "preflight_invalid_non_empty_state_augmentation",
     "state_claim_grounding_correction",
+    "orphaned_interpretation_review_augmentation",
 ]
 
 
@@ -736,6 +737,109 @@ def _is_pending_interpretation_handoff(result: ValidationResult) -> bool:
     )
 
 
+# Readiness/error code for an orphaned interpretation site that survived the
+# repair budget. Deliberately distinct from ``INTERPRETATION_REVIEW_PENDING_CODE``:
+# that code marks the *resolvable* two-step handoff (token + a pending event the
+# user clears via the review card), where readiness is
+# ``completion_ready=True, execution_ready=False`` so the UI advances to the
+# review step. An ORPHAN has a run-blocking ``{{interpretation:<term>}}`` site
+# with NO matching resolvable event — there is no card, the user can never clear
+# it, and ``materialize_state_for_execution`` would reject the run. Surfacing it
+# under its own code with ``completion_ready=False`` keeps the UI from enabling
+# "run"/"continue" on a composition that cannot run.
+_INTERPRETATION_REVIEW_ORPHANED_CODE: Final[str] = "interpretation_review_orphaned"
+# Mirrors ``validation._CHECK_INTERPRETATION_REVIEW`` so the synthetic
+# fail-closed result names the same check as the runtime preflight; kept as a
+# local literal rather than importing a private validation symbol.
+_INTERPRETATION_REVIEW_CHECK_NAME: Final[str] = "interpretation_review"
+
+
+def _orphaned_interpretation_review_validation(
+    missing_sites: tuple[tuple[str, str, InterpretationKind], ...],
+) -> ValidationResult:
+    """Build the synthetic, fail-closed final-gate result for orphaned reviews.
+
+    Called from the no-tool-calls finalization path when the repair budget is
+    exhausted AND ``_missing_pending_interpretation_review_sites`` is still
+    non-empty: the composer left a ``{{interpretation:<term>}}`` site (or an
+    unresolvable vague-term wiring) with no matching pending event, so there is
+    nothing the user can resolve and the run would be rejected at
+    ``materialize_state_for_execution`` with
+    ``UnresolvedInterpretationPlaceholderError``.
+
+    Distinct from :func:`_no_mutation_empty_state_validation` (empty state) and
+    from the resolvable ``INTERPRETATION_REVIEW_PENDING_CODE`` handoff: every
+    readiness axis is blocking (``authoring_valid``/``completion_ready``/
+    ``execution_ready`` all ``False``) so the UI cannot advance regardless of
+    which flag it gates on. The detail text names the unresolvable site(s) and
+    the corrective action (call ``request_interpretation_review`` to make the
+    site resolvable, or remove the token) — NOT the "resolve the pending review"
+    wording, which would point the user at a card that does not exist.
+
+    The gate fires for EVERY interpretation kind that
+    ``_missing_pending_interpretation_review_sites`` can surface — vague_term,
+    invented_source, and pipeline_decision — not just legacy vague_term tokens.
+    ``component_type`` is therefore derived per-site from the kind
+    (``INVENTED_SOURCE`` is a source-level handoff, every other kind is a
+    transform-level one) so the persisted ``ValidationError`` / readiness
+    blocker carries the correct component type into the audit trail; and
+    ``affected_nodes`` excludes source sites, mirroring the runtime preflight's
+    canonical handling (``execution/validation.py`` ``InterpretationReviewPending``
+    branch, which collects only ``component_type == "transform"`` sites).
+    """
+
+    def _component_type_for_kind(kind: InterpretationKind) -> Literal["source", "transform"]:
+        return "source" if kind is InterpretationKind.INVENTED_SOURCE else "transform"
+
+    site_detail = ", ".join(f"{kind.value}:{component_id}:{term}" for component_id, term, kind in missing_sites)
+    detail = f"The pipeline carries an unresolvable interpretation handoff with no matching pending review and cannot run: {site_detail}."
+    suggestion = (
+        "For each listed site, call request_interpretation_review with the listed "
+        "affected_node_id, kind, and user_term so the interpretation site becomes "
+        "resolvable, or remove the corresponding {{interpretation:<term>}} token / "
+        "invented-source from the pipeline."
+    )
+    affected_nodes = tuple(
+        dict.fromkeys(component_id for component_id, _term, kind in missing_sites if _component_type_for_kind(kind) == "transform")
+    )
+    return ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name=_INTERPRETATION_REVIEW_CHECK_NAME,
+                passed=False,
+                detail=detail,
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id=component_id,
+                component_type=_component_type_for_kind(kind),
+                message=detail,
+                suggestion=suggestion,
+                error_code=_INTERPRETATION_REVIEW_ORPHANED_CODE,
+            )
+            for component_id, _term, kind in missing_sites
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=False,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[
+                ValidationReadinessBlocker(
+                    code=_INTERPRETATION_REVIEW_ORPHANED_CODE,
+                    component_id=component_id,
+                    component_type=_component_type_for_kind(kind),
+                    detail=detail,
+                )
+                for component_id, _term, kind in missing_sites
+            ],
+        ),
+    )
+
+
 def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     """Build the synthetic final-gate result for empty-state no-mutation replies."""
     detail = f"No composition-state mutation completed successfully; state_exists=false. Blocking result: {blocker}"
@@ -1044,6 +1148,7 @@ class ComposerServiceImpl:
             persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
             persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
             tool_invocations=result.tool_invocations,
+            runtime_preflight=result.runtime_preflight,
         )
 
     def _serialize_response_via_walker(
@@ -2200,6 +2305,87 @@ class ComposerServiceImpl:
             repair_turns_used=repair_turns_used,
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        # Fail-closed orphaned-interpretation gate. The repair budget is now
+        # exhausted (every repair-injection branch above is gated on
+        # ``repair_turns_used < _MAX_REPAIR_TURNS``). If the composition STILL
+        # carries an unresolvable interpretation site — a
+        # ``{{interpretation:<term>}}`` token (or an unresolvable vague-term
+        # wiring) with no matching pending review event — then the model never
+        # staged the review the in-loop repair asked for, there is no card the
+        # user can resolve, and ``materialize_state_for_execution`` would reject
+        # the run with ``UnresolvedInterpretationPlaceholderError`` at run time.
+        #
+        # Do NOT finalize this turn as a success. The ordinary
+        # ``_finalize_no_tool_response`` path runs ``validate_pipeline``, whose
+        # ``InterpretationReviewPending`` shape is INDISTINGUISHABLE between a
+        # resolvable two-step handoff and an orphan (both yield
+        # ``completion_ready=True, execution_ready=False`` and are passed
+        # through by ``_is_pending_interpretation_handoff``). Only
+        # ``_missing_pending_interpretation_review_sites`` — which consults the
+        # session's pending events — can tell them apart, and it lives here in
+        # the loop, not in ``validate_pipeline``. Surface a fail-closed,
+        # turn-level blocking result (mirrors the preflight-invalid non-empty
+        # branch's blocking shape) so the UI never enables "run"/"continue" on
+        # an orphan. This makes a tutorial run identical to a regular run, and
+        # leaves the legitimate bare-token two-step flow (token written, review
+        # staged within budget) untouched — that path clears
+        # ``_missing_pending_interpretation_review_sites`` before reaching here.
+        orphaned_sites = await self._missing_pending_interpretation_review_sites(
+            state,
+            session_id=session_id,
+        )
+        if orphaned_sites:
+            # The compose turn itself completed (the model stopped emitting
+            # tools); the blocking state is carried on ``runtime_preflight``
+            # readiness, mirroring the preflight-invalid finalize branches that
+            # also emit ``phase="complete"`` while returning a non-runnable
+            # result. ``phase`` has no "blocked" member, and the result is
+            # returned (not raised), so a ``phase="failed"`` reason code would
+            # misrepresent it as a request failure. The unrunnable state is
+            # surfaced to the UI via the readiness flags on the returned result.
+            await emit_progress(
+                progress,
+                ComposerProgressEvent(
+                    phase="complete",
+                    headline="The pipeline has an unresolved interpretation placeholder and cannot run yet.",
+                    evidence=("An {{interpretation:<term>}} token has no matching review to resolve it.",),
+                    likely_next="Ask ELSPETH to stage the interpretation review, or remove the token.",
+                    reason="composer_complete",
+                ),
+            )
+            raw_content = assistant_message.content or ""
+            orphan_runtime_result = _orphaned_interpretation_review_validation(orphaned_sites)
+            # Augment the model's prose with a system-attributed suffix naming
+            # the unresolvable site, mirroring the preflight-invalid non-empty
+            # finalize branch. The ComposerResult field-pairing invariant
+            # (protocol.py) requires ``raw_assistant_content`` to carry the
+            # pre-synthesis prose whenever ``runtime_preflight`` is blocking and
+            # is NOT the resolvable pending-handoff shape — which an orphan, by
+            # construction, is not — so the augment-vs-replace discriminator at
+            # routes._composer_history_content strips the operator suffix from
+            # LLM history.
+            augmented_message = _compose_preflight_failure_message(raw_content, runtime_result=orphan_runtime_result)
+            _enforce_augmentation_prefix_invariant(
+                branch="orphaned_interpretation_review_augmentation",
+                content=raw_content,
+                augmented=augmented_message,
+            )
+            blocked_result = ComposerResult(
+                message=augmented_message,
+                state=state,
+                runtime_preflight=orphan_runtime_result,
+                raw_assistant_content=raw_content,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+            )
+            threaded_blocked = replace(
+                blocked_result,
+                repair_turns_used=repair_turns_used,
+                persisted_assistant_message_id=persisted_assistant_message_id,
+                persisted_tool_call_turn=persisted_tool_call_turn,
+            )
+            return _TerminateOutcome(action="return", result=threaded_blocked)
 
         await emit_progress(
             progress,
@@ -3651,6 +3837,11 @@ class ComposeLoopTestResult:
     # assert recorder state without
     # touching the persistence machinery directly.
     tool_invocations: tuple[Any, ...] = ()
+    # Final-gate ValidationResult carried on the returned ComposerResult.
+    # Exposed so compose-loop tests can assert on the turn's readiness
+    # (e.g. the fail-closed orphaned-interpretation gate) without bypassing
+    # the production ``_compose_loop`` path.
+    runtime_preflight: ValidationResult | None = None
 
     @property
     def tool_outcomes_for_assertion(self) -> tuple[Any, ...]:

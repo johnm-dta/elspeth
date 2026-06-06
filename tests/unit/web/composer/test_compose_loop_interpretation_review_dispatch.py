@@ -776,6 +776,125 @@ async def test_pending_interpretation_placeholder_without_event_forces_review_to
 
 
 @pytest.mark.asyncio
+async def test_orphaned_interpretation_placeholder_fails_turn_closed_after_repair_budget(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """An orphaned ``{{interpretation:...}}`` token that survives the repair budget fails closed.
+
+    Regression for elspeth-01832796f4 (Fix A, Option 1). The composer writes a
+    bare ``{{interpretation:cool}}`` token via ``set_pipeline`` and then NEVER
+    calls ``request_interpretation_review`` — so the in-loop repair (which is
+    capped at ``_MAX_REPAIR_TURNS``) keeps firing, the model keeps emitting
+    plain text, and the budget is exhausted with the placeholder still
+    unresolvable (no pending event exists for it).
+
+    Before this fix the no-tool-calls finalizer would finalize the turn as a
+    "success" once the budget ran out — the runtime preflight's
+    ``InterpretationReviewPending`` shape is indistinguishable between a
+    resolvable two-step handoff and an orphan, so the UI would enable run and
+    the backend would only reject at ``materialize_state_for_execution`` with
+    ``UnresolvedInterpretationPlaceholderError``. The fail-closed gate now
+    surfaces a turn-level blocking ``runtime_preflight`` (every readiness axis
+    False, distinct ``interpretation_review_orphaned`` code) so the UI never
+    enables run on an orphan — making a tutorial run identical to a regular run.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Orphaned interpretation placeholder session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    # Turn 1 stages the bare token; every subsequent turn (incl. the
+    # forced-repair turns) emits plain text only — the model never stages the
+    # review, so the placeholder stays orphaned. The scripted LLM keeps
+    # returning a no-tool text response once the list is exhausted.
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+            _fake_text_response("It is ready, you can run it."),
+            _fake_text_response("All set."),
+            _fake_text_response("All set."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    # No pending interpretation event was ever created (the review tool was
+    # never called) — the placeholder is a genuine orphan.
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert events == []
+
+    # The turn fails closed: the runtime preflight is blocking on every
+    # readiness axis (NOT the resolvable pending-handoff shape).
+    preflight = result.runtime_preflight
+    assert preflight is not None
+    assert preflight.is_valid is False
+    assert preflight.readiness.execution_ready is False
+    assert preflight.readiness.completion_ready is False
+    assert preflight.readiness.authoring_valid is False
+    blocker_codes = {blocker.code for blocker in preflight.readiness.blockers}
+    assert blocker_codes == {"interpretation_review_orphaned"}
+    assert any("cool" in error.message for error in preflight.errors)
+
+
+def test_orphaned_interpretation_validation_derives_component_type_per_kind() -> None:
+    """The fail-closed orphan result labels component_type per interpretation kind.
+
+    The gate fires for every kind ``_missing_pending_interpretation_review_sites``
+    can surface, not just legacy vague_term tokens. An ``INVENTED_SOURCE`` site is
+    a source-level handoff (component_id ``"source"``, component_type ``"source"``)
+    while every other kind is transform-level. The persisted ValidationError /
+    readiness blocker must carry the correct component_type into the audit trail,
+    and ``affected_nodes`` must exclude source sites (mirroring the runtime
+    preflight's ``InterpretationReviewPending`` handling).
+    """
+    from elspeth.web.composer.service import _orphaned_interpretation_review_validation
+
+    result = _orphaned_interpretation_review_validation(
+        (
+            ("source", "inline_source_url_list", InterpretationKind.INVENTED_SOURCE),
+            ("rate_node", "cool", InterpretationKind.VAGUE_TERM),
+        )
+    )
+
+    # Every readiness axis is blocking (not the resolvable-handoff shape).
+    assert result.is_valid is False
+    assert result.readiness.authoring_valid is False
+    assert result.readiness.completion_ready is False
+    assert result.readiness.execution_ready is False
+
+    # component_type derived per-site: source for invented_source, transform otherwise.
+    error_by_component = {error.component_id: error.component_type for error in result.errors}
+    assert error_by_component == {"source": "source", "rate_node": "transform"}
+    blocker_by_component = {blocker.component_id: blocker.component_type for blocker in result.readiness.blockers}
+    assert blocker_by_component == {"source": "source", "rate_node": "transform"}
+    assert {blocker.code for blocker in result.readiness.blockers} == {"interpretation_review_orphaned"}
+
+    # affected_nodes excludes the source site (transform-only, per validation.py).
+    assert result.checks[0].affected_nodes == ("rate_node",)
+
+
+@pytest.mark.asyncio
 async def test_prompt_template_review_event_does_not_trigger_vague_term_repair(
     tmp_path: Path,
     sessions_service: SessionServiceImpl,

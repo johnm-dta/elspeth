@@ -112,6 +112,7 @@ from elspeth.engine.orchestrator.aggregation import (
     rebind_checkpoint_batch_ids,
 )
 from elspeth.engine.orchestrator.ceremony import RunCeremony
+from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import (
     export_landscape,
@@ -151,7 +152,6 @@ from elspeth.engine.orchestrator.types import (
     PipelineConfig,
     ResumeState,
     RouteValidationError,
-    RowProcessorHandle,
     RunContext,
     RunResult,
     _CheckpointFactory,
@@ -350,205 +350,13 @@ class Orchestrator:
         self._canonical_version = canonical_version
         self._span_factory = SpanFactory()
         self._checkpoint_manager = checkpoint_manager
-        self._checkpoint_config = checkpoint_config
         self._clock = clock if clock is not None else DEFAULT_CLOCK
         self._rate_limit_registry = rate_limit_registry
         self._concurrency_config = concurrency_config
         self._coalesce_completed_keys_limit = coalesce_completed_keys_limit
-        self._sequence_number = 0  # Monotonic counter for checkpoint ordering
-        self._current_graph: ExecutionGraph | None = None  # Set during execution for checkpointing
         self._telemetry = telemetry_manager  # Optional, disabled by default
         self._ceremony = RunCeremony(events=self._events, telemetry=self._telemetry)
-
-    def _reset_checkpoint_sequence(self) -> None:
-        """Reset checkpoint ordering for a fresh run."""
-        self._sequence_number = 0
-
-    def _rebase_checkpoint_sequence(self, sequence_number: int) -> None:
-        """Continue checkpoint ordering from a previously persisted checkpoint."""
-        self._sequence_number = sequence_number
-
-    def _maybe_checkpoint(
-        self,
-        run_id: str,
-        token_id: str,
-        node_id: str,
-        aggregation_state: AggregationCheckpointState | None = None,
-        coalesce_state: CoalesceCheckpointState | None = None,
-    ) -> None:
-        """Create checkpoint if configured.
-
-        Called after a token has been durably written to its terminal sink.
-        The checkpoint represents a durable progress marker - recovery can
-        safely skip any row whose token has a checkpoint with a sink node_id.
-
-        IMPORTANT: Checkpoints are created AFTER sink writes, not during
-        the main processing loop. This ensures the checkpoint represents
-        actual durable output, not just processing completion.
-
-        Args:
-            run_id: Current run ID
-            token_id: Token that was just written to sink
-            node_id: Sink node that received the token
-            aggregation_state: Typed aggregation checkpoint state for crash recovery
-            coalesce_state: Typed pending coalesce state for crash recovery
-        """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
-            return
-        if self._checkpoint_manager is None:
-            return
-        if self._current_graph is None:
-            # Should never happen - graph is set during execution
-            raise OrchestrationInvariantError("Cannot create checkpoint: execution graph not available")
-
-        self._sequence_number += 1
-
-        # RuntimeCheckpointConfig.frequency is an int:
-        # - 1 = every_row
-        # - 0 = aggregation_only
-        # - N = every N rows
-        frequency = self._checkpoint_config.frequency
-        should_checkpoint = False
-        if frequency == 0:
-            # aggregation_only: checkpoint unconditionally. In the post-sink
-            # architecture (elspeth-rapid-xtmo), _maybe_checkpoint is only
-            # called from checkpoint_after_sink — i.e., after sink durability.
-            # Aggregation already reduces cardinality (many rows → fewer
-            # aggregated results), so the I/O reduction is inherent.
-            should_checkpoint = True
-        elif frequency == 1:
-            should_checkpoint = True  # every_row
-        elif frequency > 1:
-            should_checkpoint = (self._sequence_number % frequency) == 0  # every_n
-
-        if should_checkpoint:
-            self._checkpoint_manager.create_checkpoint(
-                run_id=run_id,
-                token_id=token_id,
-                node_id=node_id,
-                sequence_number=self._sequence_number,
-                graph=self._current_graph,
-                aggregation_state=aggregation_state,
-                coalesce_state=coalesce_state,
-            )
-
-    def _make_checkpoint_after_sink_factory(
-        self,
-        run_id: str,
-        processor: RowProcessorHandle,
-    ) -> _CheckpointFactory:
-        """Create a per-sink checkpoint callback factory.
-
-        Returns a factory that, given a sink_node_id, produces a callback
-        invoked after each token is durably written to that sink.  Used by
-        both the normal execution path and the resume path.
-        """
-
-        def factory(sink_node_id: str) -> Callable[[TokenInfo], None]:
-            def callback(token: TokenInfo) -> None:
-                agg_state = processor.get_aggregation_checkpoint_state()
-                coalesce_state = processor.get_coalesce_checkpoint_state()
-                self._maybe_checkpoint(
-                    run_id=run_id,
-                    token_id=token.token_id,
-                    node_id=sink_node_id,
-                    aggregation_state=agg_state,
-                    coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
-                )
-
-            return callback
-
-        return factory
-
-    def _checkpoint_interrupted_progress(
-        self,
-        run_id: str,
-        loop_ctx: LoopContext,
-        sink_id_map: Mapping[SinkName, NodeID],
-        source_id: NodeID,
-    ) -> None:
-        """Persist a resumable checkpoint for graceful shutdown.
-
-        Shutdown is an explicit operator action, so it creates a recovery
-        checkpoint even if normal checkpoint frequency would skip this row.
-        This preserves resumability for runs that stop before any sink-token
-        checkpoint has been emitted, especially buffered aggregation/coalesce
-        pipelines that intentionally skip end-of-source flushes on shutdown.
-        """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
-            return
-        if self._checkpoint_manager is None:
-            return
-        if self._current_graph is None:
-            raise OrchestrationInvariantError("Cannot create shutdown checkpoint: execution graph not available")
-
-        aggregation_state = loop_ctx.processor.get_aggregation_checkpoint_state()
-        raw_coalesce = loop_ctx.processor.get_coalesce_checkpoint_state()
-        # Persist coalesce state when it has pending barriers or completed keys
-        # needed for late-arrival detection on resume
-        coalesce_state = raw_coalesce if raw_coalesce is not None and raw_coalesce.has_resumable_state else None
-
-        token_id: str | None = None
-        node_id: str | None = None
-        checkpoint_agg_state: AggregationCheckpointState | None = None
-
-        if aggregation_state.nodes:
-            agg_node_id, agg_node_state = next(iter(aggregation_state.nodes.items()))
-            token_id = agg_node_state.tokens[-1].token_id
-            node_id = agg_node_id
-            checkpoint_agg_state = aggregation_state
-        elif coalesce_state is not None and coalesce_state.pending:
-            pending_entry = coalesce_state.pending[-1]
-            node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
-            if pending_entry.branches:
-                last_branch = list(pending_entry.branches.values())[-1]
-                token_id = last_branch.token_id
-        else:
-            for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
-                if not token_outcome_pairs:
-                    continue
-                token_id = token_outcome_pairs[-1][0].token_id
-                node_id = str(sink_id_map[SinkName(sink_name)])
-                break
-
-        if token_id is None and loop_ctx.last_token_id is not None:
-            token_id = loop_ctx.last_token_id
-            if node_id is None:
-                node_id = str(source_id)
-
-        if token_id is None or node_id is None:
-            slog.warning(
-                "shutdown_checkpoint_skipped",
-                run_id=run_id,
-                reason="no_token_or_node_id_available",
-                has_aggregation_nodes=bool(aggregation_state.nodes),
-                has_coalesce_pending=coalesce_state is not None,
-                has_pending_sink_tokens=any(bool(pairs) for pairs in loop_ctx.pending_tokens.values()),
-                last_token_id=loop_ctx.last_token_id,
-                resolved_token_id=token_id,
-                resolved_node_id=node_id,
-            )
-            return
-
-        self._sequence_number += 1
-        self._checkpoint_manager.create_checkpoint(
-            run_id=run_id,
-            token_id=token_id,
-            node_id=node_id,
-            sequence_number=self._sequence_number,
-            graph=self._current_graph,
-            aggregation_state=checkpoint_agg_state,
-            coalesce_state=coalesce_state,
-        )
-
-    def _delete_checkpoints(self, run_id: str) -> None:
-        """Delete all checkpoints for a run after successful completion.
-
-        Args:
-            run_id: Run to clean up checkpoints for
-        """
-        if self._checkpoint_manager is not None:
-            self._checkpoint_manager.delete_checkpoints(run_id)
+        self._checkpoints = CheckpointCoordinator(checkpoint_manager=checkpoint_manager, checkpoint_config=checkpoint_config)
 
     def _write_pending_to_sinks(
         self,
@@ -1018,7 +826,7 @@ class Orchestrator:
         prepare_for_run()
 
         # Schema validation now happens in ExecutionGraph.validate() during graph construction
-        self._reset_checkpoint_sequence()
+        self._checkpoints.reset_sequence()
 
         # OpenRouter catalog snapshot is mandatory for the audit trail —
         # every run records which model catalog blessed its decisions.
@@ -1102,7 +910,7 @@ class Orchestrator:
 
             # Delete checkpoints on successful completion
             # (checkpoints are for recovery, not needed after success)
-            self._delete_checkpoints(run.run_id)
+            self._checkpoints.delete_checkpoints(run.run_id)
 
             # EXPORT phase - post-run landscape export (if enabled)
             if settings is not None and settings.landscape.export.enabled:
@@ -1538,7 +1346,7 @@ class Orchestrator:
         # state that we intentionally preserved can be checkpointed for resume.
         if interrupted_by_shutdown:
             if shutdown_checkpoint_source_id is not None:
-                self._checkpoint_interrupted_progress(
+                self._checkpoints.checkpoint_interrupted_progress(
                     run_id=run_id,
                     loop_ctx=loop_ctx,
                     sink_id_map=sink_id_map,
@@ -2155,7 +1963,7 @@ class Orchestrator:
         source+process loop, sink writes. Returns RunStatus.RUNNING — the public
         run() wrapper transitions to COMPLETED after finalize_run().
         """
-        self._current_graph = graph
+        self._checkpoints.set_active_graph(graph)
 
         # 1. Register graph nodes and edges
         artifacts = self._register_graph_nodes_and_edges(factory, run_id, config, graph)
@@ -2204,7 +2012,7 @@ class Orchestrator:
                 artifacts.sink_id_map,
                 artifacts.edge_map,
                 loop_result.interrupted,
-                on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
 
@@ -2261,7 +2069,7 @@ class Orchestrator:
         finally:
             cleanup_plugins(config, run_ctx.ctx, include_source=True)
 
-        self._current_graph = None
+        self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
 
     def _reconstruct_resume_state(
@@ -2417,7 +2225,7 @@ class Orchestrator:
         # resume path.
         prepare_for_run()
 
-        self._rebase_checkpoint_sequence(resume_point.sequence_number)
+        self._checkpoints.rebase_sequence(resume_point.sequence_number)
         state = self._reconstruct_resume_state(resume_point, payload_store)
         run_id = state.run_id
         factory = state.factory
@@ -2483,7 +2291,7 @@ class Orchestrator:
                 )
 
                 # Delete checkpoints on successful completion
-                self._delete_checkpoints(run_id)
+                self._checkpoints.delete_checkpoints(run_id)
 
                 return audit_counters.to_run_result(run_id, terminal_status)
 
@@ -2642,7 +2450,7 @@ class Orchestrator:
             )
 
             # 9. Delete checkpoints on successful completion
-            self._delete_checkpoints(run_id)
+            self._checkpoints.delete_checkpoints(run_id)
 
             return result
         except GracefulShutdownError as shutdown_exc:
@@ -2705,7 +2513,7 @@ class Orchestrator:
         # Checkpointing:          Same post-sink + shutdown semantics as run()
         # ─────────────────────────────────────────────────────────────────
 
-        self._current_graph = graph
+        self._checkpoints.set_active_graph(graph)
 
         # 1. Setup (loads graph artifacts from original run's DB records)
         artifacts = setup_resume_context(factory, run_id, config, graph)
@@ -2762,7 +2570,7 @@ class Orchestrator:
                 artifacts.sink_id_map,
                 artifacts.edge_map,
                 interrupted,
-                on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
 
@@ -2780,5 +2588,5 @@ class Orchestrator:
         finally:
             cleanup_plugins(config, run_ctx.ctx, include_source=False)
 
-        self._current_graph = None
+        self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)

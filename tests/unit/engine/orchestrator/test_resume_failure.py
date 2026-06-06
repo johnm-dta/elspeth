@@ -190,7 +190,7 @@ class TestResumeFinalizesAsFailed:
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
             patch.object(orch._ceremony, "emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -307,7 +307,7 @@ class TestResumeFinalizesAsFailed:
             patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
             patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
             patch.object(orch._ceremony, "emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,

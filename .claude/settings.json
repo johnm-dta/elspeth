@@ -1,35 +1,43 @@
 {
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
+  },
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/home/john/.local/bin/filigree ensure-dashboard",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__filigree__.*"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "/home/john/.local/bin/filigree session-context",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
           },
           {
-            "type": "command",
             "command": "/home/john/.local/bin/filigree ensure-dashboard",
-            "timeout": 5000
+            "timeout": 5000,
+            "type": "command"
           }
         ]
-      }
-    ],
-    "PreToolUse": [
+      },
       {
-        "matcher": "mcp__filigree__.*",
         "hooks": [
           {
-            "type": "command",
-            "command": "/home/john/.local/bin/filigree ensure-dashboard",
-            "timeout": 5000
+            "command": "loomweave hook session-start --path '/home/john/elspeth'",
+            "type": "command"
           }
         ]
       }
     ]
-  },
-  "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true
   }
 }

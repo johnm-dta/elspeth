@@ -297,3 +297,13 @@ notes/resign/*
 
 AGENTS.md
 CLAUDE.md
+.loomweave/loomweave.lock
+.agents/skills/loomweave-workflow/.fingerprint
+.agents/skills/loomweave-workflow/SKILL.md
+loomweave.yaml
+wardline.yaml
+.loomweave/.gitignore
+.loomweave/config.json
+.loomweave/instance_id
+.claude/skills/loomweave-workflow/.fingerprint
+.claude/skills/loomweave-workflow/SKILL.md

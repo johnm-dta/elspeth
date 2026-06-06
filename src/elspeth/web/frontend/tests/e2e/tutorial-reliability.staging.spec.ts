@@ -31,6 +31,7 @@ import {
   reachableSourceCount,
   resetToFirstRun,
   cleanSessions,
+  scrapeNodeId,
   startRealRun,
 } from "./helpers/tutorial-harness";
 
@@ -50,17 +51,42 @@ async function acceptAllAssumptions(page: Page): Promise<number> {
   return count;
 }
 
-// Count rows whose any value is a meaningful, non-degenerate string. We do not
-// hard-code the colour field key (it varies with the composed pipeline), so we
-// scan the row's values defensively.
-function substantiveRowCount(rows: Array<Record<string, unknown>>): number {
-  const degenerate = /cannot|unknown|n\/a|none/i;
+// Dimension (d) output-substance (spec §6): count rows that carry a meaningful,
+// non-degenerate value in the LLM-EXTRACTED attribute — NOT in an input column.
+//
+// We do NOT hard-code the colour field key (it varies per composed pipeline).
+// Instead we derive the input columns from the composition source (the keys of
+// the first seeded source row, e.g. {url}) and treat every OTHER key in an
+// output row as a candidate extraction field. We also exclude an obvious `html`
+// key because the prompt strips HTML before the sink. A row is substantive iff
+// at least one such extraction field holds a non-empty, non-degenerate string.
+//
+// The earlier version scanned EVERY value in the row, so any non-degenerate
+// string anywhere (the URL, the agency name) made the row count — it measured
+// "did we get a row" not "did the row carry a real extracted value", and the
+// minSubstantiveRows check never bit. This targets the extraction output.
+const DEGENERATE_VALUE = /cannot|unknown|n\/a|none|no clear|not (?:found|available|determined)/i;
+const KNOWN_INPUT_KEYS = /^(?:url|source|agency|abuse_contact|scraping_reason|html|html_content|raw_html)$/i;
+function substantiveRowCount(
+  rows: Array<Record<string, unknown>>,
+  sourceInputKeys: string[],
+): number {
+  const inputKeys = new Set(sourceInputKeys.map((k) => k.toLowerCase()));
   return rows.filter((row) =>
-    Object.values(row).some(
-      (v) => typeof v === "string" && v.trim().length > 0 && !degenerate.test(v),
-    ),
+    Object.entries(row).some(([key, v]) => {
+      const k = key.toLowerCase();
+      if (inputKeys.has(k) || KNOWN_INPUT_KEYS.test(k)) return false; // not an extraction field
+      return typeof v === "string" && v.trim().length > 0 && !DEGENERATE_VALUE.test(v);
+    }),
   ).length;
 }
+
+// Classify a transport/error string as infra noise vs a composition fault.
+// 5xx / 429 / rate-limit / connection / timeout / DNS / target-down → infra.
+const INFRA_ERROR = /\b5\d\d\b|429|rate.?limit|throttl|timed? ?out|timeout|did not reach terminal|econn|socket hang|network|temporarily unavailable|bad gateway|service unavailable|gateway timeout/i;
+// A dead/wrong URL the composer invented (composition fault, dim d) vs a good
+// URL the network failed to fetch (infra). 404 / DNS / SSL / not found → dim d.
+const UNREACHABLE_URL_ERROR = /\b404\b|not found|name or service|no such host|getaddrinfo|enotfound|ssl|certificate|name resolution/i;
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
   test.setTimeout(420_000); // real compose + tutorial run + real-system re-run can take minutes
@@ -183,45 +209,123 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     const comp = sessionId
       ? await fetchComposition(ctx, sessionId).catch(() => ({
           composer_meta: null,
+          nodes: [],
+          sourceInputKeys: [],
+          raw: null,
         }))
-      : { composer_meta: null };
+      : { composer_meta: null, nodes: [], sourceInputKeys: [], raw: null };
+    const scrapeNode = scrapeNodeId(comp.nodes);
     const diag = tutorialRunId
       ? await fetchDiagnostics(ctx, tutorialRunId).catch(() => ({
           operations: [],
+          tokens: [],
+          failureDetail: null,
         }))
-      : { operations: [] };
+      : { operations: [], tokens: [], failureDetail: null };
+    // Real-run diagnostics give the *why* for a clean terminal `failed` (no thrown
+    // exception): the failure_detail.error_message disambiguates infra (5xx/429/
+    // timeout) from invented-source-unreachable (404/DNS/SSL) from a true
+    // normalization gap. Only fetched when the real run did not pass.
+    const realDiag =
+      realsystemRunId && realStatus !== "completed"
+        ? await fetchDiagnostics(ctx, realsystemRunId).catch(() => ({
+            operations: [],
+            tokens: [],
+            failureDetail: null,
+          }))
+        : { operations: [], tokens: [], failureDetail: null };
 
     const raisedKinds = events.map((e) => e.kind);
     const underFlagged = ASSUMPTION_RUBRIC.expectVerify.filter(
       (k) => !raisedKinds.includes(k),
     );
-    const overFlagged = (
-      ASSUMPTION_RUBRIC.expectWaive as readonly string[]
-    ).filter((k) => raisedKinds.includes(k));
+    // Over-flagging (spec §5): the composer raised an interpretation review whose
+    // semantic TARGET is a value the user stated explicitly (abuse contact /
+    // scraping reason). We match the review's `user_term` against the rubric's
+    // term patterns — NOT the event `kind` (abuse_contact/scraping_reason are
+    // implicit-decision field paths, never InterpretationKind values, so a
+    // kind-comparison can never fire). See prompt-and-rubric.ts.
+    const overFlagged = ASSUMPTION_RUBRIC.overFlagTerms.filter((_label, i) => {
+      const pattern = ASSUMPTION_RUBRIC.overFlagTermPatterns[i];
+      return events.some((e) => typeof e.user_term === "string" && pattern.test(e.user_term));
+    });
     const normalized =
       (comp.composer_meta as Record<string, unknown> | null)
         ?.tutorial_runtime_normalized === true;
-    const reachable = reachableSourceCount(diag.operations);
-    const substantive = substantiveRowCount(outputRows);
+    const reachable = reachableSourceCount(diag.tokens, scrapeNode);
+    const substantive = substantiveRowCount(outputRows, comp.sourceInputKeys);
 
-    // Dimension (b) is authoritative on the real-system re-run terminal status;
-    // the normalization flag remains the annotation/trigger.
+    // Dimension (b) is authoritative on the real-system re-run terminal status.
     const realsystemPassed = realStatus === "completed";
 
-    // Classify (spec §7). Precedence: hard frontend fault → normalization/real-run
-    // divergence (b) → assumption faults (c) → mechanical (d) faults.
+    // Classify (spec §7). Two headline numbers depend on this: tutorial-pass-rate
+    // (driven to 100%) and infra-noise rate (held separate so prompt changes are
+    // not confounded). So infra noise MUST be separated from composition faults.
+    //
+    // Precedence:
+    //   1. infra noise (timeout / 5xx / 429 / scrape-target-down) — excluded from
+    //      the tutorial denominator entirely.
+    //   2. hard frontend fault (an ambiguous UI error / never-advanced turn).
+    //   3. real-run divergence (failed b) — subclass decided by the real run's
+    //      WHY: 404/DNS → invented-source-unreachable (d), 5xx/429/timeout →
+    //      infra, template-with-normalization → normalization-gap.
+    //   4. assumption faults (c).
+    //   5. mechanical solution-quality (d) — checked AFTER a/b/c so a single
+    //      metric cannot zero the headline rate.
+    //
+    // `normalized` is an ANNOTATION ONLY (recorded in landscape.normalization_fired).
+    // It is NOT a classification trigger: the tutorial path ALWAYS normalizes
+    // (spec §10), so triggering on it would brand every run normalization-gap even
+    // when the real system passed.
+    const realFailureWhy =
+      realDiag.failureDetail?.error_message ??
+      (realStatus && realStatus.startsWith("error:") ? realStatus : "");
+    const hardErrorIsInfra = hardError !== null && INFRA_ERROR.test(hardError);
+
     let outcome: RunRecord["outcome"] = "pass";
     let sub: FaultSubclass = null;
     let fix: string | null = null;
-    if (hardError) {
+    if (hardErrorIsInfra) {
+      // A transport timeout / 5xx / 429 thrown during the UI or re-run flow.
+      outcome = "infra_fault";
+      sub = /did not reach terminal|timed? ?out|timeout/i.test(hardError ?? "")
+        ? "timeout"
+        : /\b5\d\d\b|bad gateway|service unavailable|gateway timeout/i.test(hardError ?? "")
+          ? "llm-5xx-or-ratelimit"
+          : "staging-hiccup";
+      fix = null;
+    } else if (hardError) {
+      // An ambiguous UI error / a turn that never advanced — a genuine frontend
+      // fault, which is exactly what this harness exists to catch. Default here
+      // (do NOT route ambiguous UI errors into infra, which would deflate signal).
       outcome = "tutorial_fault";
       sub = "frontend-state-machine";
       fix = "frontend / timing";
-    } else if (normalized || !realsystemPassed) {
-      // passed (a) but failed (b): the "tutorial lies" class.
-      outcome = "tutorial_fault";
-      sub = "normalization-gap";
-      fix = "engine: tutorial normalization parity";
+    } else if (graduated && !realsystemPassed) {
+      // Passed (a) but failed (b). Decide infra vs composition vs normalization
+      // from the real run's failure reason — NOT a flat normalization-gap.
+      if (INFRA_ERROR.test(realFailureWhy)) {
+        outcome = "infra_fault";
+        sub = /timed? ?out|timeout|did not reach terminal/i.test(realFailureWhy)
+          ? "timeout"
+          : /\b5\d\d\b|bad gateway|service unavailable|gateway timeout|rate.?limit|429|throttl/i.test(
+                realFailureWhy,
+              )
+            ? "llm-5xx-or-ratelimit"
+            : "staging-hiccup";
+        fix = null;
+      } else if (UNREACHABLE_URL_ERROR.test(realFailureWhy)) {
+        // A good network but a dead/wrong URL the composer invented → dim (d).
+        outcome = "tutorial_fault";
+        sub = "invented-source-unreachable";
+        fix = "composer-skill-prompt: generated-source discipline";
+      } else {
+        // The real system failed on the composer's own output where the tutorial
+        // passed: the "tutorial lies" / normalization-fidelity class (spec §10).
+        outcome = "tutorial_fault";
+        sub = "normalization-gap";
+        fix = "engine: tutorial normalization parity";
+      }
     } else if (underFlagged.length) {
       outcome = "tutorial_fault";
       sub = "assumption-under-flag";
@@ -231,6 +335,10 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
       sub = "assumption-over-flag";
       fix = "composer-skill-prompt: pipeline_composer.md review rules";
     } else if (reachable < JUDGE_RUBRIC.minReachableSources) {
+      // d-mechanical: a scrape node-state failed for one of the invented URLs but
+      // the run still completed (e.g. the row diverted). On a real network this is
+      // the composer picking a bad URL; transient fetch failures surface as infra
+      // above via the real-run why-signal.
       outcome = "tutorial_fault";
       sub = "invented-source-unreachable";
       fix = "composer-skill-prompt: generated-source discipline";

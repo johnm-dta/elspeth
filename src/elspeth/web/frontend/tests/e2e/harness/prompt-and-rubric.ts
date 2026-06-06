@@ -18,12 +18,30 @@ export const FIXED_PROMPT =
 // backend enum (kind field on InterpretationEventResponse).
 export const ASSUMPTION_RUBRIC = {
   // Composer invented the 5 URLs and the subjective colour criterion → verify.
+  // These are InterpretationKind values (the `kind` field on an interpretation
+  // event): contracts/composer_interpretation.py enum =
+  // vague_term | invented_source | llm_prompt_template | pipeline_decision | llm_model_choice.
   expectVerify: ["invented_source", "vague_term"] as const,
   // The composer MAY also stage a prompt-template review for the LLM node; this
   // is acceptable-but-not-required, so it is neither under- nor over-flagging.
   allowOptional: ["llm_prompt_template"] as const,
-  // Explicit values the user stated → must NOT be raised for review.
-  expectWaive: ["abuse_contact", "scraping_reason"] as const,
+  // Over-flagging (spec §5): the composer raised a review on a value the USER
+  // STATED EXPLICITLY (the abuse contact + the scraping reason in FIXED_PROMPT).
+  //
+  // IMPORTANT — these are NOT InterpretationKind values. "abuse_contact" and
+  // "scraping_reason" are web_scrape.http field paths surfaced through the
+  // implicit-decisions mechanism (composer_meta.implicit_decisions), a DIFFERENT
+  // surface from interpretation events. The earlier rubric compared these
+  // strings against interpretation-event `kind`, which can NEVER match, so the
+  // over-flag check was dead.
+  //
+  // The correct over-flag signal is: did the composer raise an interpretation
+  // review whose semantic TARGET is one of these explicitly-stated values?
+  // We detect that by matching the review's `user_term` (LLM phrasing varies, so
+  // we match on substrings/synonyms, not exact kind). `overFlagTermPatterns`
+  // drives that match in the spec classifier.
+  overFlagTerms: ["abuse_contact", "scraping_reason"] as const,
+  overFlagTermPatterns: [/abuse|contact|noreply|email/i, /scrap\w*\s*reason|reason|purpose|demonstration/i] as const,
 };
 
 // Dimension (d): the judge rubric the agent applies to recorded output rows.

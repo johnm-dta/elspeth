@@ -60,7 +60,12 @@ from elspeth.web.sessions.models import (
 )
 from elspeth.web.sessions.protocol import CompositionStateData, CompositionStateRecord
 from elspeth.web.sessions.schema import initialize_session_schema
-from elspeth.web.sessions.service import SessionServiceImpl, _interpretation_event_record_from_row, _patch_llm_transform_prompt
+from elspeth.web.sessions.service import (
+    InterpretationPlaceholderConsumedError,
+    SessionServiceImpl,
+    _interpretation_event_record_from_row,
+    _patch_llm_transform_prompt,
+)
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +184,78 @@ def _structured_llm_node(
                             "accepted_value": None,
                             "resolved_prompt_template_hash": None,
                         }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+def _vague_term_and_prompt_template_node(
+    *,
+    node_id: str = "llm_transform_1",
+    vague_term: str = "cool",
+) -> dict:
+    """Structured LLM node carrying BOTH a pending vague_term slot AND a pending
+    whole-prompt llm_prompt_template review — the real Turn-2b shape the composer
+    stages when the prompt text references a vague term.
+
+    Reproduces the cross-review dependency behind elspeth-e51216d305: resolving
+    the vague_term rewrites the rendered ``prompt_template`` while the
+    prompt-template review's ``llm_draft`` stays frozen at the surfacing render.
+    The prompt-template review approves the prompt SKELETON (text + slot ids),
+    which is invariant under vague-term resolution, so it must still resolve.
+    """
+    rendered = "Rate pending interpretation this is."
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="input",
+                on_success="out",
+                on_error="quarantine",
+                options={
+                    "prompt_template": rendered,
+                    PROMPT_TEMPLATE_PARTS_KEY: [
+                        {"kind": "text", "text": "Rate "},
+                        {"kind": "interpretation_ref", "requirement_id": vague_term},
+                        {"kind": "text", "text": " this is."},
+                    ],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": vague_term,
+                            "user_term": vague_term,
+                            "status": "pending",
+                            "draft": "A draft of cool",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "resolved_prompt_template_hash": None,
+                        },
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": f"llm_prompt_template:{node_id}",
+                            "status": "pending",
+                            "draft": rendered,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        },
                     ],
                 },
                 condition=None,
@@ -1055,6 +1132,161 @@ async def test_07_resolve_raises_when_placeholder_absent(service) -> None:
     assert row.choice == "pending"
     assert row.accepted_value is None
     assert len(states) == 1, "resolve must short-circuit before writing a new state"
+
+
+@pytest.mark.asyncio
+async def test_resolve_prompt_template_review_survives_sibling_vague_term_bake(service) -> None:
+    """Regression for elspeth-e51216d305.
+
+    A node can carry both a pending ``vague_term`` and a pending
+    ``llm_prompt_template`` review. Resolving the vague_term FIRST rewrites the
+    rendered ``prompt_template``. The prompt-template review approves the prompt
+    SKELETON, which ``prompt_structure_hash`` makes invariant under vague-term
+    resolution — so accepting it afterward MUST still succeed. Before the fix it
+    raised ``InterpretationPlaceholderConsumedError`` (mapped to a 422 "Stale
+    review"), bricking the only remaining review card and stalling Turn 2b.
+    """
+    session_id = uuid4()
+    rendered = "Rate pending interpretation this is."
+    state = await _seed_state_with_llm_node(
+        service,
+        session_id=session_id,
+        node=_vague_term_and_prompt_template_node(),
+    )
+
+    vague_event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_vague",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="Innovative and creative",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    prompt_event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_prompt_template",
+        user_term="llm_prompt_template:llm_transform_1",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=rendered,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    # Resolve the vague_term first — this rewrites options.prompt_template.
+    _resolved_vague, baked_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=vague_event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier=None,
+        runtime_model_version=None,
+    )
+    baked_node = next(n for n in baked_state.nodes if n["id"] == "llm_transform_1")
+    assert baked_node["options"]["prompt_template"] == "Rate Innovative and creative this is."
+
+    # The prompt-template review's frozen draft now differs from the rendered
+    # text, but the skeleton is unchanged — accepting it must succeed.
+    resolved_prompt, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=prompt_event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier=None,
+        runtime_model_version=None,
+    )
+
+    assert resolved_prompt.choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
+    assert resolved_prompt.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    # No audit-semantic divergence: accept-as-drafted records the frozen
+    # surfacing draft as accepted_value — identical to what the
+    # prompt-template-first resolution order has always recorded (that order
+    # also resolves with accepted_value == llm_draft == surfacing render). The
+    # fix only lets the vague-term-first order reach the same record.
+    assert resolved_prompt.accepted_value == rendered
+    # The vague-term substitution survives (the prompt-template resolve only
+    # stamps review metadata; it must not clobber the baked prompt).
+    final_node = next(n for n in new_state.nodes if n["id"] == "llm_transform_1")
+    assert final_node["options"]["prompt_template"] == "Rate Innovative and creative this is."
+    reqs = final_node["options"][INTERPRETATION_REQUIREMENTS_KEY]
+    pt_req = next(r for r in reqs if r["id"] == "prompt_template_review")
+    assert pt_req["status"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_resolve_prompt_template_review_still_rejects_genuine_skeleton_edit(service) -> None:
+    """The relaxed gate must still reject a GENUINE structural edit.
+
+    Loosening the acceptance gate from rendered-text equality to skeleton
+    equality must not blind it to a real change in the LLM-authored prompt
+    structure (a re-pointed slot or edited fixed text). Here the live node's
+    prompt parts no longer match the surfacing skeleton the user reviewed, so
+    accepting the stale prompt-template review must still raise.
+    """
+    session_id = uuid4()
+    rendered = "Rate pending interpretation this is."
+    state = await _seed_state_with_llm_node(
+        service,
+        session_id=session_id,
+        node=_vague_term_and_prompt_template_node(),
+    )
+    prompt_event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_prompt_template",
+        user_term="llm_prompt_template:llm_transform_1",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=rendered,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    # Genuine structural edit: replace the node with a different prompt skeleton
+    # (extra fixed text) at a new live version, simulating a real prompt edit
+    # between surfacing and resolve.
+    edited_node = _vague_term_and_prompt_template_node()
+    edited_node["options"]["prompt_template"] = "Rate pending interpretation this is. EXTRA."
+    edited_node["options"][PROMPT_TEMPLATE_PARTS_KEY] = [
+        {"kind": "text", "text": "Rate "},
+        {"kind": "interpretation_ref", "requirement_id": "cool"},
+        {"kind": "text", "text": " this is. EXTRA."},
+    ]
+    await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=[edited_node],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    with pytest.raises(
+        InterpretationPlaceholderConsumedError,
+        match=r"skeleton no longer matches",
+    ):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=prompt_event.id,
+            choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+            amended_value=None,
+            actor="user:alice",
+            runtime_model_identifier=None,
+            runtime_model_version=None,
+        )
 
 
 # --------------------------------------------------------------------------- #

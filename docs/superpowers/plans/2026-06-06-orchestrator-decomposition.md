@@ -25,6 +25,8 @@ uv pip install -e . --python .venv-wt/bin/python
 ```
 Use `.venv-wt/bin/python -m pytest …` for all test runs below. (Python 3.13 is also required for the tier-model gate per project convention.)
 
+**MANDATORY env prefix for ALL test commands:** `env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 .venv-wt/bin/python -m pytest …`. The interactive shell has `VIRTUAL_ENV` pointing at main's `.venv`; the suite runs under `pytest-xdist` (parallel workers) which inherit that stale pointer and load a second numpy C-extension → `ImportError: cannot load module more than once per process`. Clearing `VIRTUAL_ENV` fixes it. (The commands below omit the prefix for brevity — always add it.)
+
 **Verification ladder (run in this order each phase):**
 - Focused: `.venv-wt/bin/python -m pytest tests/unit/engine/orchestrator tests/integration/pipeline/orchestrator -q`
 - Resume-critical (phases touching resume/checkpoint): `.venv-wt/bin/python -m pytest tests/integration/test_adr_019_resume_counter_parity.py tests/integration/test_adr_019_sweep_durability.py tests/integration/test_adr_019_cross_table_invariants.py tests/unit/engine/orchestrator/test_resume_failure.py -q`
@@ -67,6 +69,16 @@ the line ranges in Phases 1–4), the verbatim-move discipline is the *only* saf
 uncovered line in `maybe_checkpoint`/`_run_main_processing_loop`/`resume`/`_process_resumed_rows`
 (the highest-stakes moves) and add a targeted characterization test in Task 0.2 Step 3 before that
 method is moved. "Green suite" blesses only covered paths; this step tells you where green is silent.
+
+> **ENV LIMITATION (2026-06-06):** coverage cannot run in this worktree venv — numpy 2.4.6's
+> C-extension single-init guard raises `ImportError: cannot load module more than once per process`
+> under coverage's import machinery (reproduced with pytest-cov, `coverage run`, xdist on AND off,
+> `COVERAGE_CORE=sysmon`). The no-cov gate is unaffected (359 focused tests pass clean). Coverage map
+> is therefore SKIPPED; per the advisor it is non-blocking. Compensating control: the two highest-stakes
+> uncovered-behavior risks were hand-identified instead — (a) `make_checkpoint_after_sink_factory`
+> late graph-binding (confirmed at core.py:618, mitigated by the `set_active_graph` relocation in
+> Phase 2) and (b) the injected-failure monkeypatch seams (negative-control check in the reviewer gate).
+> The **verbatim-diff reviewer gate is the primary net for uncovered lines.**
 
 - [ ] **Step 4: Commit the baseline + coverage note** (if recorded; otherwise skip)
 

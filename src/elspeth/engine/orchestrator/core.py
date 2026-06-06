@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -30,10 +30,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 if TYPE_CHECKING:
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.payload_store import PayloadStore
-    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.events import EventBusProtocol
     from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
 
@@ -41,7 +38,6 @@ import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth.contracts import (
     ExportStatus,
     RunStatus,
-    SchemaContract,
     SecretResolutionInput,
     SinkProtocol,
 )
@@ -69,7 +65,6 @@ from elspeth.contracts.events import (
     RunSummary,
 )
 from elspeth.contracts.run_result import derive_terminal_run_status
-from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.tier_registry import freeze_tier_registry
 from elspeth.contracts.types import (
     AggregationName,
@@ -78,35 +73,25 @@ from elspeth.contracts.types import (
     NodeID,
     SinkName,
 )
-from elspeth.core.canonical import canonical_json
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 
 # Import module functions from orchestrator submodules
-from elspeth.engine.orchestrator.aggregation import (
-    handle_incomplete_batches,
-    rebind_checkpoint_batch_ids,
-)
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import (
     export_landscape,
-    reconstruct_schema_from_json,
 )
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
 )
-from elspeth.engine.orchestrator.resume import (
-    run_resume_processing_loop,
-    setup_resume_context,
-)
+from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.run_status import (
     cli_completion_for,
-    derive_resume_terminal_status_from_audit,
 )
 from elspeth.engine.orchestrator.runtime_preflight import run_transform_runtime_preflights
 from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
@@ -116,7 +101,6 @@ from elspeth.engine.orchestrator.types import (
     GraphArtifacts,
     LoopContext,
     PipelineConfig,
-    ResumeState,
     RunResult,
 )
 from elspeth.engine.orchestrator.validation import (
@@ -327,6 +311,14 @@ class Orchestrator:
             rate_limit_registry=self._rate_limit_registry,
             coalesce_completed_keys_limit=self._coalesce_completed_keys_limit,
             telemetry=self._telemetry,
+        )
+        self._resume_coordinator = ResumeCoordinator(
+            db=self._db,
+            events=self._events,
+            ceremony=self._ceremony,
+            checkpoints=self._checkpoints,
+            run_core=self._run_core,
+            checkpoint_manager=self._checkpoint_manager,
         )
 
     def _initialize_database_phase(
@@ -1015,120 +1007,6 @@ class Orchestrator:
         self._checkpoints.set_active_graph(None)
         return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)
 
-    def _reconstruct_resume_state(
-        self,
-        resume_point: ResumePoint,
-        payload_store: PayloadStore,
-    ) -> ResumeState:
-        """Reconstruct state needed to process resumed rows.
-
-        Creates a fresh factory, handles incomplete batches, restores aggregation state,
-        deserializes the source schema for type fidelity, validates the schema contract,
-        and retrieves unprocessed rows from the payload store.
-
-        Args:
-            resume_point: ResumePoint from RecoveryManager.get_resume_point()
-            payload_store: PayloadStore for retrieving row data
-
-        Returns:
-            ResumeState with all reconstruction results.
-
-        Raises:
-            ValueError: If checkpoint_manager is not initialized.
-            OrchestrationInvariantError: If schema contract is missing from audit trail.
-        """
-        run_id = resume_point.checkpoint.run_id
-
-        # Create fresh factory (stateless, like run())
-        # Pass payload_store for external call payload persistence
-        factory = RecorderFactory(self._db, payload_store=payload_store)
-
-        # 1. Handle incomplete batches - call module function directly
-        batch_id_mapping = handle_incomplete_batches(factory.execution, run_id)
-
-        # 2. Update run status to running
-        factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
-
-        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches
-        restored_state: dict[str, AggregationCheckpointState] = {}
-        if resume_point.aggregation_state is not None:
-            rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
-            restored_state[resume_point.node_id] = rebound_state
-        restored_coalesce_state = resume_point.coalesce_state
-
-        # 4. Get unprocessed row data from payload store
-        from elspeth.core.checkpoint import RecoveryManager
-
-        if self._checkpoint_manager is None:
-            raise OrchestrationInvariantError(
-                "CheckpointManager is required for resume - Orchestrator must be initialized with checkpoint_manager"
-            )
-        recovery = RecoveryManager(self._db, self._checkpoint_manager)
-
-        # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
-        # Resume must use the ORIGINAL run's schema, not the current source's schema
-        # This enables proper type coercion (datetime/Decimal) from JSON payload strings
-        source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
-
-        # Deserialize schema and recreate Pydantic model class with full type fidelity
-        # Call module function directly (no wrapper method)
-        schema_dict = json.loads(source_schema_json)
-        source_schema_class = reconstruct_schema_from_json(schema_dict)
-
-        # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
-        # During resume, we need to wrap plain dicts in PipelineRow with contract
-        # This ensures type fidelity and maintains the same data structures as main run
-        schema_contract = factory.run_lifecycle.get_run_contract(run_id)
-        if schema_contract is None:
-            # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
-            # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-            # Inferring a contract from row data would:
-            # 1. Mask missing/corrupt audit data (evidence tampering)
-            # 2. Produce incomplete contracts (fields appearing later are omitted)
-            # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
-            raise OrchestrationInvariantError(
-                f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
-                f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete\n"
-                f"  2. The run was started with a version that didn't record contracts\n"
-                f"Resume cannot proceed safely without the schema contract. "
-                f"The audit trail must be complete and trustworthy."
-            )
-
-        # Resume replays persisted PipelineRow payloads through NullSource rather
-        # than re-opening the original source plugin, so source-boundary evidence
-        # is inherited from the original run. That is only sound if the current
-        # declaration-contract and Tier-1 registries still exactly match the
-        # manifest captured at original run start.
-        recorded_runtime_val_manifest = factory.run_lifecycle.get_runtime_val_manifest(run_id)
-        current_runtime_val_manifest = canonical_json(build_runtime_val_manifest())
-        if current_runtime_val_manifest != recorded_runtime_val_manifest:
-            raise OrchestrationInvariantError(
-                f"Cannot resume run '{run_id}': runtime VAL manifest drift detected. "
-                "The current contract registry no longer matches the registry "
-                "captured in the original run header, so inherited source-boundary "
-                "evidence is no longer trustworthy. Resume requires identical "
-                "declaration-contract and Tier-1 registries."
-            )
-
-        unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
-
-        # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
-        # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
-        # whole-row restart (which would re-emit already-completed branches).
-        incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
-
-        return ResumeState(
-            factory=factory,
-            run_id=run_id,
-            restored_aggregation_state=restored_state,
-            restored_coalesce_state=restored_coalesce_state,
-            unprocessed_rows=unprocessed_rows,
-            schema_contract=schema_contract,
-            incomplete_by_row=incomplete_by_row,
-            recovery_manager=recovery,
-        )
-
     def resume(
         self,
         resume_point: ResumePoint,
@@ -1141,395 +1019,15 @@ class Orchestrator:
     ) -> RunResult:
         """Resume a failed run from a checkpoint.
 
-        STATELESS: Like run(), creates fresh factory and processor internally.
-        This mirrors the reality that recovery happens in a new process.
-
-        Args:
-            resume_point: ResumePoint from RecoveryManager.get_resume_point()
-            config: Same PipelineConfig used for original run()
-            graph: Same ExecutionGraph used for original run()
-            payload_store: PayloadStore for retrieving row data (required)
-            settings: Full settings (optional, for retry config etc.)
-
-        Returns:
-            RunResult with recovery outcome
-
-        Raises:
-            ValueError: If payload_store is not provided
+        Delegates to :class:`ResumeCoordinator`, which owns the resume-path
+        orchestration extracted from this class. The public signature is the
+        stable contract; the implementation lives in resume.py.
         """
-        if payload_store is None:
-            raise OrchestrationInvariantError("payload_store is required for resume - row data must be retrieved from stored payloads")
-
-        # ADR-010 §Decision 3: freeze both registries at bootstrap, mirroring
-        # run(). Recovery happens in a new process — the module import chain
-        # registers PassThroughDeclarationContract, but without this call the
-        # registries are never frozen, leaving a window where
-        # register_declaration_contract() could succeed post-bootstrap on the
-        # resume path.
-        prepare_for_run()
-
-        self._checkpoints.rebase_sequence(resume_point.sequence_number)
-        state = self._reconstruct_resume_state(resume_point, payload_store)
-        run_id = state.run_id
-        factory = state.factory
-        restored_state = state.restored_aggregation_state
-        restored_coalesce_state = state.restored_coalesce_state
-        if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
-            restored_coalesce_state = None
-        schema_contract = state.schema_contract
-        unprocessed_rows = state.unprocessed_rows
-        # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
-        incomplete_by_row = state.incomplete_by_row
-        recovery_manager = state.recovery_manager
-        resume_checkpoint_id = resume_point.checkpoint.checkpoint_id
-        resume_start_time = time.perf_counter()
-
-        # 5. Process unprocessed rows (with graceful shutdown support)
-
-        # When shutdown_event is provided (testing), skip signal handler
-        # installation and use the caller's event directly.
-        shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else shutdown_handler_context()
-
-        try:
-            if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
-                factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
-
-                # All rows were processed - complete the run.
-                #
-                # Phase 2.2 (elspeth-0de989c56d): the resume's local counters
-                # are 0 here because nothing was reprocessed, but the audit DB
-                # carries the truth.  Aggregate token_outcomes to derive the
-                # correct four-value terminal status and feed it to both the
-                # Landscape finalize and the local RunResult.
-                terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-                factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
-
-                # Emit RunFinished telemetry (matching the normal completion path)
-                self._ceremony.emit_telemetry(
-                    RunFinished(
-                        timestamp=datetime.now(UTC),
-                        run_id=run_id,
-                        status=terminal_status,
-                        row_count=audit_counters.rows_processed,
-                        duration_ms=0.0,
-                    )
-                )
-
-                # Emit RunSummary event
-                cli_status, exit_code = cli_completion_for(terminal_status)
-                self._events.emit(
-                    RunSummary(
-                        run_id=run_id,
-                        status=cli_status,
-                        total_rows=audit_counters.rows_processed,
-                        succeeded=audit_counters.rows_succeeded,
-                        failed=audit_counters.rows_failed,
-                        quarantined=audit_counters.rows_quarantined,
-                        duration_seconds=0.0,
-                        exit_code=exit_code,
-                        routed_success=audit_counters.rows_routed_success,
-                        routed_failure=audit_counters.rows_routed_failure,
-                        routed_destinations=tuple(audit_counters.routed_destinations.items()),
-                    )
-                )
-
-                # Delete checkpoints on successful completion
-                self._checkpoints.delete_checkpoints(run_id)
-
-                return audit_counters.to_run_result(run_id, terminal_status)
-
-            with shutdown_ctx as active_event:
-                result = self._process_resumed_rows(
-                    factory=factory,
-                    run_id=run_id,
-                    config=config,
-                    graph=graph,
-                    unprocessed_rows=unprocessed_rows,
-                    restored_aggregation_state=restored_state,
-                    restored_coalesce_state=restored_coalesce_state,
-                    settings=settings,
-                    payload_store=payload_store,
-                    schema_contract=schema_contract,
-                    incomplete_by_row=incomplete_by_row,
-                    recovery_manager=recovery_manager,
-                    resume_checkpoint_id=resume_checkpoint_id,
-                    shutdown_event=active_event,
-                )
-
-            # 6. Complete the run with reproducibility grade
-            # SUCCESS PATH: Must be inside try block so RunFinished is emitted
-            # BEFORE the finally block flushes telemetry to exporters.
-            # Fix: elspeth-rapid-sg0q — previously this was after the finally block,
-            # meaning RunFinished was emitted after telemetry flush (never exported).
-            #
-            # F2 (resume-fork-reemit) — UNIFY both resume branches on the audit
-            # trail.  This with-unprocessed-rows branch previously derived its
-            # terminal status + counters from the resume loop's *local* counters
-            # (only what THIS resume call reprocessed), so a resumed run's
-            # RunResult disagreed field-for-field with an uninterrupted run
-            # (e.g. a resumed 1-row 2-branch fork reported rows_succeeded=1,
-            # rows_forked=0 instead of the cumulative 2, 1) — while the
-            # no-unprocessed-rows branch already reconstructed cumulative
-            # counters from token_outcomes.  Both branches now finalize from the
-            # SAME audit-derived cumulative (status, counters).
-            #
-            # ORDERING: this runs AFTER _process_resumed_rows returned, i.e.
-            # after run_resume_processing_loop's end-of-source aggregation /
-            # coalesce flushes, after _flush_and_write_sinks recorded sink
-            # diversions, and after sweep_deferred_invariants_or_crash — so every
-            # outcome this resume wrote is committed and visible to the derive
-            # query.  Deriving before those flushes commit would undercount.
-            # The status returned here is computed from the audit-only counters
-            # (rows_coalesce_failed == 0, see graft below); it is intentionally
-            # discarded and RECOMPUTED post-graft so terminal_status stays a pure
-            # function of the FINAL reconciled counters — the same set the
-            # uninterrupted path derives from. This is correctness-by-symmetry,
-            # NOT crash-prevention: a coalesce failure always co-increments
-            # rows_failed (outcomes.py flush_coalesce_pending does both, and the
-            # consumed branches land in audit as UNROUTED), so derive's audit-only
-            # rows_failed is already > 0 → failure_indicator already True → the
-            # pre-graft status is already COMPLETED_WITH_FAILURES, never COMPLETED.
-            # So grafting rows_coalesce_failed does not flip the status in any
-            # real flow and the RunResult biconditional's COMPLETED+failure arm
-            # cannot fire here. Recomputing is still the honest, future-proof
-            # construction (status derived from the same final counters as the
-            # uninterrupted path) and guards against a future counter whose graft
-            # WOULD be status-bearing.
-            _audit_only_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-
-            # F2 — per-field "best available source" graft.
-            #
-            # Each counter field is taken from its best available source. For
-            # the 11 fields the audit trail records per-token, that source is
-            # derive_resume_terminal_status_from_audit (cumulative, queryable
-            # from token_outcomes). rows_coalesce_failed is the LONE field the
-            # audit trail does NOT record: a failed coalesce records per-branch
-            # FAILURE/UNROUTED outcomes (so rows_failed reconstructs) but the
-            # coalesce-operation roll-up is emitted to TELEMETRY ONLY
-            # (outcomes.py flush_coalesce_pending → _emit_failed_coalesce_telemetry;
-            # there is no queryable token_outcomes signal for it). derive()
-            # therefore has no match arm for it and returns 0. For the with-rows
-            # branch its best source is the live re-drive counter captured by
-            # flush_coalesce_pending into the resume loop's `result`, so graft it
-            # back over the audit-derived 0.
-            #
-            # NOTE (scope + reachability): this recovers only coalesce failures
-            # that occurred DURING THIS RESUME's re-drive. Coalesce failures from
-            # run-1 (before the interrupt) were live-counter-only — never
-            # persisted as a queryable signal — and are unrecoverable here.
-            # Making rows_coalesce_failed reconstructable cumulatively (incl.
-            # run-1) is a schema/epoch change tracked as an operator follow-up;
-            # the no-rows branch already ships the 0 for the same structural
-            # reason.
-            #
-            # This graft is a LIVE REGRESSION FIX, not future-proofing. The
-            # during-re-drive coalesce failure is CONFIRMED reachable: the resume
-            # loop calls handle_coalesce_timeouts → CoalesceExecutor.check_timeouts
-            # PER-ROW (resume.py:268-276), and a coalesce that times out before
-            # quorum during re-drive increments rows_coalesce_failed
-            # (outcomes.py:447/462, "quorum_not_met_at_timeout") in the live
-            # `result`. Pre-F2 that count was reported; F2 (pre-graft) discarded it
-            # by replacing `result` with audit-derived counters; this graft
-            # restores it. End-to-end regression test (with observed removed-graft
-            # red / restored-graft green):
-            # test_adr_019_resume_counter_parity.py::
-            #   test_resume_grafts_rows_coalesce_failed_from_timeout_redrive.
-            #
-            # The other increment site — flush_pending (end-of-source,
-            # "incomplete_branches") — does NOT produce a during-re-drive failure
-            # in deterministic flows (lost branches fail immediately via
-            # notify_branch_lost without touching this counter; buffered branches
-            # are restored-to-completion by restore_from_checkpoint; an unproduced
-            # coalesce branch is DAG-rejected), so on that path the graft copies
-            # 0-over-0 and is a no-op. The timeout path is where it earns its keep.
-            audit_counters.rows_coalesce_failed = result.rows_coalesce_failed
-
-            # Recompute terminal_status from the final reconciled counters (now
-            # carrying the grafted rows_coalesce_failed) via the pure L0 function
-            # — NOT by re-calling derive_resume_terminal_status_from_audit, which
-            # would re-query token_outcomes and silently re-zero the graft.
-            terminal_status = derive_terminal_run_status(
-                rows_processed=audit_counters.rows_processed,
-                rows_succeeded=audit_counters.rows_succeeded,
-                rows_failed=audit_counters.rows_failed,
-                rows_routed_success=audit_counters.rows_routed_success,
-                rows_routed_failure=audit_counters.rows_routed_failure,
-                rows_quarantined=audit_counters.rows_quarantined,
-                rows_coalesce_failed=audit_counters.rows_coalesce_failed,
-            )
-
-            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
-            result = audit_counters.to_run_result(run_id, terminal_status)
-
-            # 7. Emit RunFinished telemetry
-            resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
-            self._ceremony.emit_telemetry(
-                RunFinished(
-                    timestamp=datetime.now(UTC),
-                    run_id=run_id,
-                    status=terminal_status,
-                    row_count=result.rows_processed,
-                    duration_ms=resume_duration_ms,
-                )
-            )
-
-            # 8. Emit RunSummary event
-            cli_status, exit_code = cli_completion_for(terminal_status)
-            total_duration = time.perf_counter() - resume_start_time
-            self._events.emit(
-                RunSummary(
-                    run_id=run_id,
-                    status=cli_status,
-                    total_rows=result.rows_processed,
-                    succeeded=result.rows_succeeded,
-                    failed=result.rows_failed,
-                    quarantined=result.rows_quarantined,
-                    duration_seconds=total_duration,
-                    exit_code=exit_code,
-                    routed_success=result.rows_routed_success,
-                    routed_failure=result.rows_routed_failure,
-                    routed_destinations=tuple(result.routed_destinations.items()),
-                )
-            )
-
-            # 9. Delete checkpoints on successful completion
-            self._checkpoints.delete_checkpoints(run_id)
-
-            return result
-        except GracefulShutdownError as shutdown_exc:
-            with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
-                self._ceremony.emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
-            raise  # Propagate to CLI
-        except _RunFailedWithPartialResultError as failed_exc:
-            with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
-                self._ceremony.emit_failed_ceremony(
-                    run_id,
-                    factory,
-                    resume_start_time,
-                    failed_exc.partial_result,
-                )
-            raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
-        except Exception:
-            # Finalize as FAILED to prevent the run from being stuck in RUNNING
-            # permanently (which blocks future resume attempts). The outer broad-except
-            # is justified — any unhandled exception during resume needs ceremony.
-            with best_effort("Generic failure ceremony on resume", run_id=run_id):
-                self._ceremony.emit_failed_ceremony(run_id, factory, resume_start_time)
-            raise
-        finally:
-            self._ceremony.safe_flush_telemetry()
-
-    def _process_resumed_rows(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        config: PipelineConfig,
-        graph: ExecutionGraph,
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]],
-        restored_aggregation_state: Mapping[str, AggregationCheckpointState],
-        restored_coalesce_state: CoalesceCheckpointState | None,
-        settings: ElspethSettings | None = None,
-        *,
-        payload_store: PayloadStore,
-        schema_contract: SchemaContract,
-        incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
-        recovery_manager: RecoveryManager,
-        resume_checkpoint_id: str,
-        shutdown_event: threading.Event | None = None,
-    ) -> RunResult:
-        """Process unprocessed rows during resume.
-
-        Mirrors _execute_run() structure but with resume-specific divergences
-        documented in the accounting block below. Returns RunStatus.RUNNING —
-        the public resume() wrapper transitions to COMPLETED after finalize_run().
-        """
-        # ─────────────────────────────────────────────────────────────────
-        # Divergence accounting: _process_resumed_rows vs _execute_run
-        #
-        # Source on_start():       Skipped (include_source_on_start=False)
-        # Graph registration:     Loads from DB (setup_resume_context)
-        # Quarantine routing:     Not applicable (rows already validated)
-        # Field resolution:       Skipped (loaded from DB in original run)
-        # Schema contract:        Skipped (passed via parameter)
-        # operation_id lifecycle: Not applicable (no source track_operation)
-        # Progress emission:      None (known gap — T24 follow-up)
-        # Checkpointing:          Same post-sink + shutdown semantics as run()
-        # ─────────────────────────────────────────────────────────────────
-
-        self._checkpoints.set_active_graph(graph)
-
-        # 1. Setup (loads graph artifacts from original run's DB records)
-        artifacts = setup_resume_context(factory, run_id, config, graph)
-
-        # 2. Initialize context + processor (source on_start skipped)
-        run_ctx = self._run_core.initialize_run_context(
-            factory,
-            run_id,
+        return self._resume_coordinator.resume(
+            resume_point,
             config,
             graph,
-            settings,
-            artifacts,
-            payload_store,
-            include_source_on_start=False,
-            restored_aggregation_state=restored_aggregation_state,
-            restored_coalesce_state=restored_coalesce_state,
+            payload_store=payload_store,
+            settings=settings,
             shutdown_event=shutdown_event,
         )
-
-        # Restore contract from parameter (already retrieved by resume() caller)
-        run_ctx.ctx.contract = schema_contract
-        run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
-
-        loop_ctx = LoopContext(
-            counters=ExecutionCounters(),
-            pending_tokens={name: [] for name in config.sinks},
-            processor=run_ctx.processor,
-            ctx=run_ctx.ctx,
-            config=config,
-            agg_transform_lookup=run_ctx.agg_transform_lookup,
-            coalesce_executor=run_ctx.coalesce_executor,
-            coalesce_node_map=run_ctx.coalesce_node_map,
-        )
-
-        try:
-            # 3. Process loop (resume path)
-            interrupted = run_resume_processing_loop(
-                loop_ctx,
-                unprocessed_rows,
-                schema_contract,
-                incomplete_by_row=incomplete_by_row,
-                recovery_manager=recovery_manager,
-                payload_store=payload_store,
-                run_id=run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                shutdown_event=shutdown_event,
-            )
-
-            # 4. Flush + write sinks with checkpoint advancement
-            self._run_core.flush_and_write_sinks(
-                factory,
-                run_id,
-                loop_ctx,
-                artifacts.sink_id_map,
-                artifacts.edge_map,
-                interrupted,
-                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                shutdown_checkpoint_source_id=artifacts.source_id,
-            )
-
-            # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
-            # postconditions only after resume sink writes finish.
-            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
-        except GracefulShutdownError:
-            raise
-        except Exception as exc:
-            raise _RunFailedWithPartialResultError(
-                original_error=exc,
-                partial_result=loop_ctx.counters.to_run_result(run_id, status=RunStatus.FAILED),
-            ) from exc
-
-        finally:
-            cleanup_plugins(config, run_ctx.ctx, include_source=False)
-
-        self._checkpoints.set_active_graph(None)
-        return loop_ctx.counters.to_run_result(run_id, status=RunStatus.RUNNING)

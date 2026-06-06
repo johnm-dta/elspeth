@@ -18,6 +18,7 @@ from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig, prepare_for_run
+from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
@@ -439,11 +440,11 @@ def test_resume_no_work_sweep_crash_finalizes_failed_and_preserves_evidence(
 
     process_calls: list[str] = []
 
-    def _fail_if_processed(self: Orchestrator, *args, **kwargs):
+    def _fail_if_processed(self: ResumeCoordinator, *args, **kwargs):
         process_calls.append("process")
-        raise AssertionError("no-work resume branch must not call _process_resumed_rows")
+        raise AssertionError("no-work resume branch must not call process_resumed_rows")
 
-    monkeypatch.setattr(Orchestrator, "_process_resumed_rows", _fail_if_processed)
+    monkeypatch.setattr(ResumeCoordinator, "process_resumed_rows", _fail_if_processed)
 
     with pytest.raises(AuditIntegrityError, match=label):
         orchestrator.resume(

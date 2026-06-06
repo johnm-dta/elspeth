@@ -481,7 +481,7 @@ class TestT18CharacterizationResumePath:
         )
 
         # Resume with the real row_id from the original run
-        orchestrator._process_resumed_rows(
+        orchestrator._resume_coordinator.process_resumed_rows(
             factory=factory,
             run_id=run_id,
             config=config,
@@ -595,7 +595,7 @@ class TestT18CharacterizationResumePath:
 
         # Call _process_resumed_rows directly with empty rows
         with patch.object(output_sink, "on_start", side_effect=tracking_sink_on_start):
-            result = orchestrator._process_resumed_rows(
+            result = orchestrator._resume_coordinator.process_resumed_rows(
                 factory=factory,
                 run_id=run_id,
                 config=config,

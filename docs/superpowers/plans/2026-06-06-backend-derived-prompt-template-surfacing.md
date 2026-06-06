@@ -17,11 +17,16 @@
 
 **(D2) Audit metadata at finalization.** The LLM response object is not in scope inside `_try_terminate_no_tools`. Use the service's own fields (already used by the dispatch builder at service.py:3277-3282): `model_identifier=self._model`, `model_version=self._model` (fallback, mirroring `safe_response_model(response) or self._model`), `provider=self._availability.provider or "unknown"`, `composer_skill_hash=self._composer_skill_hash`.
 
-**(D3) Idempotency.** Backend surfacing must not create duplicate events across repair turns. Before creating, fetch pending events (`list_interpretation_events(session_id, status="pending")`) and skip any node whose `(kind=LLM_PROMPT_TEMPLATE, user_term, affected_node_id)` already has a pending event at the current composition_state_id. (Rate-limiting does NOT apply — this is backend-initiated, not user/LLM-initiated.)
+**(D3) Idempotency.** Trivial under surface-late (D4). The auto-surface runs once per turn — line 2334 (the orphan gate) is reached exactly once, then the turn returns. A defensive skip still applies: fetch pending events (`list_interpretation_events(session_id, status="pending")`) and skip any node that already has a pending `LLM_PROMPT_TEMPLATE` event (guards a stale pending PT event left from a prior turn; within a turn at most one is created). (Rate-limiting does NOT apply — backend-initiated.)
 
-**(D4) Insertion point.** Insert the auto-surfacing call at service.py:2257 — AFTER the pre-state branch (2242-2256) returns, and BEFORE the missing-sites repair check (2258) and the orphan gate (2334), which BOTH flag llm_prompt_template sites (confirmed: `_missing_pending_interpretation_review_sites` → `interpretation_sites` → `_missing_prompt_template_review_sites`). Run it UNCONDITIONALLY (not gated on `repair_turns_used`), so the prompt-template sites are satisfied before either gate on every finalization attempt.
+**(D4) Insertion point — SURFACE LATE (corrected 2026-06-07 after advisor review + read-only investigation `wf_9a6727f8-d84`).** Insert the auto-surfacing call IMMEDIATELY BEFORE the orphan gate at service.py:2334 (i.e. at ~2333), NOT at 2257. Established from the investigation:
+- **The skeleton is MUTABLE across repair turns** but **FROZEN once line 2334 is reached** (that path makes no further LLM call — reads `state` and returns; investigator `skeleton-growth-timing`). Surfacing at 2257 snapshots attempt-1's skeleton S1; a later repair turn can grow it to S2 → the surfaced review goes stale → **Case B re-introduced inside the repair loop** (advisor catch). Surfacing right before 2334 always captures the FINAL skeleton → staleness impossible by construction.
+- **`_missing_pending_interpretation_review_sites` flags PT at BOTH the repair gate (2258/2263) and the orphan gate (2334)** with no kind filter (investigator `missing-sites-logic`). Since the LLM now REJECTS surfacing PT (Task 3), the repair message at 2263 would pester the model for something it cannot provide. Fix: **post-filter `LLM_PROMPT_TEMPLATE` out of the repair message at 2263 only** (Task 2b) — repair-continue only when NON-PT sites remain. Leave the orphan gate (2334) UNFILTERED so a still-missing PT after auto-surface stays **fail-closed** (backstop if the helper ever no-ops).
+- **The PT requirement is reliably `pending` at finalization** (replace-semantics on re-stage; investigator `pt-requirement-pending`) → `create_pending`'s gate at sessions/service.py:2839 is satisfied.
 
 **(D5) composition_state_id source — PLAN-REALITY CORRECTION (verified 2026-06-06).** The original draft used `current_state_id = state.id`. **`CompositionState` has NO `.id` field** (verified composer/state.py:1761-1786 — fields are source/nodes/edges/outputs/metadata/version/guided_session). The persisted composition_state_id is the outer-loop local `current_state_id` (service.py:2555, assigned from `persist.current_state_id` at 2655) — it is the DB id that `create_pending_interpretation_event` requires (the gate at sessions/service.py needs a pending requirement at THAT exact composition_state_id). It is **NOT** currently a parameter of `_try_terminate_no_tools` (verified signature 2209-2227). **Therefore Task 2 MUST thread `current_state_id: str | None` into `_try_terminate_no_tools`** (add the param; pass the outer-loop `current_state_id` at the call site) and the helper takes it as an argument. Correctness assumption to confirm during impl: at the no-tool-calls finalization branch the LLM made no further mutation this turn, so `current_state_id` already points at the frozen final skeleton; if a finalization can occur before the final state is persisted, the requirement lookup at that id will miss and the create_pending gate (`llm_draft == options.prompt_template` + pending requirement at id) will reject — verify with the Task 2 test before wiring.
+
+**(D6) Audit surface is JUST D1; freeform parity confirmed.** Surface-late (D4) needs NO pending-event mutation / refresh / supersede primitive — those would have been a SECOND audit-domain choice under surface-early. The ONLY audit-data-domain decision in this plan is the D1 `tool_call_id` sentinel. Freeform parity (investigator `freeform-refresh-parity`): sendMessage / retryMessage / acceptProposal all refresh interpretation events post-turn (sessionStore.ts:643/1065/751) → backend-surfaced PT events reach freeform users too. `forkFromMessage` (sessionStore.ts:1109) omits the refresh — PRE-EXISTING gap, **file as a follow-up observation, out of scope here.**
 
 ---
 
@@ -152,26 +157,57 @@ async def test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_bl
 
 - [ ] **Step 2: Run to verify it fails** — `pytest ...::test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_block -v`. Expected: FAIL (today: either an orphan-block result or a repair `continue`, and no backend event).
 
-- [ ] **Step 3: Implement the wiring** — TWO edits (D5):
+- [ ] **Step 3: Implement the wiring — SURFACE LATE (D4).** THREE edits:
 
-  **(a)** Add a `current_state_id: str | None` parameter to `_try_terminate_no_tools` (signature at service.py:2209-2227) and pass the outer-loop local `current_state_id` (service.py:2555/2655) at its call site (grep `_try_terminate_no_tools(` for the caller — it is the no-tool-calls branch of the main compose loop).
+  **(a) Thread the state id (D5)** — add a `current_state_id: str | None` parameter to `_try_terminate_no_tools` (signature at service.py:2209-2227) and pass the outer-loop local `current_state_id` (service.py:2555/2655) at its call site (grep `_try_terminate_no_tools(` for the caller — the no-tool-calls branch of the main compose loop).
 
-  **(b)** Insert at service.py:2257 (after the pre-state branch returns, before `if repair_turns_used < _MAX_REPAIR_TURNS:` at 2258):
+  **(b) Auto-surface immediately BEFORE the orphan gate** — insert right before `orphaned_sites = await self._missing_pending_interpretation_review_sites(` at service.py:2334 (NOT at 2257). At this point every repair branch above has declined/continued, so `state` is the FINAL frozen skeleton:
 
 ```python
-        # Backend-derived surfacing (elspeth-e51216d305 Case B): ensure every
-        # llm node's auto-staged llm_prompt_template review is surfaced against
-        # the FINAL frozen skeleton before the missing-sites / orphan gates run.
-        # Unconditional (not gated on the repair budget) so the prompt-template
-        # sites are satisfied on every finalization attempt; idempotent.
+        # Backend-derived surfacing (elspeth-e51216d305 Case B): surface every
+        # llm node's auto-staged llm_prompt_template review against the FINAL
+        # frozen skeleton, immediately before the fail-closed orphan gate. The
+        # skeleton can only grow across repair turns (each re-invokes the model);
+        # here, past every repair branch, no further mutation occurs this turn,
+        # so the surfaced review can never go stale (cf. surface-early = Case B
+        # in the repair loop). The orphan gate below (unfiltered) then sees the
+        # PT event present; if this helper ever no-ops, it stays fail-closed.
         await self._auto_surface_prompt_template_reviews(
             state, session_id=session_id, current_state_id=current_state_id,
         )
 ```
 
+  **(c) Task 2b — post-filter PT out of the repair message at 2263** — so the LLM (which now rejects PT, Task 3) is not pestered to surface it during the repair loop. Replace the `if missing_interpretation_sites:` block at 2263:
+
+```python
+            if missing_interpretation_sites:
+                # llm_prompt_template is surfaced by the backend at finalization
+                # (before the orphan gate), NOT by the model — exclude it from the
+                # repair ask so we don't pester the model for a kind it rejects.
+                # The orphan gate at 2334 stays UNFILTERED (fail-closed backstop).
+                model_repairable = tuple(
+                    site
+                    for site in missing_interpretation_sites
+                    if site[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE
+                )
+                if model_repairable:
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": _pending_interpretation_review_repair_message(
+                                model_repairable,
+                                next_turn=repair_turns_used + 1,
+                            ),
+                        }
+                    )
+                    return _TerminateOutcome(action="continue", repair_turns_delta=1)
+```
+
+  (Confirm the site tuple shape is `(component_id, user_term, kind)` — investigator `missing-sites-logic` verified `site_key = (site.component_id, site.user_term, site.kind)`; `site[2]` is the kind.)
+
 - [ ] **Step 4: Run to verify it passes** — same command. Then run the whole dispatch suite: `pytest tests/unit/web/composer/test_compose_loop_interpretation_review_dispatch.py -q`. Expected: PASS (update any test that assumed prompt-template orphan-blocking — see Task 5).
 
-- [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(composer): surface prompt-template reviews at finalization before the orphan gate"`
+- [ ] **Step 5: Commit (EXPLICIT PATHS — never `git add -A`; the tree carries uncommitted foreign files `.claude/settings.json`, `.gitignore`, `.mcp.json`)** — `git add src/elspeth/web/composer/service.py tests/unit/web/composer/test_compose_loop_interpretation_review_dispatch.py && git commit -m "feat(composer): surface prompt-template reviews at finalization before the orphan gate"`
 
 ---
 
@@ -269,3 +305,21 @@ NOTE: skills are LLM prompts, not code — do NOT add a grep-the-text "test" (pr
   - (iii) skill-hash gate — **CONFIRMED REAL** (`assert_skill_hash_unchanged_on_disk`); Task 4 Step 2 upgraded from optional to mandatory; test literal-hashes are stubs (safe).
   - Insertion seam (2257/2258), `create_pending_interpretation_event` (sessions/service.py:2661), `list_interpretation_events` (3406) — all confirmed.
 - **Risk:** the (D1) audit-provenance sentinel is the one decision needing operator/judge visibility — call it out in the PR. The compose-loop is audit-sensitive and was last touched today (33f05f186); keep changes minimal and run the full composer suite.
+
+---
+
+## Task 7: Adversarial-review remediation (added 2026-06-07 — workflow `wf_d240d901-e0b` reviews)
+
+The implement+review fleet landed Impl-1/2/3 GREEN but two reviewers returned CHANGES_REQUESTED with TWO confirmed high-severity findings (verified against source). Both must be fixed before gating/commit.
+
+**(HIGH-1) A second no-tool finalize path bypasses auto-surface + the orphan gate.** Confirmed: `_classify_and_budget_turn`'s B-4D-3 budget-exhaustion last-chance finalize (`service.py:2247`, fires when `turn_has_mutation` AND the composition budget is exhausted AND the bonus model call returns no tool calls) calls `_finalize_no_tool_response` directly and returns `_ClassifyOutcome(action="return",...)` at 2265 — running NEITHER `_auto_surface_prompt_template_reviews` NOR `_missing_pending_interpretation_review_sites`. This path always has `turn_has_mutation=True`, so it can carry a fresh LLM node with a pending PT requirement and no surfaced event; with the new LLM-side rejection (Impl-2) the model can no longer surface PT here either → it reliably ORPHANS a required PT review (finalizes runnable-pending with no card). The orphan gate must be universal.
+- **Fix:** extract the auto-surface + orphan-gate + finalize tail of `_try_terminate_no_tools` (service.py:2435-2526) into a shared async method `_surface_and_finalize_no_tools(self, *, assistant_message, state, session_id, current_state_id, progress, recorder, initial_version, user_id, last_runtime_preflight, runtime_preflight_cache, session_scope, message, mutation_success_seen) -> ComposerResult` that returns either the blocked ComposerResult (orphan) or the finalized result. Caller threads `repair_turns_used` (only `_try_terminate_no_tools`) + persisted ids. Call it from BOTH finalize sites. Thread `session_id` into `_classify_and_budget_turn` (add param; pass at call site service.py:2798); at 2247 use `current_state_id=persist.current_state_id` (the loop persists the mutation BEFORE classify — dispatch(2727)→persist(2758)→`current_state_id=persist.current_state_id`(2770)→classify(2798) — so `state`==persisted(`persist.current_state_id`), the create_pending gate holds).
+
+**(HIGH-2) Node-id-keyed dedup bricks a PT review after a genuine multi-turn prompt edit.** Confirmed: `already = {event.affected_node_id ...}` (service.py:1357) keys on node id alone. Turn 1 surfaces E_A (skeleton_A); turn 2 edits prompt to B (re-stages the requirement, but no code clears the persisted pending event E_A); turn 2 auto-surface sees E_A → SKIPS → no E_B. The orphan gate matches on (node,term,kind) → satisfied by stale E_A → finalizes; the user resolves E_A → the Case-A skeleton-hash gate rejects forever; the LLM can no longer re-surface (Impl-2). The node's PT review is bricked. No false approval (integrity holds) but a NEW liveness regression this diff introduces.
+- **Fix:** make the dedup DRAFT-AWARE — skip a node only if a pending PT event exists whose `llm_draft == the node's current options.prompt_template`. On skeleton drift, surface a fresh event for the current skeleton. (The stale event lingers cosmetically; full supersede/cancel needs the governed SUPERSEDED enum — **file as a follow-up**, out of scope here.)
+
+**(LOW-a) Multiplicity mirror.** `_has_pending_prompt_template_requirement` (service.py:1393) returns True on the FIRST match; the writer-boundary gate `_matching_pending_requirement_index` requires EXACTLY ONE and raises on 0/>1. Tighten the helper to count and return True only on exactly-one (so a duplicate-requirement node is skipped to the fail-closed orphan gate, never an opaque 500). Unreachable today but they must not diverge.
+
+**(LOW-b) Provenance comment.** Add a one-line comment at the D2 site (service.py:1386-1387) noting `model_version == model_identifier == self._model` is intentional: a backend-derived surface has no LLM response object to derive a provider-resolved model from (divergence from the LLM-surfaced path's `safe_response_model(response)` is deliberate and audit-honest).
+
+**Tests (TDD):** (HIGH-1) drive the budget-exhaustion finalize with a pending auto-staged PT requirement + no event → assert the PT event IS surfaced (sentinel) AND a genuine bare-token orphan blocks on that path. (HIGH-2) surface E_A for skeleton A, edit the node prompt to B, run auto-surface → assert a fresh resolvable E_B (draft==B) is created. (LOW-a) two pending PT requirements → helper returns False.

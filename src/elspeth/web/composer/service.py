@@ -18,11 +18,11 @@ import asyncio
 import json
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
@@ -122,6 +122,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
     INTERPRETATION_REVIEW_PENDING_CODE,
     PROMPT_SHIELD_USER_TERM,
     PROMPT_SHIELD_WARNING_DRAFT,
@@ -1326,6 +1327,118 @@ class ComposerServiceImpl:
                 missing_or_unresolvable[event_site_key] = None
         return tuple(missing_or_unresolvable)
 
+    async def _auto_surface_prompt_template_reviews(
+        self,
+        state: CompositionState,
+        *,
+        session_id: str | None,
+        current_state_id: str | None,
+    ) -> None:
+        """Surface a pending ``llm_prompt_template`` review EVENT, backend-derived.
+
+        For every LLM node that carries a pending auto-staged
+        ``llm_prompt_template`` requirement and does not yet have a pending event
+        for it, create the pending event against the FINAL frozen skeleton at
+        turn finalization. Because the skeleton can no longer mutate this turn
+        once we reach the orphan gate, a review surfaced here can never go stale
+        against a later skeleton mutation (elspeth-e51216d305 Case B). Idempotent
+        (skips nodes that already have a pending PT event) and a no-op when there
+        is no session or no persisted state id. See (D1)-(D5) in the plan.
+
+        The honest provenance sentinel ``tool_call_id="backend_auto_surface:..."``
+        (D1) records that no LLM tool call produced this event; the user still
+        reviews it, so ``interpretation_source`` stays ``user_approved``.
+        """
+
+        if session_id is None or current_state_id is None:
+            return
+        sessions_service = self._require_sessions_service()
+        events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+        for site in interpretation_sites(state):
+            if site.kind is not InterpretationKind.LLM_PROMPT_TEMPLATE:
+                continue
+            node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
+            if node is None:
+                continue
+            options = node.options if isinstance(node.options, Mapping) else {}
+            prompt_template = options.get("prompt_template")
+            if not isinstance(prompt_template, str) or not prompt_template:
+                continue
+            # Draft-aware dedup (Task 7 HIGH-2): skip the node only when a pending
+            # PT event already carries the node's CURRENT prompt_template. A stale
+            # pending event from a prior turn whose draft is an OLDER skeleton must
+            # NOT suppress re-surfacing — node-id-only dedup would brick the review
+            # after a multi-turn prompt edit (the stale event survives, the
+            # Case-A skeleton-hash resolve gate then rejects forever, and the LLM
+            # can no longer re-surface). The stale event lingers cosmetically; a
+            # governed SUPERSEDED/cancel primitive is a follow-up.
+            if any(
+                event.affected_node_id == site.component_id
+                and event.llm_draft == prompt_template
+                and event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+                for event in events
+            ):
+                continue
+            # The create_pending gate (sessions/service.py) REQUIRES exactly one
+            # pending PT requirement on the node for this user_term. Surface only
+            # where that precondition holds — otherwise create_pending would raise
+            # and crash the compose loop. A prompt_template node with no pending PT
+            # requirement is the requirement-None enumerator branch
+            # (_missing_prompt_template_review_sites) and is left to the orphan gate.
+            if not self._has_pending_prompt_template_requirement(options, user_term=site.user_term):
+                continue
+            await sessions_service.create_pending_interpretation_event(
+                session_id=UUID(session_id),
+                composition_state_id=UUID(current_state_id),
+                affected_node_id=site.component_id,
+                tool_call_id=f"backend_auto_surface:{uuid4()}",  # (D1)
+                user_term=site.user_term,
+                kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+                llm_draft=prompt_template,
+                # (D2 / Task 7 LOW-b) model_version == model_identifier == self._model
+                # is INTENTIONAL here: a backend-derived surface has no LLM response
+                # object to resolve a provider-reported model from, so we cannot use
+                # the LLM-surfaced path's safe_response_model(response). This deliberate
+                # divergence is the most audit-honest value available at this surface.
+                model_identifier=self._model,  # (D2)
+                model_version=self._model,  # (D2)
+                provider=self._availability.provider or "unknown",  # (D2)
+                composer_skill_hash=self._composer_skill_hash,  # (D2)
+            )
+
+    @staticmethod
+    def _has_pending_prompt_template_requirement(options: Mapping[str, Any], *, user_term: str) -> bool:
+        """Return True iff ``options`` carries a pending PT requirement for ``user_term``.
+
+        Mirrors the precondition ``create_pending_interpretation_event`` enforces
+        for ``llm_prompt_template`` (a single pending requirement matching the
+        user_term). Reading the requirements directly keeps the backend-surface
+        helper aligned with that writer-boundary gate.
+        """
+
+        raw = options.get(INTERPRETATION_REQUIREMENTS_KEY)
+        # NodeSpec freezes nested lists into tuples, so accept any non-string
+        # sequence (list from raw dicts, tuple from a frozen NodeSpec).
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return False
+        matches = 0
+        for requirement in raw:
+            if not isinstance(requirement, Mapping):
+                continue
+            if requirement.get("kind") != InterpretationKind.LLM_PROMPT_TEMPLATE.value:
+                continue
+            if requirement.get("status") != "pending":
+                continue
+            requirement_term = requirement.get("user_term")
+            if isinstance(requirement_term, str) and requirement_term.strip() == user_term.strip():
+                matches += 1
+        # (Task 7 LOW-a) Mirror _matching_pending_requirement_index's EXACTLY-ONE
+        # multiplicity: create_pending raises on 0 or >1 matching pending PT
+        # requirements. Return True only on exactly one so a duplicate-requirement
+        # node is skipped to the fail-closed orphan gate, never crashed into an
+        # opaque 500 at the writer boundary.
+        return matches == 1
+
     def _new_runtime_preflight_cache(self) -> _RuntimePreflightCache:
         return {}
 
@@ -2052,6 +2165,7 @@ class ComposerServiceImpl:
         deadline: float,
         runtime_preflight_cache: _RuntimePreflightCache,
         session_scope: str,
+        session_id: str | None,
         user_id: str | None,
         mutation_success_seen: bool,
         composition_turns_used: int,
@@ -2144,28 +2258,31 @@ class ComposerServiceImpl:
                 )
                 assistant_message = response.choices[0].message
                 if not assistant_message.tool_calls:
-                    await emit_progress(
-                        progress,
-                        ComposerProgressEvent(
-                            phase="complete",
-                            headline="The composer response is ready.",
-                            evidence=("The model stopped requesting pipeline tools.",),
-                            likely_next="ELSPETH will save any accepted pipeline update.",
-                            reason="composer_complete",
-                        ),
-                    )
-                    result = await self._finalize_no_tool_response(
-                        content=assistant_message.content or "",
+                    # B-4D-3 budget-exhaustion last-chance finalize is a SECOND
+                    # no-tool finalize path. Route it through the SHARED
+                    # ``_surface_and_finalize_no_tools`` (Task 7 HIGH-1) so the
+                    # backend PT auto-surface AND the fail-closed orphan gate are
+                    # UNIVERSAL — this path always carries ``turn_has_mutation``,
+                    # so it can otherwise orphan a required PT review (the LLM can
+                    # no longer surface PT). The loop persists the mutation BEFORE
+                    # classify (dispatch -> persist -> ``current_state_id =
+                    # persist.current_state_id`` -> classify), so ``state`` matches
+                    # ``persist.current_state_id`` and the create_pending gate
+                    # holds. This path does NOT track ``repair_turns_used``.
+                    result = await self._surface_and_finalize_no_tools(
+                        assistant_message=assistant_message,
                         state=state,
+                        session_id=session_id,
+                        current_state_id=persist.current_state_id,
+                        progress=progress,
+                        recorder=recorder,
                         initial_version=initial_version,
                         user_id=user_id,
                         last_runtime_preflight=last_runtime_preflight,
                         runtime_preflight_cache=runtime_preflight_cache,
                         session_scope=session_scope,
-                        user_message=message,
+                        message=message,
                         mutation_success_seen=mutation_success_seen,
-                        tool_invocations=recorder.invocations,
-                        llm_calls=recorder.llm_calls,
                     )
                     threaded = replace(
                         result,
@@ -2214,6 +2331,7 @@ class ComposerServiceImpl:
         llm_messages: list[dict[str, Any]],
         state: CompositionState,
         session_id: str | None,
+        current_state_id: str | None,
         initial_version: int,
         user_id: str | None,
         last_runtime_preflight: ValidationResult | None,
@@ -2261,16 +2379,26 @@ class ComposerServiceImpl:
                 session_id=session_id,
             )
             if missing_interpretation_sites:
-                llm_messages.append(
-                    {
-                        "role": "user",
-                        "content": _pending_interpretation_review_repair_message(
-                            missing_interpretation_sites,
-                            next_turn=repair_turns_used + 1,
-                        ),
-                    }
+                # llm_prompt_template is surfaced by the backend at finalization
+                # (immediately before the orphan gate), NOT by the model — exclude
+                # it from the repair ask so we don't pester the model for a kind it
+                # rejects. The site tuple is (component_id, user_term, kind), so
+                # site[2] is the kind. The orphan gate below stays UNFILTERED so a
+                # still-missing PT after auto-surface remains fail-closed.
+                model_repairable = tuple(
+                    site for site in missing_interpretation_sites if site[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE
                 )
-                return _TerminateOutcome(action="continue", repair_turns_delta=1)
+                if model_repairable:
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": _pending_interpretation_review_repair_message(
+                                model_repairable,
+                                next_turn=repair_turns_used + 1,
+                            ),
+                        }
+                    )
+                    return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
         if await self._attempt_empty_state_uploaded_blob_repair(
             state=state,
@@ -2331,6 +2459,85 @@ class ComposerServiceImpl:
         # leaves the legitimate bare-token two-step flow (token written, review
         # staged within budget) untouched — that path clears
         # ``_missing_pending_interpretation_review_sites`` before reaching here.
+        # Auto-surface PT reviews + run the fail-closed orphan gate + finalize.
+        # Shared with the B-4D-3 budget-exhaustion last-chance finalize in
+        # ``_classify_and_budget_turn`` (Task 7 HIGH-1) so the orphan gate is
+        # UNIVERSAL across BOTH no-tool finalize paths. This caller threads
+        # ``repair_turns_used`` (only it tracks repair turns) plus the persisted
+        # ids onto the returned result.
+        result = await self._surface_and_finalize_no_tools(
+            assistant_message=assistant_message,
+            state=state,
+            session_id=session_id,
+            current_state_id=current_state_id,
+            progress=progress,
+            recorder=recorder,
+            initial_version=initial_version,
+            user_id=user_id,
+            last_runtime_preflight=last_runtime_preflight,
+            runtime_preflight_cache=runtime_preflight_cache,
+            session_scope=session_scope,
+            message=message,
+            mutation_success_seen=mutation_success_seen,
+        )
+        # Thread repair_turns_used through to the result so the route handler can
+        # persist it onto the new ``composition_states.composer_meta`` row (and the
+        # API state response can surface ``composer_meta.repair_turns_used``) — see
+        # web/sessions/routes.py::_state_data_from_composer_state call sites in the
+        # compose / recompose paths. Uniform threading for BOTH the orphan-blocked
+        # and the finalized-success shapes (one return).
+        threaded = replace(
+            result,
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
+        return _TerminateOutcome(action="return", result=threaded)
+
+    async def _surface_and_finalize_no_tools(
+        self,
+        *,
+        assistant_message: Any,
+        state: CompositionState,
+        session_id: str | None,
+        current_state_id: str | None,
+        progress: ComposerProgressSink | None,
+        recorder: BufferingRecorder,
+        initial_version: int,
+        user_id: str | None,
+        last_runtime_preflight: ValidationResult | None,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_scope: str,
+        message: str,
+        mutation_success_seen: bool,
+    ) -> ComposerResult:
+        """Auto-surface PT reviews, run the fail-closed orphan gate, finalize.
+
+        Shared tail of BOTH no-tool finalize paths (Task 7 HIGH-1):
+        ``_try_terminate_no_tools`` and the B-4D-3 budget-exhaustion last-chance
+        finalize in ``_classify_and_budget_turn``. Returns either the fail-closed
+        blocked ``ComposerResult`` (an orphaned interpretation site survived) or
+        the finalized ``ComposerResult``. The caller threads ``repair_turns_used``
+        (only ``_try_terminate_no_tools`` tracks it) and the persisted ids.
+
+        See the orphan-gate / backend-surfacing doctrine in the caller's docstring
+        and in the comments around ``_missing_pending_interpretation_review_sites``.
+        """
+
+        # Backend-derived surfacing (elspeth-e51216d305 Case B): surface every
+        # LLM node's auto-staged llm_prompt_template review against the FINAL
+        # frozen skeleton, immediately before the fail-closed orphan gate. The
+        # skeleton can only grow across repair turns (each re-invokes the model);
+        # here, past every repair branch (and on the budget-exhaustion path, after
+        # the bonus call returned no tool calls), no further mutation occurs this
+        # turn, so the surfaced review can never go stale (cf. surface-early =
+        # Case B in the repair loop). The orphan gate below (unfiltered) then sees
+        # the PT event present; if this helper ever no-ops, it stays fail-closed.
+        await self._auto_surface_prompt_template_reviews(
+            state,
+            session_id=session_id,
+            current_state_id=current_state_id,
+        )
         orphaned_sites = await self._missing_pending_interpretation_review_sites(
             state,
             session_id=session_id,
@@ -2371,7 +2578,7 @@ class ComposerServiceImpl:
                 content=raw_content,
                 augmented=augmented_message,
             )
-            blocked_result = ComposerResult(
+            return ComposerResult(
                 message=augmented_message,
                 state=state,
                 runtime_preflight=orphan_runtime_result,
@@ -2379,13 +2586,6 @@ class ComposerServiceImpl:
                 tool_invocations=recorder.invocations,
                 llm_calls=recorder.llm_calls,
             )
-            threaded_blocked = replace(
-                blocked_result,
-                repair_turns_used=repair_turns_used,
-                persisted_assistant_message_id=persisted_assistant_message_id,
-                persisted_tool_call_turn=persisted_tool_call_turn,
-            )
-            return _TerminateOutcome(action="return", result=threaded_blocked)
 
         await emit_progress(
             progress,
@@ -2397,7 +2597,7 @@ class ComposerServiceImpl:
                 reason="composer_complete",
             ),
         )
-        result = await self._finalize_no_tool_response(
+        return await self._finalize_no_tool_response(
             content=assistant_message.content or "",
             state=state,
             initial_version=initial_version,
@@ -2410,19 +2610,6 @@ class ComposerServiceImpl:
             tool_invocations=recorder.invocations,
             llm_calls=recorder.llm_calls,
         )
-        # Thread repair_turns_used through to the result so the
-        # route handler can persist it onto the new
-        # ``composition_states.composer_meta`` row (and the API state
-        # response can surface ``composer_meta.repair_turns_used``)
-        # — see web/sessions/routes.py::_state_data_from_composer_state
-        # call sites in the compose / recompose paths.
-        threaded = replace(
-            result,
-            repair_turns_used=repair_turns_used,
-            persisted_assistant_message_id=persisted_assistant_message_id,
-            persisted_tool_call_turn=persisted_tool_call_turn,
-        )
-        return _TerminateOutcome(action="return", result=threaded)
 
     async def _compose_loop(
         self,
@@ -2578,6 +2765,7 @@ class ComposerServiceImpl:
                     llm_messages=llm_messages,
                     state=state,
                     session_id=session_id,
+                    current_state_id=current_state_id,
                     initial_version=initial_version,
                     user_id=user_id,
                     last_runtime_preflight=last_runtime_preflight,
@@ -2693,6 +2881,7 @@ class ComposerServiceImpl:
                 deadline=deadline,
                 runtime_preflight_cache=runtime_preflight_cache,
                 session_scope=session_scope,
+                session_id=session_id,
                 user_id=user_id,
                 mutation_success_seen=mutation_success_seen,
                 composition_turns_used=composition_turns_used,

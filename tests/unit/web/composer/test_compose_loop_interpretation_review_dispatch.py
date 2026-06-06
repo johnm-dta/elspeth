@@ -516,7 +516,12 @@ def _force_composer_available(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ComposerServiceImpl, "_compute_availability", _available)
 
 
-def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> ComposerServiceImpl:
+def _build_composer(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+    *,
+    max_composition_turns: int = 15,
+) -> ComposerServiceImpl:
     from unittest.mock import MagicMock
 
     from elspeth.web.catalog.protocol import CatalogService
@@ -528,7 +533,7 @@ def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> Com
     catalog.list_sinks.return_value = []
     settings = WebSettings(
         data_dir=tmp_path,
-        composer_max_composition_turns=15,
+        composer_max_composition_turns=max_composition_turns,
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
@@ -541,6 +546,40 @@ def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> Com
         sessions_service=sessions_service,
         session_engine=sessions_service._engine,
     )
+
+
+def _set_pipeline_clean_llm_node_args() -> dict[str, Any]:
+    """A ``set_pipeline`` whose LLM node has a CLEAN prompt_template (no bare
+    ``{{interpretation:...}}`` token). The node still auto-stages an
+    ``llm_prompt_template`` review requirement, but carries no orphan token —
+    so the ONLY pending review at finalization is the backend-surfaced PT one.
+    """
+    return {
+        "source": {
+            "plugin": "null",
+            "on_success": "rows",
+            "options": {},
+        },
+        "nodes": [
+            {
+                "id": "rate_node",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "scored_rows",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.text }} in one sentence.",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [],
+    }
 
 
 def test_composer_runtime_preflight_uses_backend_readiness_contract(
@@ -704,13 +743,21 @@ async def test_fresh_session_set_pipeline_then_request_interpretation_review_per
     assert [inv.status.value for inv in invocations] == ["success", "success"]
 
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    assert len(events) == 1
-    event = events[0]
+    # The model staged the vague_term review via the tool; the backend also
+    # auto-surfaces the node's llm_prompt_template review at finalization
+    # (elspeth-e51216d305) as an independent review event.
+    vague_events = [e for e in events if e.kind is InterpretationKind.VAGUE_TERM]
+    assert len(vague_events) == 1
+    event = vague_events[0]
     assert event.composition_state_id is not None
     assert event.affected_node_id == "rate_node"
     assert event.tool_call_id == "call_review"
     assert event.user_term == "cool"
     assert event.llm_draft == "modern, useful, engaging, and clear for the public."
+    pt_events = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt_events) == 1
+    assert pt_events[0].affected_node_id == "rate_node"
+    assert pt_events[0].tool_call_id.startswith("backend_auto_surface:")
 
 
 @pytest.mark.asyncio
@@ -769,10 +816,18 @@ async def test_pending_interpretation_placeholder_without_event_forces_review_to
     ]
     assert [inv.status.value for inv in result.tool_invocations] == ["success", "success"]
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    assert len(events) == 1
-    assert events[0].user_term == "cool"
-    assert events[0].affected_node_id == "rate_node"
-    assert events[0].tool_call_id == "call_review_after_repair"
+    # The model staged the vague_term "cool" review via the tool; the backend
+    # additionally auto-surfaces the node's llm_prompt_template review at
+    # finalization (elspeth-e51216d305) as an independent review event.
+    vague_events = [e for e in events if e.kind is InterpretationKind.VAGUE_TERM]
+    assert len(vague_events) == 1
+    assert vague_events[0].user_term == "cool"
+    assert vague_events[0].affected_node_id == "rate_node"
+    assert vague_events[0].tool_call_id == "call_review_after_repair"
+    pt_events = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt_events) == 1
+    assert pt_events[0].affected_node_id == "rate_node"
+    assert pt_events[0].tool_call_id.startswith("backend_auto_surface:")
 
 
 @pytest.mark.asyncio
@@ -839,10 +894,16 @@ async def test_orphaned_interpretation_placeholder_fails_turn_closed_after_repai
         message="create a workflow that rates how cool pages are",
     )
 
-    # No pending interpretation event was ever created (the review tool was
-    # never called) — the placeholder is a genuine orphan.
+    # The vague_term "cool" review tool was never called, so no VAGUE_TERM event
+    # exists for it — the placeholder is a genuine orphan and still fails closed.
+    # The backend DOES auto-surface the node's llm_prompt_template review at
+    # finalization (elspeth-e51216d305), but that is an independent review and
+    # does not resolve the orphaned vague_term token.
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    assert events == []
+    assert all(event.kind is not InterpretationKind.VAGUE_TERM for event in events)
+    assert all(
+        event.tool_call_id.startswith("backend_auto_surface:") for event in events if event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    )
 
     # The turn fails closed: the runtime preflight is blocking on every
     # readiness axis (NOT the resolvable pending-handoff shape).
@@ -928,11 +989,23 @@ async def test_prompt_template_review_event_does_not_trigger_vague_term_repair(
 
 
 @pytest.mark.asyncio
-async def test_missing_prompt_template_review_event_forces_review_tool_retry(
+async def test_missing_prompt_template_review_event_reported_by_orphan_gate(
     tmp_path: Path,
     sessions_service: SessionServiceImpl,
 ) -> None:
-    """A pending prompt-template requirement is incomplete until its event exists."""
+    """A pending prompt-template requirement with no event is reported as a missing site.
+
+    Backend ownership (elspeth-e51216d305 Case B): the LLM no longer surfaces the
+    ``llm_prompt_template`` review via the tool, and Task 2b filters it OUT of the
+    repair ask — so a missing prompt-template event does NOT force an LLM tool
+    retry. ``_missing_pending_interpretation_review_sites`` nonetheless still
+    REPORTS the prompt-template site UNFILTERED (D4): this feeds the fail-closed
+    orphan gate at finalization, which stays the backstop if the backend
+    auto-surfacing ever no-ops. The backend surfaces the event immediately before
+    that gate, so in the normal path the site is cleared (see
+    ``test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_block``);
+    this test pins that the helper itself does not silently drop the kind.
+    """
 
     composer = _build_composer(tmp_path, sessions_service)
     state = _state_with_prompt_template_review_node()
@@ -944,6 +1017,346 @@ async def test_missing_prompt_template_review_event_forces_review_tool_retry(
     )
 
     assert missing == (("rate_node", "llm_prompt_template:rate_node", InterpretationKind.LLM_PROMPT_TEMPLATE),)
+
+
+@pytest.mark.asyncio
+async def test_auto_surface_prompt_template_creates_pending_event_idempotently(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """The backend surfaces a pending llm_prompt_template event idempotently.
+
+    A node carrying a pending auto-staged ``llm_prompt_template`` requirement and
+    NO pending event gets exactly one backend-surfaced event whose ``llm_draft``
+    equals the node's ``options.prompt_template`` and whose ``tool_call_id`` is
+    the honest ``backend_auto_surface:`` sentinel (D1). A second call is a no-op.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    await composer._auto_surface_prompt_template_reviews(
+        state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+    )
+
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt) == 1
+    assert pt[0].affected_node_id == "rate_node"
+    assert pt[0].user_term == "llm_prompt_template:rate_node"
+    assert pt[0].llm_draft == "Read {{ row.html }} and return JSON."
+    assert pt[0].tool_call_id.startswith("backend_auto_surface:")
+
+    # Idempotent: a second call must not create a duplicate.
+    await composer._auto_surface_prompt_template_reviews(
+        state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+    )
+    events2 = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert len([e for e in events2 if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]) == 1
+
+
+@pytest.mark.asyncio
+async def test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_block(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Finalization surfaces the PT review and does NOT fail closed on it.
+
+    The model finishes (no tool calls) with a pending auto-staged
+    ``llm_prompt_template`` requirement and no pending event. The backend
+    surfaces the event against the frozen final skeleton immediately before the
+    orphan gate, so the turn finalizes (``action == "return"``) instead of
+    fail-closing as an orphan on account of the prompt-template review.
+    """
+
+    from elspeth.web.composer.audit import BufferingRecorder
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    class _AssistantMessage:
+        content = "Done — the pipeline is ready."
+
+    outcome = await composer._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[],
+        state=state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=composer._new_runtime_preflight_cache(),
+        session_scope=str(session_id),
+        mutation_success_seen=True,
+        recorder=BufferingRecorder(),
+        progress=None,
+        repair_turns_used=0,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+    )
+
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert any(e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for e in events)
+    assert outcome.action == "return"
+    # Both the orphan-block and the finalize path return action="return", so
+    # assert specifically that the turn did NOT fail closed on a prompt-template
+    # orphan — the backend surfacing cleared that site.
+    result = outcome.result
+    assert result is not None
+    preflight = result.runtime_preflight
+    assert preflight is None or all(blocker.code != "interpretation_review_orphaned" for blocker in preflight.readiness.blockers)
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_finalize_auto_surfaces_prompt_template(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """HIGH-1: the B-4D-3 budget-exhaustion last-chance finalize ALSO surfaces PT.
+
+    Regression for Task 7 (elspeth-e51216d305). The B-4D-3 budget-exhaustion
+    last-chance no-tool finalize in ``_classify_and_budget_turn`` is a SECOND
+    no-tool finalize path. Before the fix it called ``_finalize_no_tool_response``
+    directly, bypassing both ``_auto_surface_prompt_template_reviews`` and the
+    fail-closed orphan gate. With ``composer_max_composition_turns=1`` the single
+    ``set_pipeline`` mutation exhausts the composition budget; the bonus call
+    returns plain text (no tool calls) and finalizes via that path. The node has a
+    CLEAN prompt (no bare token), so the only pending review must be the
+    backend-surfaced PT one.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service, max_composition_turns=1)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Budget-exhaustion PT surfacing session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    # Turn 1: a single mutation (set_pipeline) — composition counter 0 -> 1 =
+    # exhausted -> B-4D-3 bonus call. Bonus call returns plain text -> the
+    # budget-exhaustion no-tool finalize path runs.
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_clean_llm_node_args(),
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+        ]
+    )
+
+    await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="summarise each row",
+    )
+
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt) == 1, "budget-exhaustion finalize must auto-surface the PT review"
+    assert pt[0].affected_node_id == "rate_node"
+    assert pt[0].tool_call_id.startswith("backend_auto_surface:")
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_finalize_fails_closed_on_bare_token_orphan(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """HIGH-1: the budget-exhaustion finalize ALSO runs the fail-closed orphan gate.
+
+    A genuine bare ``{{interpretation:cool}}`` vague-term token with no pending
+    event must fail closed on the budget-exhaustion path exactly as it does on the
+    ``_try_terminate_no_tools`` path — not finalize runnable-pending with no card.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service, max_composition_turns=1)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Budget-exhaustion orphan session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    # The vague_term "cool" review was never staged: a genuine orphan. The
+    # budget-exhaustion finalize must fail closed (NOT finalize runnable).
+    preflight = result.runtime_preflight
+    assert preflight is not None
+    assert preflight.is_valid is False
+    assert preflight.readiness.execution_ready is False
+    assert {blocker.code for blocker in preflight.readiness.blockers} == {"interpretation_review_orphaned"}
+
+
+@pytest.mark.asyncio
+async def test_auto_surface_re_surfaces_after_prompt_edit_not_bricked(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """HIGH-2: draft-aware dedup re-surfaces PT after a multi-turn prompt edit.
+
+    Turn 1 surfaces event E_A for skeleton A. Turn 2 edits the node prompt to B
+    (re-stages the PT requirement; the stale pending event E_A survives). With
+    node-id-only dedup the second auto-surface would SKIP the node and never
+    create E_B (the review is bricked). Draft-aware dedup skips only when a
+    pending PT event's ``llm_draft`` equals the CURRENT prompt, so a fresh,
+    resolvable E_B (draft == B) is surfaced.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state_a = _state_with_prompt_template_review_node()  # prompt == "Read {{ row.html }} and return JSON."
+    session_id, state_id_a = await _seed_session_and_state(sessions_service, state=state_a)
+
+    await composer._auto_surface_prompt_template_reviews(
+        state_a,
+        session_id=str(session_id),
+        current_state_id=str(state_id_a),
+    )
+    events_a = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt_a = [e for e in events_a if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt_a) == 1
+    assert pt_a[0].llm_draft == "Read {{ row.html }} and return JSON."
+
+    # Turn 2: edit the prompt to B and re-stage the PT requirement against it.
+    prompt_b = "Classify {{ row.html }} and return a label."
+    node_a = state_a.nodes[0]
+    new_options = dict(node_a.options)
+    new_options["prompt_template"] = prompt_b
+    new_options[INTERPRETATION_REQUIREMENTS_KEY] = [
+        {
+            "id": "prompt_template_review",
+            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+            "user_term": "llm_prompt_template:rate_node",
+            "status": "pending",
+            "draft": prompt_b,
+            "event_id": None,
+            "accepted_value": None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": None,
+        }
+    ]
+    node_b = NodeSpec(
+        id=node_a.id,
+        node_type=node_a.node_type,
+        plugin=node_a.plugin,
+        input=node_a.input,
+        on_success=node_a.on_success,
+        on_error=node_a.on_error,
+        options=new_options,
+        condition=node_a.condition,
+        routes=node_a.routes,
+        fork_to=node_a.fork_to,
+        branches=node_a.branches,
+        policy=node_a.policy,
+        merge=node_a.merge,
+    )
+    state_b = CompositionState(
+        source=state_a.source,
+        nodes=(node_b,),
+        edges=state_a.edges,
+        outputs=state_a.outputs,
+        metadata=state_a.metadata,
+        version=2,
+    )
+    state_dict_b = state_b.to_dict()
+    record_b = await sessions_service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=state_dict_b["nodes"],
+            source=state_dict_b["source"],
+            metadata_=state_dict_b["metadata"],
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    await composer._auto_surface_prompt_template_reviews(
+        state_b,
+        session_id=str(session_id),
+        current_state_id=str(record_b.id),
+    )
+
+    events_b = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt_b = [e for e in events_b if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    drafts = {e.llm_draft for e in pt_b}
+    assert prompt_b in drafts, "draft-aware dedup must surface a fresh event for the edited prompt B"
+
+
+def test_has_pending_prompt_template_requirement_false_on_duplicate() -> None:
+    """LOW-a: the helper returns False when TWO pending PT requirements match.
+
+    Mirrors ``_matching_pending_requirement_index``'s exactly-one multiplicity:
+    a duplicate-requirement node must be skipped to the fail-closed orphan gate,
+    never surfaced (which would raise an opaque 500 at the writer boundary).
+    """
+
+    options = {
+        "prompt_template": "Rate {{ row.html }}.",
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_template_review_1",
+                "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                "user_term": "llm_prompt_template:rate_node",
+                "status": "pending",
+                "draft": "Rate {{ row.html }}.",
+            },
+            {
+                "id": "prompt_template_review_2",
+                "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                "user_term": "llm_prompt_template:rate_node",
+                "status": "pending",
+                "draft": "Rate {{ row.html }}.",
+            },
+        ],
+    }
+
+    assert (
+        ComposerServiceImpl._has_pending_prompt_template_requirement(
+            options,
+            user_term="llm_prompt_template:rate_node",
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -1094,7 +1507,11 @@ async def test_pending_interpretation_event_with_duplicate_placeholder_forces_pr
         "patch_node_options",
     ]
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    assert len(events) == 1
+    # One vague_term event (staged by the model); the backend additionally
+    # auto-surfaces the node's llm_prompt_template review at finalization
+    # (elspeth-e51216d305).
+    assert len([e for e in events if e.kind is InterpretationKind.VAGUE_TERM]) == 1
+    assert len([e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]) == 1
     state_record = await sessions_service.get_current_state(session_id)
     assert state_record is not None
     [rate_node] = [node for node in state_record.nodes if node["id"] == "rate_node"]
@@ -1179,8 +1596,15 @@ async def test_missing_state_interpretation_review_arg_error_forces_staging_retr
         "success",
     ]
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    assert len(events) == 1
-    assert events[0].tool_call_id == "call_review"
+    # The model staged the vague_term review (after the early arg_error retry);
+    # the backend also auto-surfaces the node's llm_prompt_template review at
+    # finalization (elspeth-e51216d305).
+    vague_events = [e for e in events if e.kind is InterpretationKind.VAGUE_TERM]
+    assert len(vague_events) == 1
+    assert vague_events[0].tool_call_id == "call_review"
+    pt_events = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt_events) == 1
+    assert pt_events[0].tool_call_id.startswith("backend_auto_surface:")
 
 
 @pytest.mark.asyncio

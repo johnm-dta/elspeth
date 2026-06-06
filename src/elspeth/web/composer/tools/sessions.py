@@ -1607,6 +1607,18 @@ async def _handle_request_interpretation_review(
             "request_interpretation_review arguments",
         ),
     )
+    # Backend owns prompt-template surfacing (elspeth-e51216d305 Case B). The
+    # ``llm_prompt_template`` review is auto-staged on every LLM node and the
+    # BACKEND surfaces its EVENT against the FINAL frozen skeleton at turn
+    # finalization, so it can never go stale against a later skeleton mutation.
+    # The LLM must NOT surface it mid-build via this tool; reject the kind at
+    # the Tier-3 boundary immediately after the parse, before any service call.
+    if parsed.kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+        raise ToolArgumentError(
+            argument="kind",
+            expected="vague_term, invented_source, pipeline_decision, or llm_model_choice",
+            actual_type=("llm_prompt_template — surfaced automatically by the backend at turn finalization; do not request it"),
+        )
     # F-34 credential prefilter: Tier-3 boundary check before any DB write.
     # ``_reject_credential_shaped_content`` raises ``ValueError``; we wrap
     # as ToolArgumentError so the compose loop's ARG_ERROR routing catches

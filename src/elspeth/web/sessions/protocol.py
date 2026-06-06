@@ -84,12 +84,12 @@ CompositionStateProvenance = Literal[
     "convergence_persist",
     "plugin_crash_persist",
     "preflight_persist",
-    # System-initiated: pre-execution template normalization for the
-    # first-run tutorial pipeline (replaces a previous misuse of
-    # ``convergence_persist`` which is reserved for the validator-failure
-    # writer in routes.py). See ``models.py`` CHECK constraint and
-    # spec amendment in
-    # ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md``.
+    # DORMANT (no live writer). Formerly written by the first-run tutorial's
+    # pre-execution template normalizer, removed for tutorial-vs-regular
+    # backend parity (the composer already emits ``row.field`` templates).
+    # Retained in the closed list + CHECK constraint so historical audit rows
+    # written under the old behavior remain representable; re-activating it is
+    # a governance action (see the NO SILENT EXTENSION block in ``models.py``).
     "tutorial_normalization",
     "session_seed",
     "session_fork",

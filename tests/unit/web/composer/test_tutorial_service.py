@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, cast
 from uuid import uuid4
 
@@ -24,8 +23,6 @@ from elspeth.web.composer.tutorial_service import (
     _cache_seed_skip_reason,
     _coalesce_run_source_hashes,
     _count_discarded_rows,
-    _normalise_bare_required_field_templates,
-    _normalise_current_tutorial_state_for_execution,
     _parse_rows_file,
     _plugin_nodes_from_composition_state,
     _plugin_nodes_from_pipeline_dict,
@@ -52,100 +49,6 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
-
-
-def test_normalise_bare_required_field_templates_uses_row_namespace() -> None:
-    original_template = "URL: {{url}}\nContent: {{ content }}\nOther: {{ ignored }}"
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": original_template,
-                "required_input_fields": ["url", "content"],
-                "resolved_prompt_template_hash": stable_hash(original_template),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    prompt = cast(str, options["prompt_template"])
-    assert prompt == "URL: {{ row.url }}\nContent: {{ row.content }}\nOther: {{ ignored }}"
-    assert options["resolved_prompt_template_hash"] == stable_hash(prompt)
-    original_options = cast(dict[str, Any], nodes[0]["options"])
-    assert original_options["prompt_template"] == original_template
-
-
-def test_normalise_bare_required_field_templates_leaves_row_namespace_alone() -> None:
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": "URL: {{ row.url }}",
-                "required_input_fields": ["url"],
-                "resolved_prompt_template_hash": stable_hash("URL: {{ row.url }}"),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is False
-    assert normalised == nodes
-
-
-def test_normalise_bare_required_field_templates_replaces_interpretation_placeholders() -> None:
-    original_template = "Rate how {{interpretation:cool}} this is, then explain why it is {{ interpretation: cool }}."
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": original_template,
-                "required_input_fields": ["content"],
-                "resolved_prompt_template_hash": stable_hash(original_template),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    prompt = cast(str, options["prompt_template"])
-    assert prompt == "Rate how cool this is, then explain why it is cool."
-    assert options["resolved_prompt_template_hash"] == stable_hash(prompt)
-
-
-def test_normalise_bare_required_field_templates_thaws_frozen_state_nodes() -> None:
-    original_template = "Content: {{ content }}"
-    nodes = (
-        MappingProxyType(
-            {
-                "id": "rate_coolness",
-                "plugin": "llm",
-                "options": MappingProxyType(
-                    {
-                        "prompt_template": original_template,
-                        "required_input_fields": ("content",),
-                    }
-                ),
-            }
-        ),
-    )
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    assert options["prompt_template"] == "Content: {{ row.content }}"
 
 
 def test_count_discarded_rows_counts_only_discard_destination() -> None:
@@ -791,81 +694,6 @@ def test_state_matches_cached_topology_returns_false_when_plugins_differ() -> No
         "sinks:\n  out:\n    plugin: jsonl\n"
     )
     assert _state_matches_cached_topology(record, cached_yaml) is False
-
-
-# --- _normalise_current_tutorial_state_for_execution provenance ---
-# A4: the tutorial-runtime template rewrite must be persisted with the
-# distinct ``tutorial_normalization`` provenance value rather than the
-# (validator-failure) ``convergence_persist`` it previously aliased.
-
-
-def test_normalise_current_tutorial_state_persists_tutorial_normalization_provenance() -> None:
-    """The pre-execution template rewrite saves with provenance='tutorial_normalization'.
-
-    Asserts both the call observed on ``save_composition_state`` and the
-    fact that ``convergence_persist`` is NOT written by this path —
-    distinguishing the tutorial rewrite from the validator-failure writer
-    in routes.py.
-    """
-    import asyncio
-    from datetime import UTC, datetime
-    from typing import Any
-    from uuid import UUID, uuid4
-
-    record = CompositionStateRecord(
-        id=uuid4(),
-        session_id=uuid4(),
-        version=1,
-        source={"plugin": "inline_blob"},
-        nodes=[
-            {
-                "id": "rate",
-                "node_type": "transform",
-                "plugin": "llm",
-                "options": {
-                    "prompt_template": "URL: {{url}}",
-                    "required_input_fields": ["url"],
-                },
-            }
-        ],
-        edges=[],
-        outputs=[{"name": "out", "plugin": "jsonl"}],
-        metadata_={},
-        is_valid=True,
-        validation_errors=None,
-        created_at=datetime(2026, 5, 19, tzinfo=UTC),
-        derived_from_state_id=None,
-        composer_meta=None,
-    )
-
-    saved: list[dict[str, Any]] = []
-
-    class _StubSessionService:
-        async def get_current_state(self, _session_id: UUID) -> CompositionStateRecord:
-            return record
-
-        async def save_composition_state(
-            self,
-            session_id: UUID,
-            state: Any,
-            *,
-            provenance: str,
-        ) -> CompositionStateRecord:
-            saved.append({"session_id": session_id, "state": state, "provenance": provenance})
-            return record
-
-    asyncio.run(
-        _normalise_current_tutorial_state_for_execution(
-            session_service=cast(Any, _StubSessionService()),
-            session_id=record.session_id,
-        )
-    )
-
-    assert len(saved) == 1, "normalise must save exactly one composition state"
-    assert saved[0]["provenance"] == "tutorial_normalization", (
-        "Tier-1 audit attribution: tutorial pre-execution template rewrite must NOT "
-        "be persisted under convergence_persist (the validator-failure writer's value)."
-    )
 
 
 def test_state_matches_cached_topology_returns_false_when_transform_count_differs() -> None:

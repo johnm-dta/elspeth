@@ -420,16 +420,20 @@ composition_states_table = Table(
     #   - ``convergence_persist``     — routes.py _handle_convergence_error
     #   - ``plugin_crash_persist``    — routes.py _handle_plugin_crash
     #   - ``preflight_persist``       — routes.py _handle_runtime_preflight_failure
-    #   - ``tutorial_normalization``  — tutorial_service.py
-    #                                    _normalise_current_tutorial_state_for_execution
-    #                                    (Phase 4 hello-world tutorial: rewrites
-    #                                    bare ``{{ field }}`` placeholders to
-    #                                    the ``row.field`` namespace before the
-    #                                    live composer pass executes the
-    #                                    pipeline. Distinct audit category so the
-    #                                    rewrite is not conflated with the
-    #                                    validator-failure writer
-    #                                    ``convergence_persist``.)
+    #   - ``tutorial_normalization``  — DORMANT (no live writer). Formerly
+    #                                    written by tutorial_service.py's
+    #                                    pre-execution template normalizer
+    #                                    (Phase 4 hello-world tutorial), which
+    #                                    rewrote bare ``{{ field }}`` placeholders
+    #                                    to the ``row.field`` namespace before the
+    #                                    live pass. Removed for tutorial-vs-regular
+    #                                    backend parity (the composer already emits
+    #                                    ``row.field`` templates; a 10-run live
+    #                                    battery showed the rewrite firing 0/10).
+    #                                    The value is retained in this CHECK so
+    #                                    historical audit rows remain representable;
+    #                                    re-activation is a governance action per
+    #                                    the NO SILENT EXTENSION block below.
     #   - ``session_seed``            — service.py create_session + set_active_state
     #                                    (also: routes.py post-compose state advance
     #                                     + fork source-storage rewrite — these two

@@ -32,6 +32,10 @@ Use `.venv-wt/bin/python -m pytest …` for all test runs below. (Python 3.13 is
 
 **Refactor discipline:** behavior-preserving moves ONLY. No logic edits, no "while I'm here" cleanups, no signature changes to public methods. When a step says "move lines X–Y verbatim," copy the body exactly and apply only the named state-rename transform. If the focused suite goes red after a move, the move was not behavior-preserving — revert and re-do, do not "fix forward."
 
+**Per-task reviewer gate (mandatory — green is necessary but NOT sufficient).** A passing suite only proves the *covered* paths survived; an under-tested path can change behavior and stay green. So between every task the reviewer MUST, beyond confirming the suite matches baseline:
+1. **Verbatim-diff check.** `git diff` the moved body against its source line range and confirm it is byte-identical modulo the named renames. A fresh subagent moving a body is the actor most likely to silently "tidy" it — the diff, not the green check, protects the uncovered lines (see Phase 0 coverage map).
+2. **Negative-control check.** Where a task repoints a monkeypatch seam that *injects a failure* (e.g. `sweep_durability:539`'s corrupting loop, `:444`'s `_fail_if_processed`), confirm the patch STILL FIRES its expected failure after repointing — not merely that the test is green. A repoint to a reference the orchestrator captured at `__init__` (rather than dispatching through the attribute) silently no-ops the patch: test green, durability never exercised. Verify the seam still bites.
+
 **Commits:** full hooks on (this is engine code, not docs). One commit per task. End messages with the `Co-Authored-By` trailer.
 
 **Gate reconciliation** is deferred to Phase 5 (single reconciliation under the freeze), per `notes/tier-model-bulk-remediation-playbook.md` and the landed `composer/service.py` precedent (merge `56b49fa05`).
@@ -53,7 +57,18 @@ Use `.venv-wt/bin/python -m pytest …` for all test runs below. (Python 3.13 is
 Run: `.venv-wt/bin/python -m pytest tests/ -q 2>&1 | tail -20`
 Expected: all pass except any documented pre-existing flakes. Record the pass/fail/deselected counts in the task's commit message or a scratch note — this is the number every later phase must reproduce.
 
-- [ ] **Step 3: Commit the baseline note** (if you recorded one; otherwise skip)
+- [ ] **Step 3: Measure the coverage risk-map of the file being dismembered.**
+
+Run: `.venv-wt/bin/python -m pytest tests/unit/engine/orchestrator tests/integration/pipeline/orchestrator tests/integration/test_adr_019_resume_counter_parity.py tests/integration/test_adr_019_sweep_durability.py --cov=elspeth.engine.orchestrator.core --cov-report=term-missing -q`
+
+Record the **term-missing line numbers**. These are the lines the test net does NOT catch — the
+real risk map. For every uncovered line that falls inside a method scheduled to move (cross-reference
+the line ranges in Phases 1–4), the verbatim-move discipline is the *only* safety net. Flag any
+uncovered line in `maybe_checkpoint`/`_run_main_processing_loop`/`resume`/`_process_resumed_rows`
+(the highest-stakes moves) and add a targeted characterization test in Task 0.2 Step 3 before that
+method is moved. "Green suite" blesses only covered paths; this step tells you where green is silent.
+
+- [ ] **Step 4: Commit the baseline + coverage note** (if recorded; otherwise skip)
 
 ### Task 0.2: Map invariants → guardian tests; fill gaps
 
@@ -203,16 +218,30 @@ class CheckpointCoordinator:
         self._sequence_number = 0
     def rebase_sequence(self, sequence_number: int) -> None:   # body from core.py:368-370
         self._sequence_number = sequence_number
-    def maybe_checkpoint(self, *, graph: ExecutionGraph, ...) -> None: ...
-        # body from core.py:538-600; replace self._current_graph -> graph (the new param)
-    def make_checkpoint_after_sink_factory(self, *, graph: ExecutionGraph, ...) -> Callable[[str], Callable[[TokenInfo], None]]: ...
-        # body from core.py:602-628; self._maybe_checkpoint(...) -> self.maybe_checkpoint(..., graph=graph)
-    def checkpoint_interrupted_progress(self, *, graph: ExecutionGraph, ...) -> None: ...
-        # body from core.py:630-709; replace self._current_graph -> graph
+    def set_active_graph(self, graph: ExecutionGraph) -> None:  # NEW — relocates self._current_graph
+        self._active_graph = graph
+    def maybe_checkpoint(self, ...) -> None: ...
+        # body from core.py:538-600; replace self._current_graph -> self._active_graph (read at fire-time)
+    def make_checkpoint_after_sink_factory(self, run_id, processor) -> _CheckpointFactory: ...
+        # body from core.py:602-628 VERBATIM; self._maybe_checkpoint(...) -> self.maybe_checkpoint(...)
+    def checkpoint_interrupted_progress(self, ...) -> None: ...
+        # body from core.py:630-709; replace self._current_graph -> self._active_graph
     def delete_checkpoints(self, run_id: str) -> None: ...     # body from core.py:711-718
 ```
 
-Preserve every other parameter of `maybe_checkpoint` / `checkpoint_interrupted_progress` / `make_checkpoint_after_sink_factory` exactly as in the original signatures (read the originals — they take aggregation/pending state; do not drop or reorder). The ONLY transform is: `self._current_graph` → an explicit `graph` keyword param, and `self._sequence_number` stays (now owned here).
+**CRITICAL — preserve LATE binding (advisor R-graph).** The original `make_checkpoint_after_sink_factory`
+(core.py:602-628) does NOT pass `graph`; its inner `callback` reads `self._current_graph` at
+*callback-fire time* via `_maybe_checkpoint` (core.py:618 → reads `_current_graph`). Capturing
+`graph=` at factory-creation time would be **early binding** — a silent behavior change in the
+resume path, invisible to any test that checkpoints against a stable graph. So the transform is a
+pure **attribute relocation**, not a signature change: `CheckpointCoordinator` owns mutable
+`self._active_graph`, set via `set_active_graph()` at exactly the points the original did
+`self._current_graph = graph`, and read at fire-time inside `maybe_checkpoint` /
+`checkpoint_interrupted_progress`. This preserves the late-binding semantics byte-for-byte. (Turning
+the coupling into an explicit per-call parameter is a *behavior-changing* improvement — explicitly
+OUT OF SCOPE for this behavior-preserving decomposition.) Preserve every other parameter of these
+methods exactly as in the originals (they carry `run_id`/`token_id`/`node_id`/aggregation/coalesce
+state — read the originals, do not drop or reorder). `self._sequence_number` stays (now owned here).
 
 - [ ] **Step 2: Wire `Orchestrator`.** In `__init__`:
 
@@ -229,10 +258,15 @@ Update call sites in `run` (1132–1379), `_execute_run` (2308–2432), `_flush_
 - `self._reset_checkpoint_sequence()` → `self._checkpoints.reset_sequence()`
 - `self._rebase_checkpoint_sequence(n)` → `self._checkpoints.rebase_sequence(n)`
 - `self._delete_checkpoints(run_id)` → `self._checkpoints.delete_checkpoints(run_id)`
-- `self._make_checkpoint_after_sink_factory(...)` → `self._checkpoints.make_checkpoint_after_sink_factory(..., graph=<the graph in scope>)`
-- `self._checkpoint_interrupted_progress(...)` → `self._checkpoints.checkpoint_interrupted_progress(..., graph=<graph>)`
+- `self._make_checkpoint_after_sink_factory(...)` → `self._checkpoints.make_checkpoint_after_sink_factory(...)` (no signature change)
+- `self._checkpoint_interrupted_progress(...)` → `self._checkpoints.checkpoint_interrupted_progress(...)` (no signature change)
 
-In `_execute_run` and `_process_resumed_rows`, the local variable that was assigned to `self._current_graph` becomes the `graph=` argument. Keep `self._current_graph` for now ONLY if other readers remain after this phase; grep to confirm — after this phase the only readers were the checkpoint methods, so delete `self._current_graph` (line 361) and its assignments too.
+In `_execute_run` (2308–2432) and `_process_resumed_rows` (2838–2951), every assignment
+`self._current_graph = <graph>` becomes `self._checkpoints.set_active_graph(<graph>)` at the **same
+line/point** (preserving when the graph becomes visible to checkpointing). Then grep `_current_graph`
+across `core.py` to confirm the checkpoint methods were its only readers, and delete the
+`self._current_graph` attribute (line 361) and its assignments. **Do not** introduce a `graph=`
+parameter — see the late-binding note in Step 1.
 
 - [ ] **Step 3: Verify (focused + resume-critical + full).**
 
@@ -384,7 +418,7 @@ Expected: PASS. Then full suite = baseline.
 
 - [ ] **Step 1: tier-model.** Run the tier-model enforcement gate (Python 3.13). For each of the 4 new files (`ceremony.py`, `checkpointing.py`, `source_iteration.py`, `resume.py`, `run_core.py`), prefer `@trust_boundary` where a method raises on malformed Tier-3 input with a real source param; otherwise carry forward the per-line allowlist entries that existed for the moved methods (the methods' tier classification did not change — this is a relocation, not a new boundary). Use `scripts/cicd/rotate_tier_model_fingerprints.py` to reconcile fingerprints displaced by the move (read `reference_tier_model_fingerprint_rotation_tool` discipline: restore stale entries first, git-diff + re-run, watch for dup-key data-loss).
 
-- [ ] **Step 2: fingerprint baseline.** Regenerate `fingerprint_baseline.json` (the structural move changes it — regen recurs after every structural change, per the playbook) and confirm `test_baseline_capture_is_self_consistent` passes. NOTE: per project memory this regen may require the operator HMAC key to bless the enforce gate — if so, STOP and hand to the operator; do not bless blind.
+- [ ] **Step 2: fingerprint baseline.** Regenerate `fingerprint_baseline.json` (the structural move changes it — regen recurs after every structural change, per the playbook) and confirm `test_baseline_capture_is_self_consistent` passes. NOTE: per project memory this regen may require the operator HMAC key to bless the enforce gate — if so, STOP and hand to the operator; do not bless blind. EXPECT the baseline diff to be **larger than this refactor alone**: RC5.3 already carries pre-existing baseline drift with an owed operator re-sign, so this decomposition's drift batches with it into one HMAC sign run (efficient — but don't be alarmed the diff exceeds your changes).
 
 - [ ] **Step 3: contracts whitelist / immutability counts.** Grep `contracts/` for any path or symbol reference to `orchestrator.core` that moved; repoint. If the class count in `core.py` changed, update `test_immutability_rules` count accordingly.
 

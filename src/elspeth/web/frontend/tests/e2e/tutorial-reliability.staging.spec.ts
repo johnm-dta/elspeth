@@ -36,17 +36,59 @@ import {
 const BATCH_ID = process.env.HARNESS_BATCH_ID ?? "skeleton";
 const BATCH_SIZE = Number(process.env.HARNESS_BATCH_SIZE ?? "1");
 
-// Generic: click every "Accept ..." button rendered in the assumptions panel,
-// then wait for the continue button to enable. Returns the count accepted.
+// Accept every assumption card, then wait for the continue button to enable.
+// Robust to any assumption-set the (non-deterministic) composer produces and to
+// the LLM-prompt-template REVIEW GATE: that card's Accept button is `disabled`
+// until its prompt region (role="region" name="Prompt template review") is
+// scrolled to the end (InterpretationReviewTurn: requiresPromptTemplateScroll →
+// hasScrolledToEnd). The earlier helper clicked nth(0) blindly and hung on that
+// disabled button — the dominant false "infra timeout" in batch-2026-06-06.
 //
-// NOTE (live-run caveat, not a compile concern): the LLM-prompt-template review
-// requires the region to be scrolled before its Accept enables (see the mocked
-// tutorial.spec.ts). A later live task may need to scroll that region.
+// Loop: ungate every prompt-template region by scrolling it to the bottom (which
+// fires its onScroll handler), then click the first ENABLED Accept button, until
+// the continue button ("Looks good") un-disables (pendingCount === 0).
 async function acceptAllAssumptions(page: Page): Promise<number> {
-  const buttons = page.getByRole("button", { name: /^Accept /i });
-  const count = await buttons.count();
-  for (let i = 0; i < count; i++) await buttons.nth(0).click(); // list shrinks as accepted
-  return count;
+  const continueBtn = page.getByRole("button", { name: "Looks good" });
+  const acceptButtons = page.getByRole("button", { name: /^Accept /i });
+  const promptRegions = page.getByRole("region", {
+    name: "Prompt template review",
+  });
+  let accepted = 0;
+  const deadline = Date.now() + 90_000;
+  while (await continueBtn.isDisabled().catch(() => true)) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        "assumptions never all became acceptable (continue stayed disabled)",
+      );
+    }
+    // Ungate prompt-template reviews: scroll each region to its end and fire the
+    // scroll event the gate listens for.
+    const regionCount = await promptRegions.count().catch(() => 0);
+    for (let i = 0; i < regionCount; i++) {
+      await promptRegions
+        .nth(i)
+        .evaluate((el) => {
+          el.scrollTop = el.scrollHeight;
+          el.dispatchEvent(new Event("scroll"));
+        })
+        .catch(() => {});
+    }
+    // Click the first currently-enabled Accept button, then re-evaluate (the
+    // accepted card unmounts, shrinking the list).
+    const total = await acceptButtons.count().catch(() => 0);
+    let clicked = false;
+    for (let i = 0; i < total; i++) {
+      const btn = acceptButtons.nth(i);
+      if (await btn.isEnabled().catch(() => false)) {
+        await btn.click().catch(() => {});
+        accepted += 1;
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) await page.waitForTimeout(300);
+  }
+  return accepted;
 }
 
 // Dimension (d) output-substance (spec §6): count rows that carry a meaningful,
@@ -84,7 +126,7 @@ function substantiveRowCount(
 const INFRA_ERROR = /\b5\d\d\b|429|rate.?limit|throttl|timed? ?out|timeout|did not reach terminal|econn|socket hang|network|temporarily unavailable|bad gateway|service unavailable|gateway timeout/i;
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
-  test.setTimeout(420_000); // real compose + tutorial run + real-system re-run can take minutes
+  test.setTimeout(720_000); // real compose + tutorial run; raised for provider latency under load
 
   // --- per-run state (Task 5 capture targets; all consumed in the record) ---
   let sessionId: string | null = null;
@@ -144,7 +186,7 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     // Turn 2b: review assumptions, accept all, continue.
     await expect(
       page.getByText(/Here is what the composer drafted/i),
-    ).toBeVisible({ timeout: 180_000 });
+    ).toBeVisible({ timeout: 300_000 }); // raised for LLM-provider latency under load
     await acceptAllAssumptions(page);
     await page.getByRole("button", { name: "Looks good" }).click();
 
@@ -154,7 +196,7 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
 
     // Turn 4: wait for completion, continue to audit story.
     await expect(page.getByRole("button", { name: "Continue" })).toBeVisible({
-      timeout: 240_000,
+      timeout: 360_000, // raised for LLM-provider latency under load
     });
     await page.getByRole("button", { name: "Continue" }).click();
     turnReached = 4;
@@ -360,7 +402,15 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
 }
 
 test.describe("tutorial reliability battery", () => {
+  // Inter-run cooldown: spacing the runs reduces the LLM-provider contention that
+  // inflated composition/run latency under back-to-back load (batch-2026-06-06:
+  // isolated runs ~72s, but 3/10 timed out under rapid succession). Skipped before
+  // the first run. Tune via HARNESS_COOLDOWN_MS.
+  const COOLDOWN_MS = Number(process.env.HARNESS_COOLDOWN_MS ?? "15000");
+  let cooldownNeeded = false;
   test.beforeEach(async () => {
+    if (cooldownNeeded) await new Promise((r) => setTimeout(r, COOLDOWN_MS));
+    cooldownNeeded = true;
     const ctx = await harnessCtx();
     await cleanSessions(ctx);
     await resetToFirstRun(ctx);

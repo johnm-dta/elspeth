@@ -20,12 +20,14 @@ Commits: `67be2ba8d` `519d44e40` `e348a25fd` `c39ca9b57` `1f5214d03` `44197b5b1`
   reason: Protocol dispatch for batch-aware transforms and re-raise guards
   max_hits: 2
 ```
-Both R5 hits **moved to `run_core.py`** (verified): `isinstance(t, TransformProtocol)` dispatch
-at `run_core.py:491` (in `build_processor`) + the bare re-raise guard at `run_core.py:484`,
-both via the relocated `_build_processor`. Action: repoint the pattern to
-`engine/orchestrator/run_core.py` (keep R5 / max_hits:2 / reason). `core.py`'s remaining
-`raise`s are plain `OrchestrationInvariantError` (Tier-1 explicit), not R5 — its R5 budget
-likely drops to 0 (confirm via a clean gate run, then remove or zero the core.py pattern).
+The R5 protocol-dispatch hit **definitely moved to `run_core.py`**: `isinstance(t,
+TransformProtocol)` at `run_core.py:491` (in `build_processor`, ex-`_build_processor`). The
+*second* R5 hit is a "re-raise guard" (the rule's reason) whose destination is **NOT
+gate-confirmed**: a bare `raise` re-raise lives at BOTH `run_core.py:484` AND `core.py:463`,
+so the split is **either 2→run_core/0→core OR 1→run_core/1→core — ESTIMATE, verify counts via
+a clean gate run.** Action: add a `run_core.py` per-file-rule (R5, max_hits 1 or 2 per the
+gate) and reduce the `core.py` entry to whatever the gate reports (do NOT assume 0). All other
+`raise`s in core.py/resume.py are plain `OrchestrationInvariantError` (Tier-1 explicit), not R5.
 Per-file `pattern` rules are not fingerprinted/judge-gated, so this edit does not itself need
 the HMAC key — BUT see #3 (the gate won't run clean until the unrelated drift is cleared).
 

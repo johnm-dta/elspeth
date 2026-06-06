@@ -345,14 +345,14 @@ class TestSinkNameValidation:
     """Tests for the OrchestrationInvariantError when sink_name is missing from config."""
 
     def _make_orchestrator(self) -> Mock:
-        """Build a minimal mock Orchestrator with _write_pending_to_sinks accessible."""
+        """Build a minimal mock RunExecutionCore with write_pending_to_sinks accessible."""
         # Import the actual method to test it directly
-        from elspeth.engine.orchestrator.core import Orchestrator
+        from elspeth.engine.orchestrator.run_core import RunExecutionCore
 
-        orchestrator = Mock(spec=Orchestrator)
+        orchestrator = Mock(spec=RunExecutionCore)
         orchestrator._span_factory = Mock()
         # Bind the real method
-        orchestrator._write_pending_to_sinks = Orchestrator._write_pending_to_sinks.__get__(orchestrator)
+        orchestrator.write_pending_to_sinks = RunExecutionCore.write_pending_to_sinks.__get__(orchestrator)
         return orchestrator
 
     def test_missing_sink_name_raises_orchestration_invariant_error(self) -> None:
@@ -370,7 +370,7 @@ class TestSinkNameValidation:
         }
 
         with pytest.raises(OrchestrationInvariantError, match="nonexistent_sink"):
-            orchestrator._write_pending_to_sinks(
+            orchestrator.write_pending_to_sinks(
                 factory=recorder,
                 run_id="test-run",
                 config=config,
@@ -397,7 +397,7 @@ class TestSinkNameValidation:
         }
 
         # Should not raise — empty list triggers `continue` before sink lookup
-        orchestrator._write_pending_to_sinks(
+        orchestrator.write_pending_to_sinks(
             factory=recorder,
             run_id="test-run",
             config=config,

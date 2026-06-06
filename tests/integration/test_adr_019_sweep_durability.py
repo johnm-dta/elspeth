@@ -18,6 +18,9 @@ from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig, prepare_for_run
+from elspeth.engine.orchestrator.resume import ResumeCoordinator
+from elspeth.engine.orchestrator.run_core import RunExecutionCore
+from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
 from tests.fixtures.pipeline import build_linear_pipeline
 from tests.fixtures.plugins import CollectSink, PassTransform
@@ -437,11 +440,11 @@ def test_resume_no_work_sweep_crash_finalizes_failed_and_preserves_evidence(
 
     process_calls: list[str] = []
 
-    def _fail_if_processed(self: Orchestrator, *args, **kwargs):
+    def _fail_if_processed(self: ResumeCoordinator, *args, **kwargs):
         process_calls.append("process")
-        raise AssertionError("no-work resume branch must not call _process_resumed_rows")
+        raise AssertionError("no-work resume branch must not call process_resumed_rows")
 
-    monkeypatch.setattr(Orchestrator, "_process_resumed_rows", _fail_if_processed)
+    monkeypatch.setattr(ResumeCoordinator, "process_resumed_rows", _fail_if_processed)
 
     with pytest.raises(AuditIntegrityError, match=label):
         orchestrator.resume(
@@ -465,9 +468,9 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
     db = LandscapeDB.in_memory()
     payload_store = MockPayloadStore()
     captured: dict[str, str] = {}
-    original_loop = Orchestrator._run_main_processing_loop
+    original_loop = SourceIterationDriver.run_main_processing_loop
 
-    def _corrupting_loop(self: Orchestrator, loop_ctx, factory, run_id, source_id, edge_map, *, shutdown_event=None):
+    def _corrupting_loop(self: SourceIterationDriver, loop_ctx, factory, run_id, source_id, edge_map, *, shutdown_event=None):
         captured["run_id"] = run_id
         sink = factory.data_flow.register_node(
             run_id=run_id,
@@ -536,7 +539,7 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
             )
         return original_loop(self, loop_ctx, factory, run_id, source_id, edge_map, shutdown_event=None)
 
-    monkeypatch.setattr(Orchestrator, "_run_main_processing_loop", _corrupting_loop)
+    monkeypatch.setattr(SourceIterationDriver, "run_main_processing_loop", _corrupting_loop)
     config, graph = _build_minimal_run()
 
     with pytest.raises(AuditIntegrityError, match=kind):
@@ -562,7 +565,7 @@ def test_sweep_skipped_on_graceful_shutdown(monkeypatch: pytest.MonkeyPatch) -> 
         sweep_calls.append(run_id)
         raise AssertionError("sweep must not run after graceful shutdown")
 
-    def _raise_shutdown_from_flush(self: Orchestrator, factory, run_id, loop_ctx, *args, **kwargs) -> None:
+    def _raise_shutdown_from_flush(self: RunExecutionCore, factory, run_id, loop_ctx, *args, **kwargs) -> None:
         raise GracefulShutdownError(
             rows_processed=loop_ctx.counters.rows_processed,
             run_id=run_id,
@@ -574,7 +577,7 @@ def test_sweep_skipped_on_graceful_shutdown(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
     monkeypatch.setattr(DataFlowRepository, "sweep_deferred_invariants_or_crash", _fail_if_swept)
-    monkeypatch.setattr(Orchestrator, "_flush_and_write_sinks", _raise_shutdown_from_flush)
+    monkeypatch.setattr(RunExecutionCore, "flush_and_write_sinks", _raise_shutdown_from_flush)
 
     db = LandscapeDB.in_memory()
     config, graph = _build_minimal_run()

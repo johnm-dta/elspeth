@@ -244,6 +244,9 @@ landscape.db-wal
 # Antigravity / Gemini AI-IDE local project state (was leaking a machine-specific
 # symlink into ~/.gemini; untracked + deleted from disk 2026-06-07).
 .antigravitycli/
+# .claude/ — Claude Code local project config + agent skills. Untracked
+# 2026-06-07; .agents/ is the canonical tracked skills home. Kept on disk.
+.claude/
 
 
 

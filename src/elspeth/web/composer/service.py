@@ -2277,7 +2277,14 @@ class ComposerServiceImpl:
                             state,
                             session_id=session_id,
                         )
-                        if not orphaned_precheck:
+                        # Exclude AUTO-SURFACEABLE llm_prompt_template sites — same
+                        # filter as the P2 pre-check above. The shared finalize tail
+                        # auto-surfaces PT immediately before its UNFILTERED orphan
+                        # gate, so a PT site is not a genuine orphan that would
+                        # suppress the advisor; only non-PT orphans do. The tail's
+                        # final orphan gate stays unfiltered (fail-closed).
+                        genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
+                        if not genuine_orphans:
                             verdict = await self._run_advisor_checkpoint(
                                 phase="end",
                                 state=state,
@@ -2501,7 +2508,17 @@ class ComposerServiceImpl:
                 state,
                 session_id=session_id,
             )
-            if not orphaned_precheck:
+            # llm_prompt_template sites are AUTO-SURFACEABLE pseudo-orphans: the
+            # shared finalize tail calls ``_auto_surface_prompt_template_reviews``
+            # immediately before its (UNFILTERED) orphan gate, so a PT site here is
+            # not a genuine orphan the tail would block — it is one the tail will
+            # resolve. Only GENUINE (non-PT) orphans suppress the advisor, mirroring
+            # the model_repairable filter above. This makes the advisor review the
+            # SAME pipeline the tail will finalize; the FINAL orphan gate in
+            # ``_surface_and_finalize_no_tools`` stays UNFILTERED, so a still-missing
+            # PT after auto-surface remains fail-closed (unchanged).
+            genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
+            if not genuine_orphans:
                 verdict = await self._run_advisor_checkpoint(
                     phase="end",
                     state=state,
@@ -3898,10 +3915,17 @@ class ComposerServiceImpl:
                 continue
             blocking = not guidance.strip().upper().startswith("CLEAN")
             return AdvisorCheckpointVerdict(ok=True, blocking=blocking, findings_text=guidance.strip())
+        # Include the exception CLASS name so an operator-facing blocked message
+        # distinguishes a genuine programming bug (AttributeError/KeyError/
+        # TypeError re-raised by the call core) from a transient transport/config
+        # failure (timeout/auth). The catch breadth is deliberately UNCHANGED —
+        # fail-closed is preserved and CancelledError still escapes as
+        # BaseException; the crash-loud-vs-fail-closed polarity is deferred to the
+        # operator (spec §13). Only the diagnostic text is sharpened.
         return AdvisorCheckpointVerdict(
             ok=False,
             blocking=False,
-            findings_text=str(last_exc) if last_exc else "advisor unavailable",
+            findings_text=f"{type(last_exc).__name__}: {last_exc}" if last_exc else "advisor unavailable",
         )
 
     async def _maybe_run_early_checkpoint(

@@ -96,12 +96,18 @@ class WebSettings(BaseModel):
         default=2,
         ge=1,
         description=(
-            "Max deterministic advisor-checkpoint passes per compose request "
-            "(early + end + end re-reviews), counted SEPARATELY from "
-            "_MAX_REPAIR_TURNS. On the last budgeted pass a still-flagged end "
-            "gate fails closed (no repair it cannot re-review). DISTINCT from "
-            "composer_advisor_max_calls_per_compose, which remains the hard "
-            "ceiling across ALL advisor calls (checkpoints + proactive-security)."
+            "Max END advisor-checkpoint passes per compose request (the initial "
+            "end sign-off plus its re-reviews), counted SEPARATELY from "
+            "_MAX_REPAIR_TURNS. The EARLY advisory pass is separate and does NOT "
+            "consume this counter (spec §13). On the last budgeted pass a "
+            "still-flagged end gate fails closed (no repair — it cannot "
+            "re-review). Checkpoint calls are bounded SOLELY by this knob and are "
+            "NOT counted against composer_advisor_max_calls_per_compose (which "
+            "bounds LLM-initiated hints + proactive-security). "
+            "(Spec §7 envisioned composer_advisor_max_calls_per_compose as a "
+            "unified backstop across all advisor calls including checkpoints; "
+            "that unification is not implemented — checkpoints are bounded "
+            "separately. Operator decision pending.)"
         ),
     )
     composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)

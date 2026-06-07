@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "contracts/dup.py",
+    "fingerprint": "contracts/dup.py:MC1:dup::duplicate@L25",
+    "line": 25,
+    "message": "contract name 'dup' is registered more than once; runtime register_declaration_contract rejects duplicate names with ValueError. Remove the redundant register_declaration_contract(...) call.",
+    "rule_id": "MC1",
+    "severity": "error",
+    "suggestion": "Keep EXPECTED_CONTRACT_SITES, register_declaration_contract(...) calls, and @implements_dispatch_site markers in sync."
+  }
+]

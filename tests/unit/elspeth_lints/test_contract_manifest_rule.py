@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -10,7 +13,7 @@ import pytest
 
 from elspeth_lints.core.protocols import RuleContext
 from elspeth_lints.rules.manifest.contract_manifest import RULE
-from elspeth_lints.rules.manifest.contract_manifest.metadata import RULE_MC2, RULE_MC3A, RULE_MC3B, RULE_MC3C
+from elspeth_lints.rules.manifest.contract_manifest.metadata import RULE_MC1, RULE_MC2, RULE_MC3A, RULE_MC3B, RULE_MC3C
 from elspeth_lints.rules.manifest.contract_manifest.rule import load_contract_allowlist
 
 
@@ -167,6 +170,187 @@ def test_contract_manifest_reports_trivial_marker_body(tmp_path: Path) -> None:
 
     assert [finding.rule_id for finding in findings] == [RULE_MC3C]
     assert "can_drop_rows::post_emission_check" in findings[0].fingerprint
+
+
+def test_contract_manifest_rejects_shadowed_register_call(tmp_path: Path) -> None:
+    # elspeth-1e8f4ece9a: a locally-defined no-op register_declaration_contract
+    # (NOT imported from the canonical module) must not be counted as a real
+    # registration, so the manifest entry is left unresolved (MC2).
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"shadowed": ["post_emission_check"]})
+    _write_contract(
+        source_root / "contracts" / "shadowed.py",
+        """
+        from elspeth.contracts.declaration_contracts import (
+            DeclarationContract,
+            implements_dispatch_site,
+        )
+
+
+        def register_declaration_contract(contract):
+            return None
+
+
+        class ShadowContract(DeclarationContract):
+            name = "shadowed"
+
+            @implements_dispatch_site("post_emission_check")
+            def post_emission_check(self, inputs, outputs):
+                raise NotImplementedError
+
+
+        register_declaration_contract(ShadowContract())
+        """,
+    )
+
+    findings = list(RULE.analyze(ast.Module(body=[], type_ignores=[]), source_root, RuleContext(root=source_root)))
+
+    assert [finding.rule_id for finding in findings] == [RULE_MC2]
+    assert "shadowed" in findings[0].fingerprint
+
+
+def test_contract_manifest_rejects_shadowed_dispatch_marker(tmp_path: Path) -> None:
+    # elspeth-487dfef2ce: a locally-defined no-op implements_dispatch_site must
+    # not be counted as a real marker, so the manifested site is reported missing
+    # (MC3b) rather than silently satisfied.
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"shadow_marker": ["post_emission_check"]})
+    _write_contract(
+        source_root / "contracts" / "shadow_marker.py",
+        """
+        from elspeth.contracts.declaration_contracts import (
+            DeclarationContract,
+            register_declaration_contract,
+        )
+
+
+        def implements_dispatch_site(site):
+            def decorate(fn):
+                return fn
+
+            return decorate
+
+
+        class ShadowMarkerContract(DeclarationContract):
+            name = "shadow_marker"
+
+            @implements_dispatch_site("post_emission_check")
+            def post_emission_check(self, inputs, outputs):
+                raise NotImplementedError
+
+
+        register_declaration_contract(ShadowMarkerContract())
+        """,
+    )
+
+    findings = list(RULE.analyze(ast.Module(body=[], type_ignores=[]), source_root, RuleContext(root=source_root)))
+
+    assert [finding.rule_id for finding in findings] == [RULE_MC3B]
+    assert "shadow_marker::post_emission_check" in findings[0].fingerprint
+
+
+def test_contract_manifest_reports_duplicate_registration(tmp_path: Path) -> None:
+    # elspeth-07d9f8a619: two registrations sharing a contract name must be
+    # flagged (runtime register_declaration_contract raises ValueError on a dup),
+    # not silently deduped into a set.
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"dup": ["post_emission_check"]})
+    _write_contract(
+        source_root / "contracts" / "dup.py",
+        """
+        from elspeth.contracts.declaration_contracts import (
+            DeclarationContract,
+            implements_dispatch_site,
+            register_declaration_contract,
+        )
+
+
+        class DupOne(DeclarationContract):
+            name = "dup"
+
+            @implements_dispatch_site("post_emission_check")
+            def post_emission_check(self, inputs, outputs):
+                raise NotImplementedError
+
+
+        class DupTwo(DeclarationContract):
+            name = "dup"
+
+            @implements_dispatch_site("post_emission_check")
+            def post_emission_check(self, inputs, outputs):
+                raise NotImplementedError
+
+
+        register_declaration_contract(DupOne())
+        register_declaration_contract(DupTwo())
+        """,
+    )
+
+    findings = list(RULE.analyze(ast.Module(body=[], type_ignores=[]), source_root, RuleContext(root=source_root)))
+
+    assert [finding.rule_id for finding in findings] == [RULE_MC1]
+    assert "dup::duplicate@" in findings[0].fingerprint
+
+
+def test_contract_manifest_accepts_keyword_form_marker(tmp_path: Path) -> None:
+    # elspeth-2b5edd369e: the runtime decorator accepts site_name as a keyword,
+    # so @implements_dispatch_site(site_name="...") is a valid marker shape and
+    # must not raise a spurious MC3b.
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"kw": ["post_emission_check"]})
+    _write_contract(
+        source_root / "contracts" / "kw.py",
+        """
+        from elspeth.contracts.declaration_contracts import (
+            DeclarationContract,
+            implements_dispatch_site,
+            register_declaration_contract,
+        )
+
+
+        class KeywordContract(DeclarationContract):
+            name = "kw"
+
+            @implements_dispatch_site(site_name="post_emission_check")
+            def post_emission_check(self, inputs, outputs):
+                raise NotImplementedError
+
+
+        register_declaration_contract(KeywordContract())
+        """,
+    )
+
+    findings = list(RULE.analyze(ast.Module(body=[], type_ignores=[]), source_root, RuleContext(root=source_root)))
+
+    assert findings == []
+
+
+def test_contract_manifest_json_mode_succeeds_on_current_codebase(
+    elspeth_lints_subprocess_env: dict[str, str],
+) -> None:
+    # Real-codebase finding-set invariance: the provenance/dup/keyword tightenings
+    # must not change the verdict on the live tree (zero blast radius).
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "elspeth_lints.core.cli",
+            "check",
+            "--rules",
+            "manifest.contract_manifest",
+            "--root",
+            "src/elspeth",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[3],
+        env=elspeth_lints_subprocess_env,
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def _write_manifest(source_root: Path, entries: dict[str, list[str]]) -> None:

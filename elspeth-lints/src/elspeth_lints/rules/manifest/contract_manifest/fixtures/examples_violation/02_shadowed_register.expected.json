@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "contracts/declaration_contracts.py",
+    "fingerprint": "contracts/declaration_contracts.py:MC2:shadowed",
+    "line": 3,
+    "message": "manifest lists contract 'shadowed' but no register_declaration_contract(...) call site resolves to it.",
+    "rule_id": "MC2",
+    "severity": "error",
+    "suggestion": "Keep EXPECTED_CONTRACT_SITES, register_declaration_contract(...) calls, and @implements_dispatch_site markers in sync."
+  }
+]

@@ -263,6 +263,12 @@ elspeth-lints = { path = "elspeth-lints", editable = true }
 target-version = "py313"
 line-length = 140
 src = ["src", "tests", "elspeth-lints/src"]
+# Deliberately-malformed / legacy-form lint-rule test fixtures must not be linted
+# or auto-upgraded: ruff "fixing" e.g. List[int] -> list[int] would defeat the
+# very fixture that exists to test detection of the deprecated form. Mirrors the
+# mypy exclude below. force-exclude (set by the ruff pre-commit hook) applies
+# this even to explicitly-passed changed files.
+extend-exclude = ["elspeth-lints/src/elspeth_lints/rules/**/fixtures"]
 
 [tool.ruff.lint]
 select = [

@@ -147,7 +147,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6209c0674e1192a5"
+    source_file_hash: str | None = "sha256:ac50840e05596ce6"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -430,6 +430,7 @@ class JSONSource(BaseSource):
                 raw_headers=raw_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
             # Create contract builder only if no contract is set yet (FIXED
@@ -453,8 +454,14 @@ class JSONSource(BaseSource):
             if key in mapping:
                 normalized[mapping[key]] = value
             else:
-                # New key not seen in first row — normalize individually
-                normalized[normalize_field_name(key)] = value
+                # New key not in the cached resolution — normalize it, then apply
+                # field_mapping by normalized name so a mapped key that first appears
+                # in a LATER row still maps to its target. (The strict resolve check
+                # used to make this branch unreachable for mapping keys; relaxing it
+                # for sparse records unmasks this path — elspeth-2ad0cebfcd.)
+                nk = normalize_field_name(key)
+                final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
+                normalized[final_name] = value
                 has_unmapped_fields = True
 
         # If this row had fields not in the initial mapping, rebuild
@@ -466,6 +473,7 @@ class JSONSource(BaseSource):
                 raw_headers=list(row.keys()),
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
         return normalized

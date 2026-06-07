@@ -42,6 +42,8 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-3c73e49cc7 | AST: gve_attribution (MD4 SUPERSEDED) | (test-only) | framework CLI emits parse-error for SyntaxError → fail-closed; locking test added |
 | elspeth-a586a7212e | AST: frozen_annotations (MD2) | b67f4a56e | regex missed capitalized typing aliases List[/Dict[/Set[ → AST walk; blast radius ZERO |
 | elspeth-fbfb9fd634 | AST: frozen_annotations (MD2) | b67f4a56e | regex required `[` so bare list/dict/set missed → AST walk; only tightens (nested-in-immutable still flagged) |
+| elspeth-20add2bd90 | AST: component_type (MD1 alias) | 9ad914feb | `_extract_base_names` saw only syntactic base → now resolves `import Base as Alias` via per-file alias map; resolved name APPENDED not substituted (never-loosen by construction); blast radius ZERO |
+| elspeth-a2b240c29b | AST: component_type (MD5 spoof) | 9ad914feb | `_class_sets_component_type` accepted any str → now restricted to {source,sink,transform}; blast radius ZERO (all real labels valid). Runtime sibling filed elspeth-ce0814e726 (config_base.__init_subclass__ only checks is-None — engine/platform cluster, deferred) |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped
@@ -148,6 +150,31 @@ only removes the mechanical-hash busywork.
 into one shared fail-closed helper that all loaders delegate to — removes the
 drift that caused MD3 in the first place. This is the "extract the helper after
 2-3 concrete fixes" win; do it after MD1/MD2 land more concrete cases.
+
+## 3c. contract_manifest family (NEXT — analysis done, fix not started)
+
+Rule: `rules/manifest/contract_manifest/rule.py`. Four bugs, coupled — land as ONE pass:
+
+- **1e8f4ece9a (MD1, fail-OPEN):** `_is_register_call` (L225) matches any Name/Attribute
+  whose final name == `register_declaration_contract`, ignoring provenance. A local no-op
+  `def register_declaration_contract(x): pass` is accepted → CI certifies a fake registration.
+- **487dfef2ce (MD1, fail-OPEN):** `_dispatch_site_marker` (L327) checks `_call_name(decorator)
+  == _DECORATOR_NAME` textually. Local no-op `implements_dispatch_site` is accepted as a real marker.
+- **07d9f8a619 (fail-OPEN):** `compute_findings` (L362,377) tracks `registered_names_found` as a
+  SET, never flags two registrations sharing a `name`. Runtime `register_declaration_contract`
+  raises ValueError on dup → CI passes a tree bootstrap would reject. Fix: detect duplicate
+  contract_name across `registrations`, emit a finding (reuse MC1 or add a sub-id — check metadata.py).
+- **2b5edd369e (P3, false-POSITIVE):** `_dispatch_site_marker` only reads `decorator.args[0]`;
+  runtime decorator accepts `site_name=` kwarg → keyword-form marker missed → spurious MC3b. Fix:
+  also read the `site_name` keyword. (FP removal — ensure real missing-marker detection unaffected.)
+
+**Fix shape:** add a per-file import-provenance map (alias→canonical) for both
+`register_declaration_contract` and `implements_dispatch_site`, sourced from
+`elspeth.contracts.declaration_contracts`. **OPEN QUESTION — blast radius FIRST:** how does real
+src/elspeth import/call these? If direct `from ...declaration_contracts import register_declaration_contract`
+and bare-name calls, a provenance requirement is safe (zero FN). If Attribute-form (`module.register_...`),
+the map must resolve `import ... as module` too. Grep before tightening; ZERO unresolvable real calls = safe.
+Per-bug TDD + fixtures + red-proof against HEAD, same method as component_type (9ad914feb).
 
 ## 4. Next session (per advisor: prove a slice, commit, continue)
 - MD1 vertical slice: pick `gve_attribution` aliased-raise

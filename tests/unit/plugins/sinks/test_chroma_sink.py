@@ -806,6 +806,32 @@ class TestChromaSinkEmptyMetadata:
         assert result.artifact.metadata["row_count"] == 2
         assert len(result.diversions) == 0
 
+    def test_mixed_batch_content_hash_covers_aligned_payload(self) -> None:
+        """elspeth-b19ee26dc2: content_hash must cover a length-consistent payload.
+
+        A mixed metadata/no-metadata batch previously extended ids/documents for
+        all rows but metadatas only for metadata rows, hashing ids/docs length 2
+        with metadatas length 1 — a payload ChromaDB never received and that cannot
+        be replayed to verify the actual calls. The faithful aggregate aligns
+        metadatas to ids with None for no-metadata rows.
+        """
+        mock_collection = MagicMock()
+        config = _make_config(
+            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": ["topic"]},
+            schema={"mode": "flexible", "fields": ["doc_id: str", "text: str", "topic: str"]},
+        )
+        sink = inject_write_failure(ChromaSink(config))
+        sink._collection = mock_collection
+        ctx = _make_sink_ctx()
+        rows = [
+            {"doc_id": "d1", "text": "with meta", "topic": "science"},
+            {"doc_id": "d2", "text": "no meta"},  # topic absent
+        ]
+        result = sink.write(rows, ctx)
+
+        expected_hash, _ = sink._compute_payload_hash(["d1", "d2"], ["with meta", "no meta"], [{"topic": "science"}, None])
+        assert result.artifact.content_hash == expected_hash
+
     def test_all_metadata_fields_absent_skip_mode(self) -> None:
         """Skip mode works correctly when metadata fields are absent."""
         mock_collection = MagicMock()

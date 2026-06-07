@@ -176,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ef8d153125c55abd"
+    source_file_hash: str | None = "sha256:28377799dbf12e83"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -250,7 +250,7 @@ class ChromaSink(BaseSink):
     def _compute_payload_hash(
         ids: list[str],
         documents: list[str],
-        metadatas: list[dict[str, Any]] | None,
+        metadatas: list[dict[str, Any] | None] | None,
     ) -> tuple[str, int]:
         """Compute canonical hash and size for the actual payload being sent."""
         payload = canonical_json({"ids": ids, "documents": documents, "metadatas": metadatas})
@@ -406,7 +406,9 @@ class ChromaSink(BaseSink):
         # These will be updated for skip/error mode to reflect actual payload sent.
         all_write_ids: list[str] = []
         all_write_documents: list[str] = []
-        all_write_metadatas: list[dict[str, Any]] = []
+        # Aligned 1:1 with all_write_ids — no-metadata rows hold None so the audit
+        # hash covers a length-consistent, replayable payload (elspeth-b19ee26dc2).
+        all_write_metadatas: list[dict[str, Any] | None] = []
         total_rows_written = 0
         total_rows_skipped = 0
         all_skipped_ids: list[str] = []
@@ -486,8 +488,14 @@ class ChromaSink(BaseSink):
 
                 all_write_ids.extend(write_ids)
                 all_write_documents.extend(write_documents)
+                # Keep metadatas aligned 1:1 with ids: the no-metadata sub-batch
+                # (write_metadatas is None) contributes a None per written row so the
+                # aggregate length matches and the hash reflects which rows carried
+                # metadata, instead of silently dropping to a shorter array.
                 if write_metadatas is not None:
                     all_write_metadatas.extend(write_metadatas)
+                else:
+                    all_write_metadatas.extend([None] * len(write_ids))
                 total_rows_written += rows_written
 
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -518,9 +526,13 @@ class ChromaSink(BaseSink):
             raise
 
         # Hash the actual payload sent, not the full batch (critical for skip mode).
-        # When some rows had metadata and some didn't, the hash covers the metadatas
-        # that were actually sent (or None if none were).
-        hash_metadatas: list[dict[str, Any]] | None = all_write_metadatas if all_write_metadatas else None
+        # all_write_metadatas is aligned 1:1 with all_write_ids (None for rows that
+        # carried no metadata). Collapse to None only when NO row had metadata, so
+        # an all-no-metadata batch hashes metadatas=None (a single metadatas=None
+        # call) while a mixed batch keeps the aligned [meta, ..., None, ...] array.
+        hash_metadatas: list[dict[str, Any] | None] | None = (
+            all_write_metadatas if any(m is not None for m in all_write_metadatas) else None
+        )
         content_hash, payload_size = self._compute_payload_hash(all_write_ids, all_write_documents, hash_metadatas)
 
         diversions = self._get_diversions()

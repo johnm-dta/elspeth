@@ -3049,6 +3049,28 @@ sinks:
         assert "secret123" not in sanitized
         assert had_password is True
 
+    def test_dsn_odbc_connect_sanitized_is_faithful_not_double_encoded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """elspeth-f9b8ed91a9: scrubbing odbc_connect must remove the password WITHOUT
+        double-encoding the non-secret connection material. The sanitized audit URL
+        must re-parse to the original connection string minus the password."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BPWD%3Dsecret123%3BServer%3Dhost"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "secret123" not in sanitized
+        # No double-encoding: the encoded form of '%3D'/'%20' (i.e. %253D/%2520) must not appear.
+        assert "%253D" not in sanitized
+        assert "%2520" not in sanitized
+        # Faithful: re-parsing the sanitized URL yields the scrubbed connection string.
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == "DRIVER={SQL Server};Server=host"
+
     def test_dsn_query_param_password_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Query-param password without userinfo password still detected."""
         from elspeth.core.config import _sanitize_dsn

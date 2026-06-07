@@ -1786,18 +1786,22 @@ def _sanitize_dsn(
                 query_password_value = value if isinstance(value, str) else value[0]
         elif key.lower() == "odbc_connect" and isinstance(value, str):
             import re
-            import urllib.parse
 
-            decoded = urllib.parse.unquote(value)
-            if re.search(r"(?i)(PWD|Password)\s*=", decoded):
+            # SQLAlchemy's URL parser already percent-decodes query values, so `value`
+            # is the plain connection string. Operate on it directly (do NOT unquote
+            # again — that double-decodes any literal '%') and store the scrubbed result
+            # DECODED, so URL.create() below encodes it exactly once. Pre-encoding here
+            # would double-encode the non-secret connection material, making the audit
+            # URL unfaithful (elspeth-f9b8ed91a9).
+            if re.search(r"(?i)(PWD|Password)\s*=", value):
                 query_had_password = True
                 # Extract the password value for fingerprinting
-                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", decoded)
+                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", value)
                 if match and query_password_value is None:
                     query_password_value = match.group(1)
                 # Scrub PWD/Password from the connect string
-                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", decoded)
-                scrubbed_query[key] = urllib.parse.quote(scrubbed_connect, safe="")
+                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", value)
+                scrubbed_query[key] = scrubbed_connect
             else:
                 scrubbed_query[key] = value
         else:

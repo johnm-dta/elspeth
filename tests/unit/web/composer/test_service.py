@@ -70,6 +70,7 @@ from tests.unit.web.composer._helpers import (
     _make_llm_response,
     _make_settings,
     _mock_catalog,
+    _stub_advisor_end_gate_clean,  # noqa: F401  (autouse end-gate CLEAN stub)
 )
 
 

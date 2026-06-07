@@ -17,6 +17,7 @@ from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_to
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.sessions.models import chat_messages_table
 from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord, CompositionStateData
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 
 async def _run_one_turn(

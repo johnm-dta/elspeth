@@ -258,3 +258,141 @@ async def test_run_advisor_checkpoint_unavailable_after_retries(make_service, si
     verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
     assert verdict.ok is False  # unavailable
     assert service._call_advisor_with_audit.await_count >= 2  # bounded retry
+
+
+# ---------------------------------------------------------------------------
+# Task 6: END authoritative gate (re-review loop; fail-closed; separate budget).
+# ---------------------------------------------------------------------------
+
+
+class _AssistantMessage:
+    """Minimal assistant message — the gate only reads ``.content``."""
+
+    content = "Done — the pipeline is ready."
+
+
+@pytest.fixture
+def clean_runnable_state(simple_state) -> CompositionState:
+    """A runnable pipeline whose orphan pre-check passes.
+
+    The orphan pre-check (``_missing_pending_interpretation_review_sites``)
+    is a SERVICE method, not state — ``drive_try_terminate`` stubs it on the
+    service instance so the pre-check returns empty and the end gate runs.
+    """
+    return simple_state
+
+
+async def drive_try_terminate(
+    service,
+    state: CompositionState,
+    *,
+    advisor_checkpoint_passes_used: int,
+    llm_messages: list[dict[str, object]] | None = None,
+):
+    """Drive ``_try_terminate_no_tools`` with the full kwarg set.
+
+    Stubs the SERVICE-level orphan pre-check to return empty (so the end
+    gate runs) and the shared finalize tail to return a canned runnable
+    result (so the clean fall-through is isolated from finalize plumbing).
+    """
+    from elspeth.web.composer.protocol import ComposerResult
+
+    service._missing_pending_interpretation_review_sites = AsyncMock(return_value=())
+    service._surface_and_finalize_no_tools = AsyncMock(return_value=ComposerResult(message="Done — the pipeline is ready.", state=state))
+    return await service._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[] if llm_messages is None else llm_messages,
+        state=state,
+        session_id="s1",
+        current_state_id="cs1",
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=service._new_runtime_preflight_cache(),
+        session_scope="s1",
+        mutation_success_seen=True,
+        recorder=make_recorder(),
+        progress=None,
+        repair_turns_used=0,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
+    )
+
+
+@pytest.mark.asyncio
+async def test_end_gate_clean_proceeds_to_finalize(make_service, clean_runnable_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=0)
+    assert outcome.action == "return"
+    assert outcome.result.runtime_preflight is None or outcome.result.runtime_preflight.is_valid
+
+
+@pytest.mark.asyncio
+async def test_end_gate_flagged_with_budget_repairs(make_service, clean_runnable_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: sink omits rating")
+    )
+    llm_messages: list[dict[str, object]] = []
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=0, llm_messages=llm_messages)
+    assert outcome.action == "continue"
+    assert outcome.advisor_passes_delta == 1
+    assert any("FLAGGED" in m["content"] for m in llm_messages)
+
+
+@pytest.mark.asyncio
+async def test_end_gate_flagged_on_last_pass_fails_closed(make_service, clean_runnable_state):
+    service = make_service()  # composer_advisor_checkpoint_max_passes default 2
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: still wrong")
+    )
+    # advisor_checkpoint_passes_used=1 -> next pass is the last (default max=2).
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=1)
+    assert outcome.action == "return"
+    assert outcome.result.runtime_preflight.is_valid is False
+    assert outcome.result.runtime_preflight.readiness.execution_ready is False
+
+
+@pytest.mark.asyncio
+async def test_end_gate_unavailable_fails_closed(make_service, clean_runnable_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    )
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=0)
+    assert outcome.action == "return"
+    assert outcome.result.runtime_preflight.is_valid is False
+
+
+@pytest.mark.asyncio
+async def test_advisor_budget_does_not_consume_repair_budget(make_service, clean_runnable_state):
+    """Gate-order invariant: a flagged advisor repair-continue increments
+    advisor_passes_delta, NOT repair_turns_delta."""
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED"))
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=0)
+    assert outcome.action == "continue"
+    assert outcome.repair_turns_delta == 0
+    assert outcome.advisor_passes_delta == 1
+
+
+@pytest.mark.asyncio
+async def test_end_gate_skips_structurally_empty_state(make_service, empty_state):
+    """The end gate does NOT fire on a structurally empty pipeline.
+
+    Mirrors the early pass's empty-state skip: a conversational no-tool
+    finalize on a pipeline with no source/nodes/sinks has nothing to sign off
+    on, so the advisor authority gate is skipped and the turn falls through to
+    the shared finalize tail. (Plan deviation: the plan's illustrative code
+    omitted this guard — added symmetric with ``_maybe_run_early_checkpoint``.)
+    """
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: no source")
+    )
+    outcome = await drive_try_terminate(service, empty_state, advisor_checkpoint_passes_used=0)
+    service._run_advisor_checkpoint.assert_not_awaited()
+    assert outcome.action == "return"

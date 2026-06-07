@@ -27,6 +27,7 @@ from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     supports_anthropic_prompt_cache_markers,
 )
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 
 class TestSupportsAnthropicPromptCacheMarkers:

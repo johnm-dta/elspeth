@@ -74,6 +74,7 @@ from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 # ---------------------------------------------------------------------------
 # Lightweight fake LLM that emits a single request_interpretation_review call.
@@ -1101,6 +1102,7 @@ async def test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_bl
         repair_turns_used=0,
         persisted_assistant_message_id=None,
         persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=0,
     )
 
     events = await sessions_service.list_interpretation_events(session_id, status="pending")

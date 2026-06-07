@@ -402,6 +402,7 @@ _AugmentationBranch = Literal[
     "preflight_invalid_non_empty_state_augmentation",
     "state_claim_grounding_correction",
     "orphaned_interpretation_review_augmentation",
+    "advisor_signoff_blocked_augmentation",
 ]
 
 
@@ -2171,6 +2172,7 @@ class ComposerServiceImpl:
         mutation_success_seen: bool,
         composition_turns_used: int,
         discovery_turns_used: int,
+        advisor_checkpoint_passes_used: int,
     ) -> _ClassifyOutcome:
         """Phase P5 of the compose loop — anti-anchor + budget classify.
 
@@ -2259,6 +2261,45 @@ class ComposerServiceImpl:
                 )
                 assistant_message = response.choices[0].message
                 if not assistant_message.tool_calls:
+                    # END authoritative advisor gate — P5 last-chance variant
+                    # (elspeth-dac6602a2b). This finalize path is reached only on
+                    # composition-budget exhaustion, so repair is IMPOSSIBLE: any
+                    # non-clean verdict (unavailable OR flagged) fails closed.
+                    # The cheap orphan pre-check runs first (mirrors P2) so the
+                    # frontier advisor is never spent on a pipeline the tail's
+                    # orphan gate would block. A clean verdict falls through to
+                    # the shared finalize tail below. The structurally-empty
+                    # guard mirrors the P2 branch (and the early pass): no
+                    # sign-off on a pipeline with nothing to authorize.
+                    max_passes = self._settings.composer_advisor_checkpoint_max_passes
+                    if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
+                        orphaned_precheck = await self._missing_pending_interpretation_review_sites(
+                            state,
+                            session_id=session_id,
+                        )
+                        if not orphaned_precheck:
+                            verdict = await self._run_advisor_checkpoint(
+                                phase="end",
+                                state=state,
+                                session_id=session_id,
+                                recorder=recorder,
+                            )
+                            if (not verdict.ok) or verdict.blocking:
+                                return _ClassifyOutcome(
+                                    action="return",
+                                    result=self._advisor_blocked_result(
+                                        reason="unavailable" if not verdict.ok else "exhausted",
+                                        verdict=verdict,
+                                        state=state,
+                                        assistant_message=assistant_message,
+                                        recorder=recorder,
+                                        repair_turns_used=0,
+                                        persisted_assistant_message_id=persisted_assistant_message_id,
+                                        persisted_tool_call_turn=persisted_tool_call_turn,
+                                    ),
+                                    composition_turns_delta=1,
+                                    advisor_passes_delta=1,
+                                )
                     # B-4D-3 budget-exhaustion last-chance finalize is a SECOND
                     # no-tool finalize path. Route it through the SHARED
                     # ``_surface_and_finalize_no_tools`` (Task 7 HIGH-1) so the
@@ -2344,6 +2385,7 @@ class ComposerServiceImpl:
         repair_turns_used: int,
         persisted_assistant_message_id: str | None,
         persisted_tool_call_turn: bool,
+        advisor_checkpoint_passes_used: int,
     ) -> _TerminateOutcome:
         """Phase P2 of the compose loop — handle the no-tool-calls branch.
 
@@ -2434,6 +2476,79 @@ class ComposerServiceImpl:
             repair_turns_used=repair_turns_used,
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        # END authoritative advisor gate (elspeth-dac6602a2b). Runs AFTER the
+        # cheap deterministic gates (the proof gate above; the orphan pre-check
+        # here mirrors the tail's gate) so the frontier advisor only reviews a
+        # mechanically valid pipeline — a flagged advisor call is never spent on
+        # a pipeline the orphan gate would block anyway. The advisor budget is
+        # SEPARATE from ``_MAX_REPAIR_TURNS``: a flagged repair-continue
+        # increments ``advisor_passes_delta``, never ``repair_turns``. On the
+        # LAST budgeted pass a still-flagged gate FAILS CLOSED (no repair — it
+        # cannot re-review); an unavailable advisor (after bounded retry) FAILS
+        # CLOSED — the advisor is the mandatory final authority (D-5/D-7/D-8).
+        #
+        # Structurally-empty guard (mirrors ``_maybe_run_early_checkpoint``,
+        # service.py): a conversational no-tool finalize on a pipeline with no
+        # source/nodes/sinks has nothing to sign off on. Firing the authority
+        # gate there would (a) spend a frontier advisor call on pure chat and
+        # (b) let a "you have no source/sink" FLAGGED verdict drive an
+        # advisor-repair loop on a conversational turn. The early pass already
+        # skips empty state for the same reason; the end gate is symmetric.
+        max_passes = self._settings.composer_advisor_checkpoint_max_passes
+        if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
+            orphaned_precheck = await self._missing_pending_interpretation_review_sites(
+                state,
+                session_id=session_id,
+            )
+            if not orphaned_precheck:
+                verdict = await self._run_advisor_checkpoint(
+                    phase="end",
+                    state=state,
+                    session_id=session_id,
+                    recorder=recorder,
+                )
+                is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
+                if not verdict.ok:
+                    return _TerminateOutcome(
+                        action="return",
+                        result=self._advisor_blocked_result(
+                            reason="unavailable",
+                            verdict=verdict,
+                            state=state,
+                            assistant_message=assistant_message,
+                            recorder=recorder,
+                            repair_turns_used=repair_turns_used,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        ),
+                        advisor_passes_delta=1,
+                    )
+                if verdict.blocking and is_last_pass:
+                    return _TerminateOutcome(
+                        action="return",
+                        result=self._advisor_blocked_result(
+                            reason="exhausted",
+                            verdict=verdict,
+                            state=state,
+                            assistant_message=assistant_message,
+                            recorder=recorder,
+                            repair_turns_used=repair_turns_used,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        ),
+                        advisor_passes_delta=1,
+                    )
+                if verdict.blocking:
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": ("[Advisor sign-off — BLOCKING. Resolve before completing.]\n" + verdict.findings_text),
+                        }
+                    )
+                    return _TerminateOutcome(action="continue", advisor_passes_delta=1)
+                # CLEAN -> fall through to the shared tail (auto-surface +
+                # final orphan gate + finalize).
 
         # Fail-closed orphaned-interpretation gate. The repair budget is now
         # exhausted (every repair-injection branch above is gated on
@@ -2737,6 +2852,11 @@ class ComposerServiceImpl:
         # additional iterations. NEVER catches plugin exceptions — only
         # configuration diagnostics.
         repair_turns_used = 0
+        # END-gate advisor pass counter (Task 6). Counts ONLY the END
+        # authoritative checkpoint passes; the EARLY advisory pass (Task 5)
+        # never touches it. Separate from ``repair_turns_used`` (D-8): a
+        # turn is a correctness repair XOR an advisor repair, never both.
+        advisor_checkpoint_passes_used = 0
         persisted_assistant_message_id: str | None = None
         persisted_tool_call_turn = False
         failed_turn: FailedTurnMetadata | None = None
@@ -2778,6 +2898,7 @@ class ComposerServiceImpl:
                     repair_turns_used=repair_turns_used,
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
+                    advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
                 )
                 if terminate.action == "return":
                     # Offensive guard (explicit raise, not assert): ``python -O``
@@ -2796,6 +2917,7 @@ class ComposerServiceImpl:
                         )
                     return terminate.result
                 repair_turns_used += terminate.repair_turns_delta
+                advisor_checkpoint_passes_used += terminate.advisor_passes_delta
                 continue
 
             dispatch, advisor_calls_used = await self._dispatch_tool_batch(
@@ -2902,9 +3024,11 @@ class ComposerServiceImpl:
                 mutation_success_seen=mutation_success_seen,
                 composition_turns_used=composition_turns_used,
                 discovery_turns_used=discovery_turns_used,
+                advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
             )
             composition_turns_used += classify.composition_turns_delta
             discovery_turns_used += classify.discovery_turns_delta
+            advisor_checkpoint_passes_used += classify.advisor_passes_delta
             if classify.action == "return":
                 # Offensive guard (explicit raise, not assert): ``python -O``
                 # strips assert statements. The contract between
@@ -3691,6 +3815,52 @@ class ComposerServiceImpl:
             "schema_excerpt": pipeline_summary,
         }
 
+    def _advisor_blocked_result(
+        self,
+        *,
+        reason: str,
+        verdict: AdvisorCheckpointVerdict,
+        state: CompositionState,
+        assistant_message: Any,
+        recorder: BufferingRecorder,
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+    ) -> ComposerResult:
+        """Build the fail-closed end-gate ``ComposerResult`` (Task 6).
+
+        Mirrors the orphan-gate finalize shape (the
+        ``_surface_and_finalize_no_tools`` orphan branch): a non-runnable
+        ``ValidationResult`` (every readiness axis False) carried on
+        ``runtime_preflight``, the advisor's findings folded into a
+        system-attributed augmented message, and the result threaded with
+        ``repair_turns_used`` plus the persisted ids so the route handler can
+        persist composer_meta uniformly. ``reason`` is ``"unavailable"`` (the
+        advisor could not be reached after bounded retry) or ``"exhausted"`` (it
+        flagged the pipeline on the last budgeted pass with no repair left).
+        """
+        raw_content = assistant_message.content or ""
+        runtime_result = _advisor_signoff_blocked_validation(reason=reason, findings=verdict.findings_text)
+        augmented = _compose_preflight_failure_message(raw_content, runtime_result=runtime_result)
+        _enforce_augmentation_prefix_invariant(
+            branch="advisor_signoff_blocked_augmentation",
+            content=raw_content,
+            augmented=augmented,
+        )
+        return replace(
+            ComposerResult(
+                message=augmented,
+                state=state,
+                runtime_preflight=runtime_result,
+                raw_assistant_content=raw_content,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+            ),
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
+
     async def _run_advisor_checkpoint(
         self,
         *,
@@ -4342,3 +4512,83 @@ def _node_required_input_fields(node: NodeSpec) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(field) for field in raw if isinstance(field, str)]
     return []
+
+
+# ---------------------------------------------------------------------------
+# END authoritative advisor gate (Task 6).
+#
+# ``_advisor_signoff_blocked_validation`` and its code constant live at module
+# scope (appended at EOF for the same AST-fingerprint-stability reason as the
+# Task-4 primitives above) because the synthetic ValidationResult it builds is
+# pure data with no ``self`` dependency — it mirrors
+# ``_orphaned_interpretation_review_validation``. The method that consumes it
+# (``ComposerServiceImpl._advisor_blocked_result``) lives in the class body.
+# ---------------------------------------------------------------------------
+_ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
+# Mirrors the orphan gate's check-name convention so the synthetic fail-closed
+# result names a stable check the UI/audit can key on.
+_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[str] = "advisor_signoff"
+
+
+def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:
+    """Build the synthetic, fail-closed end-gate result for a blocked sign-off.
+
+    Returned (not raised) by the END authoritative advisor gate
+    (:meth:`ComposerServiceImpl._advisor_blocked_result`) when the advisor is
+    either *unavailable* after bounded retry (``reason="unavailable"``) or has
+    FLAGGED the pipeline on the last budgeted pass with no further repair
+    possible (``reason="exhausted"``). The advisor is the mandatory final
+    authority, so both outcomes fail closed.
+
+    Mirrors :func:`_orphaned_interpretation_review_validation`'s shape: every
+    readiness axis is blocking (``authoring_valid`` / ``execution_ready`` /
+    ``completion_ready`` all ``False``) so the UI cannot advance regardless of
+    which flag it gates on. The blocker/error names the advisor sign-off and
+    the reason; the advisor's own findings text is carried in the augmented
+    message (not duplicated verbatim into the structured blocker, which stays a
+    stable operator-facing summary).
+    """
+    detail = (
+        f"The advisor sign-off did not pass ({reason}); the pipeline cannot complete. {findings}"
+        if reason == "exhausted"
+        else f"The advisor sign-off could not be obtained ({reason}); the pipeline cannot complete. {findings}"
+    )
+    suggestion = (
+        "Resolve the advisor's flagged concern and re-run the composer."
+        if reason == "exhausted"
+        else "The advisor model was unavailable after retry; retry the request, or check the advisor model configuration."
+    )
+    return ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name=_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME,
+                passed=False,
+                detail=detail,
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id="pipeline",
+                component_type="pipeline",
+                message=detail,
+                suggestion=suggestion,
+                error_code=_ADVISOR_SIGNOFF_BLOCKED_CODE,
+            )
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=False,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[
+                ValidationReadinessBlocker(
+                    code=_ADVISOR_SIGNOFF_BLOCKED_CODE,
+                    component_id="pipeline",
+                    component_type="pipeline",
+                    detail=detail,
+                )
+            ],
+        ),
+    )

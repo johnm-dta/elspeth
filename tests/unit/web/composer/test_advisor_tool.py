@@ -37,6 +37,7 @@ from elspeth.web.composer.service import ComposerAvailability, ComposerServiceIm
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import get_tool_definitions
 from elspeth.web.config import WebSettings
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 # --- Test scaffolding (mirrors test_compose_loop_anti_anchor.py) ---
 

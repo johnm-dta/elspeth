@@ -57,6 +57,8 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-584d4ea502 | AST: audit_evidence_nominal (MD5 provenance) | 89c19cc82 | _bases_include_audit_evidence_base name-only → requires import from elspeth.contracts.audit_evidence; same-module allowance for subclass inside contracts/audit_evidence.py. Blast ZERO (all 5 real imports canonical). Existing accepts_direct_base test updated to import canonically |
 | elspeth-08b0336287 | AST: tier_1_decoration (form) | f719c9202 | _has_tier_1_error_decorator name-only → requires non-empty reason keyword (non-literal/**splat=present). Blast ZERO |
 | elspeth-f8650893f1 | AST: tier_1_decoration (scope) | f719c9202 | scan_root only scanned errors.py → TDE2-only pass over all other files (caller_module guard repo-wide). Blast ZERO (all 13 call sites compliant). TDE1 deliberately STAYS errors.py-scoped (112 *Error classes elsewhere = project intent; repo-wide TDE1 = operator policy, not scanner fix). CI already whole-repo (--file citation pre-migration) |
+| elspeth-c0c4f49981 | AST: composer catch_order (MD1 alias) | dae8d76e1 | _handler_class_names name-only → per-file alias map (local rebind + import-as, transitive), append both literal+resolved. Blast ZERO |
+| elspeth-eb90341cdb | AST: composer catch_order (broad) | dae8d76e1 | _SUBCLASS_TO_SUPERCLASSES composer-only → added Exception/BaseException as broad supertypes; except Exception before crash subclass → CCO1. Blast ZERO. map-vs-MRO test updated to expect broad supers |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped

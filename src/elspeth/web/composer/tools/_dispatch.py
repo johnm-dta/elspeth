@@ -247,9 +247,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
 
     Returns 42 tools: 13 discovery + 13 mutation + 10 blob tools + 3 secret
     tools + 1 advisor tool + 1 session-aware interpretation-review tool.
-    ``request_advisor_hint`` is filtered out of the LLM-visible list when
-    the operator's ``composer_advisor_enabled`` flag is False (the default)
-    — see ``ComposerServiceImpl._get_litellm_tools``.
+    ``request_advisor_hint`` is always part of the LLM-visible list —
+    advisor is mandatory — see ``ComposerServiceImpl._get_litellm_tools``.
 
     The tool catalogue is derived from ``_TOOL_DEFS_BY_NAME`` (every
     declared tool) plus two inline definitions for the dispatch-outside-

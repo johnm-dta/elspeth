@@ -3017,7 +3017,6 @@ class ComposerServiceImpl:
                 user_message=user_message,
                 catalog=self._catalog,
                 data_dir=self._data_dir,
-                advisor_enabled=True,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
@@ -3027,12 +3026,10 @@ class ComposerServiceImpl:
     def _get_litellm_tools(self) -> list[dict[str, Any]]:
         """Convert tool definitions to LiteLLM function format.
 
-        When ``composer_advisor_enabled`` is False (the default), the
-        ``request_advisor_hint`` tool is filtered out of the LLM-visible
-        list. This is the strongest off-switch available — the composer
-        LLM never sees the tool name or description, so it cannot call
-        it even if instructed to. The CLI MCP server (composer_mcp/) is
-        not affected; advisor is web-composer only by design.
+        Advisor is mandatory, so ``request_advisor_hint`` is always present
+        in the LLM-visible list. The CLI MCP server (composer_mcp/) is not
+        affected; advisor is web-composer only by design (the tool is not
+        registered in the CLI dispatch tables).
         """
         definitions = get_tool_definitions()
         return [
@@ -3511,7 +3508,7 @@ class ComposerServiceImpl:
         effective_timeout = configured_timeout if timeout is None else min(configured_timeout, timeout)
         max_completion = self._settings.composer_advisor_max_completion_tokens
 
-        system_msg = build_system_prompt(self._data_dir, advisor_enabled=True) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
+        system_msg = build_system_prompt(self._data_dir) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
         # Required fields (trigger, problem_summary, recent_errors,
         # attempted_actions) are validated by _TOOL_REQUIRED_PATHS before this
         # method runs, so direct dict access is sound. schema_excerpt is the

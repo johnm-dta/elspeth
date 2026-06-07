@@ -237,7 +237,6 @@ async def test_step2_persists_intercepted_advisor_tool_call_rows(
     service = composer_service_with_real_sessions
     service._settings = service._settings.model_copy(  # type: ignore[attr-defined]
         update={
-            "composer_advisor_enabled": True,
             "composer_advisor_max_calls_per_compose": 3,
         }
     )

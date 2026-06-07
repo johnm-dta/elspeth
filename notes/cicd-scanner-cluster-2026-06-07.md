@@ -48,6 +48,9 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-487dfef2ce | AST: contract_manifest (MD1 provenance) | 2cdec9875 | same provenance gate for @implements_dispatch_site decorator; shadowed no-op → MC3b. Fail-open closed |
 | elspeth-07d9f8a619 | AST: contract_manifest (dup) | 2cdec9875 | `compute_findings` set-deduped → now emits MC1 on duplicate contract name (key name::duplicate@L<line>), matching runtime ValueError. Fail-open closed |
 | elspeth-2b5edd369e | AST: contract_manifest (FP) | 2cdec9875 | marker site read from args[0] only → now positional OR site_name= keyword; removes spurious MC3b on valid keyword form |
+| elspeth-f2959957fc | AST: freeze_guards FG2 | f814fdbdb | isinstance guard matched bare Name only → now qualified Attribute (types.MappingProxyType/collections.abc.Mapping) + list/set, bare & tuple forms. Blast ZERO (no such form in real __post_init__) |
+| elspeth-ec6749f8da | AST: freeze_guards FG3 nested | f814fdbdb | `_annotation_contains_container` outer-name only → recurses tuple/frozenset carriers (carrier-gated: NOT Callable), strictly additive. Surfaced 1 real (_OutputBlobFinalizationOutcome.errors → elspeth-640168fa4b, allowlisted) |
+| elspeth-b872929157 | AST: freeze_guards FG3 partial | f814fdbdb | any-freeze-call → per-field coverage (freeze_fields names OR object.__setattr__ freeze-producing RHS; dynamic *splat = covers-all). 4 real partial cases all covered via object.__setattr__(tuple()) → blast ZERO |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped

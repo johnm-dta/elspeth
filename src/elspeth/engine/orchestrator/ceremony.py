@@ -97,15 +97,35 @@ class RunCeremony:
         exception is pending, a telemetry failure should surface rather than
         vanish, so the flush runs raw and propagates.
 
+        EXCEPTION: Tier-1 / audit-integrity errors always propagate, even with a
+        run exception pending — audit corruption outranks even the primary
+        failure. The export thread stores FrameworkBugError/AuditIntegrityError
+        (manager.py types _stored_exception as BaseException for exactly this),
+        and these are not-yet-surfaced audit signals; best_effort's broad
+        suppression would silently discard them, so they are re-raised before it.
+        Mirrors the cli.py _close_orchestrator_resources teardown guard.
+
         (Previously this caught only TelemetryExporterError, so a stored
         programming error escaped the finally and replaced the run error —
         elspeth-1e4ca5b1db.)
         """
         import sys
 
+        # Live attribute access of the lazily materialized TIER_1_ERRORS tuple —
+        # never a from-import snapshot (which would capture an empty/stale tuple
+        # and let Tier-1 errors fall through to best_effort's broad suppression).
+        import elspeth.contracts.errors as contract_errors
+
         if sys.exc_info()[0] is not None:
-            with best_effort("Telemetry flush during exception cleanup"):
+            try:
                 self.flush_telemetry()
+            except contract_errors.TIER_1_ERRORS:
+                raise
+            except Exception:
+                # Re-raise inside best_effort so its safe, class-only logging and
+                # suppression apply to non-Tier-1 telemetry failures.
+                with best_effort("Telemetry flush during exception cleanup"):
+                    raise
         else:
             self.flush_telemetry()
 

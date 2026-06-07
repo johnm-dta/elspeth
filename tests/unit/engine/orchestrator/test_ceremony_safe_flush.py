@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from elspeth.contracts.errors import TelemetryExporterError
+from elspeth.contracts.errors import AuditIntegrityError, TelemetryExporterError
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 
 
@@ -57,6 +57,33 @@ def test_programming_error_surfaces_when_no_pending_exception():
     ceremony = _ceremony(telem)
 
     with pytest.raises(RuntimeError, match="export-thread programming error"):
+        ceremony.safe_flush_telemetry()
+
+
+def test_tier1_audit_error_propagates_even_when_run_exception_pending():
+    """A Tier-1 audit-integrity error stored by the export thread must PROPAGATE
+    even during teardown with a run exception pending — audit corruption outranks
+    even the primary run failure (matching the cli.py _close_orchestrator_resources
+    guard). best_effort suppression must not swallow it.
+    """
+    telem = _FlushRaises(AuditIntegrityError("checkpoint hash mismatch"))
+    ceremony = _ceremony(telem)
+
+    with pytest.raises(AuditIntegrityError, match="checkpoint hash mismatch"):
+        try:
+            raise ValueError("original run failure")
+        finally:
+            ceremony.safe_flush_telemetry()
+
+    assert telem.flush_calls == 1  # flush was attempted
+
+
+def test_tier1_audit_error_surfaces_when_no_pending_exception():
+    """A Tier-1 error on an otherwise-clean run surfaces (raw path)."""
+    telem = _FlushRaises(AuditIntegrityError("checkpoint hash mismatch"))
+    ceremony = _ceremony(telem)
+
+    with pytest.raises(AuditIntegrityError, match="checkpoint hash mismatch"):
         ceremony.safe_flush_telemetry()
 
 

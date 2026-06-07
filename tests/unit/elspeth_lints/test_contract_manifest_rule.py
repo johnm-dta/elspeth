@@ -6,9 +6,35 @@ import ast
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from elspeth_lints.core.protocols import RuleContext
 from elspeth_lints.rules.manifest.contract_manifest import RULE
 from elspeth_lints.rules.manifest.contract_manifest.metadata import RULE_MC2, RULE_MC3A, RULE_MC3B, RULE_MC3C
+from elspeth_lints.rules.manifest.contract_manifest.rule import load_contract_allowlist
+
+
+def test_load_contract_allowlist_rejects_malformed_expiry(tmp_path: Path) -> None:
+    """A typoed ``expires`` must fail closed, not silently drop the time bound.
+
+    Regression for elspeth-99ae5c0991: ``_parse_date`` swallowed malformed
+    dates and returned ``None``, so ``fail_on_expired`` could never enforce a
+    typoed expiry and a one-character diff silently disabled the bound.
+    """
+    (tmp_path / "rules.yaml").write_text(
+        """
+allow_contracts:
+  - key: ghost_not_in_manifest
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: not-a-date
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expires"):
+        load_contract_allowlist(tmp_path)
 
 
 def test_contract_manifest_reports_extra_registration(tmp_path: Path) -> None:

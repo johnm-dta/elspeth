@@ -9,10 +9,13 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext
 from elspeth_lints.rules.audit_evidence.audit_evidence_nominal import RULE as AUDIT_EVIDENCE_NOMINAL_RULE
 from elspeth_lints.rules.audit_evidence.guard_symmetry import RULE as GUARD_SYMMETRY_RULE
 from elspeth_lints.rules.audit_evidence.gve_attribution import RULE as GVE_ATTRIBUTION_RULE
+from elspeth_lints.rules.audit_evidence.shared import load_class_allowlist
 from elspeth_lints.rules.audit_evidence.tier_1_decoration import RULE as TIER_1_DECORATION_RULE
 
 
@@ -93,6 +96,60 @@ allow_classes:
     )
 
     assert _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path) == []
+
+
+def test_load_class_allowlist_rejects_malformed_expiry(tmp_path: Path) -> None:
+    """A typoed ``expires`` must fail closed, not silently drop the time bound.
+
+    Regression for elspeth-2d73b966c5 / elspeth-44d771caad: the shared
+    ``load_class_allowlist`` parser swallowed malformed dates and returned
+    ``expires=None``, so ``fail_on_expired`` could never enforce a typoed
+    expiry and a one-character diff silently disabled the bound.
+    """
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: bad.py:AEN1:Mimic
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: not-a-date
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expires"):
+        load_class_allowlist(allowlist)
+
+
+def test_audit_evidence_nominal_fails_closed_on_malformed_expiry(tmp_path: Path) -> None:
+    """End-to-end: a malformed expiry propagates out of ``analyze`` as a hard error."""
+    _write(
+        tmp_path / "bad.py",
+        """
+        class Mimic(RuntimeError):
+            def to_audit_dict(self):
+                return {}
+        """,
+    )
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: bad.py:AEN1:Mimic
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: not-a-date
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expires"):
+        _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path)
 
 
 def test_tier_1_decoration_reports_missing_tier_marker() -> None:

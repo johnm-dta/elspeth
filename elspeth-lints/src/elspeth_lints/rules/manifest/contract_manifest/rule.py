@@ -502,12 +502,15 @@ def _parse_date(raw: object) -> date | None:
         return None
     if isinstance(raw, date):
         return raw
-    if isinstance(raw, str):
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).date()
-        except ValueError:
-            return None
-    return None
+    # Fail closed: a malformed ``expires`` must raise, not silently become
+    # ``None``. Swallowing it leaves ``fail_on_expired`` unable to enforce a
+    # typoed expiry, so a one-character diff disables the time bound.
+    if not isinstance(raw, str):
+        raise ValueError(f"allow_contracts entry expires must be YYYY-MM-DD, null, or absent; got {raw!r}")
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).date()
+    except ValueError as exc:
+        raise ValueError(f"allow_contracts entry expires must be YYYY-MM-DD; got {raw!r}") from exc
 
 
 def repo_relative_display_path(file_path: Path, source_root: Path) -> str:

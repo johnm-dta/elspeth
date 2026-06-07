@@ -456,7 +456,22 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: uv run pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
+        run: |
+          # Fail closed: a real integration failure — assertion regression,
+          # collection/import error (exit 2), internal error (exit 3), or
+          # infra fault — must fail the lane so build-push.yaml never builds an
+          # image off a broken CI run. The only tolerated outcome is pytest's
+          # exit code 5 ("no tests collected"); integration tests self-skip via
+          # pytest.skip / importorskip when their credentials are absent, which
+          # is exit 0 anyway. ``|| status=$?`` captures the code without letting
+          # ``set -e`` abort before we can inspect it.
+          status=0
+          uv run pytest tests/integration/ -v -m integration || status=$?
+          if [ "$status" -eq 5 ]; then
+            echo "No integration tests collected (exit 5) — treating as a skip."
+            exit 0
+          fi
+          exit "$status"
 
   # ===========================================================================
   # Stage 3b: Testcontainer Postgres lane (CL-PP-11 dialect-portability proof)

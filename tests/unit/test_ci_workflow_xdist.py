@@ -167,6 +167,28 @@ def test_integration_job_runs_on_rc_branch_pushes() -> None:
     assert "startsWith(github.ref, 'refs/heads/RC')" in condition
 
 
+def test_integration_lane_fails_closed_on_real_test_failures() -> None:
+    """A real integration failure must fail the lane.
+
+    The historical ``... || echo "Integration tests skipped (no API keys)"``
+    swallowed *every* non-zero pytest exit — assertion regressions, collection
+    errors, import failures, and infra faults all left the job green, and
+    ``build-push.yaml`` would then build an image off a broken CI run. The lane
+    must propagate real failures and tolerate only pytest's exit code 5 ("no
+    tests collected").
+    """
+    workflow = _ci_workflow()
+    integration_job = workflow["jobs"]["integration"]
+    run = _step_run(integration_job, "Run integration tests")
+
+    # The blanket failure-swallow must be gone.
+    assert "|| echo" not in run
+    # Real failures propagate via the captured status.
+    assert 'exit "$status"' in run
+    # Only "no tests collected" (pytest exit 5) is tolerated as a skip.
+    assert "-eq 5" in run
+
+
 def test_xdist_auto_defaults_to_parallel_in_ci_controller(monkeypatch: pytest.MonkeyPatch) -> None:
     """CI controllers should get the same xdist default as local runs."""
     monkeypatch.setenv("CI", "true")

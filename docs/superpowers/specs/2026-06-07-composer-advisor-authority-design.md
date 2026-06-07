@@ -152,3 +152,22 @@ The end-gate ordering (cheap deterministic gates → advisor) is chosen so the d
 - Case B fix `5deb34f78` (elspeth-e51216d305 CLOSED); follow-ups elspeth-dbc39dd367 (supersede primitive), elspeth-f936a78840 (fork refresh), elspeth-7dc234589a (stale/dup PT events).
 - Composer correctness epic elspeth-e1ab67e55a; reactive advisor escape-hatch elspeth-7197f92457.
 - Sibling specs to follow (deferred §2): field-contract checker, reciprocity enforcement, vague_term nudge.
+
+---
+
+## 13. Scope amendment (2026-06-07) — frontier-primary pivot; two-tier dropped
+
+After grounding revealed there is **no tutorial-compose model seam** (tutorial compose runs through the same singleton `ComposerServiceImpl`; `tutorial_service.py` only handles the tutorial *run*), the operator changed strategy: **use a frontier model as primary everywhere** rather than cheap-primary + tutorial-override. Consequences, superseding the relevant parts above:
+
+- **Two-tier wiring is DROPPED.** No `composer_tutorial_model` field, no per-compose model override, no tutorial-routing plumbing. (Supersedes Goal §2 "Two-tier model wiring" and D-2's "+ two-tier".)
+- **Distinctness simplifies to a single primary:** `advisor_model ≠ composer_model` (normalized exact-string). (Supersedes D-1's `∉ {composer_model, composer_tutorial_model}` → just `≠ composer_model`; the forward-compat "both tiers" wording is moot.)
+- **Concrete model pairing:** primary = Sonnet (`claude-sonnet-4-6`), advisor = Opus (`claude-opus-4-7`) — more capable than gpt-5.4-mini, validated via the staging tutorial harness. NOTE: both are Anthropic (same lineage) — this pairing tests *model*-distinctness (which exact-string enforces), not *vendor*-independence. Operator chose it knowingly (Opus is the strongest available reviewer).
+- **Rationale broadens, design holds:** with a frontier primary the confident-failure rate drops, so deterministic checkpoints shift from *compensation for a weak model* to an **independence + backstop** mechanism ("the producer is never its own checker," regardless of producer strength). The early/end checkpoint architecture, the re-review loop, the budget model, and the config mandate are all unchanged.
+
+**Retire-trigger reconciliation (clarified against reality):** the proactive security triggers share the *same* `request_advisor_hint` tool as the reactive one. So "retire reactive" = remove `reactive_validation_loop` from `ADVISOR_TRIGGER_VALUES` (tools/sessions.py:116-126) + the reactive-only validation branch (service.py:3179), and **keep** the `request_advisor_hint` tool for `proactive_security_safety` / `proactive_red_listed_plugin`. Removing `composer_advisor_enabled` (advisor now mandatory) drops the tool *filter* (service.py:3039-3040) — the tool is always present — and collapses the advisor-disabled prompt-strip surface (`_strip_advisor_content` becomes dead).
+
+**Grounding-confirmed governance facts (de-risk the plan):**
+- `config.py` is NOT in the tier-model allowlist; its `@model_validator`s are not flagged → no allowlist churn for the new validator (uses direct attribute access + explicit raise).
+- WebSettings has no `contracts/config` alignment test; the contract is the `ComposerSettings` Protocol (protocol.py:640), mypy-enforced → removing `composer_advisor_enabled` = remove field (config.py:83) + protocol property (protocol.py:673), type-checked.
+- Blast radius of removing `composer_advisor_enabled`: src — app.py:387/397 (boot-probe gate + telemetry), tool_batch.py:659 (defense-in-depth branch), service.py:3021/3039 (build_messages arg + tool filter), prompts.py (strip surface). Tests — test_dispatch_arms_characterization.py, test_app.py, test_compose_loop_persistence.py, test_advisor_tool.py. Deploy — elspeth-web.env:17.
+- New budget field `composer_advisor_checkpoint_max_passes` is DISTINCT from the existing `composer_advisor_max_calls_per_compose` (config.py:85, which remains the hard ceiling across all advisor calls).

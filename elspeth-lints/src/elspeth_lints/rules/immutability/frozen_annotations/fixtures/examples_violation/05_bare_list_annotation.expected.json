@@ -1,0 +1,12 @@
+[
+  {
+    "column": 4,
+    "file_path": "bad.py",
+    "fingerprint": "bad.py:Example:items",
+    "line": 6,
+    "message": "Frozen dataclass field Example.items uses mutable annotation list. Use Sequence/Mapping/tuple/frozenset instead of list/dict/set.",
+    "rule_id": "immutability.frozen_annotations",
+    "severity": "error",
+    "suggestion": "Use Sequence/Mapping/tuple/frozenset instead of list/dict/set"
+  }
+]

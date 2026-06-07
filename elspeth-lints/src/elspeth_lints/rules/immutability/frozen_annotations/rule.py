@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +13,10 @@ from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, Rul
 from elspeth_lints.rules.immutability.frozen_annotations.metadata import RULE_ID, RULE_METADATA
 from elspeth_lints.rules.immutability.shared import allowlist_path_for_root, is_frozen_dataclass, repo_relative_display_path
 
-MUTABLE_PATTERNS = re.compile(r"\b(list|dict|set)\[")
+# Mutable container types, both builtin (list/dict/set) and the capitalized
+# ``typing`` aliases (List/Dict/Set). frozenset/tuple and Sequence/Mapping are
+# intentionally absent — they are the immutable forms the rule steers toward.
+_MUTABLE_CONTAINER_NAMES = frozenset({"list", "dict", "set", "List", "Dict", "Set"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,10 +95,34 @@ def find_findings(tree: ast.AST, filename: str) -> list[Finding]:
                 continue
             if item.target is None or not isinstance(item.target, ast.Name):
                 continue
-            annotation = ast.unparse(item.annotation)
-            if MUTABLE_PATTERNS.search(annotation):
+            if _is_mutable_container_annotation(item.annotation):
+                annotation = ast.unparse(item.annotation)
                 findings.append(_finding(filename, node.name, item.target.id, annotation, item.lineno, item.col_offset))
     return findings
+
+
+def _is_mutable_container_annotation(annotation: ast.expr) -> bool:
+    """Return whether a frozen field's annotation references a mutable container.
+
+    The original ``\\b(list|dict|set)\\[`` regex only matched lowercase,
+    subscripted builtins. This walks the annotation and flags any reference to a
+    mutable container name — builtin or capitalized ``typing`` alias, subscripted
+    or bare — so the forms the regex missed are caught:
+      * ``List[int]`` / ``typing.Dict[...]`` (capitalized aliases)
+      * ``list`` / ``Dict`` (bare, unsubscripted)
+      * ``list[int] | None`` / ``Optional[List[int]]`` (unioned/optional)
+
+    It only ever tightens: every annotation the regex flagged contains the same
+    name, and a mutable nested inside an immutable wrapper (``tuple[list[int]]``,
+    ``Mapping[str, list]``) stays flagged as before. ``frozenset``/``tuple``/
+    ``Sequence``/``Mapping`` carry no mutable name and remain clean.
+    """
+    for node in ast.walk(annotation):
+        if isinstance(node, ast.Name) and node.id in _MUTABLE_CONTAINER_NAMES:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _MUTABLE_CONTAINER_NAMES:
+            return True
+    return False
 
 
 def _finding(filename: str, class_name: str, field_name: str, annotation: str, line: int, column: int) -> Finding:

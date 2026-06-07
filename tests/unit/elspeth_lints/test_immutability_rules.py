@@ -353,6 +353,75 @@ def test_frozen_annotations_reports_mutable_annotation_variants(annotation: str)
     assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
 
 
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        # elspeth-a586a7212e: capitalized typing aliases (subscripted + qualified)
+        "List[int]",
+        "Dict[str, int]",
+        "Set[str]",
+        "typing.List[int]",
+        "Optional[List[int]]",
+        # elspeth-fbfb9fd634: bare, unsubscripted builtins and typing aliases
+        "list",
+        "dict",
+        "set",
+        "List",
+        "Dict",
+    ],
+)
+def test_frozen_annotations_reports_typing_and_bare_mutable_forms(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import Dict, List, Optional, Set
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
+@pytest.mark.parametrize("annotation", ["FrozenSet[int]", "frozenset", "Sequence[tuple[int, ...]]"])
+def test_frozen_annotations_ignores_immutable_typing_forms(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import FrozenSet
+        from collections.abc import Sequence
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert findings == []
+
+
+@pytest.mark.parametrize("annotation", ["tuple[list[int], ...]", "Mapping[str, list]"])
+def test_frozen_annotations_still_flags_mutable_nested_in_immutable_wrapper(annotation: str) -> None:
+    """The fix only tightens: a mutable nested inside an immutable container was
+    flagged by the old ``list[``-substring regex and must remain flagged."""
+    findings = _analyze_frozen_annotations(
+        f"""
+        from collections.abc import Mapping
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
 def test_frozen_annotations_ignores_mapping_annotation() -> None:
     findings = _analyze_frozen_annotations(
         """

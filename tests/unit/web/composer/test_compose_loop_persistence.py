@@ -56,7 +56,7 @@ def _advisor_tool_call_response(call_id: str) -> Any:
                                 name="request_advisor_hint",
                                 arguments=json.dumps(
                                     {
-                                        "trigger": "reactive_validation_loop",
+                                        "trigger": "proactive_security_safety",
                                         "problem_summary": "stuck on llm config with private schema",
                                         "recent_errors": [
                                             "validator rejected the private column",

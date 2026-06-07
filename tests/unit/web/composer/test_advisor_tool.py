@@ -146,7 +146,7 @@ def _make_advisor_tool_call(
     call_id: str,
     *,
     problem: str = "stuck on llm config",
-    trigger: str = "reactive_validation_loop",
+    trigger: str = "proactive_security_safety",
 ) -> _FakeLLMResponse:
     args = {
         "trigger": trigger,
@@ -239,7 +239,6 @@ def test_advisor_tool_schema_requires_trigger_and_mentions_proactive_criteria() 
 
     trigger_schema = parameters["properties"]["trigger"]
     assert trigger_schema["enum"] == [
-        "reactive_validation_loop",
         "proactive_security_safety",
         "proactive_red_listed_plugin",
     ]
@@ -248,6 +247,41 @@ def test_advisor_tool_schema_requires_trigger_and_mentions_proactive_criteria() 
     assert "security" in description
     assert "red-listed" in description
     assert "before `set_pipeline`" in description
+
+
+def test_reactive_trigger_is_retired() -> None:
+    """The reactive validation-loop trigger is no longer an LLM-supplied
+    trigger; ``request_advisor_hint`` with ``trigger="reactive_validation_loop"``
+    must be rejected as an unknown trigger.
+    """
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings(advisor_enabled=True))
+    payload = service._validate_advisor_arguments(
+        {
+            "trigger": "reactive_validation_loop",
+            "problem_summary": "stuck",
+            "recent_errors": ["e1", "e2"],
+            "attempted_actions": ["a1", "a2"],
+        }
+    )
+    assert payload is not None  # ARG_ERROR
+    assert payload["status"] == "ARG_ERROR"
+    assert "must be one of" in payload["error"]
+    assert "reactive_validation_loop" not in payload["error"]
+
+
+def test_proactive_triggers_still_valid() -> None:
+    """The two proactive triggers must still validate cleanly."""
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings(advisor_enabled=True))
+    for trig in ("proactive_security_safety", "proactive_red_listed_plugin"):
+        payload = service._validate_advisor_arguments(
+            {
+                "trigger": trig,
+                "problem_summary": "p",
+                "recent_errors": [],
+                "attempted_actions": [],
+            }
+        )
+        assert payload is None  # valid
 
 
 # --- 2. CLI MCP allowlist excludes the advisor by design ---
@@ -437,7 +471,7 @@ async def test_advisor_omits_seed_when_advisor_model_does_not_support_it(monkeyp
     service = ComposerServiceImpl(catalog=catalog, settings=_make_settings(advisor_enabled=True))
     recorder = BufferingRecorder()
     args = {
-        "trigger": "reactive_validation_loop",
+        "trigger": "proactive_security_safety",
         "problem_summary": "stuck",
         "recent_errors": ["validator rejected provider", "validator rejected provider"],
         "attempted_actions": ["set_pipeline once", "checked schema"],

@@ -113,14 +113,11 @@ _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pip
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 
 
-ADVISOR_TRIGGER_REACTIVE: Final[str] = "reactive_validation_loop"
-
 ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
 
 ADVISOR_TRIGGER_PROACTIVE_RED_LISTED: Final[str] = "proactive_red_listed_plugin"
 
 ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
-    ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_PROACTIVE_SECURITY,
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )

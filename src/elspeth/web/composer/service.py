@@ -96,7 +96,6 @@ from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, loa
 from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.tools import (
     _SESSION_AWARE_TOOL_HANDLERS,
-    ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_VALUES,
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     ToolResult,
@@ -3018,7 +3017,7 @@ class ComposerServiceImpl:
                 user_message=user_message,
                 catalog=self._catalog,
                 data_dir=self._data_dir,
-                advisor_enabled=self._settings.composer_advisor_enabled,
+                advisor_enabled=True,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
@@ -3036,8 +3035,6 @@ class ComposerServiceImpl:
         not affected; advisor is web-composer only by design.
         """
         definitions = get_tool_definitions()
-        if not self._settings.composer_advisor_enabled:
-            definitions = [defn for defn in definitions if defn["name"] != "request_advisor_hint"]
         return [
             {
                 "type": "function",
@@ -3174,16 +3171,6 @@ class ComposerServiceImpl:
                 "status": "ARG_ERROR",
                 "error": "attempted_actions must be a list of strings",
                 "error_class": "TypeError",
-            }
-
-        if trigger == ADVISOR_TRIGGER_REACTIVE and (len(recent) < 2 or len(attempted) < 2):
-            return {
-                "status": "ARG_ERROR",
-                "error": (
-                    "reactive_validation_loop trigger requires at least two recent_errors "
-                    "and two attempted_actions showing the unchanged validation loop"
-                ),
-                "error_class": "ValueError",
             }
 
         if "schema_excerpt" in arguments and arguments["schema_excerpt"] is not None:

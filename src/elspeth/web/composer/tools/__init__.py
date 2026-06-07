@@ -97,7 +97,6 @@ from elspeth.web.composer.tools.outputs import (
 )
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
-    ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_VALUES,
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RATE_CAP_PER_SESSION_DAY_CODE,
@@ -121,7 +120,6 @@ from elspeth.web.composer.tools.transforms import (
 )
 
 __all__ = [
-    "ADVISOR_TRIGGER_REACTIVE",
     "ADVISOR_TRIGGER_VALUES",
     "RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE",
     "RATE_CAP_PER_SESSION_DAY_CODE",

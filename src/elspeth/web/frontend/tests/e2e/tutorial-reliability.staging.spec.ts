@@ -21,7 +21,8 @@ import {
   FIXED_PROMPT,
   JUDGE_RUBRIC,
 } from "./harness/prompt-and-rubric";
-import type { FaultSubclass, RunRecord } from "./harness/types";
+import { classifyOutcome, type StepSignal } from "./harness/classify";
+import type { RunRecord } from "./harness/types";
 import {
   fetchComposition,
   fetchDiagnostics,
@@ -121,10 +122,6 @@ function substantiveRowCount(
   ).length;
 }
 
-// Classify a transport/error string as infra noise vs a composition fault.
-// 5xx / 429 / rate-limit / connection / timeout / DNS / target-down → infra.
-const INFRA_ERROR = /\b5\d\d\b|429|rate.?limit|throttl|timed? ?out|timeout|did not reach terminal|econn|socket hang|network|temporarily unavailable|bad gateway|service unavailable|gateway timeout/i;
-
 async function runOnce(page: Page, runIndex: number): Promise<void> {
   test.setTimeout(720_000); // real compose + tutorial run; raised for provider latency under load
 
@@ -146,15 +143,62 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
   let graduated = false;
   let hardError: string | null = null;
 
-  // Capture session id, tutorial run id, cache flag, and output rows from the
-  // network (Task 5 + Task 6 Step 2).
+  // --- backend-grounded step signals (de-conflation; see harness/classify.ts) ---
+  // Capture the compose (POST /api/sessions/{id}/messages) and run
+  // (POST /api/tutorial/run) POSTs REGARDLESS of resp.ok(), plus whether each
+  // request even responded before the deadline. Classification keys on these,
+  // not on the Playwright timeout string (which always says "Timeout").
+  const mkStep = (): StepSignal => ({
+    fired: false,
+    responded: false,
+    status: null,
+    bodyText: null,
+    elapsedMs: null,
+  });
+  const step = { compose: mkStep(), run: mkStep() };
+  const startMs: { compose: number | null; run: number | null } = { compose: null, run: null };
+  const isCompose = (url: string, method: string) =>
+    method === "POST" && /\/api\/sessions\/[0-9a-f-]{36}\/messages\b/i.test(url);
+  const isRun = (url: string, method: string) =>
+    method === "POST" && url.includes("/api/tutorial/run");
+
+  page.on("request", (req) => {
+    const url = req.url();
+    const method = req.method();
+    if (isCompose(url, method)) {
+      step.compose.fired = true;
+      startMs.compose = Date.now();
+    } else if (isRun(url, method)) {
+      step.run.fired = true;
+      startMs.run = Date.now();
+    }
+  });
+  page.on("requestfailed", (req) => {
+    // Transport failure (connection reset / abort) — record the failure text so
+    // INFRA_BODY in the classifier can see it. responded stays false.
+    const url = req.url();
+    const method = req.method();
+    const errText = req.failure()?.errorText ?? "connection failed";
+    if (isCompose(url, method)) step.compose.bodyText ??= errText;
+    else if (isRun(url, method)) step.run.bodyText ??= errText;
+  });
+
+  // Capture session id, tutorial run id, cache flag, output rows, AND the
+  // compose/run step status+timing+error-body (Task 5 + Task 6 Step 2).
   page.on("response", async (resp) => {
     const url = resp.url();
-    if (
-      url.includes("/api/tutorial/run") &&
-      resp.request().method() === "POST" &&
-      resp.ok()
-    ) {
+    const method = resp.request().method();
+    const compose = isCompose(url, method);
+    const run = isRun(url, method);
+    if (compose || run) {
+      const tgt = compose ? step.compose : step.run;
+      const start = compose ? startMs.compose : startMs.run;
+      tgt.responded = true;
+      tgt.status = resp.status();
+      tgt.elapsedMs = start !== null ? Date.now() - start : null;
+      if (!resp.ok()) tgt.bodyText = await resp.text().catch(() => null);
+    }
+    if (run && resp.ok()) {
       const body = await resp.json().catch(() => null);
       if (body) {
         tutorialRunId = body.run_id ?? null;
@@ -282,72 +326,32 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     // issued (it would collide on the first run's output artifacts → FileExistsError).
     const dimBPassed = !normalized && graduated && outputRows.length > 0;
 
-    // Classify (spec §7). Two headline numbers depend on this: tutorial-pass-rate
-    // (driven to 100%) and infra-noise rate (held separate so prompt changes are
-    // not confounded).
-    //
-    // Precedence:
-    //   1. infra noise (timeout / 5xx / 429) thrown during the UI flow — excluded
-    //      from the tutorial denominator entirely.
-    //   2. hard frontend fault (ambiguous UI error / never-advanced turn).
-    //   3. parity break (b): normalization fired → tutorial ran a different pipeline
-    //      than a regular run would → normalization-gap.
-    //   4. assumption faults (c).
-    //   5. mechanical solution-quality (d) — reachability / discard / substantive.
-    const hardErrorIsInfra = hardError !== null && INFRA_ERROR.test(hardError);
-
-    let outcome: RunRecord["outcome"] = "pass";
-    let sub: FaultSubclass = null;
-    let fix: string | null = null;
-    if (hardErrorIsInfra) {
-      // A transport timeout / 5xx / 429 thrown during the UI flow.
-      outcome = "infra_fault";
-      sub = /did not reach terminal|timed? ?out|timeout/i.test(hardError ?? "")
-        ? "timeout"
-        : /\b5\d\d\b|bad gateway|service unavailable|gateway timeout/i.test(hardError ?? "")
-          ? "llm-5xx-or-ratelimit"
-          : "staging-hiccup";
-      fix = null;
-    } else if (hardError) {
-      // An ambiguous UI error / a turn that never advanced — a genuine frontend
-      // fault, which is exactly what this harness exists to catch. Default here
-      // (do NOT route ambiguous UI errors into infra, which would deflate signal).
-      outcome = "tutorial_fault";
-      sub = "frontend-state-machine";
-      fix = "frontend / timing";
-    } else if (graduated && normalized) {
-      // Parity break (backend-parity principle + spec §10): the tutorial REPAIRED
-      // the composed pipeline before running; a regular /execute applies no such
-      // repair, so the composer's actual output is not proven to run as a regular
-      // run. Fix at source (composer emits correct templates / engine handles both)
-      // — never a tutorial-only band-aid.
-      outcome = "tutorial_fault";
-      sub = "normalization-gap";
-      fix = "remove tutorial-only normalization: make tutorial == regular run";
-    } else if (underFlagged.length) {
-      outcome = "tutorial_fault";
-      sub = "assumption-under-flag";
-      fix = "composer-skill-prompt: pipeline_composer.md review rules";
-    } else if (overFlagged.length) {
-      outcome = "tutorial_fault";
-      sub = "assumption-over-flag";
-      fix = "composer-skill-prompt: pipeline_composer.md review rules";
-    } else if (reachable < JUDGE_RUBRIC.minReachableSources) {
-      // d-mechanical: a scrape node-state failed for one of the invented URLs but
-      // the run still completed (e.g. the row diverted). On a real network this is
-      // the composer picking a bad URL; transient fetch failures surface as infra
-      // above via the real-run why-signal.
-      outcome = "tutorial_fault";
-      sub = "invented-source-unreachable";
-      fix = "composer-skill-prompt: generated-source discipline";
-    } else if (
-      discardedRowCount > JUDGE_RUBRIC.maxDiscardedRows ||
-      substantive < JUDGE_RUBRIC.minSubstantiveRows
-    ) {
-      outcome = "tutorial_fault";
-      sub = "degenerate-output";
-      fix = "composer-skill-prompt: extraction discipline";
-    }
+    // Classify (spec §7) via the pure, unit-tested classifier (harness/classify.ts).
+    // It keys on the BACKEND outcome of the blocking step (compose/run POST status,
+    // whether it responded, whether a pipeline was composed) — NOT on the Playwright
+    // "Timeout" string, which the old classifier matched and which laundered compose/
+    // run validation failures and provider latency into one `infra_fault` bucket
+    // (notes/tutorial-harness-infra-timeout-rootcause-2026-06-07.md). The two headline
+    // numbers (tutorial-pass-rate vs infra-noise rate) are only meaningful once these
+    // are separated.
+    const { outcome, sub, fix } = classifyOutcome({
+      graduated,
+      turnReached,
+      compose: step.compose,
+      run: step.run,
+      composedNodeCount: comp.nodes.length,
+      normalized,
+      underFlaggedCount: underFlagged.length,
+      overFlaggedCount: overFlagged.length,
+      reachable,
+      minReachable: JUDGE_RUBRIC.minReachableSources,
+      discardedRowCount,
+      maxDiscarded: JUDGE_RUBRIC.maxDiscardedRows,
+      substantive,
+      minSubstantive: JUDGE_RUBRIC.minSubstantiveRows,
+      outputRowCount: outputRows.length,
+      hardError,
+    });
 
     const record: RunRecord = {
       batch_id: BATCH_ID,
@@ -387,7 +391,33 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
         composer_skill_hash: events[0]?.composer_skill_hash ?? null,
         model_identifier: events[0]?.model_identifier ?? null,
       },
-      timing_s: {},
+      timing_s: {
+        ...(step.compose.elapsedMs !== null
+          ? { compose_s: Math.round(step.compose.elapsedMs / 100) / 10 }
+          : {}),
+        ...(step.run.elapsedMs !== null
+          ? { run_s: Math.round(step.run.elapsedMs / 100) / 10 }
+          : {}),
+      },
+      // Backend step evidence (the de-conflation inputs) — kept in the record so
+      // a future batch is diagnosable without re-running: did each POST fire,
+      // respond, with what status, in how long.
+      steps: {
+        compose: {
+          fired: step.compose.fired,
+          responded: step.compose.responded,
+          status: step.compose.status,
+          elapsed_s: step.compose.elapsedMs !== null ? Math.round(step.compose.elapsedMs / 100) / 10 : null,
+          body: step.compose.bodyText?.slice(0, 500) ?? null,
+        },
+        run: {
+          fired: step.run.fired,
+          responded: step.run.responded,
+          status: step.run.status,
+          elapsed_s: step.run.elapsedMs !== null ? Math.round(step.run.elapsedMs / 100) / 10 : null,
+          body: step.run.bodyText?.slice(0, 500) ?? null,
+        },
+      },
       error: hardError,
     };
 

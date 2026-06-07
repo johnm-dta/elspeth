@@ -93,9 +93,11 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
 from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
-from elspeth.web.composer.state import CompositionState, ValidationSummary
+from elspeth.web.composer.state import CompositionState, NodeSpec, ValidationSummary
 from elspeth.web.composer.tools import (
     _SESSION_AWARE_TOOL_HANDLERS,
+    ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
+    ADVISOR_TRIGGER_DETERMINISTIC_END,
     ADVISOR_TRIGGER_VALUES,
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     ToolResult,
@@ -3637,6 +3639,86 @@ class ComposerServiceImpl:
                 if current_exc is not None:
                     attach_llm_calls(current_exc, recorder)
 
+    def _build_checkpoint_arguments(self, *, phase: str, state: CompositionState) -> dict[str, Any]:
+        """Synthesize the (Tier-1, trusted) advisor ``arguments`` for a checkpoint.
+
+        The dict matches the shape ``_build_advisor_user_message`` consumes
+        (``trigger``, ``problem_summary``, ``recent_errors``,
+        ``attempted_actions``, optional ``schema_excerpt``). Because the data
+        is backend-produced — not LLM-supplied — it deliberately BYPASSES
+        ``_validate_advisor_arguments`` (which guards the Tier-3 tool boundary).
+        A compact pipeline summary (topology + node options + field contracts)
+        is passed as ``schema_excerpt``.
+        """
+        pipeline_summary = _summarize_pipeline_for_advisor(state)
+        if phase == "early":
+            return {
+                "trigger": ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
+                "problem_summary": (
+                    "Review this pipeline APPROACH early (it was just established). "
+                    "Does the topology fit the user's intent? Are producer->consumer "
+                    "field contracts coherent (does each node consume fields its upstream "
+                    "actually emits, accounting for subtractive transforms)? Name concrete gaps."
+                ),
+                "recent_errors": [],
+                "attempted_actions": [],
+                "schema_excerpt": pipeline_summary,
+            }
+        return {
+            "trigger": ADVISOR_TRIGGER_DETERMINISTIC_END,
+            "problem_summary": (
+                "Final sign-off. Does this pipeline fulfil the user's intent and is it "
+                "sound? Flag any unmet intent, broken field contract, or subjective rubric "
+                "that should have been surfaced. Start your reply with CLEAN or FLAGGED."
+            ),
+            "recent_errors": [],
+            "attempted_actions": [],
+            "schema_excerpt": pipeline_summary,
+        }
+
+    async def _run_advisor_checkpoint(
+        self,
+        *,
+        phase: str,
+        state: CompositionState,
+        session_id: str | None,
+        recorder: BufferingRecorder | None,
+    ) -> AdvisorCheckpointVerdict:
+        """Backend-initiated deterministic advisor checkpoint (early|end).
+
+        Reuses :meth:`_call_advisor_with_audit` so the checkpoint shares the
+        same audited, model-distinct advisor path as the LLM-initiated hint.
+        The call is retried up to ``attempts`` times; any exception (the call
+        core re-raises typed LLM errors — timeout, auth, transport, malformed)
+        is treated as *unavailable* and converted to a non-raising verdict with
+        ``ok=False``. Callers decide degrade (early) vs fail-closed (end).
+
+        ``blocking`` is True iff the guidance is a FLAGGED sign-off; a leading
+        ``CLEAN`` (case-insensitive) is non-blocking. ``session_id`` is part of
+        the checkpoint contract (threaded by callers and consumed downstream);
+        it is intentionally not forwarded into the advisor call here.
+        """
+        arguments = self._build_checkpoint_arguments(phase=phase, state=state)
+        attempts = 2  # bounded retry; the underlying call wraps its own timeout
+        last_exc: Exception | None = None
+        for _ in range(attempts):
+            try:
+                guidance, _meta = await self._call_advisor_with_audit(arguments, recorder=recorder)
+            except Exception as exc:
+                # Convert-to-verdict (non-raising): the call core re-raises
+                # typed LLM errors (timeout, auth, transport, malformed); a
+                # checkpoint must degrade to "unavailable" rather than crash
+                # the compose loop, so every exception class is treated alike.
+                last_exc = exc
+                continue
+            blocking = not guidance.strip().upper().startswith("CLEAN")
+            return AdvisorCheckpointVerdict(ok=True, blocking=blocking, findings_text=guidance.strip())
+        return AdvisorCheckpointVerdict(
+            ok=False,
+            blocking=False,
+            findings_text=str(last_exc) if last_exc else "advisor unavailable",
+        )
+
     async def _call_llm_with_audit(
         self,
         messages: list[dict[str, Any]],
@@ -4021,3 +4103,196 @@ class ComposeLoopTestResult:
         """Backward-compatible assertion surface for compose-loop tests."""
 
         return self.tool_outcomes
+
+
+# ---------------------------------------------------------------------------
+# Deterministic advisor checkpoint primitives (Task 4).
+#
+# AdvisorCheckpointVerdict and _summarize_pipeline_for_advisor live at module
+# scope (the methods that produce/consume them are on ComposerServiceImpl).
+# They are appended at end-of-file rather than spliced near the imports for the
+# same fingerprint-stability reason documented above _arg_error_payload:
+# inserting a module-level def mid-file would rotate every downstream symbol's
+# AST fingerprint. The verdict is also imported directly by the unit tests.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AdvisorCheckpointVerdict:
+    """Result of a deterministic advisor checkpoint.
+
+    ``ok`` False => the advisor call failed after bounded retry (unavailable);
+    callers decide degrade (early) vs fail-closed (end). ``blocking`` True =>
+    the advisor flagged a problem (only meaningful when ``ok``).
+    """
+
+    ok: bool
+    blocking: bool
+    findings_text: str
+
+
+# Salient, intent-bearing option keys whose VALUES are rendered (compactly) in
+# the advisor summary so the reviewer can judge topology/intent — not just
+# field contracts. Deliberately excludes secret-shaped keys (api_key, token,
+# password, …) and storage carriers (path, file, blob_ref): those are surfaced
+# as key-names-only, never as values, so the summary cannot leak credentials or
+# internal storage locations (the schema_excerpt field is further redacted on
+# the audit path regardless).
+_ADVISOR_SUMMARY_VALUE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "model",
+        "prompt_template",
+        "template",
+        "column",
+        "columns",
+        "field",
+        "fields",
+        "format",
+        "output_field",
+        "expression",
+        "operation",
+        "aggregation",
+    }
+)
+_ADVISOR_SUMMARY_VALUE_MAX_CHARS: Final[int] = 120
+
+
+def _summarize_pipeline_for_advisor(state: CompositionState) -> str:
+    """Render a compact, redaction-safe description of the pipeline.
+
+    Produces descriptive text the advisor can reason about for BOTH halves of
+    the early/end checkpoint:
+
+    * topology — source -> nodes -> sinks, each node's id/type/plugin and named
+      connection points;
+    * intent / control flow — the salient structural settings (gate
+      ``condition``/``routes``/``fork_to``, coalesce ``policy``/``merge``,
+      aggregation ``trigger``/``output_mode``) plus an allowlisted set of
+      intent-bearing option *values* (``model``, ``prompt_template``, selected
+      columns, …);
+    * field contract — each node's declared ``required_input_fields``.
+
+    Redaction safety: only allowlisted, non-secret option keys have their
+    values rendered (truncated); every other option appears as a key NAME only,
+    so credentials and storage paths cannot leak — even before the audit-path
+    redactor runs on the ``schema_excerpt`` field.
+
+    Defensive against partial states: the EARLY checkpoint fires on the
+    empty->non-empty transition, so ``source``/``nodes``/``outputs`` may each
+    be missing. Missing pieces are reported plainly; nothing is fabricated.
+    """
+    lines: list[str] = []
+
+    if state.metadata.name:
+        lines.append(f"Pipeline: {state.metadata.name}")
+    if state.metadata.description:
+        lines.append(f"Intent (stated): {state.metadata.description}")
+
+    # Source.
+    if state.source is None:
+        lines.append("Source: (none set)")
+    else:
+        opt_text = _render_options_for_advisor(state.source.options)
+        lines.append(f"Source: plugin={state.source.plugin} -> '{state.source.on_success}' [{opt_text}]")
+
+    # Nodes (topology + control flow + per-node field contract).
+    if not state.nodes:
+        lines.append("Nodes: (none)")
+    else:
+        lines.append("Nodes:")
+        for node in state.nodes:
+            plugin = node.plugin if node.plugin is not None else "-"
+            on_success = node.on_success if node.on_success is not None else "-"
+            required = _node_required_input_fields(node)
+            req_text = ", ".join(required) if required else "(none declared)"
+            control = _render_node_control_flow(node)
+            control_suffix = f" {control}" if control else ""
+            opt_text = _render_options_for_advisor(node.options)
+            lines.append(
+                f"  - {node.id}: type={node.node_type} plugin={plugin} "
+                f"reads '{node.input}' -> '{on_success}'{control_suffix} "
+                f"[requires: {req_text}] [{opt_text}]"
+            )
+
+    # Sinks.
+    if not state.outputs:
+        lines.append("Sinks: (none)")
+    else:
+        lines.append("Sinks:")
+        for output in state.outputs:
+            opt_text = _render_options_for_advisor(output.options)
+            lines.append(f"  - {output.name}: plugin={output.plugin} [{opt_text}]")
+
+    return "\n".join(lines)
+
+
+def _render_node_control_flow(node: NodeSpec) -> str:
+    """Render a node's intent-bearing control-flow fields (gate/coalesce/agg).
+
+    These are top-level :class:`NodeSpec` scalars/maps, not ``options`` — and
+    none of them carry secrets — so the values are rendered directly (truncated)
+    to let the advisor judge routing/topology intent.
+    """
+    parts: list[str] = []
+    if node.condition is not None:
+        parts.append(f"condition={_truncate_for_advisor(str(node.condition))}")
+    if node.routes is not None:
+        parts.append(f"routes={_truncate_for_advisor(str(dict(node.routes)))}")
+    if node.fork_to is not None:
+        parts.append(f"fork_to={list(node.fork_to)}")
+    if node.policy is not None:
+        parts.append(f"policy={node.policy}")
+    if node.merge is not None:
+        parts.append(f"merge={node.merge}")
+    if node.trigger is not None:
+        parts.append(f"trigger={_truncate_for_advisor(str(dict(node.trigger)))}")
+    if node.output_mode is not None:
+        parts.append(f"output_mode={node.output_mode}")
+    return " ".join(parts)
+
+
+def _render_options_for_advisor(options: Mapping[str, Any]) -> str:
+    """Render an options mapping as redaction-safe descriptive text.
+
+    Allowlisted intent-bearing keys (:data:`_ADVISOR_SUMMARY_VALUE_KEYS`) show
+    a truncated value; every other key shows its NAME only. Never raises.
+    """
+    if not options:
+        return "no options"
+    value_parts: list[str] = []
+    name_only: list[str] = []
+    for key in sorted(options.keys()):
+        if key in _ADVISOR_SUMMARY_VALUE_KEYS:
+            value_parts.append(f"{key}={_truncate_for_advisor(str(options[key]))}")
+        else:
+            name_only.append(key)
+    segments: list[str] = []
+    if value_parts:
+        segments.append("options: " + ", ".join(value_parts))
+    if name_only:
+        segments.append("other option keys: " + ", ".join(name_only))
+    return "; ".join(segments)
+
+
+def _truncate_for_advisor(value: str) -> str:
+    """Bound a rendered value so the summary stays compact. Never raises."""
+    if len(value) <= _ADVISOR_SUMMARY_VALUE_MAX_CHARS:
+        return value
+    return value[: _ADVISOR_SUMMARY_VALUE_MAX_CHARS - 1] + "…"
+
+
+def _node_required_input_fields(node: NodeSpec) -> list[str]:
+    """Extract a node's declared ``required_input_fields`` as plain strings.
+
+    Reads the option in either the flat or nested ``options`` shape (mirroring
+    state.py's declared-input lookup) and coerces only string entries — a
+    malformed value never raises here, it just yields no contract detail.
+    """
+    raw: Any = node.options.get("required_input_fields")
+    if raw is None:
+        nested = node.options.get("options")
+        if isinstance(nested, Mapping):
+            raw = nested.get("required_input_fields")
+    if isinstance(raw, (list, tuple)):
+        return [str(field) for field in raw if isinstance(field, str)]
+    return []

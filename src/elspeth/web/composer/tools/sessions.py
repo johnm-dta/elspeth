@@ -122,6 +122,14 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
 
+# Backend-synthesized triggers for the deterministic advisor checkpoints
+# (early/end). Deliberately NOT in ADVISOR_TRIGGER_VALUES: those are the
+# LLM-selectable set validated against Tier-3 input; these are produced by the
+# trusted compose loop itself and bypass the Tier-3 trigger allowlist.
+ADVISOR_TRIGGER_DETERMINISTIC_EARLY: Final[str] = "deterministic_early_checkpoint"
+
+ADVISOR_TRIGGER_DETERMINISTIC_END: Final[str] = "deterministic_end_checkpoint"
+
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
     """Tier-3 trust-boundary model for the ``request_interpretation_review`` tool.

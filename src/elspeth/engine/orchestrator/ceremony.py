@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.errors import GracefulShutdownError, TelemetryExporterError
+from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.events import (
     PhaseError,
     PipelinePhase,
@@ -88,25 +88,26 @@ class RunCeremony:
     def safe_flush_telemetry(self) -> None:
         """Flush telemetry in a finally block, preserving any pending exception.
 
-        If flush_telemetry() raises TelemetryExporterError (fail_on_total=True),
-        only re-raises when no other exception is pending — telemetry failures
-        must not mask run errors.
+        flush_telemetry() can raise more than TelemetryExporterError: the
+        TelemetryManager re-raises ANY exception stored by its export thread on
+        flush() (manager.py), including non-transport programming errors. When a
+        run exception is already in flight, none of these may replace it —
+        telemetry failures must not mask run errors — so the flush runs inside
+        best_effort, which logs and suppresses any Exception. When no run
+        exception is pending, a telemetry failure should surface rather than
+        vanish, so the flush runs raw and propagates.
+
+        (Previously this caught only TelemetryExporterError, so a stored
+        programming error escaped the finally and replaced the run error —
+        elspeth-1e4ca5b1db.)
         """
         import sys
 
-        logger = slog
-        pending_exc = sys.exc_info()[0]
-
-        try:
+        if sys.exc_info()[0] is not None:
+            with best_effort("Telemetry flush during exception cleanup"):
+                self.flush_telemetry()
+        else:
             self.flush_telemetry()
-        except TelemetryExporterError as e:
-            logger.warning(
-                "Telemetry flush failed - will raise after cleanup if no other exception pending",
-                exporter=e.exporter_name,
-                error=e.message,
-            )
-            if pending_exc is None:
-                raise
 
     def emit_interrupted_ceremony(
         self,

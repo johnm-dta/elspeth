@@ -38,12 +38,96 @@ def test_audit_evidence_nominal_reports_to_audit_dict_without_base() -> None:
 
 
 def test_audit_evidence_nominal_accepts_direct_base() -> None:
+    # The base must be the canonical AuditEvidenceBase (imported from
+    # elspeth.contracts.audit_evidence) — see elspeth-584d4ea502.
     findings = list(
         AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
             _tree("""
+            from elspeth.contracts.audit_evidence import AuditEvidenceBase
+
             class Compliant(AuditEvidenceBase, RuntimeError):
                 def to_audit_dict(self):
                     return {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_audit_evidence_nominal_flags_spoofed_base_name() -> None:
+    # elspeth-584d4ea502: a base merely NAMED AuditEvidenceBase (here a local
+    # class, not imported from the canonical module) must NOT satisfy nominal
+    # inheritance — it is the spoofing bypass.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AuditEvidenceBase:
+                pass
+
+            class Spoof(AuditEvidenceBase, RuntimeError):
+                def to_audit_dict(self):
+                    return {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["AEN1"]
+    assert "Spoof" in findings[0].message
+
+
+def test_audit_evidence_nominal_accepts_local_base_inside_canonical_module() -> None:
+    # Inside contracts/audit_evidence.py the base is defined locally and a
+    # subclass inherits it without an import — that local reference IS the real
+    # base and cannot be spoofed (the file path is the canonical module).
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AuditEvidenceBase:
+                pass
+
+            class Sub(AuditEvidenceBase):
+                def to_audit_dict(self):
+                    return {}
+            """),
+            Path("contracts/audit_evidence.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_audit_evidence_nominal_flags_annotated_assignment_form() -> None:
+    # elspeth-37879426d1: an annotated assignment WITH a value defines a real
+    # to_audit_dict descriptor and must be detected.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AnnMimic(RuntimeError):
+                to_audit_dict: object = lambda self: {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["AEN1"]
+    assert "AnnMimic" in findings[0].message
+
+
+def test_audit_evidence_nominal_ignores_bare_annotation_without_value() -> None:
+    # A bare annotation (no value) creates no runtime attribute, so it does not
+    # define to_audit_dict and must not be flagged.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class Annotated(RuntimeError):
+                to_audit_dict: object
             """),
             Path("example.py"),
             RuleContext(root=Path(".")),

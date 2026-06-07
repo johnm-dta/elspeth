@@ -44,6 +44,10 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-fbfb9fd634 | AST: frozen_annotations (MD2) | b67f4a56e | regex required `[` so bare list/dict/set missed → AST walk; only tightens (nested-in-immutable still flagged) |
 | elspeth-20add2bd90 | AST: component_type (MD1 alias) | 9ad914feb | `_extract_base_names` saw only syntactic base → now resolves `import Base as Alias` via per-file alias map; resolved name APPENDED not substituted (never-loosen by construction); blast radius ZERO |
 | elspeth-a2b240c29b | AST: component_type (MD5 spoof) | 9ad914feb | `_class_sets_component_type` accepted any str → now restricted to {source,sink,transform}; blast radius ZERO (all real labels valid). Runtime sibling filed elspeth-ce0814e726 (config_base.__init_subclass__ only checks is-None — engine/platform cluster, deferred) |
+| elspeth-1e8f4ece9a | AST: contract_manifest (MD1 provenance) | 2cdec9875 | `_is_register_call` trusted textual name → now requires import from elspeth.contracts.declaration_contracts (CanonicalBindings); shadowed no-op → MC2. Fail-open closed |
+| elspeth-487dfef2ce | AST: contract_manifest (MD1 provenance) | 2cdec9875 | same provenance gate for @implements_dispatch_site decorator; shadowed no-op → MC3b. Fail-open closed |
+| elspeth-07d9f8a619 | AST: contract_manifest (dup) | 2cdec9875 | `compute_findings` set-deduped → now emits MC1 on duplicate contract name (key name::duplicate@L<line>), matching runtime ValueError. Fail-open closed |
+| elspeth-2b5edd369e | AST: contract_manifest (FP) | 2cdec9875 | marker site read from args[0] only → now positional OR site_name= keyword; removes spurious MC3b on valid keyword form |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped
@@ -151,7 +155,17 @@ into one shared fail-closed helper that all loaders delegate to — removes the
 drift that caused MD3 in the first place. This is the "extract the helper after
 2-3 concrete fixes" win; do it after MD1/MD2 land more concrete cases.
 
-## 3c. contract_manifest family (NEXT — analysis done, fix not started)
+## 3c. contract_manifest family — DONE (2cdec9875, all 4 closed)
+
+Provenance lesson generalised: name-identity ≠ provenance. The fix added a per-file
+`CanonicalBindings` map (register_names / marker_names / module_aliases sourced ONLY from
+`from elspeth.contracts.declaration_contracts import ...`). Proof model for THIS family was
+**real-codebase finding-set invariance** (HEAD==fixed==[] on src/elspeth), NOT old⊆new — the
+provenance/keyword fixes intentionally change the synthetic verdict (advisor catch). Added a
+json-mode real-scan test (the rule had none, unlike component_type). Original analysis ↓ kept for
+reference.
+
+### (original analysis)
 
 Rule: `rules/manifest/contract_manifest/rule.py`. Four bugs, coupled — land as ONE pass:
 

@@ -659,6 +659,8 @@ class DataverseClient:
                 retryable=False,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             )
 
         # FetchXML paging cookie
@@ -669,6 +671,8 @@ class DataverseClient:
                 retryable=False,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             )
 
         more_records_raw = parsed.get("@Microsoft.Dynamics.CRM.morerecords")
@@ -690,6 +694,8 @@ class DataverseClient:
                         retryable=False,
                         status_code=response.status_code,
                         latency_ms=latency_ms,
+                        request_url=url,
+                        request_headers=fingerprinted,
                     )
             else:
                 raise DataverseClientError(
@@ -698,6 +704,8 @@ class DataverseClient:
                     retryable=False,
                     status_code=response.status_code,
                     latency_ms=latency_ms,
+                    request_url=url,
+                    request_headers=fingerprinted,
                 )
         else:
             # Field absent — record the absence, don't infer.

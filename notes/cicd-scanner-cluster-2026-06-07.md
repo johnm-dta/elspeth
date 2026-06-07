@@ -40,6 +40,16 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-c36485165b | AST: gve_attribution (MD1 alias) | 9b9f22fd6 | matcher keyed on bare name → now collects ImportFrom aliases; blast radius ZERO |
 | elspeth-16f41371f8 | AST: gve_attribution | 9b9f22fd6 | component_id keyword counted by presence → now flags component_id=None literal; blast radius ZERO |
 | elspeth-3c73e49cc7 | AST: gve_attribution (MD4 SUPERSEDED) | (test-only) | framework CLI emits parse-error for SyntaxError → fail-closed; locking test added |
+| elspeth-a586a7212e | AST: frozen_annotations (MD2) | b67f4a56e | regex missed capitalized typing aliases List[/Dict[/Set[ → AST walk; blast radius ZERO |
+| elspeth-fbfb9fd634 | AST: frozen_annotations (MD2) | b67f4a56e | regex required `[` so bare list/dict/set missed → AST walk; only tightens (nested-in-immutable still flagged) |
+
+**Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
+(mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped
+ruff UP006/UP035 (wanted to auto-upgrade it to `list[int]` — defeating the very
+fixture for a586a7212e). Same root cause as the mypy hook fix: pre-commit passes
+changed files explicitly, bypassing the tool's dir-exclude. **General lesson for
+this sweep: adding lint-rule fixtures that intentionally use deprecated/old forms
+needs BOTH mypy + ruff fixture-excludes (now both in place).**
 
 **Ergonomics win (goal half 2) — committed 1a90a0695:** mypy pre-commit hook now
 mirrors pyproject's `rules/.*/fixtures/` exclude. Without it, adding 2+ fixture

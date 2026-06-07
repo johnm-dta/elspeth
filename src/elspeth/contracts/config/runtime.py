@@ -612,6 +612,12 @@ class RuntimeTelemetryConfig:
                 f"backpressure_mode must be BackpressureMode, got {type(self.backpressure_mode).__name__}: {self.backpressure_mode!r}"
             )
         require_int(self.max_consecutive_failures, "max_consecutive_failures", min_value=1)
+        # A non-ExporterConfig entry (e.g. a raw dict) satisfies the tuple type but
+        # fails later in the telemetry factory (exporter_config.name -> AttributeError).
+        # Reject at the contract boundary, mirroring the services guard above.
+        for i, exporter in enumerate(self.exporter_configs):
+            if not isinstance(exporter, ExporterConfig):
+                raise TypeError(f"exporter_configs[{i}] must be ExporterConfig, got {type(exporter).__name__}: {exporter!r}")
 
     @classmethod
     def default(cls) -> "RuntimeTelemetryConfig":

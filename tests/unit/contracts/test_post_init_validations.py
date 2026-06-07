@@ -76,6 +76,17 @@ class TestRuntimeTelemetryConfigPostInit:
         with pytest.raises(TypeError, match="backpressure_mode must be BackpressureMode"):
             RuntimeTelemetryConfig(**self._telemetry_kwargs(backpressure_mode="block"))  # type: ignore[arg-type]
 
+    def test_rejects_non_exporter_config_entry(self) -> None:
+        """A raw dict in exporter_configs satisfies the tuple type but fails later in
+        the telemetry factory (exporter_config.name -> AttributeError). Reject at the
+        contract boundary, mirroring the RuntimeRateLimitConfig.services guard."""
+        with pytest.raises(TypeError, match=r"exporter_configs\[0\] must be ExporterConfig"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(exporter_configs=({"name": "console"},)))  # type: ignore[arg-type]
+
+    def test_valid_exporter_config_entry_succeeds(self) -> None:
+        cfg = RuntimeTelemetryConfig(**self._telemetry_kwargs(exporter_configs=(ExporterConfig(name="console", options={}),)))
+        assert cfg.exporter_configs[0].name == "console"
+
 
 class TestRuntimeCheckpointConfigPostInit:
     """elspeth-665fd96f28: bool fields validated on direct construction."""

@@ -375,6 +375,18 @@ class TestCoalesceCheckpointStateFromDict:
                 }
             )
 
+    def test_rejects_non_dict_top_level(self) -> None:
+        """Regression (elspeth-74686f3cf0): a non-dict top-level value must raise a
+        contract-grade AuditIntegrityError, not an incidental AttributeError from data.keys()."""
+        with pytest.raises(AuditIntegrityError, match="top-level value must be a dict"):
+            CoalesceCheckpointState.from_dict(["not", "a", "dict"])  # type: ignore[arg-type]
+
+    def test_rejects_non_dict_pending_entry(self) -> None:
+        """Regression (elspeth-74686f3cf0): each pending entry must be a dict before
+        delegating to CoalescePendingCheckpoint.from_dict (which calls set(data.keys()))."""
+        with pytest.raises(AuditIntegrityError, match=r"pending\[0\].*must be a dict"):
+            CoalesceCheckpointState.from_dict({"_version": "1.0", "pending": [123], "completed_keys": []})
+
     def test_json_round_trip_preserves_tuple_types(self) -> None:
         """Round-trip through JSON must restore tuples, not lists.
 

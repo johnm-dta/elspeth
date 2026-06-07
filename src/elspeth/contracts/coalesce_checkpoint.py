@@ -249,6 +249,8 @@ class CoalesceCheckpointState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CoalesceCheckpointState:
+        if not isinstance(data, dict):
+            raise AuditIntegrityError(f"Corrupted coalesce checkpoint: top-level value must be a dict, got {type(data).__name__}.")
         required_fields = {"_version", "pending", "completed_keys"}
         missing = required_fields - set(data.keys())
         if missing:
@@ -257,6 +259,11 @@ class CoalesceCheckpointState:
         pending = data["pending"]
         if not isinstance(pending, list):
             raise AuditIntegrityError(f"Corrupted coalesce checkpoint: 'pending' must be a list, got {type(pending).__name__}.")
+        for i, entry in enumerate(pending):
+            if not isinstance(entry, dict):
+                raise AuditIntegrityError(
+                    f"Corrupted coalesce checkpoint: pending[{i}] must be a dict, got {type(entry).__name__}: {entry!r}."
+                )
 
         raw_keys = data["completed_keys"]
         if not isinstance(raw_keys, list):

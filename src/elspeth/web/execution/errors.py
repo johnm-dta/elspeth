@@ -12,10 +12,15 @@ to access entries and contracts.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.web.composer.state import ValidationEntry
 from elspeth.web.interpretation_state import InterpretationReviewSite
+
+if TYPE_CHECKING:
+    from elspeth.web.execution.schemas import ValidationError, ValidationReadiness
 
 
 class SemanticContractViolationError(ValueError):
@@ -36,6 +41,47 @@ class SemanticContractViolationError(ValueError):
         self.contracts = contracts
         message = "; ".join(entry.message for entry in entries)
         super().__init__(message)
+
+
+class PipelineValidationError(ValueError):
+    """Raised when /execute pre-run dry-run validation (``validate_pipeline``)
+    rejects the composed pipeline BEFORE a run is created.
+
+    Closes the "detect != enforce" gap (notes/composer-advisor-surface-map-2026-06-08.md):
+    ``validate_pipeline`` already detects graph / value-source / generic plugin-config
+    contract violations, but ``execute()`` previously created a run and let it fail
+    opaquely (``status=failed``, ``rows_processed=0``). This fails CLOSED with the
+    structured ``ValidationError`` payload — mirroring ``SemanticContractViolationError``'s
+    422 contract — and also closes the tutorial bypass (``tutorial_service`` calls
+    ``execute()`` directly with no pre-run validation).
+
+    Not every failure class is preflightable: ``SchemaConfigModeViolation`` is a
+    post-emission row check and the Chroma SSRF check is deliberately deferred network
+    I/O — those remain runtime failures by design.
+
+    Subclasses ValueError for back-compat with existing ``except ValueError`` paths;
+    new callers catch this type to access ``errors`` / ``readiness``.
+    """
+
+    def __init__(
+        self,
+        *,
+        errors: tuple[ValidationError, ...],
+        readiness: ValidationReadiness | None = None,
+    ) -> None:
+        errors = tuple(errors)
+        if not errors:
+            # Offensive guard: is_valid=False ALWAYS carries >=1 error. Constructing
+            # this with no errors means the caller raised without checking
+            # ValidationResult.is_valid — a control-flow bug worth crashing for.
+            raise ValueError(
+                "PipelineValidationError requires at least one ValidationError — "
+                "caller must check ValidationResult.is_valid before raising."
+            )
+        self.errors = errors
+        self.readiness = readiness
+        message = "; ".join(e.message for e in errors)
+        super().__init__(f"Pipeline failed pre-run validation: {message}")
 
 
 class ExecuteRequestValidationError(ValueError):

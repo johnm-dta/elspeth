@@ -62,6 +62,27 @@ def _make_mock_audit_ctx() -> Any:
     return make_context()
 
 
+class TestChromaSinkCompletionTelemetry:
+    """elspeth-ee69831e4c: on_complete telemetry emit must be best-effort.
+
+    Telemetry fires AFTER successful writes and their audit record; an emit
+    failure must not fail completion. Tier-1/audit-integrity errors still
+    propagate (audit corruption outranks).
+    """
+
+    def test_telemetry_failure_does_not_fail_completion(self) -> None:
+        sink = ChromaSink(_make_config())
+        sink._telemetry_emit = MagicMock(side_effect=RuntimeError("telemetry transport down"))
+        sink.on_complete(_make_lifecycle_ctx())  # must not raise
+        sink._telemetry_emit.assert_called_once()
+
+    def test_tier1_error_during_telemetry_propagates(self) -> None:
+        sink = ChromaSink(_make_config())
+        sink._telemetry_emit = MagicMock(side_effect=AuditIntegrityError("audit corruption during emit"))
+        with pytest.raises(AuditIntegrityError):
+            sink.on_complete(_make_lifecycle_ctx())
+
+
 class TestChromaSinkOnStart:
     def test_constructs_persistent_client(self) -> None:
         sink = inject_write_failure(ChromaSink(_make_config()))

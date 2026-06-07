@@ -22,6 +22,7 @@ from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.errors import (
+    TIER_1_ERRORS,
     AuditIntegrityError,
     DuplicateDocumentError,
     FrameworkBugError,
@@ -175,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4886bfa5435cf9de"
+    source_file_hash: str | None = "sha256:d9d5fd47c0581aa4"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -573,7 +574,14 @@ class ChromaSink(BaseSink):
 
     def on_complete(self, ctx: LifecycleContext) -> None:
         super().on_complete(ctx)
-        if self._telemetry_emit is not None:
+        if self._telemetry_emit is None:
+            return
+        # Telemetry is best-effort operational visibility emitted AFTER the writes
+        # and their audit record have completed; an emit failure must not fail
+        # completion (elspeth-ee69831e4c). Tier-1/audit-integrity errors still
+        # propagate (audit corruption outranks) — same guard shape as
+        # plugins/sinks/dataverse.py's post-audit telemetry emission.
+        try:
             self._telemetry_emit(
                 {
                     "event": "chroma_sink_complete",
@@ -581,6 +589,17 @@ class ChromaSink(BaseSink):
                     "total_written": self._total_written,
                     "total_bytes": self._total_bytes,
                 }
+            )
+        except TIER_1_ERRORS:
+            raise
+        except Exception as tel_err:
+            slog.warning(
+                "telemetry_emit_failed",
+                sink="chroma",
+                collection=self._config.collection,
+                error=str(tel_err),
+                error_type=type(tel_err).__name__,
+                exc_info=True,
             )
 
     def close(self) -> None:

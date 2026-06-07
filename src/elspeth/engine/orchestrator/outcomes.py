@@ -17,7 +17,6 @@ timeout continuations (lines 2124, 2139-2143 in the original).
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -25,6 +24,7 @@ from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap, RowProcessorHandle
 
 if TYPE_CHECKING:
@@ -289,7 +289,7 @@ def accumulate_row_outcomes(
             if result.error is None:
                 raise OrchestrationInvariantError(f"ON_ERROR_ROUTED result missing error (FailureInfo). Token: {result.token}")
             sink_name = _require_sink_name(result)
-            error_hash = hashlib.sha256(result.error.message.encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(result.error.message, exception_type=result.error.exception_type)
             counters.rows_failed += 1
             counters.rows_routed_failure += 1
             counters.routed_destinations[sink_name] += 1

@@ -93,10 +93,11 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
 from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
-from elspeth.web.composer.state import CompositionState, ValidationSummary
+from elspeth.web.composer.state import CompositionState, NodeSpec, ValidationSummary
 from elspeth.web.composer.tools import (
     _SESSION_AWARE_TOOL_HANDLERS,
-    ADVISOR_TRIGGER_REACTIVE,
+    ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
+    ADVISOR_TRIGGER_DETERMINISTIC_END,
     ADVISOR_TRIGGER_VALUES,
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     ToolResult,
@@ -401,6 +402,7 @@ _AugmentationBranch = Literal[
     "preflight_invalid_non_empty_state_augmentation",
     "state_claim_grounding_correction",
     "orphaned_interpretation_review_augmentation",
+    "advisor_signoff_blocked_augmentation",
 ]
 
 
@@ -2170,6 +2172,7 @@ class ComposerServiceImpl:
         mutation_success_seen: bool,
         composition_turns_used: int,
         discovery_turns_used: int,
+        advisor_checkpoint_passes_used: int,
     ) -> _ClassifyOutcome:
         """Phase P5 of the compose loop — anti-anchor + budget classify.
 
@@ -2258,6 +2261,52 @@ class ComposerServiceImpl:
                 )
                 assistant_message = response.choices[0].message
                 if not assistant_message.tool_calls:
+                    # END authoritative advisor gate — P5 last-chance variant
+                    # (elspeth-dac6602a2b). This finalize path is reached only on
+                    # composition-budget exhaustion, so repair is IMPOSSIBLE: any
+                    # non-clean verdict (unavailable OR flagged) fails closed.
+                    # The cheap orphan pre-check runs first (mirrors P2) so the
+                    # frontier advisor is never spent on a pipeline the tail's
+                    # orphan gate would block. A clean verdict falls through to
+                    # the shared finalize tail below. The structurally-empty
+                    # guard mirrors the P2 branch (and the early pass): no
+                    # sign-off on a pipeline with nothing to authorize.
+                    max_passes = self._settings.composer_advisor_checkpoint_max_passes
+                    if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
+                        orphaned_precheck = await self._missing_pending_interpretation_review_sites(
+                            state,
+                            session_id=session_id,
+                        )
+                        # Exclude AUTO-SURFACEABLE llm_prompt_template sites — same
+                        # filter as the P2 pre-check above. The shared finalize tail
+                        # auto-surfaces PT immediately before its UNFILTERED orphan
+                        # gate, so a PT site is not a genuine orphan that would
+                        # suppress the advisor; only non-PT orphans do. The tail's
+                        # final orphan gate stays unfiltered (fail-closed).
+                        genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
+                        if not genuine_orphans:
+                            verdict = await self._run_advisor_checkpoint(
+                                phase="end",
+                                state=state,
+                                session_id=session_id,
+                                recorder=recorder,
+                            )
+                            if (not verdict.ok) or verdict.blocking:
+                                return _ClassifyOutcome(
+                                    action="return",
+                                    result=self._advisor_blocked_result(
+                                        reason="unavailable" if not verdict.ok else "exhausted",
+                                        verdict=verdict,
+                                        state=state,
+                                        assistant_message=assistant_message,
+                                        recorder=recorder,
+                                        repair_turns_used=0,
+                                        persisted_assistant_message_id=persisted_assistant_message_id,
+                                        persisted_tool_call_turn=persisted_tool_call_turn,
+                                    ),
+                                    composition_turns_delta=1,
+                                    advisor_passes_delta=1,
+                                )
                     # B-4D-3 budget-exhaustion last-chance finalize is a SECOND
                     # no-tool finalize path. Route it through the SHARED
                     # ``_surface_and_finalize_no_tools`` (Task 7 HIGH-1) so the
@@ -2343,6 +2392,7 @@ class ComposerServiceImpl:
         repair_turns_used: int,
         persisted_assistant_message_id: str | None,
         persisted_tool_call_turn: bool,
+        advisor_checkpoint_passes_used: int,
     ) -> _TerminateOutcome:
         """Phase P2 of the compose loop — handle the no-tool-calls branch.
 
@@ -2433,6 +2483,89 @@ class ComposerServiceImpl:
             repair_turns_used=repair_turns_used,
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        # END authoritative advisor gate (elspeth-dac6602a2b). Runs AFTER the
+        # cheap deterministic gates (the proof gate above; the orphan pre-check
+        # here mirrors the tail's gate) so the frontier advisor only reviews a
+        # mechanically valid pipeline — a flagged advisor call is never spent on
+        # a pipeline the orphan gate would block anyway. The advisor budget is
+        # SEPARATE from ``_MAX_REPAIR_TURNS``: a flagged repair-continue
+        # increments ``advisor_passes_delta``, never ``repair_turns``. On the
+        # LAST budgeted pass a still-flagged gate FAILS CLOSED (no repair — it
+        # cannot re-review); an unavailable advisor (after bounded retry) FAILS
+        # CLOSED — the advisor is the mandatory final authority (D-5/D-7/D-8).
+        #
+        # Structurally-empty guard (mirrors ``_maybe_run_early_checkpoint``,
+        # service.py): a conversational no-tool finalize on a pipeline with no
+        # source/nodes/sinks has nothing to sign off on. Firing the authority
+        # gate there would (a) spend a frontier advisor call on pure chat and
+        # (b) let a "you have no source/sink" FLAGGED verdict drive an
+        # advisor-repair loop on a conversational turn. The early pass already
+        # skips empty state for the same reason; the end gate is symmetric.
+        max_passes = self._settings.composer_advisor_checkpoint_max_passes
+        if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
+            orphaned_precheck = await self._missing_pending_interpretation_review_sites(
+                state,
+                session_id=session_id,
+            )
+            # llm_prompt_template sites are AUTO-SURFACEABLE pseudo-orphans: the
+            # shared finalize tail calls ``_auto_surface_prompt_template_reviews``
+            # immediately before its (UNFILTERED) orphan gate, so a PT site here is
+            # not a genuine orphan the tail would block — it is one the tail will
+            # resolve. Only GENUINE (non-PT) orphans suppress the advisor, mirroring
+            # the model_repairable filter above. This makes the advisor review the
+            # SAME pipeline the tail will finalize; the FINAL orphan gate in
+            # ``_surface_and_finalize_no_tools`` stays UNFILTERED, so a still-missing
+            # PT after auto-surface remains fail-closed (unchanged).
+            genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
+            if not genuine_orphans:
+                verdict = await self._run_advisor_checkpoint(
+                    phase="end",
+                    state=state,
+                    session_id=session_id,
+                    recorder=recorder,
+                )
+                is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
+                if not verdict.ok:
+                    return _TerminateOutcome(
+                        action="return",
+                        result=self._advisor_blocked_result(
+                            reason="unavailable",
+                            verdict=verdict,
+                            state=state,
+                            assistant_message=assistant_message,
+                            recorder=recorder,
+                            repair_turns_used=repair_turns_used,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        ),
+                        advisor_passes_delta=1,
+                    )
+                if verdict.blocking and is_last_pass:
+                    return _TerminateOutcome(
+                        action="return",
+                        result=self._advisor_blocked_result(
+                            reason="exhausted",
+                            verdict=verdict,
+                            state=state,
+                            assistant_message=assistant_message,
+                            recorder=recorder,
+                            repair_turns_used=repair_turns_used,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        ),
+                        advisor_passes_delta=1,
+                    )
+                if verdict.blocking:
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": ("[Advisor sign-off — BLOCKING. Resolve before completing.]\n" + verdict.findings_text),
+                        }
+                    )
+                    return _TerminateOutcome(action="continue", advisor_passes_delta=1)
+                # CLEAN -> fall through to the shared tail (auto-surface +
+                # final orphan gate + finalize).
 
         # Fail-closed orphaned-interpretation gate. The repair budget is now
         # exhausted (every repair-injection branch above is gated on
@@ -2736,6 +2869,11 @@ class ComposerServiceImpl:
         # additional iterations. NEVER catches plugin exceptions — only
         # configuration diagnostics.
         repair_turns_used = 0
+        # END-gate advisor pass counter (Task 6). Counts ONLY the END
+        # authoritative checkpoint passes; the EARLY advisory pass (Task 5)
+        # never touches it. Separate from ``repair_turns_used`` (D-8): a
+        # turn is a correctness repair XOR an advisor repair, never both.
+        advisor_checkpoint_passes_used = 0
         persisted_assistant_message_id: str | None = None
         persisted_tool_call_turn = False
         failed_turn: FailedTurnMetadata | None = None
@@ -2777,6 +2915,7 @@ class ComposerServiceImpl:
                     repair_turns_used=repair_turns_used,
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
+                    advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
                 )
                 if terminate.action == "return":
                     # Offensive guard (explicit raise, not assert): ``python -O``
@@ -2795,6 +2934,7 @@ class ComposerServiceImpl:
                         )
                     return terminate.result
                 repair_turns_used += terminate.repair_turns_delta
+                advisor_checkpoint_passes_used += terminate.advisor_passes_delta
                 continue
 
             dispatch, advisor_calls_used = await self._dispatch_tool_batch(
@@ -2822,12 +2962,27 @@ class ComposerServiceImpl:
             # State the driver still owns across iterations updates from
             # the dispatch carrier; persist + classify consume the rest
             # of the dispatch fields directly.
+            prev_state = state
             state = dispatch.state
             last_validation = dispatch.last_validation
             last_runtime_preflight = dispatch.last_runtime_preflight
             if dispatch.mutation_success_observed:
                 mutation_success_seen = True
             self._phase3_last_tool_outcomes = dispatch.tool_outcomes
+            # EARLY advisory pass (advisory, never blocks): fires on the
+            # empty->non-empty pipeline TRANSITION, which is structurally
+            # <= once per session. Placed here — after the state-owning
+            # block, before P4 persist — so the very turn that creates the
+            # pipeline always reaches the hook, even if the persist/
+            # plugin-crash branch below raises. Does NOT consume the END
+            # gate budget; the return value is intentionally discarded.
+            await self._maybe_run_early_checkpoint(
+                state=state,
+                prev_state=prev_state,
+                session_id=session_id,
+                llm_messages=llm_messages,
+                recorder=recorder,
+            )
             persist = await self._persist_turn_audit(
                 tool_outcomes=dispatch.tool_outcomes,
                 decoded_args_by_call_id=dispatch.decoded_args_by_call_id,
@@ -2886,9 +3041,11 @@ class ComposerServiceImpl:
                 mutation_success_seen=mutation_success_seen,
                 composition_turns_used=composition_turns_used,
                 discovery_turns_used=discovery_turns_used,
+                advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
             )
             composition_turns_used += classify.composition_turns_delta
             discovery_turns_used += classify.discovery_turns_delta
+            advisor_checkpoint_passes_used += classify.advisor_passes_delta
             if classify.action == "return":
                 # Offensive guard (explicit raise, not assert): ``python -O``
                 # strips assert statements. The contract between
@@ -3018,7 +3175,6 @@ class ComposerServiceImpl:
                 user_message=user_message,
                 catalog=self._catalog,
                 data_dir=self._data_dir,
-                advisor_enabled=self._settings.composer_advisor_enabled,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
@@ -3028,16 +3184,12 @@ class ComposerServiceImpl:
     def _get_litellm_tools(self) -> list[dict[str, Any]]:
         """Convert tool definitions to LiteLLM function format.
 
-        When ``composer_advisor_enabled`` is False (the default), the
-        ``request_advisor_hint`` tool is filtered out of the LLM-visible
-        list. This is the strongest off-switch available — the composer
-        LLM never sees the tool name or description, so it cannot call
-        it even if instructed to. The CLI MCP server (composer_mcp/) is
-        not affected; advisor is web-composer only by design.
+        Advisor is mandatory, so ``request_advisor_hint`` is always present
+        in the LLM-visible list. The CLI MCP server (composer_mcp/) is not
+        affected; advisor is web-composer only by design (the tool is not
+        registered in the CLI dispatch tables).
         """
         definitions = get_tool_definitions()
-        if not self._settings.composer_advisor_enabled:
-            definitions = [defn for defn in definitions if defn["name"] != "request_advisor_hint"]
         return [
             {
                 "type": "function",
@@ -3174,16 +3326,6 @@ class ComposerServiceImpl:
                 "status": "ARG_ERROR",
                 "error": "attempted_actions must be a list of strings",
                 "error_class": "TypeError",
-            }
-
-        if trigger == ADVISOR_TRIGGER_REACTIVE and (len(recent) < 2 or len(attempted) < 2):
-            return {
-                "status": "ARG_ERROR",
-                "error": (
-                    "reactive_validation_loop trigger requires at least two recent_errors "
-                    "and two attempted_actions showing the unchanged validation loop"
-                ),
-                "error_class": "ValueError",
             }
 
         if "schema_excerpt" in arguments and arguments["schema_excerpt"] is not None:
@@ -3524,7 +3666,7 @@ class ComposerServiceImpl:
         effective_timeout = configured_timeout if timeout is None else min(configured_timeout, timeout)
         max_completion = self._settings.composer_advisor_max_completion_tokens
 
-        system_msg = build_system_prompt(self._data_dir, advisor_enabled=True) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
+        system_msg = build_system_prompt(self._data_dir) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
         # Required fields (trigger, problem_summary, recent_errors,
         # attempted_actions) are validated by _TOOL_REQUIRED_PATHS before this
         # method runs, so direct dict access is sound. schema_excerpt is the
@@ -3652,6 +3794,170 @@ class ComposerServiceImpl:
                 current_exc = sys.exc_info()[1]
                 if current_exc is not None:
                     attach_llm_calls(current_exc, recorder)
+
+    def _build_checkpoint_arguments(self, *, phase: str, state: CompositionState) -> dict[str, Any]:
+        """Synthesize the (Tier-1, trusted) advisor ``arguments`` for a checkpoint.
+
+        The dict matches the shape ``_build_advisor_user_message`` consumes
+        (``trigger``, ``problem_summary``, ``recent_errors``,
+        ``attempted_actions``, optional ``schema_excerpt``). Because the data
+        is backend-produced — not LLM-supplied — it deliberately BYPASSES
+        ``_validate_advisor_arguments`` (which guards the Tier-3 tool boundary).
+        A compact pipeline summary (topology + node options + field contracts)
+        is passed as ``schema_excerpt``.
+        """
+        pipeline_summary = _summarize_pipeline_for_advisor(state)
+        if phase == "early":
+            return {
+                "trigger": ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
+                "problem_summary": (
+                    "Review this pipeline APPROACH early (it was just established). "
+                    "Does the topology fit the user's intent? Are producer->consumer "
+                    "field contracts coherent (does each node consume fields its upstream "
+                    "actually emits, accounting for subtractive transforms)? Name concrete gaps."
+                ),
+                "recent_errors": [],
+                "attempted_actions": [],
+                "schema_excerpt": pipeline_summary,
+            }
+        return {
+            "trigger": ADVISOR_TRIGGER_DETERMINISTIC_END,
+            "problem_summary": (
+                "Final sign-off. Does this pipeline fulfil the user's intent and is it "
+                "sound? Flag any unmet intent, broken field contract, or subjective rubric "
+                "that should have been surfaced. Start your reply with CLEAN or FLAGGED."
+            ),
+            "recent_errors": [],
+            "attempted_actions": [],
+            "schema_excerpt": pipeline_summary,
+        }
+
+    def _advisor_blocked_result(
+        self,
+        *,
+        reason: str,
+        verdict: AdvisorCheckpointVerdict,
+        state: CompositionState,
+        assistant_message: Any,
+        recorder: BufferingRecorder,
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+    ) -> ComposerResult:
+        """Build the fail-closed end-gate ``ComposerResult`` (Task 6).
+
+        Mirrors the orphan-gate finalize shape (the
+        ``_surface_and_finalize_no_tools`` orphan branch): a non-runnable
+        ``ValidationResult`` (every readiness axis False) carried on
+        ``runtime_preflight``, the advisor's findings folded into a
+        system-attributed augmented message, and the result threaded with
+        ``repair_turns_used`` plus the persisted ids so the route handler can
+        persist composer_meta uniformly. ``reason`` is ``"unavailable"`` (the
+        advisor could not be reached after bounded retry) or ``"exhausted"`` (it
+        flagged the pipeline on the last budgeted pass with no repair left).
+        """
+        raw_content = assistant_message.content or ""
+        runtime_result = _advisor_signoff_blocked_validation(reason=reason, findings=verdict.findings_text)
+        augmented = _compose_preflight_failure_message(raw_content, runtime_result=runtime_result)
+        _enforce_augmentation_prefix_invariant(
+            branch="advisor_signoff_blocked_augmentation",
+            content=raw_content,
+            augmented=augmented,
+        )
+        return replace(
+            ComposerResult(
+                message=augmented,
+                state=state,
+                runtime_preflight=runtime_result,
+                raw_assistant_content=raw_content,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+            ),
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
+
+    async def _run_advisor_checkpoint(
+        self,
+        *,
+        phase: str,
+        state: CompositionState,
+        session_id: str | None,
+        recorder: BufferingRecorder | None,
+    ) -> AdvisorCheckpointVerdict:
+        """Backend-initiated deterministic advisor checkpoint (early|end).
+
+        Reuses :meth:`_call_advisor_with_audit` so the checkpoint shares the
+        same audited, model-distinct advisor path as the LLM-initiated hint.
+        The call is retried up to ``attempts`` times; any exception (the call
+        core re-raises typed LLM errors — timeout, auth, transport, malformed)
+        is treated as *unavailable* and converted to a non-raising verdict with
+        ``ok=False``. Callers decide degrade (early) vs fail-closed (end).
+
+        ``blocking`` is True iff the guidance is a FLAGGED sign-off; a leading
+        ``CLEAN`` (case-insensitive) is non-blocking. ``session_id`` is part of
+        the checkpoint contract (threaded by callers and consumed downstream);
+        it is intentionally not forwarded into the advisor call here.
+        """
+        arguments = self._build_checkpoint_arguments(phase=phase, state=state)
+        attempts = 2  # bounded retry; the underlying call wraps its own timeout
+        last_exc: Exception | None = None
+        for _ in range(attempts):
+            try:
+                guidance, _meta = await self._call_advisor_with_audit(arguments, recorder=recorder)
+            except Exception as exc:
+                # Convert-to-verdict (non-raising): the call core re-raises
+                # typed LLM errors (timeout, auth, transport, malformed); a
+                # checkpoint must degrade to "unavailable" rather than crash
+                # the compose loop, so every exception class is treated alike.
+                last_exc = exc
+                continue
+            blocking = not guidance.strip().upper().startswith("CLEAN")
+            return AdvisorCheckpointVerdict(ok=True, blocking=blocking, findings_text=guidance.strip())
+        # Include the exception CLASS name so an operator-facing blocked message
+        # distinguishes a genuine programming bug (AttributeError/KeyError/
+        # TypeError re-raised by the call core) from a transient transport/config
+        # failure (timeout/auth). The catch breadth is deliberately UNCHANGED —
+        # fail-closed is preserved and CancelledError still escapes as
+        # BaseException; the crash-loud-vs-fail-closed polarity is deferred to the
+        # operator (spec §13). Only the diagnostic text is sharpened.
+        return AdvisorCheckpointVerdict(
+            ok=False,
+            blocking=False,
+            findings_text=f"{type(last_exc).__name__}: {last_exc}" if last_exc else "advisor unavailable",
+        )
+
+    async def _maybe_run_early_checkpoint(
+        self,
+        *,
+        state: CompositionState,
+        prev_state: CompositionState,
+        session_id: str | None,
+        llm_messages: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+    ) -> bool:
+        """Run the EARLY advisory checkpoint on the empty->non-empty pipeline
+        TRANSITION (structurally <= once per session). Advisory only: inject the
+        guidance as a user message; NEVER block. Degrade silently on failure.
+        Does NOT consume the END gate budget. Returns whether it ran."""
+        if _state_is_structurally_empty(state):
+            return False
+        if not _state_is_structurally_empty(prev_state):
+            return False  # pipeline was already non-empty before this turn (or resumed session)
+        verdict = await self._run_advisor_checkpoint(phase="early", state=state, session_id=session_id, recorder=recorder)
+        if verdict.ok and verdict.blocking:
+            llm_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Early review by the advisor model — advisory, not binding]\n"
+                        + verdict.findings_text
+                        + "\n\nAddress any concrete gap above, or continue if it does not apply."
+                    ),
+                }
+            )
+        return True
 
     async def _call_llm_with_audit(
         self,
@@ -4037,3 +4343,276 @@ class ComposeLoopTestResult:
         """Backward-compatible assertion surface for compose-loop tests."""
 
         return self.tool_outcomes
+
+
+# ---------------------------------------------------------------------------
+# Deterministic advisor checkpoint primitives (Task 4).
+#
+# AdvisorCheckpointVerdict and _summarize_pipeline_for_advisor live at module
+# scope (the methods that produce/consume them are on ComposerServiceImpl).
+# They are appended at end-of-file rather than spliced near the imports for the
+# same fingerprint-stability reason documented above _arg_error_payload:
+# inserting a module-level def mid-file would rotate every downstream symbol's
+# AST fingerprint. The verdict is also imported directly by the unit tests.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AdvisorCheckpointVerdict:
+    """Result of a deterministic advisor checkpoint.
+
+    ``ok`` False => the advisor call failed after bounded retry (unavailable);
+    callers decide degrade (early) vs fail-closed (end). ``blocking`` True =>
+    the advisor flagged a problem (only meaningful when ``ok``).
+    """
+
+    ok: bool
+    blocking: bool
+    findings_text: str
+
+
+# Salient, intent-bearing option keys whose VALUES are rendered (compactly) in
+# the advisor summary so the reviewer can judge topology/intent — not just
+# field contracts. Deliberately excludes secret-shaped keys (api_key, token,
+# password, …) and storage carriers (path, file, blob_ref): those are surfaced
+# as key-names-only, never as values, so the summary cannot leak credentials or
+# internal storage locations (the schema_excerpt field is further redacted on
+# the audit path regardless).
+_ADVISOR_SUMMARY_VALUE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "model",
+        "prompt_template",
+        "template",
+        "column",
+        "columns",
+        "field",
+        "fields",
+        "format",
+        "output_field",
+        "expression",
+        "operation",
+        "aggregation",
+    }
+)
+_ADVISOR_SUMMARY_VALUE_MAX_CHARS: Final[int] = 120
+
+
+def _summarize_pipeline_for_advisor(state: CompositionState) -> str:
+    """Render a compact, redaction-safe description of the pipeline.
+
+    Produces descriptive text the advisor can reason about for BOTH halves of
+    the early/end checkpoint:
+
+    * topology — source -> nodes -> sinks, each node's id/type/plugin and named
+      connection points;
+    * intent / control flow — the salient structural settings (gate
+      ``condition``/``routes``/``fork_to``, coalesce ``policy``/``merge``,
+      aggregation ``trigger``/``output_mode``) plus an allowlisted set of
+      intent-bearing option *values* (``model``, ``prompt_template``, selected
+      columns, …);
+    * field contract — each node's declared ``required_input_fields``.
+
+    Redaction safety: only allowlisted, non-secret option keys have their
+    values rendered (truncated); every other option appears as a key NAME only,
+    so credentials and storage paths cannot leak — even before the audit-path
+    redactor runs on the ``schema_excerpt`` field.
+
+    Defensive against partial states: the EARLY checkpoint fires on the
+    empty->non-empty transition, so ``source``/``nodes``/``outputs`` may each
+    be missing. Missing pieces are reported plainly; nothing is fabricated.
+    """
+    lines: list[str] = []
+
+    if state.metadata.name:
+        lines.append(f"Pipeline: {state.metadata.name}")
+    if state.metadata.description:
+        lines.append(f"Intent (stated): {state.metadata.description}")
+
+    # Source.
+    if state.source is None:
+        lines.append("Source: (none set)")
+    else:
+        opt_text = _render_options_for_advisor(state.source.options)
+        lines.append(f"Source: plugin={state.source.plugin} -> '{state.source.on_success}' [{opt_text}]")
+
+    # Nodes (topology + control flow + per-node field contract).
+    if not state.nodes:
+        lines.append("Nodes: (none)")
+    else:
+        lines.append("Nodes:")
+        for node in state.nodes:
+            plugin = node.plugin if node.plugin is not None else "-"
+            on_success = node.on_success if node.on_success is not None else "-"
+            required = _node_required_input_fields(node)
+            req_text = ", ".join(required) if required else "(none declared)"
+            control = _render_node_control_flow(node)
+            control_suffix = f" {control}" if control else ""
+            opt_text = _render_options_for_advisor(node.options)
+            lines.append(
+                f"  - {node.id}: type={node.node_type} plugin={plugin} "
+                f"reads '{node.input}' -> '{on_success}'{control_suffix} "
+                f"[requires: {req_text}] [{opt_text}]"
+            )
+
+    # Sinks.
+    if not state.outputs:
+        lines.append("Sinks: (none)")
+    else:
+        lines.append("Sinks:")
+        for output in state.outputs:
+            opt_text = _render_options_for_advisor(output.options)
+            lines.append(f"  - {output.name}: plugin={output.plugin} [{opt_text}]")
+
+    return "\n".join(lines)
+
+
+def _render_node_control_flow(node: NodeSpec) -> str:
+    """Render a node's intent-bearing control-flow fields (gate/coalesce/agg).
+
+    These are top-level :class:`NodeSpec` scalars/maps, not ``options`` — and
+    none of them carry secrets — so the values are rendered directly (truncated)
+    to let the advisor judge routing/topology intent.
+    """
+    parts: list[str] = []
+    if node.condition is not None:
+        parts.append(f"condition={_truncate_for_advisor(str(node.condition))}")
+    if node.routes is not None:
+        parts.append(f"routes={_truncate_for_advisor(str(dict(node.routes)))}")
+    if node.fork_to is not None:
+        parts.append(f"fork_to={list(node.fork_to)}")
+    if node.policy is not None:
+        parts.append(f"policy={node.policy}")
+    if node.merge is not None:
+        parts.append(f"merge={node.merge}")
+    if node.trigger is not None:
+        parts.append(f"trigger={_truncate_for_advisor(str(dict(node.trigger)))}")
+    if node.output_mode is not None:
+        parts.append(f"output_mode={node.output_mode}")
+    return " ".join(parts)
+
+
+def _render_options_for_advisor(options: Mapping[str, Any]) -> str:
+    """Render an options mapping as redaction-safe descriptive text.
+
+    Allowlisted intent-bearing keys (:data:`_ADVISOR_SUMMARY_VALUE_KEYS`) show
+    a truncated value; every other key shows its NAME only. Never raises.
+    """
+    if not options:
+        return "no options"
+    value_parts: list[str] = []
+    name_only: list[str] = []
+    for key in sorted(options.keys()):
+        if key in _ADVISOR_SUMMARY_VALUE_KEYS:
+            value_parts.append(f"{key}={_truncate_for_advisor(str(options[key]))}")
+        else:
+            name_only.append(key)
+    segments: list[str] = []
+    if value_parts:
+        segments.append("options: " + ", ".join(value_parts))
+    if name_only:
+        segments.append("other option keys: " + ", ".join(name_only))
+    return "; ".join(segments)
+
+
+def _truncate_for_advisor(value: str) -> str:
+    """Bound a rendered value so the summary stays compact. Never raises."""
+    if len(value) <= _ADVISOR_SUMMARY_VALUE_MAX_CHARS:
+        return value
+    return value[: _ADVISOR_SUMMARY_VALUE_MAX_CHARS - 1] + "…"
+
+
+def _node_required_input_fields(node: NodeSpec) -> list[str]:
+    """Extract a node's declared ``required_input_fields`` as plain strings.
+
+    Reads the option in either the flat or nested ``options`` shape (mirroring
+    state.py's declared-input lookup) and coerces only string entries — a
+    malformed value never raises here, it just yields no contract detail.
+    """
+    raw: Any = node.options.get("required_input_fields")
+    if raw is None:
+        nested = node.options.get("options")
+        if isinstance(nested, Mapping):
+            raw = nested.get("required_input_fields")
+    if isinstance(raw, (list, tuple)):
+        return [str(field) for field in raw if isinstance(field, str)]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# END authoritative advisor gate (Task 6).
+#
+# ``_advisor_signoff_blocked_validation`` and its code constant live at module
+# scope (appended at EOF for the same AST-fingerprint-stability reason as the
+# Task-4 primitives above) because the synthetic ValidationResult it builds is
+# pure data with no ``self`` dependency — it mirrors
+# ``_orphaned_interpretation_review_validation``. The method that consumes it
+# (``ComposerServiceImpl._advisor_blocked_result``) lives in the class body.
+# ---------------------------------------------------------------------------
+_ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
+# Mirrors the orphan gate's check-name convention so the synthetic fail-closed
+# result names a stable check the UI/audit can key on.
+_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[str] = "advisor_signoff"
+
+
+def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:
+    """Build the synthetic, fail-closed end-gate result for a blocked sign-off.
+
+    Returned (not raised) by the END authoritative advisor gate
+    (:meth:`ComposerServiceImpl._advisor_blocked_result`) when the advisor is
+    either *unavailable* after bounded retry (``reason="unavailable"``) or has
+    FLAGGED the pipeline on the last budgeted pass with no further repair
+    possible (``reason="exhausted"``). The advisor is the mandatory final
+    authority, so both outcomes fail closed.
+
+    Mirrors :func:`_orphaned_interpretation_review_validation`'s shape: every
+    readiness axis is blocking (``authoring_valid`` / ``execution_ready`` /
+    ``completion_ready`` all ``False``) so the UI cannot advance regardless of
+    which flag it gates on. The blocker/error names the advisor sign-off and
+    the reason; the advisor's own findings text is carried in the augmented
+    message (not duplicated verbatim into the structured blocker, which stays a
+    stable operator-facing summary).
+    """
+    detail = (
+        f"The advisor sign-off did not pass ({reason}); the pipeline cannot complete. {findings}"
+        if reason == "exhausted"
+        else f"The advisor sign-off could not be obtained ({reason}); the pipeline cannot complete. {findings}"
+    )
+    suggestion = (
+        "Resolve the advisor's flagged concern and re-run the composer."
+        if reason == "exhausted"
+        else "The advisor model was unavailable after retry; retry the request, or check the advisor model configuration."
+    )
+    return ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name=_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME,
+                passed=False,
+                detail=detail,
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id="pipeline",
+                component_type="pipeline",
+                message=detail,
+                suggestion=suggestion,
+                error_code=_ADVISOR_SIGNOFF_BLOCKED_CODE,
+            )
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=False,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[
+                ValidationReadinessBlocker(
+                    code=_ADVISOR_SIGNOFF_BLOCKED_CODE,
+                    component_id="pipeline",
+                    component_type="pipeline",
+                    detail=detail,
+                )
+            ],
+        ),
+    )

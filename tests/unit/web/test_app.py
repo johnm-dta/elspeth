@@ -666,7 +666,6 @@ class TestLifespanShutdown:
                 composer_boot_probe_enabled=True,
                 composer_temperature=0.0,
                 composer_seed=42,
-                composer_advisor_enabled=True,
                 composer_advisor_model="anthropic/claude-sonnet-4-6",
             )
         )
@@ -696,7 +695,6 @@ class TestLifespanShutdown:
             assert attributes["composer_temperature"] == "0.0"
             assert attributes["composer_seed"] == "42"
             assert attributes["composer_advisor_model"] == "anthropic/claude-sonnet-4-6"
-            assert attributes["composer_advisor_enabled"] is True
             assert attributes["probe_status"] == "success"
         for call in latency.record.call_args_list:
             value, attributes = call.args
@@ -730,11 +728,16 @@ class TestLifespanShutdown:
         with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
             await asyncio.wait_for(_enter_and_exit_lifespan(), timeout=1.0)
 
-        counter.add.assert_called_once()
-        _, attributes = counter.add.call_args.args
-        assert attributes["probe_status"] == "transient_failure"
-        assert attributes["probed_model"] == "gpt-5.5"
-        latency.record.assert_called_once()
+        # Advisor is mandatory, so both the primary and advisor models are
+        # probed. Both hang and time out as transient_failure; the loop does
+        # not break on a transient failure.
+        assert counter.add.call_count == 2
+        probed = [call.args[1]["probed_model"] for call in counter.add.call_args_list]
+        assert probed[0] == "gpt-5.5"
+        for call in counter.add.call_args_list:
+            _, attributes = call.args
+            assert attributes["probe_status"] == "transient_failure"
+        assert latency.record.call_count == 2
         assert cancelled is True
 
     @pytest.mark.asyncio

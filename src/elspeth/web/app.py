@@ -383,9 +383,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.composer_boot_probe_enabled:
         from elspeth.web.composer.boot_probe import ComposerBootConfigError, probe_composer_config
 
-        probe_models = [settings.composer_model]
-        if settings.composer_advisor_enabled:
-            probe_models.append(settings.composer_advisor_model)
+        # Advisor is mandatory, so the advisor model is always probed.
+        probe_models = [settings.composer_model, settings.composer_advisor_model]
         for model in probe_models:
             composer_probe_start = time.monotonic()
             probe_status = "started"
@@ -394,7 +393,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "composer_temperature": str(settings.composer_temperature),
                 "composer_seed": str(settings.composer_seed),
                 "composer_advisor_model": settings.composer_advisor_model,
-                "composer_advisor_enabled": settings.composer_advisor_enabled,
                 "probed_model": model,
                 "probe_status": probe_status,
             }

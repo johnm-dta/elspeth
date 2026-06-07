@@ -37,7 +37,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -51,7 +51,12 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationSource,
 )
 from elspeth.web.composer.protocol import ToolArgumentError
-from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl, _pending_interpretation_review_repair_message
+from elspeth.web.composer.service import (
+    AdvisorCheckpointVerdict,
+    ComposerAvailability,
+    ComposerServiceImpl,
+    _pending_interpretation_review_repair_message,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
@@ -74,6 +79,7 @@ from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 # ---------------------------------------------------------------------------
 # Lightweight fake LLM that emits a single request_interpretation_review call.
@@ -572,6 +578,41 @@ def _set_pipeline_clean_llm_node_args() -> dict[str, Any]:
                     "provider": "openrouter",
                     "model": "openai/gpt-4o-mini",
                     "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.text }} in one sentence.",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [],
+    }
+
+
+def _set_pipeline_clean_llm_node_no_model_args() -> dict[str, Any]:
+    """Like ``_set_pipeline_clean_llm_node_args`` but the LLM node carries NO
+    ``model`` (nor provider/api_key). With no ``options.model``, no
+    ``llm_model_choice`` review site is enumerated
+    (``interpretation_state._missing_model_choice_review_sites`` short-circuits on
+    an empty model), so the ONLY orphaned pre-check site at finalization is the
+    auto-surfaceable ``llm_prompt_template`` one — the exact masking condition the
+    END advisor gate must see through. The clean prompt_template (no bare token)
+    still auto-stages the PT review requirement (it keys off prompt_template, not
+    model)."""
+    return {
+        "source": {
+            "plugin": "null",
+            "on_success": "rows",
+            "options": {},
+        },
+        "nodes": [
+            {
+                "id": "rate_node",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "scored_rows",
+                "on_error": "discard",
+                "options": {
                     "prompt_template": "Summarise {{ row.text }} in one sentence.",
                     "schema": {"mode": "observed"},
                 },
@@ -1101,6 +1142,7 @@ async def test_finalization_auto_surfaces_prompt_template_and_does_not_orphan_bl
         repair_turns_used=0,
         persisted_assistant_message_id=None,
         persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=0,
     )
 
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
@@ -2059,3 +2101,155 @@ def test_tool_argument_error_code_defaults_to_none() -> None:
         actual_type="any actual type",
     )
     assert exc.code is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6 review CRITICAL: the END advisor gate must REACH pipelines whose only
+# pending-review site is an auto-surfaceable llm_prompt_template (the canonical
+# "use an LLM to rate" case). Pre-fix BOTH end-gate pre-checks used the
+# UNFILTERED _missing_pending_interpretation_review_sites, so a still-unsurfaced
+# PT site (which the finalize tail auto-surfaces) suppressed the advisor — the
+# authoritative gate never fired for any LLM-prompt-template pipeline. The fix
+# excludes PT sites from the suppress decision (only GENUINE non-PT orphans
+# suppress); the tail's FINAL orphan gate stays unfiltered (fail-closed).
+#
+# These regressions are NON-VACUOUS: unlike the suites that stub
+# _missing_pending_interpretation_review_sites -> (), they drive the REAL
+# function over a REAL CompositionState and FIRST prove the masking site exists.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_end_advisor_gate_reaches_unsurfaced_prompt_template_pipeline_p2(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """P2 (_try_terminate_no_tools): advisor fires for a PT-only pipeline.
+
+    Half (1): the REAL ``_missing_pending_interpretation_review_sites`` returns a
+    NON-EMPTY set containing an ``LLM_PROMPT_TEMPLATE`` site for this state —
+    BEFORE the finalize tail auto-surfaces it. This proves the masking condition
+    that suppressed the advisor pre-fix is real for this state (without it, half
+    (2) would be theater). It MUST be asserted before driving the gate, because
+    the tail creates the pending PT event and the same call then returns empty.
+
+    Half (2): with ``_run_advisor_checkpoint`` overridden by an assertable CLEAN
+    ``AsyncMock`` (no real Opus call), the END gate is driven and the advisor IS
+    awaited; the CLEAN verdict falls through to finalize (``action == "return"``,
+    not an advisor-driven ``continue``).
+
+    Pre-fix this test fails: the unfiltered pre-check is non-empty -> advisor
+    skipped -> ``await_count == 0``. Post-fix the PT site is filtered out of the
+    suppress decision -> advisor runs -> ``await_count >= 1``.
+    """
+
+    from elspeth.web.composer.audit import BufferingRecorder
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    # Half (1) — the masking site is REAL for this state (and is PT-kind).
+    sites = await composer._missing_pending_interpretation_review_sites(state, session_id=str(session_id))
+    assert sites, "expected the unsurfaced PT site to be a (real) pending-review orphan pre-fix"
+    assert any(site[2] is InterpretationKind.LLM_PROMPT_TEMPLATE for site in sites)
+
+    # Per-instance assertable advisor stub (instance attr wins over the autouse
+    # class-level CLEAN stub) so we can assert it was awaited.
+    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+    composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
+
+    class _AssistantMessage:
+        content = "Done — the pipeline is ready."
+
+    outcome = await composer._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[],
+        state=state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=composer._new_runtime_preflight_cache(),
+        session_scope=str(session_id),
+        mutation_success_seen=True,
+        recorder=BufferingRecorder(),
+        progress=None,
+        repair_turns_used=0,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=0,
+    )
+
+    # Half (2) — the advisor WAS reached (the crux: pre-fix it was suppressed).
+    assert advisor_mock.await_count >= 1, "END advisor gate must fire for a PT-only pipeline"
+    # CLEAN verdict falls through to finalize; it did NOT advisor-block/continue.
+    assert outcome.action == "return"
+
+
+@pytest.mark.asyncio
+async def test_end_advisor_gate_reaches_prompt_template_pipeline_p5_budget_exhaustion(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """P5 (_classify_and_budget_turn budget-exhaustion last-chance finalize).
+
+    Same masking + same fix as P2, but on the DISTINCT P5 code site. The session
+    starts from a REAL ``_state_with_prompt_template_review_node`` (an LLM node
+    with an unsurfaced PT requirement and NO ``model`` — so no genuine
+    ``llm_model_choice`` orphan: the ONLY orphaned pre-check site is the
+    auto-surfaceable PT one). With ``max_composition_turns=1`` a single
+    ``set_metadata`` mutation exhausts the composition budget; the bonus call
+    returns plain text and finalizes through the P5 pre-check. We use
+    ``set_metadata`` (not ``set_pipeline``) so the existing PT node is not
+    re-canonicalized — a model-less LLM node cannot survive ``set_pipeline``
+    canonicalization, and a model-bearing one would re-introduce the
+    ``llm_model_choice`` orphan that legitimately suppresses the advisor.
+
+    Starting from a NON-empty state means the empty->non-empty early pass does
+    NOT fire, so the only advisor call possible is the END gate — but we still
+    discriminate on ``phase == "end"`` for robustness. Pre-fix the unfiltered PT
+    site suppressed this pre-check (no ``end`` call); post-fix it is filtered and
+    the advisor is awaited.
+    """
+
+    composer = _build_composer(tmp_path, sessions_service, max_composition_turns=1)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    # Half (1) — the masking site is REAL for this state (and is PT-kind), with
+    # no genuine non-PT orphan to legitimately suppress the advisor.
+    sites = await composer._missing_pending_interpretation_review_sites(state, session_id=str(session_id))
+    assert sites, "expected the unsurfaced PT site to be a (real) pending-review orphan pre-fix"
+    assert all(site[2] is InterpretationKind.LLM_PROMPT_TEMPLATE for site in sites)
+
+    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+    composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_metadata",
+                tool_name="set_metadata",
+                arguments={"patch": {"name": "Rate pipeline"}},
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+        ]
+    )
+
+    await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_state=state,
+        message="give it a name",
+    )
+
+    # Half (2) — the P5 END advisor pre-check was reached (pre-fix the unfiltered
+    # PT site suppressed it). Discriminate on the END phase for robustness.
+    end_calls = [call for call in advisor_mock.await_args_list if call.kwargs.get("phase") == "end"]
+    assert end_calls, "P5 budget-exhaustion END advisor gate must fire for a PT pipeline"
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert any(e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for e in events)

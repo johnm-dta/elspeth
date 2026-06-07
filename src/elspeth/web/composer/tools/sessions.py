@@ -113,17 +113,22 @@ _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pip
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 
 
-ADVISOR_TRIGGER_REACTIVE: Final[str] = "reactive_validation_loop"
-
 ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
 
 ADVISOR_TRIGGER_PROACTIVE_RED_LISTED: Final[str] = "proactive_red_listed_plugin"
 
 ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
-    ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_PROACTIVE_SECURITY,
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
+
+# Backend-synthesized triggers for the deterministic advisor checkpoints
+# (early/end). Deliberately NOT in ADVISOR_TRIGGER_VALUES: those are the
+# LLM-selectable set validated against Tier-3 input; these are produced by the
+# trusted compose loop itself and bypass the Tier-3 trigger allowlist.
+ADVISOR_TRIGGER_DETERMINISTIC_EARLY: Final[str] = "deterministic_early_checkpoint"
+
+ADVISOR_TRIGGER_DETERMINISTIC_END: Final[str] = "deterministic_end_checkpoint"
 
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):

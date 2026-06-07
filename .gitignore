@@ -1,12 +1,15 @@
 # Superpowers brainstorming artifacts
 .superpowers/
 
-# notes/ — previously gitignored as session scratch; unignored 2026-05-03
-# after a content audit confirmed no credentials, tokens, PII, or other
-# sensitive material in the existing files. Going forward, treat notes/
-# as a tracked record of evaluation work, session reports, and remediation
-# plans — not a credential dumping ground. If you need to capture transient
-# secrets, write them to /tmp/ or to a path explicitly added to .gitignore.
+# notes/ — internal session logs / scratch records: kept on disk, not tracked.
+# History: gitignored as scratch → unignored 2026-05-03 (after a content audit
+# found no secrets) to serve as a tracked evaluation/handoff record → re-ignored
+# 2026-06-07 because the churn of version-controlling internal logs outweighed
+# the value. Notes already committed remain retrievable from git history.
+# Never write credentials, tokens, or PII here regardless of tracking; for
+# transient secrets use /tmp/ or a path explicitly added to .gitignore.
+# (To deliberately share one note, `git add -f notes/<file>` past this ignore.)
+notes/
 
 # Credential-shaped filenames — refused regardless of directory.
 # Defence-in-depth so an accidental jwt.txt or .env can't slip into a tracked

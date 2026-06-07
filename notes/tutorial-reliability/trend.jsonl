@@ -1,2 +1,0 @@
-{"batch_id":"batch-2026-06-06","git":"403cd6a2c","harness":"1.0.0","model":"openrouter/openai/gpt-5.4-mini","skill_hash":"8f816cb5f811637d984002966274dd3a762876f2665acc97e66175988eed788a","n":10,"tutorial_pass":0,"tutorial_denom":4,"infra":6}
-{"batch_id":"fix-verify2-2026-06-06","git":"33f05f186","harness":"1.0.0","model":"openrouter/openai/gpt-5.4-mini","skill_hash":"a72fda9d2f87c3c0418fa415c46d44790f34eedd5c3fc5442f9af3c72c4059c2","n":8,"tutorial_pass":1,"tutorial_denom":4,"infra":4}

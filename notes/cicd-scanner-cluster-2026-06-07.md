@@ -55,6 +55,8 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-b7ef37c4a9 | AST: tier_model TC (FP) | 3d47fdb66 | _find_type_checking_lines direct-children-only → recurse node.body (NOT orelse). Nested-TC try/import → TC not L1. Real TC invariant=1 preserved |
 | elspeth-37879426d1 | AST: audit_evidence_nominal (form) | 89c19cc82 | _class_defines_to_audit_dict missed AnnAssign → now detects AnnAssign-with-value (bare annotation defines nothing → ignored). Blast ZERO |
 | elspeth-584d4ea502 | AST: audit_evidence_nominal (MD5 provenance) | 89c19cc82 | _bases_include_audit_evidence_base name-only → requires import from elspeth.contracts.audit_evidence; same-module allowance for subclass inside contracts/audit_evidence.py. Blast ZERO (all 5 real imports canonical). Existing accepts_direct_base test updated to import canonically |
+| elspeth-08b0336287 | AST: tier_1_decoration (form) | f719c9202 | _has_tier_1_error_decorator name-only → requires non-empty reason keyword (non-literal/**splat=present). Blast ZERO |
+| elspeth-f8650893f1 | AST: tier_1_decoration (scope) | f719c9202 | scan_root only scanned errors.py → TDE2-only pass over all other files (caller_module guard repo-wide). Blast ZERO (all 13 call sites compliant). TDE1 deliberately STAYS errors.py-scoped (112 *Error classes elsewhere = project intent; repo-wide TDE1 = operator policy, not scanner fix). CI already whole-repo (--file citation pre-migration) |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped

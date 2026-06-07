@@ -491,6 +491,19 @@ class AuditedLLMClient(AuditedClientBase):
                 latency_ms=latency_ms,
                 resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
+            # Telemetry emitted AFTER successful Landscape recording — without
+            # this, serialization failures undercount in dashboards relative to
+            # the SDK-error/null-content branches (elspeth-a960d22540). No
+            # response payload: model_dump() failed, so there is nothing to hash.
+            self._emit_telemetry_after_audit(
+                call_status=CallStatus.ERROR,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                request_payload=request_dto,
+                response_data=None,
+                response_payload=None,
+                token_usage=usage if usage.has_data else None,
+            )
             raise LLMClientError(
                 f"Failed to serialize LLM response: {dump_exc}",
                 retryable=False,
@@ -552,6 +565,18 @@ class AuditedLLMClient(AuditedClientBase):
                 latency_ms=latency_ms,
                 resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
+            # Telemetry emitted AFTER successful Landscape recording — keeps
+            # empty-choices failures counted alongside the other error branches
+            # (elspeth-a960d22540).
+            self._emit_telemetry_after_audit(
+                call_status=CallStatus.ERROR,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                request_payload=request_dto,
+                response_data=response_dto.to_dict(),
+                response_payload=response_dto,
+                token_usage=usage if usage.has_data else None,
+            )
             raise LLMClientError(error_msg, retryable=False)
 
         content = response.choices[0].message.content
@@ -581,6 +606,18 @@ class AuditedLLMClient(AuditedClientBase):
                     ),
                     latency_ms=latency_ms,
                     resolved_prompt_template_hash=resolved_prompt_template_hash,
+                )
+                # Telemetry emitted AFTER successful Landscape recording — keeps
+                # unsupported tool_calls failures counted alongside the other
+                # error branches (elspeth-a960d22540).
+                self._emit_telemetry_after_audit(
+                    call_status=CallStatus.ERROR,
+                    latency_ms=latency_ms,
+                    request_data=request_data,
+                    request_payload=request_dto,
+                    response_data=response_dto.to_dict(),
+                    response_payload=response_dto,
+                    token_usage=usage if usage.has_data else None,
                 )
                 raise LLMClientError(error_msg, retryable=False)
 
@@ -647,6 +684,19 @@ class AuditedLLMClient(AuditedClientBase):
                 ),
                 latency_ms=latency_ms,
                 resolved_prompt_template_hash=resolved_prompt_template_hash,
+            )
+            # Telemetry emitted AFTER successful Landscape recording — keeps
+            # non-str content failures counted alongside the other error
+            # branches (elspeth-a960d22540). Mirrors the malformed-model branch:
+            # response payload is the raw provider response.
+            self._emit_telemetry_after_audit(
+                call_status=CallStatus.ERROR,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                request_payload=request_dto,
+                response_data=response_payload.to_dict(),
+                response_payload=response_payload,
+                token_usage=usage if usage.has_data else None,
             )
             raise LLMClientError(error_msg, retryable=False)
 

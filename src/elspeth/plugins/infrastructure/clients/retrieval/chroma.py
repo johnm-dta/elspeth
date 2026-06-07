@@ -338,10 +338,15 @@ class ChromaSearchProvider:
                 continue
 
             # RetrievalChunk validates score range and metadata JSON-serializability
-            # at construction, raising ValueError. That ValueError originates in the
-            # post-query parse path (e.g. corrupt-index metadata carrying NaN), so it
-            # must become a RetrievalError for search()'s audit handler to record it —
-            # mirrors the same wrap in AzureSearchProvider._parse_response.
+            # at construction, raising ValueError. `dict(metadata)` additionally
+            # raises TypeError for a truthy non-mapping metadata (e.g. an int or a
+            # list of non-pairs) from a corrupt index. Both originate in the
+            # post-query parse path, so both must become a RetrievalError for
+            # search()'s audit handler to record it — mirrors the wrap in
+            # AzureSearchProvider._parse_response. (The only TypeError source in
+            # this block is the Tier-3 dict(metadata) coercion; RetrievalChunk's
+            # kwargs are static and its __post_init__ raises only ValueError, so
+            # this does not mask an our-code bug.)
             try:
                 chunks.append(
                     RetrievalChunk(
@@ -351,7 +356,7 @@ class ChromaSearchProvider:
                         metadata=dict(metadata) if metadata else {},
                     )
                 )
-            except ValueError as exc:
+            except (ValueError, TypeError) as exc:
                 raise RetrievalError(
                     f"Chroma provider produced invalid chunk data for document {doc_id!r}: {exc}",
                     retryable=False,

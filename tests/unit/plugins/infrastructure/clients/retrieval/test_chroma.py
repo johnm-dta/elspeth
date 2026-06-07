@@ -509,6 +509,36 @@ class TestTier3ResultBoundary:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
+    def test_non_mapping_metadata_raises_retrieval_error(self):
+        """A truthy non-mapping metadata from a corrupt index must become RetrievalError.
+
+        `dict(metadata)` raises TypeError (not ValueError) for a non-mapping truthy
+        value (e.g. an int or a list of non-pairs); that escaped the `except ValueError`
+        chunk-construction guard and bypassed search()'s audit-ERROR handler.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"t3m-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        config = ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral")
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider._collection.add(documents=["test doc"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["test doc"]],
+                    "distances": [[0.1]],
+                    "metadatas": [[12345]],  # truthy non-mapping → dict(12345) raises TypeError
+                },
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
     def test_none_inner_list_raises_retrieval_error(self):
         """If SDK returns None where inner list expected, should get RetrievalError."""
         from unittest.mock import patch

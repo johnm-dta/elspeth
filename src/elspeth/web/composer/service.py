@@ -997,6 +997,50 @@ def _empty_state_uploaded_blob_repair_message(ready_blobs: tuple[Mapping[str, An
     )
 
 
+def _compose_preflight_repair_message(runtime_result: ValidationResult, *, next_turn: int) -> str:
+    """Build a MODEL-facing forced-repair prompt for an invalid runtime preflight.
+
+    Distinct from ``_compose_preflight_failure_message`` (USER-facing — the
+    terminal augmentation appended to the model's prose once the repair budget
+    is exhausted). This message is appended to ``llm_messages`` so the model
+    FIXES the named contract violation before claiming completion again.
+
+    Renders up to three of the preflight's ``ValidationError`` objections
+    (component attribution + message + suggestion). Boundary contract (mirrors
+    the other repair-message builders): carries only validator objection text
+    and operator-supplied component names — never secret values
+    (``validate_pipeline`` resolves secret refs before validation) and never
+    source bytes.
+    """
+    rendered: list[str] = []
+    for i, error in enumerate(runtime_result.errors[:3], start=1):
+        component = f"{error.component_type or '?'}:{error.component_id or '?'}"
+        line = f"{i}. [{component}] {error.message}"
+        if error.suggestion:
+            line += f"\n   Suggested fix: {error.suggestion}"
+        rendered.append(line)
+    if not rendered:
+        # No per-component errors (e.g. a failed check with no attribution).
+        # Surface a generic objection so the model still gets a repair signal.
+        rendered.append("1. The pipeline failed runtime preflight validation and cannot run as configured.")
+
+    budget_note = (
+        f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}. "
+        "First FIX the named violation by editing the named component (use the "
+        "appropriate composer tool — e.g. patch_node_options or upsert_node for a "
+        "node, patch_source_options for the source, patch_output_options for a "
+        "sink). Then call preview_pipeline to confirm the violation is cleared "
+        "before finalising again. Do not simply re-run preview_pipeline without "
+        "fixing — that will not resolve the violation."
+    )
+
+    return (
+        "[composer-system] Pre-finalisation runtime preflight found contract "
+        "violation(s) — the pipeline cannot run as currently configured. "
+        "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+    )
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1629,6 +1673,78 @@ class ComposerServiceImpl:
         )
 
         llm_messages.append({"role": "user", "content": message})
+        return True
+
+    async def _attempt_preflight_repair(
+        self,
+        *,
+        state: CompositionState,
+        llm_messages: list[dict[str, Any]],
+        user_id: str | None,
+        last_runtime_preflight: ValidationResult | None,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        initial_version: int,
+        session_scope: str,
+        recorder: BufferingRecorder,
+        repair_turns_used: int,
+    ) -> bool:
+        """Pre-finalize runtime-preflight gate (Fix 2).
+
+        When the assistant emits no tool_calls (claiming completion) but the
+        runtime preflight is invalid — a real contract violation, NOT a
+        resolvable two-step interpretation handoff — and the repair budget is
+        not exhausted, inject a model-facing repair message naming the
+        validator's objection and ask the loop to continue for one more turn so
+        the model fixes the pipeline before it is finalised. Without this gate
+        the invalid pipeline is finalised terminally (``_finalize_no_tool_response``
+        augment-and-return), and only ``execute()``'s fail-closed gate rejects
+        it at run time — too late for the composer to self-correct.
+
+        Returns True when a repair message was injected (the loop should
+        ``continue``). Returns False when: the budget is exhausted; the state
+        is structurally empty (nothing to fix — the empty-state finalize branch
+        owns that); the preflight is valid; or the failure is a pending
+        interpretation handoff (owned by the interpretation/orphan path).
+
+        Mirrors ``_finalize_no_tool_response``'s preflight computation EXACTLY
+        (reuse ``last_runtime_preflight``; recompute via
+        ``_cached_runtime_preflight`` only when the state mutated this turn) so
+        this gate and the eventual finalize observe the SAME result. The
+        per-turn cache (keyed on ``state.version``) makes the double call free
+        for an unchanged version. ``_cached_runtime_preflight`` may raise the
+        same ``ComposerRuntimePreflightError`` finalize would — the enclosing
+        ``_try_terminate_no_tools`` handler is shared, so moving the call
+        earlier does not change the failure envelope.
+
+        Boundary: NEVER catches plugin exceptions and NEVER increments a
+        counter — it returns a bool; the caller emits ``repair_turns_delta=1``
+        and the loop is the sole mutation site (the termination bound).
+        """
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return False
+        if _state_is_structurally_empty(state):
+            return False
+
+        runtime_result: ValidationResult | None = last_runtime_preflight
+        if state.version > initial_version:
+            runtime_result = await self._cached_runtime_preflight(
+                state,
+                user_id=user_id,
+                cache=runtime_preflight_cache,
+                initial_version=initial_version,
+                session_scope=session_scope,
+                llm_calls=recorder.llm_calls,
+            )
+
+        if runtime_result is None or runtime_result.is_valid or _is_pending_interpretation_handoff(runtime_result):
+            return False
+
+        llm_messages.append(
+            {
+                "role": "user",
+                "content": _compose_preflight_repair_message(runtime_result, next_turn=repair_turns_used + 1),
+            }
+        )
         return True
 
     async def _finalize_no_tool_response(
@@ -2278,11 +2394,12 @@ class ComposerServiceImpl:
                             session_id=session_id,
                         )
                         # Exclude AUTO-SURFACEABLE llm_prompt_template sites — same
-                        # filter as the P2 pre-check above. The shared finalize tail
-                        # auto-surfaces PT immediately before its UNFILTERED orphan
-                        # gate, so a PT site is not a genuine orphan that would
-                        # suppress the advisor; only non-PT orphans do. The tail's
-                        # final orphan gate stays unfiltered (fail-closed).
+                        # filter as the P2 pre-check above. Both the shared finalize
+                        # tail AND the advisor-blocked terminal return below now run
+                        # the surface+UNFILTERED-gate pair, so a PT site is not a
+                        # genuine orphan that would be left eventless; only non-PT
+                        # orphans suppress the advisor. The final orphan gate stays
+                        # unfiltered (fail-closed).
                         genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
                         if not genuine_orphans:
                             verdict = await self._run_advisor_checkpoint(
@@ -2292,6 +2409,37 @@ class ComposerServiceImpl:
                                 recorder=recorder,
                             )
                             if (not verdict.ok) or verdict.blocking:
+                                # Advisor-blocked TERMINAL return on the P5
+                                # budget-exhaustion path — same fix as the P2
+                                # blocked returns: run the surface+unfiltered-gate
+                                # pair here (this branch returns instead of falling
+                                # through to the shared finalize tail below), so a
+                                # node with a pending PT requirement but no pending
+                                # event is made resolvable (or returned fail-closed
+                                # as an orphan) rather than reaching RUN as an
+                                # eventless placeholder. ``state`` matches
+                                # ``persist.current_state_id`` here (the mutation
+                                # was persisted before classify), satisfying the
+                                # create_pending gate.
+                                orphan_result = await self._surface_pt_and_gate_orphans_or_none(
+                                    state=state,
+                                    session_id=session_id,
+                                    current_state_id=persist.current_state_id,
+                                    assistant_message=assistant_message,
+                                    recorder=recorder,
+                                    progress=progress,
+                                )
+                                if orphan_result is not None:
+                                    return _ClassifyOutcome(
+                                        action="return",
+                                        result=replace(
+                                            orphan_result,
+                                            persisted_assistant_message_id=persisted_assistant_message_id,
+                                            persisted_tool_call_turn=persisted_tool_call_turn,
+                                        ),
+                                        composition_turns_delta=1,
+                                        advisor_passes_delta=1,
+                                    )
                                 return _ClassifyOutcome(
                                     action="return",
                                     result=self._advisor_blocked_result(
@@ -2484,6 +2632,32 @@ class ComposerServiceImpl:
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
+        # Runtime-preflight repair gate (Fix 2). When the model claims completion
+        # but the deterministic runtime preflight is invalid — a real contract
+        # violation, not a resolvable two-step interpretation handoff — inject a
+        # repair message naming the validator's objection and continue so the
+        # model fixes the pipeline before it is finalised. Shares the single
+        # ``_MAX_REPAIR_TURNS`` budget with the proof / interpretation repairs
+        # (a turn is a correctness repair XOR an advisor repair); on budget
+        # exhaustion it short-circuits and control falls through to the existing
+        # preflight-invalid finalize (``_compose_preflight_failure_message``),
+        # which ``execute()``'s fail-closed gate then rejects. Ordered AFTER the
+        # proof gate (more-specific blob diagnostics first) and BEFORE the
+        # advisor gate (the frontier advisor only reviews a mechanically valid
+        # pipeline — same rationale as the orphan pre-check below).
+        if await self._attempt_preflight_repair(
+            state=state,
+            llm_messages=llm_messages,
+            user_id=user_id,
+            last_runtime_preflight=last_runtime_preflight,
+            runtime_preflight_cache=runtime_preflight_cache,
+            initial_version=initial_version,
+            session_scope=session_scope,
+            recorder=recorder,
+            repair_turns_used=repair_turns_used,
+        ):
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
         # END authoritative advisor gate (elspeth-dac6602a2b). Runs AFTER the
         # cheap deterministic gates (the proof gate above; the orphan pre-check
         # here mirrors the tail's gate) so the frontier advisor only reviews a
@@ -2509,14 +2683,15 @@ class ComposerServiceImpl:
                 session_id=session_id,
             )
             # llm_prompt_template sites are AUTO-SURFACEABLE pseudo-orphans: the
-            # shared finalize tail calls ``_auto_surface_prompt_template_reviews``
-            # immediately before its (UNFILTERED) orphan gate, so a PT site here is
-            # not a genuine orphan the tail would block — it is one the tail will
-            # resolve. Only GENUINE (non-PT) orphans suppress the advisor, mirroring
-            # the model_repairable filter above. This makes the advisor review the
-            # SAME pipeline the tail will finalize; the FINAL orphan gate in
-            # ``_surface_and_finalize_no_tools`` stays UNFILTERED, so a still-missing
-            # PT after auto-surface remains fail-closed (unchanged).
+            # surface+unfiltered-gate pair (``_surface_pt_and_gate_orphans_or_none``)
+            # runs on EVERY terminal no-tool path now — the CLEAN fall-through tail
+            # AND each advisor-blocked terminal return below — so a PT site here is
+            # not a genuine orphan that would be left eventless; it is one those
+            # paths will resolve (or fail-close via the unfiltered gate). Only
+            # GENUINE (non-PT) orphans suppress the advisor, mirroring the
+            # model_repairable filter above. This makes the advisor review the SAME
+            # pipeline that will finalize; the final orphan gate stays UNFILTERED,
+            # so a still-missing PT after auto-surface remains fail-closed.
             genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
             if not genuine_orphans:
                 verdict = await self._run_advisor_checkpoint(
@@ -2526,26 +2701,42 @@ class ComposerServiceImpl:
                     recorder=recorder,
                 )
                 is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
-                if not verdict.ok:
-                    return _TerminateOutcome(
-                        action="return",
-                        result=self._advisor_blocked_result(
-                            reason="unavailable",
-                            verdict=verdict,
-                            state=state,
-                            assistant_message=assistant_message,
-                            recorder=recorder,
-                            repair_turns_used=repair_turns_used,
-                            persisted_assistant_message_id=persisted_assistant_message_id,
-                            persisted_tool_call_turn=persisted_tool_call_turn,
-                        ),
-                        advisor_passes_delta=1,
+                if (not verdict.ok) or (verdict.blocking and is_last_pass):
+                    # Advisor-blocked TERMINAL return. This bypasses the CLEAN
+                    # fall-through to the shared finalize tail, so it must run the
+                    # SAME surface+unfiltered-orphan-gate pair here (else a node
+                    # with a pending llm_prompt_template requirement but no pending
+                    # EVENT becomes the runnable max-version pointer and RUN raises
+                    # UnresolvedInterpretationPlaceholderError with a zero frontend
+                    # pending-event count — the staging 500). If an orphan survives
+                    # auto-surfacing, return it fail-closed (it is the more
+                    # fundamental block than the advisor verdict; both yield a
+                    # non-runnable result). Otherwise the PT event is now surfaced
+                    # and the runnable state is resolvable, so proceed to the
+                    # advisor-blocked result as before.
+                    orphan_result = await self._surface_pt_and_gate_orphans_or_none(
+                        state=state,
+                        session_id=session_id,
+                        current_state_id=current_state_id,
+                        assistant_message=assistant_message,
+                        recorder=recorder,
+                        progress=progress,
                     )
-                if verdict.blocking and is_last_pass:
+                    if orphan_result is not None:
+                        return _TerminateOutcome(
+                            action="return",
+                            result=replace(
+                                orphan_result,
+                                repair_turns_used=repair_turns_used,
+                                persisted_assistant_message_id=persisted_assistant_message_id,
+                                persisted_tool_call_turn=persisted_tool_call_turn,
+                            ),
+                            advisor_passes_delta=1,
+                        )
                     return _TerminateOutcome(
                         action="return",
                         result=self._advisor_blocked_result(
-                            reason="exhausted",
+                            reason="unavailable" if not verdict.ok else "exhausted",
                             verdict=verdict,
                             state=state,
                             assistant_message=assistant_message,
@@ -2627,6 +2818,108 @@ class ComposerServiceImpl:
         )
         return _TerminateOutcome(action="return", result=threaded)
 
+    async def _surface_pt_and_gate_orphans_or_none(
+        self,
+        *,
+        state: CompositionState,
+        session_id: str | None,
+        current_state_id: str | None,
+        assistant_message: Any,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+    ) -> ComposerResult | None:
+        """Auto-surface PT reviews + run the UNFILTERED orphan gate.
+
+        Returns the fail-closed orphan ``ComposerResult`` (a bare result with no
+        threaded ``repair_turns_used``/persisted ids — the caller threads those)
+        when an interpretation site survives auto-surfacing, otherwise ``None``.
+
+        Single-sourced surface+gate PAIR (elspeth fix for the staging
+        ``UnresolvedInterpretationPlaceholderError`` 500): the CLEAN no-tool
+        finalize tail (:meth:`_surface_and_finalize_no_tools`) AND the three
+        advisor-blocked terminal returns (P2 unavailable / P2 exhausted / P5
+        unavailable-or-exhausted) all call this. Before the fix, only the CLEAN
+        tail ran the pair; a blocked terminal return left a state with a pending
+        ``llm_prompt_template`` requirement but no pending EVENT as the runnable
+        max-version pointer — RUN then raised at ``materialize_state_for_execution``
+        even though the frontend pending-event count was zero. Calling this on the
+        blocked returns restores the invariant: every state that can become the
+        runnable pointer either carries a resolvable pending PT event (surfaced
+        here) or is returned fail-closed (the orphan gate below).
+
+        The pair MUST stay coupled (surface THEN unfiltered gate): a node whose PT
+        requirement is absent (the ``_missing_prompt_template_review_sites``
+        requirement-None enumerator branch) is skipped by auto-surface
+        (``_has_pending_prompt_template_requirement`` is False) and only the
+        unfiltered gate keeps it fail-closed. Likewise a genuine bare-token
+        vague-term orphan (non-PT) is left fail-closed by the gate.
+        """
+
+        # Backend-derived surfacing (elspeth-e51216d305 Case B): surface every
+        # LLM node's auto-staged llm_prompt_template review against the FINAL
+        # frozen skeleton, immediately before the fail-closed orphan gate. On
+        # every caller (CLEAN tail past every repair branch; the budget-exhaustion
+        # bonus call that returned no tool calls; and the advisor-blocked terminal
+        # returns AFTER the mutating turn was persisted) no further mutation
+        # occurs this turn, so the surfaced review can never go stale (cf.
+        # surface-early = Case B in the repair loop). The orphan gate below
+        # (unfiltered) then sees the PT event present; if this helper ever no-ops,
+        # it stays fail-closed.
+        await self._auto_surface_prompt_template_reviews(
+            state,
+            session_id=session_id,
+            current_state_id=current_state_id,
+        )
+        orphaned_sites = await self._missing_pending_interpretation_review_sites(
+            state,
+            session_id=session_id,
+        )
+        if not orphaned_sites:
+            return None
+
+        # The compose turn itself completed (the model stopped emitting tools);
+        # the blocking state is carried on ``runtime_preflight`` readiness,
+        # mirroring the preflight-invalid finalize branches that also emit
+        # ``phase="complete"`` while returning a non-runnable result. ``phase``
+        # has no "blocked" member, and the result is returned (not raised), so a
+        # ``phase="failed"`` reason code would misrepresent it as a request
+        # failure. The unrunnable state is surfaced to the UI via the readiness
+        # flags on the returned result.
+        await emit_progress(
+            progress,
+            ComposerProgressEvent(
+                phase="complete",
+                headline="The pipeline has an unresolved interpretation placeholder and cannot run yet.",
+                evidence=("An {{interpretation:<term>}} token has no matching review to resolve it.",),
+                likely_next="Ask ELSPETH to stage the interpretation review, or remove the token.",
+                reason="composer_complete",
+            ),
+        )
+        raw_content = assistant_message.content or ""
+        orphan_runtime_result = _orphaned_interpretation_review_validation(orphaned_sites)
+        # Augment the model's prose with a system-attributed suffix naming the
+        # unresolvable site, mirroring the preflight-invalid non-empty finalize
+        # branch. The ComposerResult field-pairing invariant (protocol.py)
+        # requires ``raw_assistant_content`` to carry the pre-synthesis prose
+        # whenever ``runtime_preflight`` is blocking and is NOT the resolvable
+        # pending-handoff shape — which an orphan, by construction, is not — so the
+        # augment-vs-replace discriminator at routes._composer_history_content
+        # strips the operator suffix from LLM history.
+        augmented_message = _compose_preflight_failure_message(raw_content, runtime_result=orphan_runtime_result)
+        _enforce_augmentation_prefix_invariant(
+            branch="orphaned_interpretation_review_augmentation",
+            content=raw_content,
+            augmented=augmented_message,
+        )
+        return ComposerResult(
+            message=augmented_message,
+            state=state,
+            runtime_preflight=orphan_runtime_result,
+            raw_assistant_content=raw_content,
+            tool_invocations=recorder.invocations,
+            llm_calls=recorder.llm_calls,
+        )
+
     async def _surface_and_finalize_no_tools(
         self,
         *,
@@ -2657,68 +2950,16 @@ class ComposerServiceImpl:
         and in the comments around ``_missing_pending_interpretation_review_sites``.
         """
 
-        # Backend-derived surfacing (elspeth-e51216d305 Case B): surface every
-        # LLM node's auto-staged llm_prompt_template review against the FINAL
-        # frozen skeleton, immediately before the fail-closed orphan gate. The
-        # skeleton can only grow across repair turns (each re-invokes the model);
-        # here, past every repair branch (and on the budget-exhaustion path, after
-        # the bonus call returned no tool calls), no further mutation occurs this
-        # turn, so the surfaced review can never go stale (cf. surface-early =
-        # Case B in the repair loop). The orphan gate below (unfiltered) then sees
-        # the PT event present; if this helper ever no-ops, it stays fail-closed.
-        await self._auto_surface_prompt_template_reviews(
-            state,
+        orphan_result = await self._surface_pt_and_gate_orphans_or_none(
+            state=state,
             session_id=session_id,
             current_state_id=current_state_id,
+            assistant_message=assistant_message,
+            recorder=recorder,
+            progress=progress,
         )
-        orphaned_sites = await self._missing_pending_interpretation_review_sites(
-            state,
-            session_id=session_id,
-        )
-        if orphaned_sites:
-            # The compose turn itself completed (the model stopped emitting
-            # tools); the blocking state is carried on ``runtime_preflight``
-            # readiness, mirroring the preflight-invalid finalize branches that
-            # also emit ``phase="complete"`` while returning a non-runnable
-            # result. ``phase`` has no "blocked" member, and the result is
-            # returned (not raised), so a ``phase="failed"`` reason code would
-            # misrepresent it as a request failure. The unrunnable state is
-            # surfaced to the UI via the readiness flags on the returned result.
-            await emit_progress(
-                progress,
-                ComposerProgressEvent(
-                    phase="complete",
-                    headline="The pipeline has an unresolved interpretation placeholder and cannot run yet.",
-                    evidence=("An {{interpretation:<term>}} token has no matching review to resolve it.",),
-                    likely_next="Ask ELSPETH to stage the interpretation review, or remove the token.",
-                    reason="composer_complete",
-                ),
-            )
-            raw_content = assistant_message.content or ""
-            orphan_runtime_result = _orphaned_interpretation_review_validation(orphaned_sites)
-            # Augment the model's prose with a system-attributed suffix naming
-            # the unresolvable site, mirroring the preflight-invalid non-empty
-            # finalize branch. The ComposerResult field-pairing invariant
-            # (protocol.py) requires ``raw_assistant_content`` to carry the
-            # pre-synthesis prose whenever ``runtime_preflight`` is blocking and
-            # is NOT the resolvable pending-handoff shape — which an orphan, by
-            # construction, is not — so the augment-vs-replace discriminator at
-            # routes._composer_history_content strips the operator suffix from
-            # LLM history.
-            augmented_message = _compose_preflight_failure_message(raw_content, runtime_result=orphan_runtime_result)
-            _enforce_augmentation_prefix_invariant(
-                branch="orphaned_interpretation_review_augmentation",
-                content=raw_content,
-                augmented=augmented_message,
-            )
-            return ComposerResult(
-                message=augmented_message,
-                state=state,
-                runtime_preflight=orphan_runtime_result,
-                raw_assistant_content=raw_content,
-                tool_invocations=recorder.invocations,
-                llm_calls=recorder.llm_calls,
-            )
+        if orphan_result is not None:
+            return orphan_result
 
         await emit_progress(
             progress,

@@ -51,10 +51,10 @@ from evals.lib.composer_rgr_score import score
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.blobs.service import content_hash as _content_hash
-from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -896,4 +896,165 @@ class TestUrlTextSmokeScenario:
 
         assert verdict["verdict"] == "GREEN", (
             f"url-text-smoke did not score GREEN. red={verdict['red_reasons']} amber={verdict['amber_reasons']}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Fix 2 proof: preflight-invalid -> repair-continue (NOT a scenario contract)
+#
+# Unlike the four scenario tests above, this test does NOT patch
+# ``_runtime_preflight`` to always pass. It makes the deterministic runtime
+# preflight CONTENT-AWARE — invalid while the json sink path is a placeholder,
+# valid once the model fixes it — so the compose loop actually reaches the
+# preflight-invalid branch (no_tool_finalize.py:192) that Fix 2 hoists from a
+# terminate-now into a repair-continue.
+#
+# The pipeline deliberately fires ONLY the preflight gate:
+#   * csv source with schema mode=observed -> compute_proof_diagnostics finds
+#     no blocking entry, so _attempt_proof_repair returns False (proof gate
+#     does not fire even though _proof_repair_is_applicable is True).
+#   * no llm node -> no llm_prompt_template / llm_model_choice interpretation
+#     review is auto-staged, so the orphan gate does not fire.
+# The advisor end-gate is stubbed CLEAN per-instance (the canonical override
+# from tests/unit/web/composer/_helpers.py) so it cannot mask the preflight
+# path by failing closed on a missing API key.
+#
+# TDD signal (the asymmetry that uniquely exercises Fix 2):
+#   * PRE-Fix-2 (terminate-now): turn2's completion claim hits the
+#     preflight-invalid terminal branch -> call_count==2, repair_turns_used==0,
+#     is_valid False.
+#   * POST-Fix-2 (repair-continue): turn2 injects a repair message and
+#     continues; turn3 fixes the sink path; turn4's completion claim finalizes
+#     a now-valid pipeline -> call_count==4, repair_turns_used==1, is_valid True.
+# --------------------------------------------------------------------------
+
+_BROKEN_SINK_PATH = "outputs/__placeholder__.jsonl"
+_FIXED_SINK_PATH = "outputs/summary.jsonl"
+
+
+def _preflight_invalid_for_placeholder_sink() -> ValidationResult:
+    """A real (non-handoff) preflight failure attributed to the json sink."""
+    return ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id="summary",
+                component_type="sink",
+                message=(f"Output path {_BROKEN_SINK_PATH!r} is a placeholder and cannot be written."),
+                suggestion="Set the json sink path to a real workspace-relative path under outputs/.",
+                error_code="invalid_output_path",
+            )
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=True,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[],
+        ),
+    )
+
+
+def _placeholder_sink_pipeline(blob_id: str, *, sink_path: str) -> dict[str, Any]:
+    """csv(observed) -> json sink. No llm node, no fixed-schema hazard."""
+    return {
+        "source": {
+            "plugin": "csv",
+            "blob_id": blob_id,
+            "on_success": "rows",
+            "options": {"schema": {"mode": "observed"}},
+            "on_validation_failure": "discard",
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "rows",
+                "plugin": "json",
+                "options": {
+                    "path": sink_path,
+                    "format": "jsonl",
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {"name": "preflight-repair-continue"},
+    }
+
+
+class TestPreflightRepairContinue:
+    """Fix 2: a preflight-invalid finalize becomes a repair-continue."""
+
+    @pytest.mark.asyncio
+    async def test_preflight_invalid_finalize_repairs_before_finalising(self, tmp_path: Path) -> None:
+        engine, session_id, sessions_service = _session_engine()
+        body = b"url\nhttps://example.gov.au\n"
+        blob_id = _seed_blob(
+            engine,
+            session_id,
+            body=body,
+            filename="urls.csv",
+            mime_type="text/csv",
+            storage_dir=tmp_path / "blobs" / session_id,
+        )
+
+        catalog = _real_catalog()
+        settings = _make_settings(tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+
+        # Turn 1: build a structurally valid pipeline whose sink path is a
+        # placeholder -> content-aware preflight is INVALID.
+        turn1 = _llm_response(
+            content=None,
+            tool_calls=[
+                {"id": "call_set", "name": "set_pipeline", "arguments": _placeholder_sink_pipeline(blob_id, sink_path=_BROKEN_SINK_PATH)}
+            ],
+        )
+        # Turn 2: claim completion -> preflight-invalid finalize.
+        turn2 = _llm_response(content="All set.", tool_calls=None)
+        # Turn 3: repair -> re-issue the pipeline with a real sink path.
+        turn3 = _llm_response(
+            content=None,
+            tool_calls=[
+                {"id": "call_fix", "name": "set_pipeline", "arguments": _placeholder_sink_pipeline(blob_id, sink_path=_FIXED_SINK_PATH)}
+            ],
+        )
+        # Turn 4: claim completion (now valid).
+        turn4 = _llm_response(content="Fixed the sink path and ready.", tool_calls=None)
+
+        def _content_aware_preflight(state: CompositionState, user_id: str | None = None) -> ValidationResult:
+            sink_path = state.outputs[0].options.get("path") if state.outputs else None
+            if sink_path == _BROKEN_SINK_PATH:
+                return _preflight_invalid_for_placeholder_sink()
+            return _passing_preflight()
+
+        empty = _empty_state()
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", side_effect=_content_aware_preflight),
+            patch.object(
+                service,
+                "_run_advisor_checkpoint",
+                new=AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+            ),
+        ):
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4]
+            result = await service.compose(
+                "Fetch the URL and write a JSONL summary",
+                [],
+                empty,
+                session_id=session_id,
+                user_id="test-user",
+            )
+
+        # Post-Fix-2: the preflight-invalid finalize injected one repair turn,
+        # the model fixed the sink path, and finalisation succeeded on a valid
+        # pipeline.
+        assert mock_llm.call_count == 4, f"expected 4 LLM calls (repair-continue), got {mock_llm.call_count}"
+        assert result.repair_turns_used == 1, f"expected 1 preflight repair turn, got {result.repair_turns_used}"
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True, (
+            "expected the finalised pipeline to be preflight-valid"
         )

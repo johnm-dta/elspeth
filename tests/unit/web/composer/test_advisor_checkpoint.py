@@ -31,6 +31,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 
 def _mock_catalog() -> MagicMock:
@@ -299,6 +300,24 @@ async def drive_try_terminate(
 
     service._missing_pending_interpretation_review_sites = AsyncMock(return_value=())
     service._surface_and_finalize_no_tools = AsyncMock(return_value=ComposerResult(message="Done — the pipeline is ready.", state=state))
+    # The advisor-blocked terminal returns now run the surface+orphan-gate pair
+    # (``_surface_pt_and_gate_orphans_or_none``) before building the blocked
+    # result. These tests isolate the ADVISOR verdict logic, so stub the pair to
+    # "no orphan" (return None) — its real behaviour is covered by the
+    # interpretation-review-dispatch suite. Without the stub it would call the
+    # real ``_auto_surface_prompt_template_reviews`` -> ``_require_sessions_service``
+    # which is intentionally unwired in this advisor-focused harness.
+    service._surface_pt_and_gate_orphans_or_none = AsyncMock(return_value=None)
+    # The END advisor gate only reviews a mechanically valid pipeline: the Fix 2
+    # preflight-repair gate runs BEFORE it and would intercept a preflight-invalid
+    # state. These tests exercise the ADVISOR, so stub the runtime preflight valid
+    # to establish that precondition (the preflight gate is covered separately).
+    service._runtime_preflight = lambda candidate, user_id=None: ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
     return await service._try_terminate_no_tools(
         assistant_message=_AssistantMessage(),
         message="rate how cool the pages are",

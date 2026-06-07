@@ -966,3 +966,35 @@ class TestAzureBlobSourceAuditAndErrors:
         assert result is not None
         resolution_map, _version = result
         assert resolution_map == {"Customer Name": "customer_name"}
+
+
+class TestAzureBlobSparseFieldMapping:
+    """elspeth-bdcdce6f58: sparse JSON blob rows + field_mapping order-independence.
+
+    The CSV path keeps the strict missing-mapped-column check (regression trap);
+    only the JSON _normalize_row_keys path is relaxed for sparse records.
+    """
+
+    def test_sparse_json_field_mapping_is_order_independent(self) -> None:
+        def make() -> Any:
+            return _make_source(
+                _base_config(
+                    format="json",
+                    blob_path="data/input.json",
+                    field_mapping={"customer_name": "client_name"},
+                )
+            )
+
+        # Sparse row first; mapped 'Customer Name' appears only in the later row.
+        src = make()
+        r1 = src._normalize_row_keys({"id": 1})
+        r2 = src._normalize_row_keys({"id": 2, "Customer Name": "Alice"})
+        assert dict(r1) == {"id": 1}
+        assert dict(r2) == {"id": 2, "client_name": "Alice"}
+
+        # Reversed order must produce identical normalized output.
+        src2 = make()
+        r1b = src2._normalize_row_keys({"id": 2, "Customer Name": "Alice"})
+        r2b = src2._normalize_row_keys({"id": 1})
+        assert dict(r1b) == {"id": 2, "client_name": "Alice"}
+        assert dict(r2b) == {"id": 1}

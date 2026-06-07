@@ -70,6 +70,7 @@ from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     MalformedBlobRefError,
     PathAllowlistViolationError,
+    PipelineValidationError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -578,6 +579,31 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
+        # Previously execute() created a run and let an invalid pipeline fail OPAQUELY
+        # at run-init (status=failed, rows_processed=0, error="Pipeline execution failed
+        # (GraphValidationError)"); the tutorial path bypassed validation entirely. Run
+        # the SAME dry-run validate_pipeline the /validate endpoint uses, BEFORE create_run,
+        # and reject with a structured PipelineValidationError when invalid. This catches
+        # the Mechanism-A classes (Graph/ValueSource/generic plugin-config) at the server
+        # boundary and closes the tutorial bypass; SchemaConfigModeViolation (post-emission
+        # row check) and the Chroma-SSRF plugin check (deferred network I/O) remain
+        # runtime-only by design. Local import mirrors the /validate path (W18 load-order).
+        from elspeth.web.execution.validation import validate_pipeline
+
+        preflight_result = validate_pipeline(
+            composition_state,
+            self._settings,
+            self._yaml_generator,
+            secret_service=self._secret_service,
+            user_id=user_id,
+        )
+        if not preflight_result.is_valid:
+            raise PipelineValidationError(
+                errors=tuple(preflight_result.errors),
+                readiness=preflight_result.readiness,
+            )
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 

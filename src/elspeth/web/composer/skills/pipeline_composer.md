@@ -156,12 +156,15 @@ tools for real work, not for memorising signatures.
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 <!-- END AUTOGEN: tool-inventory -->
 
-#### When You Are Still Stuck
+#### Advisor Review
 
-Use `request_advisor_hint` for advice, not as a mutation. Valid triggers include
-`reactive_validation_loop`, `proactive_security_safety`, and
-`proactive_red_listed_plugin`. After the advisor replies, convert the advice
-into normal composer tool calls and verify the result.
+An advisor model reviews your work automatically — early (your approach) and at completion (final sign-off). The end review is BINDING: if it flags an issue you will be asked to fix it before the pipeline can complete.
+
+You can also use `request_advisor_hint` for advice, not as a mutation, on
+proactive security/safety or red-listed-plugin concerns. Valid triggers:
+`proactive_security_safety` and `proactive_red_listed_plugin`. After the advisor
+replies, convert the advice into normal composer tool calls and verify the
+result.
 
 ## Audit Boundaries
 

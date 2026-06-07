@@ -76,11 +76,6 @@ class WebSettings(BaseModel):
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
-    # Advisor escape hatch: lets the composer LLM phone a frontier model
-    # for guidance when stuck. Disabled by default; enabling it filters
-    # the request_advisor_hint tool into get_tool_definitions(). Budget
-    # is per-compose-request (local counter), not per-session lifetime.
-    composer_advisor_enabled: bool = False
     composer_advisor_model: str = "anthropic/claude-sonnet-4-6"
     composer_advisor_max_calls_per_compose: int = Field(
         default=4,
@@ -95,6 +90,24 @@ class WebSettings(BaseModel):
             "cost is bounded by composer_rate_limit_per_minute, not this setting. "
             "Raise this for heavyweight workloads (e.g. business-analysis pipelines "
             "with many plugins where the LLM benefits from multiple intro consultations)."
+        ),
+    )
+    composer_advisor_checkpoint_max_passes: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Max END advisor-checkpoint passes per compose request (the initial "
+            "end sign-off plus its re-reviews), counted SEPARATELY from "
+            "_MAX_REPAIR_TURNS. The EARLY advisory pass is separate and does NOT "
+            "consume this counter (spec §13). On the last budgeted pass a "
+            "still-flagged end gate fails closed (no repair — it cannot "
+            "re-review). Checkpoint calls are bounded SOLELY by this knob and are "
+            "NOT counted against composer_advisor_max_calls_per_compose (which "
+            "bounds LLM-initiated hints + proactive-security). "
+            "(Spec §7 envisioned composer_advisor_max_calls_per_compose as a "
+            "unified backstop across all advisor calls including checkpoints; "
+            "that unification is not implemented — checkpoints are bounded "
+            "separately. Operator decision pending.)"
         ),
     )
     composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)
@@ -474,6 +487,28 @@ class WebSettings(BaseModel):
                 f"got {self.composer_timeout_seconds}s, maximum {max_backend_timeout_seconds}s "
                 f"(transport idle ceiling {self.composer_transport_idle_ceiling_seconds}s - "
                 f"headroom {self.composer_transport_headroom_seconds}s)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_advisor_distinct_from_primary(self) -> WebSettings:
+        """The advisor must be a different model from the primary composer.
+
+        Independence of failure modes: a model checking its own work shares
+        its blind spots. Exact-string distinctness on the canonical model id
+        (final path segment, so provider prefixes like ``openrouter/openai/``
+        do not mask a same-model pairing). The advisor is mandatory — there is
+        no enable flag — so this runs for every boot.
+        """
+
+        def _canonical(model_id: str) -> str:
+            return model_id.rsplit("/", 1)[-1].strip()
+
+        if _canonical(self.composer_advisor_model) == _canonical(self.composer_model):
+            raise ValueError(
+                "composer_advisor_model must differ from composer_model "
+                f"(both resolve to {_canonical(self.composer_model)!r}); the advisor "
+                "is the independent reviewer and cannot be the primary composer"
             )
         return self
 

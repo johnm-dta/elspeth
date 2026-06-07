@@ -16,6 +16,12 @@ export type FaultSubclass =
   | "scrape-target-down-or-throttled"
   | "staging-hiccup"
   | "timeout"
+  // De-conflation subclasses (notes/tutorial-harness-infra-timeout-rootcause-2026-06-07.md):
+  // backend-grounded causes the old string-match classifier laundered into `timeout`.
+  | "latency-hang" // request fired, no response by deadline (genuine provider latency)
+  | "composer-no-pipeline" // compose returned 2xx but produced no pipeline draft
+  | "compose-validation-failure" // compose POST 4xx/5xx (invalid pipeline at compose)
+  | "run-validation-failure" // run POST 4xx/5xx (composed pipeline failed execution)
   | null;
 
 export interface RunRecord {
@@ -54,5 +60,23 @@ export interface RunRecord {
     model_identifier: string | null;
   };
   timing_s: Record<string, number>;
+  // Backend step evidence for the de-conflated classifier (compose = POST
+  // /api/sessions/{id}/messages, run = POST /api/tutorial/run). Optional so
+  // older records remain valid.
+  steps?: {
+    compose: StepEvidence;
+    run: StepEvidence;
+  };
   error: string | null; // exception text on hard fault
+}
+
+export interface StepEvidence {
+  fired: boolean;
+  responded: boolean;
+  status: number | null;
+  elapsed_s: number | null;
+  // Error body (FastAPI `detail`) when the POST was !ok — truncated. Makes a
+  // failed run self-diagnostic (e.g. which validation error) without a server
+  // round-trip. null on a 2xx / in-flight step.
+  body: string | null;
 }

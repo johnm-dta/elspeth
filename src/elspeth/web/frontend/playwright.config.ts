@@ -67,7 +67,10 @@ const composerSettingsEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**"],
+  // `**/*.test.ts` are vitest unit tests (e.g. harness/classify.test.ts) which
+  // import `vitest` — that collides with Playwright's expect. Playwright owns
+  // `*.spec.ts`; vitest owns `*.test.ts`.
+  testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**", "**/*.test.ts"],
   // The suite uses one authenticated account and verifies account-scoped
   // composer preferences. Running specs in parallel lets tests race through the
   // same preference row and makes first-session mode assertions nondeterministic.

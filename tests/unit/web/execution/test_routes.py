@@ -384,6 +384,58 @@ class TestExecuteEndpoint:
         assert detail["semantic_contracts"][0]["requirement_code"] == "line_explode.source_field.line_framed_text"
 
     @pytest.mark.asyncio
+    async def test_execute_returns_422_for_pipeline_validation_failure(self) -> None:
+        """Fail-closed pre-run validation (notes/composer-advisor-surface-map-2026-06-08.md):
+        an invalid composed pipeline maps to a structured 422 — NOT an opaque
+        ``status=failed`` run, NOT the bare-ValueError 404. ``PipelineValidationError``
+        subclasses ValueError, so its handler MUST sit above the bare ``except
+        ValueError`` branch; a regression that demoted the catch order would leak
+        the structured ``errors`` the frontend banner renders.
+        """
+        from elspeth.web.execution.errors import PipelineValidationError
+        from elspeth.web.execution.schemas import (
+            ValidationError,
+            ValidationReadiness,
+            ValidationReadinessBlocker,
+        )
+
+        exc = PipelineValidationError(
+            errors=(
+                ValidationError(
+                    component_id="rate",
+                    component_type="transform",
+                    message="Graph validation failed: 'rate' requires field 'content' not emitted upstream",
+                    suggestion="Wire an upstream node that emits 'content'.",
+                    error_code=None,
+                ),
+            ),
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="graph_structure",
+                        component_id="rate",
+                        component_type="transform",
+                        detail="Graph validation failed.",
+                    )
+                ],
+            ),
+        )
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=exc)
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail["kind"] == "pipeline_validation_failure"
+        assert detail["errors"][0]["component_id"] == "rate"
+        assert detail["errors"][0]["message"].startswith("Graph validation failed")
+        assert detail["errors"][0]["suggestion"] == "Wire an upstream node that emits 'content'."
+
+    @pytest.mark.asyncio
     async def test_execute_returns_422_for_unresolved_interpretation_placeholder(self) -> None:
         """F-17 / F-21: unresolved interpretation placeholder maps to 422 with structured payload.
 

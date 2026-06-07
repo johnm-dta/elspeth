@@ -17,6 +17,7 @@ from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_to
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.sessions.models import chat_messages_table
 from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord, CompositionStateData
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 
 async def _run_one_turn(
@@ -56,7 +57,7 @@ def _advisor_tool_call_response(call_id: str) -> Any:
                                 name="request_advisor_hint",
                                 arguments=json.dumps(
                                     {
-                                        "trigger": "reactive_validation_loop",
+                                        "trigger": "proactive_security_safety",
                                         "problem_summary": "stuck on llm config with private schema",
                                         "recent_errors": [
                                             "validator rejected the private column",
@@ -237,7 +238,6 @@ async def test_step2_persists_intercepted_advisor_tool_call_rows(
     service = composer_service_with_real_sessions
     service._settings = service._settings.model_copy(  # type: ignore[attr-defined]
         update={
-            "composer_advisor_enabled": True,
             "composer_advisor_max_calls_per_compose": 3,
         }
     )

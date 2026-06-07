@@ -42,6 +42,7 @@ from elspeth.core.config import (
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from elspeth.web.blobs.protocol import BlobFinalizationResult
+from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -49,6 +50,10 @@ from elspeth.web.execution.schemas import (
     RunAccountingRouting,
     RunAccountingSource,
     RunAccountingTokens,
+    ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
+    ValidationResult,
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
@@ -289,7 +294,25 @@ def service(
             return None
 
     cast(Any, svc)._call_async = _mock_call_async
-    yield svc
+    # The fail-closed pre-run validation gate (execute() -> validate_pipeline, added
+    # 2026-06-08) runs on every execute. These tests exercise execute MECHANICS (run
+    # creation, blob/path gates, cancel) with a minimal mock state that is NOT a
+    # runnable pipeline, so stub validate_pipeline to VALID to reach the mechanics.
+    # Gate-behavior tests (TestExecutionFlow::*_pipeline_*) override this with their
+    # own patch; validate_pipeline's own correctness is covered in test_validation.py.
+    _gate_valid = ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(
+            authoring_valid=True,
+            execution_ready=True,
+            completion_ready=True,
+            blockers=[],
+        ),
+    )
+    with patch("elspeth.web.execution.validation.validate_pipeline", return_value=_gate_valid):
+        yield svc
     _real_loop.close()
 
 
@@ -325,6 +348,78 @@ class TestExecutionFlow:
         create_call = mock_session_service.create_run.call_args
         assert "session_id" in create_call[1] or len(create_call[0]) >= 1
         assert "pipeline_yaml" in create_call[1] or len(create_call[0]) >= 2
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_invalid_pipeline_before_run_creation(
+        self, service: ExecutionServiceImpl, mock_session_service: MagicMock
+    ) -> None:
+        """Fix 1 (notes/composer-advisor-surface-map-2026-06-08.md): execute() must
+        fail CLOSED on a pipeline that fails validate_pipeline — raising a structured
+        PipelineValidationError BEFORE create_run — instead of launching an opaque
+        ``status=failed`` run. This closes the tutorial bypass (tutorial_service calls
+        execute() directly with no pre-run validation) and the advisory-gate gap.
+        """
+        invalid = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="rate",
+                    component_type="transform",
+                    message="Graph validation failed: 'rate' requires field 'content' not emitted upstream",
+                    suggestion=None,
+                    error_code=None,
+                )
+            ],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="graph_structure",
+                        component_id="rate",
+                        component_type="transform",
+                        detail="Graph validation failed.",
+                    )
+                ],
+            ),
+        )
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", return_value=invalid),
+            pytest.raises(PipelineValidationError) as exc_info,
+        ):
+            await service.execute(session_id=uuid4())
+
+        # No opaque failed-run: the gate refuses BEFORE create_run.
+        assert mock_session_service.create_run.await_count == 0
+        # Carries the structured errors for the route to surface as a 422.
+        assert exc_info.value.errors
+        assert exc_info.value.errors[0].component_id == "rate"
+
+    @pytest.mark.asyncio
+    async def test_execute_allows_valid_pipeline_through_the_gate(
+        self, service: ExecutionServiceImpl, mock_session_service: MagicMock
+    ) -> None:
+        """Fix 1: a valid pipeline passes the new pre-run gate and still creates a run."""
+        valid = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=True,
+                completion_ready=True,
+                blockers=[],
+            ),
+        )
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", return_value=valid),
+            patch.object(service, "_run_pipeline"),
+        ):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+        mock_session_service.create_run.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_status_returns_run_status(self, service: ExecutionServiceImpl, mock_session_service: MagicMock) -> None:

@@ -269,6 +269,13 @@ class TestBuildSystemPrompt:
         result = build_system_prompt(None)
         assert result == SYSTEM_PROMPT
 
+    def test_system_prompt_always_advisor_enabled(self) -> None:
+        """Advisor is mandatory — the advisor-enabled projection is the ONLY
+        projection. ``build_system_prompt(None)`` always teaches the LLM
+        about ``request_advisor_hint`` (there is no disabled projection)."""
+        text = build_system_prompt(None)
+        assert "request_advisor_hint" in text
+
     def test_missing_deployment_skill_returns_core_only(self, tmp_path: Path) -> None:
         """data_dir with no skills/ subdir returns core skill only."""
         result = build_system_prompt(str(tmp_path))
@@ -717,8 +724,9 @@ class TestBuildMessagesGuidedTerminal:
         system_content = messages[0]["content"]
         assert deployment_content.strip() in system_content, "Deployment overlay missing from guided-terminal transition prompt (Codex #17)"
 
-    def test_guided_terminal_advisor_disabled_strips_advisor_content(self) -> None:
-        """When advisor_enabled=False, advisor-specific content must be absent from the transition prompt."""
+    def test_guided_terminal_always_retains_advisor_content(self) -> None:
+        """Advisor is mandatory, so advisor sections must always remain in the
+        transition prompt (there is no disabled projection)."""
         state = _empty_state()
         catalog = _stub_catalog()
 
@@ -727,31 +735,6 @@ class TestBuildMessagesGuidedTerminal:
             state,
             "continue",
             catalog,
-            advisor_enabled=False,
-            guided_terminal=_completed_terminal(),
-        )
-
-        system_content = messages[0]["content"]
-        # The advisor subsection heading that _strip_advisor_content removes.
-        assert "#### When You Are Still Stuck" not in system_content, (
-            "Advisor subsection must be stripped when advisor_enabled=False (Codex #17)"
-        )
-        # The advisor tool name token that _strip_advisor_content removes.
-        assert ", `request_advisor_hint`" not in system_content, (
-            "Advisor tool token must be stripped when advisor_enabled=False (Codex #17)"
-        )
-
-    def test_guided_terminal_advisor_enabled_retains_advisor_content(self) -> None:
-        """When advisor_enabled=True (default), advisor sections must remain in the transition prompt."""
-        state = _empty_state()
-        catalog = _stub_catalog()
-
-        messages = build_messages(
-            [],
-            state,
-            "continue",
-            catalog,
-            advisor_enabled=True,
             guided_terminal=_completed_terminal(),
         )
 
@@ -759,7 +742,7 @@ class TestBuildMessagesGuidedTerminal:
         # At least one of the two advisor-specific markers must survive.
         has_advisor_section = "#### When You Are Still Stuck" in system_content
         has_advisor_token = "request_advisor_hint" in system_content
-        assert has_advisor_section or has_advisor_token, "Advisor content must be present when advisor_enabled=True"
+        assert has_advisor_section or has_advisor_token, "Advisor content must always be present"
 
     def test_guided_terminal_no_data_dir_matches_non_transition_core_skill(self) -> None:
         """Without data_dir the transition prompt freeform layer equals the standard system prompt."""

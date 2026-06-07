@@ -38,6 +38,7 @@ from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     ExecuteRequestValidationError,
+    PipelineValidationError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -583,6 +584,30 @@ def create_execution_router() -> APIRouter:
                             "user_term": site.user_term,
                         }
                         for site in exc.sites
+                    ],
+                },
+            ) from exc
+        except PipelineValidationError as exc:
+            # Fail-closed pre-run validation: the composed pipeline failed the
+            # dry-run validate_pipeline BEFORE any run was created. 422 mirrors the
+            # SemanticContractViolationError precedent (syntactically valid request,
+            # non-executable composition). MUST sit above ``except ValueError`` (404)
+            # and ``except ExecuteRequestValidationError`` (400) — PipelineValidationError
+            # subclasses ValueError. The structured ``errors`` mirror the /validate
+            # ValidationResult.errors shape so the frontend banner needs no string parsing.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "kind": "pipeline_validation_failure",
+                    "errors": [
+                        {
+                            "component_id": err.component_id,
+                            "component_type": err.component_type,
+                            "message": err.message,
+                            "suggestion": err.suggestion,
+                            "error_code": err.error_code,
+                        }
+                        for err in exc.errors
                     ],
                 },
             ) from exc

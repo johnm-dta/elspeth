@@ -1819,3 +1819,25 @@ class TestUnmappedFieldsRebuildResolution:
         mapping, _ = resolution
         # Only the original fields should be in the mapping
         assert set(mapping.keys()) == {"contactid", "fullname"}
+
+
+class TestDataverseSparseFieldMapping:
+    """elspeth-594221617d: sparse Dataverse rows + field_mapping order-independence."""
+
+    def test_sparse_field_mapping_is_order_independent(self) -> None:
+        """An optional mapped attribute appearing only in a later row must neither
+        quarantine the sparse first row nor mis-map the later-only key. Order-
+        independence pins both the quarantine and the else-branch mis-mapping."""
+        # Sparse row first; mapped 'Customer Name' appears only in the later row.
+        src = _make_source(_base_config(field_mapping={"customer_name": "client_name"}))
+        r1 = src._normalize_row_fields({"contactid": "1"}, is_first_row=True)
+        r2 = src._normalize_row_fields({"contactid": "2", "Customer Name": "Alice"}, is_first_row=False)
+        assert r1 == {"contactid": "1"}
+        assert r2 == {"contactid": "2", "client_name": "Alice"}
+
+        # Reversed order must produce identical normalized output.
+        src2 = _make_source(_base_config(field_mapping={"customer_name": "client_name"}))
+        r1b = src2._normalize_row_fields({"contactid": "2", "Customer Name": "Alice"}, is_first_row=True)
+        r2b = src2._normalize_row_fields({"contactid": "1"}, is_first_row=False)
+        assert r1b == {"contactid": "2", "client_name": "Alice"}
+        assert r2b == {"contactid": "1"}

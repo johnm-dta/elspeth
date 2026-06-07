@@ -206,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d5fd3a4f3c6b40e6"
+    source_file_hash: str | None = "sha256:91c44790cfe3408f"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -422,6 +422,7 @@ class DataverseSource(BaseSource):
                 raw_headers=raw_headers,
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
             )
 
         # Apply resolution mapping.
@@ -437,8 +438,13 @@ class DataverseSource(BaseSource):
             if k in mapping:
                 normalized_name = mapping[k]
             else:
-                # Field not in initial mapping — normalize individually
-                normalized_name = normalize_field_name(k)
+                # New key not in the cached resolution — normalize it, then apply
+                # field_mapping by normalized name so a mapped attribute that first
+                # appears in a LATER row still maps to its target. (Relaxing the
+                # strict resolve check for sparse entities unmasks this path —
+                # elspeth-594221617d.)
+                nk = normalize_field_name(k)
+                normalized_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
                 has_unmapped_fields = True
             result[normalized_name] = v
 
@@ -451,6 +457,7 @@ class DataverseSource(BaseSource):
                 raw_headers=list(row.keys()),
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
             )
 
         return result

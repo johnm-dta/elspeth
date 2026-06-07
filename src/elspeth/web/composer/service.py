@@ -2823,12 +2823,27 @@ class ComposerServiceImpl:
             # State the driver still owns across iterations updates from
             # the dispatch carrier; persist + classify consume the rest
             # of the dispatch fields directly.
+            prev_state = state
             state = dispatch.state
             last_validation = dispatch.last_validation
             last_runtime_preflight = dispatch.last_runtime_preflight
             if dispatch.mutation_success_observed:
                 mutation_success_seen = True
             self._phase3_last_tool_outcomes = dispatch.tool_outcomes
+            # EARLY advisory pass (advisory, never blocks): fires on the
+            # empty->non-empty pipeline TRANSITION, which is structurally
+            # <= once per session. Placed here — after the state-owning
+            # block, before P4 persist — so the very turn that creates the
+            # pipeline always reaches the hook, even if the persist/
+            # plugin-crash branch below raises. Does NOT consume the END
+            # gate budget; the return value is intentionally discarded.
+            await self._maybe_run_early_checkpoint(
+                state=state,
+                prev_state=prev_state,
+                session_id=session_id,
+                llm_messages=llm_messages,
+                recorder=recorder,
+            )
             persist = await self._persist_turn_audit(
                 tool_outcomes=dispatch.tool_outcomes,
                 decoded_args_by_call_id=dispatch.decoded_args_by_call_id,
@@ -3718,6 +3733,37 @@ class ComposerServiceImpl:
             blocking=False,
             findings_text=str(last_exc) if last_exc else "advisor unavailable",
         )
+
+    async def _maybe_run_early_checkpoint(
+        self,
+        *,
+        state: CompositionState,
+        prev_state: CompositionState,
+        session_id: str | None,
+        llm_messages: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+    ) -> bool:
+        """Run the EARLY advisory checkpoint on the empty->non-empty pipeline
+        TRANSITION (structurally <= once per session). Advisory only: inject the
+        guidance as a user message; NEVER block. Degrade silently on failure.
+        Does NOT consume the END gate budget. Returns whether it ran."""
+        if _state_is_structurally_empty(state):
+            return False
+        if not _state_is_structurally_empty(prev_state):
+            return False  # pipeline was already non-empty before this turn (or resumed session)
+        verdict = await self._run_advisor_checkpoint(phase="early", state=state, session_id=session_id, recorder=recorder)
+        if verdict.ok and verdict.blocking:
+            llm_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Early review by the advisor model — advisory, not binding]\n"
+                        + verdict.findings_text
+                        + "\n\nAddress any concrete gap above, or continue if it does not apply."
+                    ),
+                }
+            )
+        return True
 
     async def _call_llm_with_audit(
         self,

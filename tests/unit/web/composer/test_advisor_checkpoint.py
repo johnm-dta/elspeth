@@ -118,6 +118,76 @@ def simple_state() -> CompositionState:
     )
 
 
+@pytest.fixture
+def empty_state() -> CompositionState:
+    """A structurally empty pipeline (source/nodes/outputs all absent)."""
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+@pytest.fixture
+def nonempty_state(simple_state) -> CompositionState:
+    """A structurally non-empty pipeline (reuse ``simple_state``)."""
+    return simple_state
+
+
+@pytest.mark.asyncio
+async def test_early_checkpoint_runs_on_transition_and_injects(make_service, empty_state, nonempty_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="Consider a field_mapper before the sink")
+    )
+    llm_messages: list[dict[str, object]] = []
+    ran = await service._maybe_run_early_checkpoint(
+        state=nonempty_state,
+        prev_state=empty_state,
+        session_id="s1",
+        llm_messages=llm_messages,
+        recorder=make_recorder(),
+    )
+    assert ran is True
+    assert any("field_mapper" in m["content"] for m in llm_messages if m["role"] == "user")
+
+
+@pytest.mark.asyncio
+async def test_early_checkpoint_skips_when_pipeline_already_nonempty(make_service, nonempty_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock()
+    ran = await service._maybe_run_early_checkpoint(
+        state=nonempty_state,
+        prev_state=nonempty_state,
+        session_id="s1",
+        llm_messages=[],
+        recorder=make_recorder(),
+    )
+    assert ran is False
+    service._run_advisor_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_early_checkpoint_degrades_on_failure(make_service, empty_state, nonempty_state):
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(
+        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    )
+    llm_messages: list[dict[str, object]] = []
+    ran = await service._maybe_run_early_checkpoint(
+        state=nonempty_state,
+        prev_state=empty_state,
+        session_id="s1",
+        llm_messages=llm_messages,
+        recorder=make_recorder(),
+    )
+    assert ran is True  # attempted
+    assert llm_messages == []  # nothing injected; degraded silently
+
+
 @pytest.mark.asyncio
 async def test_run_advisor_checkpoint_end_returns_verdict(make_service, simple_state):
     service = make_service()

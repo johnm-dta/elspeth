@@ -35,6 +35,8 @@ notes/
 # Composer MCP scratch folder (session state, test configs)
 .scratch/*
 !.scratch/.gitkeep
+# scratch/ (no dot) is a duplicate of .scratch/ — never track; use .scratch/.
+scratch/
 
 # Generated bug analysis docs (can be regenerated)
 docs/bugs/generated/
@@ -239,6 +241,9 @@ landscape.db-wal
 
 # Tool-specific local config and caches
 .codex/
+# Antigravity / Gemini AI-IDE local project state (was leaking a machine-specific
+# symlink into ~/.gemini; untracked + deleted from disk 2026-06-07).
+.antigravitycli/
 
 
 

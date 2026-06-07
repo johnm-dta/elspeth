@@ -26,6 +26,58 @@ migrated rule. Discriminator is already in-repo: add the missed case as
 test), missed = live (you now hold the failing test). Do **not** "fix" the
 dead `scripts/cicd/enforce_*.py` paths.
 
+## 1b. Progress log (verify-then-fix sweep)
+
+**Closed 2026-06-07 (this sweep), each with TDD locking test + 3-hop audit trail:**
+
+| Bug | Stream | Commit | Resolution |
+|-----|--------|--------|------------|
+| elspeth-06913f39d4 | fail-open CI (LIVE gate) | 3a8f37f23 | ci.yaml integration lane `\|\| echo` swallowed every pytest exit → capture status, tolerate ONLY exit 5 (no tests collected), propagate the rest |
+| elspeth-0707b6d15b | fail-open (operator tool) | 66d3cba26 | `_structured_findings` trusted any present sidecar → now authoritative only when mtime >= report; else warn + parse Markdown |
+| elspeth-4634ee39ee | fail-open (operator tool) | 66d3cba26 | 3 codex runners returned 0 after per-target failures → `exit_code_from_stats()` + `summary["failed"]`; codex_bug_hunt.py GONE (migrated) |
+| elspeth-118bf5ea8c | CI build-push | 4dc2b08d2 | smoke-test hardcoded GHCR pull → registry-aware SMOKE_IMAGE (GHCR pref, ACR fallback) + per-registry logins + skip-if-nothing-pushed |
+| elspeth-8cb798c3fd | CI build-push (DUP of 118bf5ea8c) | 4dc2b08d2 | same fix |
+| elspeth-c36485165b | AST: gve_attribution (MD1 alias) | 9b9f22fd6 | matcher keyed on bare name → now collects ImportFrom aliases; blast radius ZERO |
+| elspeth-16f41371f8 | AST: gve_attribution | 9b9f22fd6 | component_id keyword counted by presence → now flags component_id=None literal; blast radius ZERO |
+| elspeth-3c73e49cc7 | AST: gve_attribution (MD4 SUPERSEDED) | (test-only) | framework CLI emits parse-error for SyntaxError → fail-closed; locking test added |
+
+**Ergonomics win (goal half 2) — committed 1a90a0695:** mypy pre-commit hook now
+mirrors pyproject's `rules/.*/fixtures/` exclude. Without it, adding 2+ fixture
+`bad.py` files in one commit fails mypy with "Duplicate module named 'bad'"
+(hook passes changed files explicitly, bypassing the dir-exclude). Type-checking
+deliberately-malformed fixtures has no safety value → no roadblock reduced. This
+unblocks future multi-fixture rule commits in this very sweep.
+
+**Worktree gotcha REPRODUCED + characterised:** gve fixtures (WHOLE_REPO) run
+through scan_root → `allowlist_path_for_root` escapes to the real config/cicd via
+cwd → spurious `actual:[]` in the harness; the PRE-EXISTING 01_missing_component_id
+fails identically. Proof method that works: `scan_root(dir, allowlist_dir_override=<empty>,
+emit_allowlist_governance=False)` matches expected exactly. For ANY WHOLE_REPO
+allowlist-loading rule, verify with controlled override, NOT the full harness.
+
+**Pattern for AST stream (reusable):** (1) read rule.py matcher; (2) blast-radius
+grep/AST-scan src/elspeth for the missed form — ZERO hits = safe pure-hardening fix,
+HITS = park `blocked` (operator allowlist) unless fixable in scope; (3) hermetic
+unit test via `RULE.analyze(_tree(src), Path("x.py"), ctx)` (routes to scan_tree,
+no allowlist) — red-proof against committed rule via `git show HEAD:rule.py` loaded
+with `sys.modules[name]=mod` before exec (slotted dataclass needs it); (4) fixtures
++ generate expected.json with `PYTHONPATH=elspeth-lints/src` (NOT raw python — that
+hits main's stale install); bump examples_violation_count.
+
+**Method confirmed working:** verify-against-current-reality first. codex_bug_hunt.py
+and the enforce_*.py scripts are gone; bugs citing them are partial-superseded —
+fix the surviving instances, note the migration in root_cause. Workflow-YAML bugs
+lock via tests/unit/test_ci_workflow_xdist.py + test_build_push_release_checks.py
+(parse YAML, assert on steps); shell logic simulated locally with `bash -eo pipefail`.
+
+**Remaining ~40 (streams):** CI-workflow (a57c4bd228 Dockerfile frontend-dist [+subsys:web],
+a7afa79003 xdist spaced-flag guard, a1f2ef0f82 redaction-gate docs, 0def0c0404 telemetry
+backfill, 313cd53771 CI policy inventory); AST-matcher ~26 (fixture discriminator +
+BLAST-RADIUS check → park as `blocked` if it surfaces real in-tree violations needing
+operator-HMAC allowlist); docs ~4 (refs to deleted scripts); plugin-hash 3 (still `triage`,
+need --advance). **Highest-value next:** MD1 alias-evasion via gve_attribution
+(c36485165b) per §4.
+
 ## 2. What landed: MD3 (commit 8954a536f)
 
 The migration left **three date parsers with divergent fail-polarity**:

@@ -18,11 +18,11 @@ import chromadb.errors
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.errors import (
-    TIER_1_ERRORS,
     AuditIntegrityError,
     DuplicateDocumentError,
     FrameworkBugError,
@@ -176,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d9d5fd47c0581aa4"
+    source_file_hash: str | None = "sha256:ef8d153125c55abd"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -590,7 +590,7 @@ class ChromaSink(BaseSink):
                     "total_bytes": self._total_bytes,
                 }
             )
-        except TIER_1_ERRORS:
+        except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as tel_err:
             slog.warning(

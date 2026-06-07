@@ -527,6 +527,75 @@ def test_gve_attribution_detects_qualified_call_and_mixed_good_bad() -> None:
     assert "line 3" in findings[0].message
 
 
+def test_gve_attribution_reports_aliased_raise() -> None:
+    """elspeth-c36485165b: an aliased import must not evade attribution checks."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            from elspeth.core.dag.models import GraphValidationError as GVE
+
+            def validate():
+                raise GVE("aliased, no component_id")
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["GA1"]
+
+
+def test_gve_attribution_accepts_aliased_raise_with_component_id() -> None:
+    """An aliased raise that is properly attributed stays clean."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            from elspeth.core.dag.models import GraphValidationError as GVE
+
+            def validate():
+                raise GVE("ok", component_id="node_1")
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_gve_attribution_flags_component_id_none() -> None:
+    """elspeth-16f41371f8: component_id=None is null attribution, not attribution."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            def validate():
+                raise GraphValidationError("bad", component_id=None)
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["GA1"]
+    assert "component_id=None" in findings[0].message
+
+
+def test_gve_attribution_accepts_component_id_from_variable() -> None:
+    """A non-None component_id expression is genuine attribution (no false positive)."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            def validate(node_id):
+                raise GraphValidationError("ok", component_id=node_id)
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
 def test_gve_attribution_reports_relative_path_and_skips_syntax_errors(tmp_path: Path) -> None:
     _write(tmp_path / "bad_syntax.py", "def broken(:\n    pass\n")
     _write(
@@ -565,6 +634,41 @@ per_file_rules:
     )
 
     assert _root_findings(GVE_ATTRIBUTION_RULE, tmp_path) == []
+
+
+def test_gve_attribution_syntax_errors_surface_as_parse_error_findings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """elspeth-3c73e49cc7 (superseded): the rule skips unparseable files internally,
+    but the CLI whole-repo walk surfaces them as ``parse-error`` findings, so a
+    SyntaxError can never silently pass the gate.
+    """
+    import argparse
+
+    from elspeth_lints.core.cli import _run_check
+    from elspeth_lints.core.registry import RuleRegistry
+
+    _write(tmp_path / "broken.py", "def broken(:\n    pass\n")
+    empty_allowlist = tmp_path / "allowlist"
+    empty_allowlist.mkdir()
+
+    registry = RuleRegistry()
+    registry.register(GVE_ATTRIBUTION_RULE)
+
+    exit_code = _run_check(
+        argparse.Namespace(
+            rules="audit_evidence.gve_attribution",
+            rule_set="static",
+            format="json",
+            root=tmp_path,
+            allowlist_dir=empty_allowlist,
+            files=None,
+        ),
+        registry=registry,
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    rule_ids = {finding["rule_id"] for finding in payload}
+    assert "parse-error" in rule_ids
 
 
 def test_audit_evidence_json_mode_succeeds_on_current_codebase(

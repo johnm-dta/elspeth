@@ -1523,6 +1523,27 @@ class ElspethSettings(BaseModel):
             raise ValueError("At least one sink is required")
         return v
 
+    @field_validator("collection_probes")
+    @classmethod
+    def validate_unique_collection_probes(cls, v: list[CollectionProbeConfig]) -> list[CollectionProbeConfig]:
+        """Reject duplicate probe collections at config time, before any probe I/O.
+
+        Probe results are keyed by collection name in the commencement gate
+        context, so two probes for the same collection collide. The uniqueness
+        guard previously lived in resolve_preflight and only fired AFTER each
+        probe.probe() had already run, raising FrameworkBugError. Enforce it
+        mechanically at config construction. (elspeth-b657daab02)
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for probe in v:
+            if probe.collection in seen and probe.collection not in duplicates:
+                duplicates.append(probe.collection)
+            seen.add(probe.collection)
+        if duplicates:
+            raise ValueError(f"duplicate collection_probes for collection(s): {duplicates}")
+        return v
+
     @field_validator("sinks")
     @classmethod
     def validate_sink_names_lowercase(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:

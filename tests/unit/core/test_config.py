@@ -81,6 +81,41 @@ class TestElspethSettings:
         )
         assert settings.retry.max_attempts == 5
 
+    def test_rejects_duplicate_collection_probes(self) -> None:
+        """Duplicate probe collections are rejected at config time, before any probe runs.
+
+        Regression for elspeth-b657daab02: probe results are keyed by collection
+        in the commencement gate context, so two probes for the same collection
+        collide. The old guard fired only in resolve_preflight, AFTER each
+        probe.probe() had already run, and raised FrameworkBugError.
+        """
+        from pydantic import ValidationError
+
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError, match="duplicate collection_probes"):
+            ElspethSettings(
+                source={"plugin": "csv", "on_success": "output"},
+                sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
+                collection_probes=[
+                    {"collection": "docs", "provider": "chroma"},
+                    {"collection": "docs", "provider": "chroma"},
+                ],
+            )
+
+    def test_accepts_distinct_collection_probes(self) -> None:
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            source={"plugin": "csv", "on_success": "output"},
+            sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
+            collection_probes=[
+                {"collection": "docs", "provider": "chroma"},
+                {"collection": "images", "provider": "chroma"},
+            ],
+        )
+        assert len(settings.collection_probes) == 2
+
 
 class TestLoadSettings:
     """Test Dynaconf-based settings loading."""

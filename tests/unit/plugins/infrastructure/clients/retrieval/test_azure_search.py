@@ -367,6 +367,47 @@ class TestParseResponse:
         chunks, _ = provider._parse_response(response, min_score=0.0)
         assert chunks[0].score >= chunks[1].score >= chunks[2].score
 
+    @pytest.mark.parametrize(
+        "bad_value,desc",
+        [
+            ({"id": "doc1"}, "dict"),
+            ("a string", "str"),
+            (42, "int"),
+        ],
+    )
+    def test_non_list_value_raises(self, bad_value, desc):
+        """Tier 3: top-level 'value' present but not an array → RetrievalError, not AttributeError.
+
+        Regression for elspeth-1b138841d3: a non-array 'value' (object/string)
+        previously iterated into `item.get(...)` and raised raw AttributeError,
+        bypassing the transform's RetrievalError handling.
+        """
+        provider = self._make_provider()
+        with pytest.raises(RetrievalError, match="must be an array"):
+            provider._parse_response({"value": bad_value}, min_score=0.0)
+
+    def test_non_dict_array_members_skipped_at_tier3_boundary(self):
+        """Tier 3: non-object array members are recorded skips, not AttributeError crashes.
+
+        Regression for elspeth-1b138841d3. Skip-over-raise is deliberate: it
+        matches the file's per-item skip pattern and survives the mixed case
+        (one garbage member must not nuke the whole valid page).
+        """
+        provider = self._make_provider()
+        response = {
+            "value": [
+                "not an object",
+                {"@search.score": 5.0, "content": "good", "id": "doc1"},
+                123,
+            ]
+        }
+        chunks, skipped = provider._parse_response(response, min_score=0.0)
+        assert len(chunks) == 1
+        assert chunks[0].source_id == "doc1"
+        invalid_item_skips = [s for s in skipped if s["reason"] == "invalid_item_type"]
+        assert len(invalid_item_skips) == 2
+        assert {s["type"] for s in invalid_item_skips} == {"str", "int"}
+
 
 class TestAzureSearchProviderReadiness:
     """Tests for AzureSearchProvider.check_readiness()."""

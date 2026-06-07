@@ -293,6 +293,20 @@ class ChromaSearchProvider:
             distances = raw_distances[0]
             metadatas = raw_metadatas[0]
             ids = results["ids"][0]
+            # Tier 3 boundary: the four parallel arrays must agree in length.
+            # zip(..., strict=True) below would raise a bare ValueError on a
+            # mismatch — after the external query returned — bypassing the
+            # RetrievalError-only post-query audit handler in search(). Check
+            # here (inside the guard) so a non-sized value also surfaces as a
+            # TypeError → RetrievalError rather than escaping len().
+            if not (len(documents) == len(distances) == len(metadatas) == len(ids)):
+                raise RetrievalError(
+                    f"Chroma query for collection {self._config.collection!r} returned "
+                    f"mismatched result array lengths (documents={len(documents)}, "
+                    f"distances={len(distances)}, metadatas={len(metadatas)}, ids={len(ids)}). "
+                    f"This indicates a malformed SDK response or index corruption.",
+                    retryable=False,
+                )
         except (KeyError, TypeError, IndexError) as exc:
             raise RetrievalError(
                 f"Chroma query returned unexpected result structure: {exc}",
@@ -323,14 +337,25 @@ class ChromaSearchProvider:
             if score < min_score:
                 continue
 
-            chunks.append(
-                RetrievalChunk(
-                    content=doc,
-                    score=score,
-                    source_id=doc_id,
-                    metadata=dict(metadata) if metadata else {},
+            # RetrievalChunk validates score range and metadata JSON-serializability
+            # at construction, raising ValueError. That ValueError originates in the
+            # post-query parse path (e.g. corrupt-index metadata carrying NaN), so it
+            # must become a RetrievalError for search()'s audit handler to record it —
+            # mirrors the same wrap in AzureSearchProvider._parse_response.
+            try:
+                chunks.append(
+                    RetrievalChunk(
+                        content=doc,
+                        score=score,
+                        source_id=doc_id,
+                        metadata=dict(metadata) if metadata else {},
+                    )
                 )
-            )
+            except ValueError as exc:
+                raise RetrievalError(
+                    f"Chroma provider produced invalid chunk data for document {doc_id!r}: {exc}",
+                    retryable=False,
+                ) from exc
 
         return chunks, skipped
 

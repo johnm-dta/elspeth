@@ -51,6 +51,8 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-f2959957fc | AST: freeze_guards FG2 | f814fdbdb | isinstance guard matched bare Name only → now qualified Attribute (types.MappingProxyType/collections.abc.Mapping) + list/set, bare & tuple forms. Blast ZERO (no such form in real __post_init__) |
 | elspeth-ec6749f8da | AST: freeze_guards FG3 nested | f814fdbdb | `_annotation_contains_container` outer-name only → recurses tuple/frozenset carriers (carrier-gated: NOT Callable), strictly additive. Surfaced 1 real (_OutputBlobFinalizationOutcome.errors → elspeth-640168fa4b, allowlisted) |
 | elspeth-b872929157 | AST: freeze_guards FG3 partial | f814fdbdb | any-freeze-call → per-field coverage (freeze_fields names OR object.__setattr__ freeze-producing RHS; dynamic *splat = covers-all). 4 real partial cases all covered via object.__setattr__(tuple()) → blast ZERO |
+| elspeth-b8b600e213 | AST: tier_model L1 layer | 3d47fdb66 | scan_layer_imports_file collected only ImportFrom level==0/node.module → now _resolve_relative_module (relative) + bare-elspeth package-root disambiguated via _module_name_to_path (plugins=flag, __version__=skip). Per-node emission. Blast ZERO (real L1=0) |
+| elspeth-b7ef37c4a9 | AST: tier_model TC (FP) | 3d47fdb66 | _find_type_checking_lines direct-children-only → recurse node.body (NOT orelse). Nested-TC try/import → TC not L1. Real TC invariant=1 preserved |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped

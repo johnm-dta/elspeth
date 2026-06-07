@@ -53,6 +53,8 @@ dead `scripts/cicd/enforce_*.py` paths.
 | elspeth-b872929157 | AST: freeze_guards FG3 partial | f814fdbdb | any-freeze-call → per-field coverage (freeze_fields names OR object.__setattr__ freeze-producing RHS; dynamic *splat = covers-all). 4 real partial cases all covered via object.__setattr__(tuple()) → blast ZERO |
 | elspeth-b8b600e213 | AST: tier_model L1 layer | 3d47fdb66 | scan_layer_imports_file collected only ImportFrom level==0/node.module → now _resolve_relative_module (relative) + bare-elspeth package-root disambiguated via _module_name_to_path (plugins=flag, __version__=skip). Per-node emission. Blast ZERO (real L1=0) |
 | elspeth-b7ef37c4a9 | AST: tier_model TC (FP) | 3d47fdb66 | _find_type_checking_lines direct-children-only → recurse node.body (NOT orelse). Nested-TC try/import → TC not L1. Real TC invariant=1 preserved |
+| elspeth-37879426d1 | AST: audit_evidence_nominal (form) | 89c19cc82 | _class_defines_to_audit_dict missed AnnAssign → now detects AnnAssign-with-value (bare annotation defines nothing → ignored). Blast ZERO |
+| elspeth-584d4ea502 | AST: audit_evidence_nominal (MD5 provenance) | 89c19cc82 | _bases_include_audit_evidence_base name-only → requires import from elspeth.contracts.audit_evidence; same-module allowance for subclass inside contracts/audit_evidence.py. Blast ZERO (all 5 real imports canonical). Existing accepts_direct_base test updated to import canonically |
 
 **Ergonomics win 2 — e7ff99c39:** ruff now `extend-exclude`s `rules/**/fixtures`
 (mirrors mypy). Adding a fixture using the deprecated `List[int]` form tripped

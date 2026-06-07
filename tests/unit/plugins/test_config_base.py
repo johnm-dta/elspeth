@@ -663,6 +663,19 @@ class TestComponentTypeEnforcement:
 
         assert GoodConfig._plugin_component_type == "transform"
 
+    @pytest.mark.parametrize("bad_value", ["nonsense", "Source", "sources", "", "SINK"])
+    def test_subclass_with_invalid_component_type_raises(self, bad_value: str) -> None:
+        """A non-None but invalid _plugin_component_type must be rejected at class creation.
+
+        Regression for elspeth-d876f7b31b: __init_subclass__ only rejected None,
+        so 'nonsense' (and other non-{source,sink,transform} strings) reached
+        downstream validation/audit attribution via PluginConfigError.component_type.
+        """
+        with pytest.raises(TypeError, match="must be one of"):
+
+            class BadConfig(DataPluginConfig):
+                _plugin_component_type: ClassVar[str | None] = bad_value
+
     def test_path_config_subclass_without_component_type_raises(self) -> None:
         """PathConfig subclass missing _plugin_component_type raises TypeError.
 

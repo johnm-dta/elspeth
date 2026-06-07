@@ -86,6 +86,10 @@ jobs:
       image_tag: ${{ steps.meta.outputs.version }}
       ghcr_image: ${{ steps.ghcr-push.outputs.digest && format('ghcr.io/{0}/{1}@{2}', github.repository_owner, env.IMAGE_NAME, steps.ghcr-push.outputs.digest) || '' }}
       acr_image: ${{ steps.acr-push.outputs.digest && format('{0}/{1}@{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, steps.acr-push.outputs.digest) || '' }}
+      # Which registries were actually pushed, so the smoke-test job tests the
+      # image that exists rather than unconditionally pulling GHCR.
+      push_ghcr: ${{ steps.registries.outputs.push_ghcr }}
+      push_acr: ${{ steps.registries.outputs.push_acr }}
 
     steps:
       - name: Checkout code
@@ -272,25 +276,63 @@ jobs:
     name: Smoke Test
     runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push]
+    # Only smoke-test when an image was actually pushed. An ACR-only manual
+    # dispatch sets push_ghcr=false; if neither registry was pushed there is
+    # nothing to test (and the old job would have failed pulling a GHCR image
+    # the workflow intentionally did not push).
+    if: needs.build-push.outputs.push_ghcr == 'true' || needs.build-push.outputs.push_acr == 'true'
     steps:
       - name: Checkout code (for example files)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ env.IMAGE_SHA }}
 
+      # Pick the image to smoke-test from the registry that was actually pushed.
+      # GHCR is preferred when present (the common path); ACR is used for an
+      # ACR-only dispatch. The chosen image and registry are exported so the
+      # login steps and every test step below operate on the real artifact.
+      - name: Determine smoke-test image
+        env:
+          PUSH_GHCR: ${{ needs.build-push.outputs.push_ghcr }}
+          PUSH_ACR: ${{ needs.build-push.outputs.push_acr }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUSH_GHCR" == "true" ]]; then
+            echo "SMOKE_REGISTRY=ghcr" >> "$GITHUB_ENV"
+            echo "SMOKE_IMAGE=ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          elif [[ "$PUSH_ACR" == "true" ]]; then
+            echo "SMOKE_REGISTRY=acr" >> "$GITHUB_ENV"
+            echo "SMOKE_IMAGE=${ACR_REGISTRY}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          else
+            echo "No image was pushed; nothing to smoke-test." >&2
+            exit 1
+          fi
+
       - name: Login to GHCR (to pull image)
+        if: env.SMOKE_REGISTRY == 'ghcr'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to ACR (to pull image)
+        if: env.SMOKE_REGISTRY == 'acr'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
       - name: Basic CLI tests
         env:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "Testing image: $IMAGE"
 
@@ -311,7 +353,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "=== Test 4: Run actual pipeline (threshold_gate_container example) ==="
 
@@ -385,7 +427,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "=== Test 6: Run representative no-secret examples ==="
           for example in boolean_routing batch_aggregation json_explode schema_contracts_demo; do

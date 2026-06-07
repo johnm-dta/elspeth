@@ -329,3 +329,26 @@ class TestResolveHostnameOrdering:
 
         result = _resolve_hostname("example.com")
         assert result == ["10.0.0.3", "10.0.0.1", "10.0.0.2"]
+
+
+class TestIPv6HostHeaderBrackets:
+    """elspeth-7144494104: a literal IPv6 authority must keep its brackets in the
+    Host header (parsed.hostname strips them), else non-default ports produce an
+    ambiguous/invalid Host like 2606:...:8080."""
+
+    _PUBLIC_IPV6 = "2606:4700:4700::1111"
+
+    def test_literal_ipv6_non_default_port_is_bracketed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("elspeth.core.security.web._resolve_hostname", lambda hostname: [self._PUBLIC_IPV6])
+        result = validate_url_for_ssrf(f"http://[{self._PUBLIC_IPV6}]:8080/path")
+        assert result.host_header == f"[{self._PUBLIC_IPV6}]:8080"
+
+    def test_literal_ipv6_default_port_is_bracketed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("elspeth.core.security.web._resolve_hostname", lambda hostname: [self._PUBLIC_IPV6])
+        result = validate_url_for_ssrf(f"http://[{self._PUBLIC_IPV6}]/path")
+        assert result.host_header == f"[{self._PUBLIC_IPV6}]"
+
+    def test_ipv4_and_dns_host_headers_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("elspeth.core.security.web._resolve_hostname", lambda hostname: ["93.184.216.34"])
+        assert validate_url_for_ssrf("http://example.com:8080/p").host_header == "example.com:8080"
+        assert validate_url_for_ssrf("http://example.com/p").host_header == "example.com"

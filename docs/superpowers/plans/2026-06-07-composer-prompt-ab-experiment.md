@@ -165,4 +165,3 @@ For each variant, in order:
 - **Consistency:** swap target, restart requirement, and hash-verify are consistent across the runner and the threats section. Model pinned to `gpt-5.4-mini` throughout.
 - **Standby respected:** no live `src/elspeth/web/composer/**` edits in Phase 0; variants live under `notes/`.
 ```
-

@@ -206,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6d56aa1f83215734"
+    source_file_hash: str | None = "sha256:d5fd3a4f3c6b40e6"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -477,7 +477,7 @@ class DataverseSource(BaseSource):
             error_reason: Additional error context
         """
         if page is not None:
-            request_data = {
+            request_data: dict[str, Any] = {
                 "method": "GET",
                 "url": url,
                 "headers": page.request_headers,  # Already fingerprinted by client
@@ -508,7 +508,11 @@ class DataverseSource(BaseSource):
                     f"Page fetch completed but audit record is missing."
                 ) from exc
         elif error is not None:
-            request_data = {"method": "GET", "url": url}
+            request_data = {
+                "method": "GET",
+                "url": url,
+                "headers": error.request_headers,  # Fingerprinted by client; mirrors the success path
+            }
             error_data = {
                 "error_type": type(error).__name__,
                 "message": str(error),

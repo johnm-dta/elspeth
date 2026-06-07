@@ -725,6 +725,32 @@ class TestWriteLifecycle:
         assert error_data["error_type"] == "DataverseClientError"
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_error_audit_preserves_request_headers(self, _mock_schema: MagicMock) -> None:
+        """elspeth-98855f307a: the write-error audit must include the fingerprinted
+        request_headers the client preserved on the error, mirroring the success path."""
+        sink = inject_write_failure(DataverseSink(_config()))
+
+        mock_client = MagicMock()
+        mock_client.upsert.side_effect = DataverseClientError(
+            "Server error (500)",
+            retryable=True,
+            status_code=500,
+            request_url="https://test.crm.dynamics.com/api/data/v9.2/contacts",
+            request_headers={"Authorization": "<fingerprint:abc>"},
+        )
+        mock_client.get_auth_headers.return_value = {}
+        sink._client = mock_client
+
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        with pytest.raises(DataverseClientError):
+            sink.write(rows, ctx)
+
+        request_data = ctx.record_call.call_args_list[0].kwargs["request_data"]
+        assert request_data["headers"] == {"Authorization": "<fingerprint:abc>"}
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_record_call_includes_url_and_method(self, _mock_schema: MagicMock) -> None:
         sink = inject_write_failure(DataverseSink(_config()))
 

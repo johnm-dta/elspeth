@@ -269,6 +269,75 @@ def test_tier_1_decoration_reports_missing_caller_module() -> None:
     assert "caller_module" in findings[0].message
 
 
+def test_tier_1_decoration_reports_missing_reason() -> None:
+    # elspeth-08b0336287: a tier_1_error decorator without a reason does not
+    # satisfy the Tier-1 decoration requirement (runtime rejects it).
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            _tree("""
+            @tier_1_error(caller_module=__name__)
+            class MissingReasonError(Exception):
+                pass
+            """),
+            Path("errors.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "MissingReasonError" in findings[0].message
+
+
+def test_tier_1_decoration_reports_empty_reason() -> None:
+    # elspeth-08b0336287: an empty reason is equivalent to no reason.
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            _tree("""
+            @tier_1_error(reason="", caller_module=__name__)
+            class EmptyReasonError(Exception):
+                pass
+            """),
+            Path("errors.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "EmptyReasonError" in findings[0].message
+
+
+def test_tier_1_decoration_enforces_tde2_outside_errors_py(tmp_path: Path) -> None:
+    # elspeth-f8650893f1: the caller_module spoofing guard (TDE2) must apply to
+    # tier_1_error call sites in files OTHER than errors.py. TDE1 (class
+    # decoration) stays scoped to errors.py — a *Error class elsewhere is not
+    # flagged for missing decoration.
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir(parents=True)
+    (contracts_dir / "errors.py").write_text("# canonical target — no classes\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text(
+        textwrap.dedent("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
+            @tier_1_error(reason="missing caller module")
+            class OtherError(Exception):
+                pass
+        """),
+        encoding="utf-8",
+    )
+
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert any(f.rule_id == "TDE2" and "other.py" in f.file_path for f in findings)
+    # TDE1 is errors.py-scoped: OtherError (a *Error class outside errors.py) is not flagged.
+    assert not any(f.rule_id == "TDE1" for f in findings)
+
+
 def test_tier_1_decoration_accepts_caller_module_name(tmp_path: Path) -> None:
     findings = _tier_1_findings_from_file(
         tmp_path,

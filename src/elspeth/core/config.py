@@ -148,8 +148,12 @@ def _validate_connection_or_sink_name(value: str, *, field_label: str) -> str:
     return value
 
 
-_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-"""Valid POSIX environment-variable name: leading letter/underscore, then word chars."""
+_ENV_VAR_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+"""Valid POSIX environment-variable name: leading letter/underscore, then word chars.
+
+Anchored with \\A...\\Z (not ^...$): $ matches just before a trailing newline, so
+"NAME\\n" would otherwise be wrongly accepted.
+"""
 
 
 class SecretsConfig(BaseModel):

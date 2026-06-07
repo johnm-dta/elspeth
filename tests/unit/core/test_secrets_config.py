@@ -53,7 +53,7 @@ class TestSecretsConfigValidation:
 
     @pytest.mark.parametrize(
         "bad_name",
-        ["BAD=NAME", "", "1STARTS_WITH_DIGIT", "HAS SPACE", "HAS-DASH", "HAS.DOT", "NUL\x00BYTE"],
+        ["BAD=NAME", "", "1STARTS_WITH_DIGIT", "HAS SPACE", "HAS-DASH", "HAS.DOT", "NUL\x00BYTE", "TRAILING\n", "\nLEADING"],
     )
     def test_keyvault_mapping_rejects_invalid_env_var_names(self, bad_name: str) -> None:
         """Invalid env-var names in the mapping are rejected at config time.

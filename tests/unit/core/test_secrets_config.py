@@ -51,6 +51,39 @@ class TestSecretsConfigValidation:
         assert config.vault_url == "https://my-vault.vault.azure.net"
         assert len(config.mapping) == 2
 
+    @pytest.mark.parametrize(
+        "bad_name",
+        ["BAD=NAME", "", "1STARTS_WITH_DIGIT", "HAS SPACE", "HAS-DASH", "HAS.DOT", "NUL\x00BYTE"],
+    )
+    def test_keyvault_mapping_rejects_invalid_env_var_names(self, bad_name: str) -> None:
+        """Invalid env-var names in the mapping are rejected at config time.
+
+        Regression for elspeth-1afd07cb77: mapping keys become os.environ
+        assignments in the sequential apply phase; an invalid name ('BAD=NAME'
+        -> ValueError, '' -> OSError) would fail late, after a valid earlier
+        entry had already mutated process env. Reject mechanically before any
+        Key Vault I/O.
+        """
+        from elspeth.core.config import SecretsConfig
+
+        with pytest.raises(ValidationError, match="not a valid environment"):
+            SecretsConfig(
+                source="keyvault",
+                vault_url="https://my-vault.vault.azure.net",
+                mapping={bad_name: "secret"},
+            )
+
+    def test_keyvault_mapping_accepts_valid_env_var_names(self) -> None:
+        """POSIX-style env-var names (leading letter/underscore) are accepted."""
+        from elspeth.core.config import SecretsConfig
+
+        config = SecretsConfig(
+            source="keyvault",
+            vault_url="https://my-vault.vault.azure.net",
+            mapping={"AZURE_OPENAI_KEY": "k1", "_PRIVATE": "k2", "K3_v2": "k3"},
+        )
+        assert len(config.mapping) == 3
+
     def test_invalid_source_rejected(self) -> None:
         """Invalid source value is rejected."""
         from elspeth.core.config import SecretsConfig

@@ -138,6 +138,10 @@ def _validate_connection_or_sink_name(value: str, *, field_label: str) -> str:
     return value
 
 
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+"""Valid POSIX environment-variable name: leading letter/underscore, then word chars."""
+
+
 class SecretsConfig(BaseModel):
     """Configuration for secret loading.
 
@@ -219,6 +223,26 @@ class SecretsConfig(BaseModel):
 
         # Normalize: strip trailing slash
         return v.rstrip("/")
+
+    @field_validator("mapping")
+    @classmethod
+    def validate_mapping_env_var_names(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject invalid environment-variable names before any Key Vault I/O.
+
+        Mapping keys become ``os.environ[name] = value`` assignments in the
+        sequential apply phase (core/security/config_secrets.py). Python rejects
+        a name containing ``=`` with ValueError and an empty name with OSError,
+        and the apply loop sets entries one at a time — so a valid entry ahead of
+        an invalid one would mutate process env before the late failure, despite
+        the apply phase's atomicity comment. Reject malformed names mechanically
+        at config-construction time. (elspeth-1afd07cb77)
+        """
+        for env_var_name in v:
+            if not _ENV_VAR_NAME_RE.match(env_var_name):
+                raise ValueError(
+                    f"secrets mapping key {env_var_name!r} is not a valid environment variable name (must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+        return v
 
     @model_validator(mode="after")
     def validate_keyvault_requirements(self) -> "SecretsConfig":

@@ -2,7 +2,17 @@
 Configuration schema and loading for Elspeth pipelines.
 
 Uses Pydantic for validation and Dynaconf for multi-source loading.
-Settings are frozen (immutable) after construction.
+
+Immutability model (see elspeth-c9a2397270): Pydantic ``frozen=True`` blocks
+attribute *reassignment* after construction, but nested containers (option
+dicts, route maps, lists) remain mutable in-process. They are deliberately NOT
+deep-frozen here: deep-freezing wraps containers in ``MappingProxyType``, which
+is not picklable and breaks the ``copy.deepcopy`` used in the loading pipeline.
+Deep immutability is instead enforced downstream at the DAG ``NodeInfo`` layer,
+where ``config`` is wrapped in ``MappingProxyType`` once the graph is built.
+Config is operator-authored (never external-input-driven), and the audit
+snapshot is taken from ``settings.model_dump()`` in ``resolve_config()``, so the
+residual mutability window is first-party in-process only.
 """
 
 import ast
@@ -1367,7 +1377,11 @@ class ElspethSettings(BaseModel):
     """Top-level Elspeth configuration matching architecture specification.
 
     This is the single source of truth for pipeline configuration.
-    All settings are validated and frozen after construction.
+    All settings are validated at construction. Pydantic ``frozen=True`` blocks
+    attribute reassignment; note that nested containers (e.g. ``source.options``,
+    gate ``routes``) are NOT deeply frozen here — see the module docstring for the
+    full immutability model (deep immutability is enforced at the DAG NodeInfo
+    layer; deep-freezing Settings would break the deepcopy loading pipeline).
     """
 
     model_config = {"frozen": True, "extra": "forbid"}

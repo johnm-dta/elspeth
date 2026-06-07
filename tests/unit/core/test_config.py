@@ -1006,6 +1006,60 @@ class TestGateSettings:
         assert gate.routes == {"true": "fork", "false": "fallback_path"}
         assert gate.fork_to == ["path_a", "path_b"]
 
+    @pytest.mark.parametrize(
+        "bad_condition",
+        [
+            "5",
+            "row['amount'] + 1",
+            "len(row['items'])",
+            "abs(row['x'])",
+            "row['x'] / 2",
+            "row['x'] // 2",
+            "-row['x']",
+        ],
+    )
+    def test_gate_settings_rejects_provably_numeric_condition(self, bad_condition: str) -> None:
+        """Conditions that statically return a numeric value are rejected at config time.
+
+        Regression for elspeth-f78e84f509: GateExecutor accepts only bool (-> 'true'/'false')
+        or str (-> route label). A provably-numeric expression can never produce a valid
+        route label and would TypeError at row execution — reject it at settings validation.
+        """
+        from pydantic import ValidationError
+
+        from elspeth.core.config import GateSettings
+
+        with pytest.raises(ValidationError, match="numeric value"):
+            GateSettings(
+                name="numeric_gate",
+                input="source_out",
+                condition=bad_condition,
+                routes={"high": "a", "low": "b"},
+            )
+
+    @pytest.mark.parametrize(
+        "ok_condition",
+        [
+            "row['tier']",  # unknown type — may be a route-label string
+            "row.get('label')",
+            "'gold' if row['vip'] else 'silver'",  # ternary of strings
+            "row['a'] + row['b']",  # Add of two unknowns — could be str concat
+            "row['name'] * 2",  # Mult — could be str repetition
+            "row['s'] % row['t']",  # Mod — could be str formatting
+        ],
+    )
+    def test_gate_settings_accepts_ambiguous_or_string_condition(self, ok_condition: str) -> None:
+        """Conservative: only PROVABLY-numeric conditions are rejected; ambiguous/string ones pass."""
+        from elspeth.core.config import GateSettings
+
+        gate = GateSettings(
+            name="route_gate",
+            input="source_out",
+            condition=ok_condition,
+            routes={"gold": "a", "silver": "b"},
+        )
+        assert gate.condition == ok_condition
+
     def test_gate_settings_invalid_condition_syntax(self) -> None:
         """Condition must be valid Python syntax."""
         from elspeth.core.config import GateSettings

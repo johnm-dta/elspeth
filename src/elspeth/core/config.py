@@ -681,6 +681,15 @@ class GateSettings(BaseModel):
                 msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
 
                 raise ValueError(" ".join(msg_parts))
+        elif parser.is_provably_non_routable():
+            # The expression statically returns a numeric value, which GateExecutor
+            # cannot turn into a route label (it accepts only bool or str). Reject at
+            # config time rather than deferring the TypeError to the first row.
+            raise ValueError(
+                f"Gate '{self.name}' condition ({self.condition!r}) statically returns a numeric value, "
+                f"which can never be a route label. Gate conditions must evaluate to a boolean "
+                f'(routes "true"/"false") or to a string route label.'
+            )
 
         return self
 

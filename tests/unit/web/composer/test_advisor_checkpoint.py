@@ -415,3 +415,190 @@ async def test_end_gate_skips_structurally_empty_state(make_service, empty_state
     outcome = await drive_try_terminate(service, empty_state, advisor_checkpoint_passes_used=0)
     service._run_advisor_checkpoint.assert_not_awaited()
     assert outcome.action == "return"
+
+
+# ---------------------------------------------------------------------------
+# Parts B & C: degeneracy-aware advisor summary + END sign-off rubric.
+#
+# B1: prompt-shaped keys get a larger render budget so the advisor sees the
+#     whole prompt (rubric anchors + output contract), while ordinary values
+#     stay capped at the 120-char budget.
+# B2: LLM nodes annotate which row fields their prompt interpolates (length
+#     -independent degeneracy signal), or NONE when there are no row refs.
+# B-cap: even with several ~1000-char prompts the rendered END user-message
+#        stays under the composer_advisor_max_prompt_tokens char_cap.
+# C: the END problem_summary carries the degenerate-output directive (and the
+#    early one does not), with CLEAN/FLAGGED still the last sentence.
+# ---------------------------------------------------------------------------
+
+
+def _llm_node(node_id: str, *, prompt_template: str, options_extra: dict | None = None) -> NodeSpec:
+    opts: dict[str, object] = {"prompt_template": prompt_template}
+    if options_extra:
+        opts.update(options_extra)
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input="rows",
+        on_success="rated",
+        on_error=None,
+        options=opts,
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def test_render_options_untruncates_prompt_but_caps_other_values():
+    """B1: a >700-char prompt_template is rendered far enough that a substring
+    near its END is visible, while a >700-char non-prompt allowlisted value is
+    still truncated to <=120 chars."""
+    from elspeth.web.composer.service import (
+        _ADVISOR_SUMMARY_VALUE_MAX_CHARS,
+        _render_options_for_advisor,
+    )
+
+    tail_anchor = "RETURN_JSON_OUTPUT_CONTRACT_TAIL"
+    long_prompt = ("Judge the page. " * 50) + tail_anchor  # ~800+ chars, anchor at end
+    long_expression = "x" * 800  # allowlisted, but NOT prompt-shaped
+
+    rendered = _render_options_for_advisor({"prompt_template": long_prompt, "expression": long_expression})
+
+    # Prompt-shaped key: the END of the prompt is visible (large budget).
+    assert tail_anchor in rendered
+    # Non-prompt allowlisted value: still truncated to the small budget.
+    expr_segment = rendered.split("expression=", 1)[1]
+    expr_value = expr_segment.split(",", 1)[0].split(";", 1)[0]
+    assert len(expr_value) <= _ADVISOR_SUMMARY_VALUE_MAX_CHARS
+    assert "xxxxxxxxxx" in expr_value  # it really is the (truncated) expression
+
+
+def test_render_options_template_key_also_untruncated():
+    """B1: the ``template`` alias is treated as prompt-shaped too."""
+    from elspeth.web.composer.service import _render_options_for_advisor
+
+    tail = "TEMPLATE_TAIL_ANCHOR"
+    long_template = ("rate this. " * 70) + tail
+    rendered = _render_options_for_advisor({"template": long_template})
+    assert tail in rendered
+
+
+def test_summarize_annotates_interpolated_row_fields(simple_state):
+    """B2: an LLM node whose prompt interpolates row fields lists them."""
+    from elspeth.web.composer.service import _summarize_pipeline_for_advisor
+
+    node = _llm_node(
+        "rate",
+        prompt_template="Rate {{ row.url }} given its body {{ row.content }}.",
+    )
+    state = simple_state.with_node(node)
+    summary = _summarize_pipeline_for_advisor(state)
+    assert "interpolates row fields:" in summary
+    # Order-tolerant: both fields present in the bracketed list.
+    annotation_line = next(line for line in summary.splitlines() if "interpolates row fields:" in line)
+    assert "url" in annotation_line
+    assert "content" in annotation_line
+    assert "NONE" not in annotation_line
+
+
+def test_summarize_annotates_bracket_subscript_row_fields(simple_state):
+    """B2: bracket-subscript ``{{ row['content'] }}`` must be detected too — it is
+    valid engine syntax (extract_jinja2_fields accepts it) and the live composer
+    skill teaches it, so a dot-only matcher would falsely annotate it NONE and
+    trigger a spurious end-gate FLAG."""
+    from elspeth.web.composer.service import _summarize_pipeline_for_advisor
+
+    node = _llm_node(
+        "rate",
+        prompt_template="Rate the page using its body {{ row['content'] }} and {{ row[\"url\"] }}.",
+    )
+    state = simple_state.with_node(node)
+    summary = _summarize_pipeline_for_advisor(state)
+    annotation_line = next(line for line in summary.splitlines() if "interpolates row fields:" in line)
+    assert "content" in annotation_line
+    assert "url" in annotation_line
+    assert "NONE" not in annotation_line
+
+
+def test_summarize_annotates_no_row_fields_loudly(simple_state):
+    """B2: an LLM node whose prompt has no row refs is flagged NONE."""
+    from elspeth.web.composer.service import _summarize_pipeline_for_advisor
+
+    node = _llm_node("rate", prompt_template="Rate how cool government web pages are.")
+    state = simple_state.with_node(node)
+    summary = _summarize_pipeline_for_advisor(state)
+    assert "interpolates row fields: NONE" in summary
+
+
+def test_summarize_reads_prompt_from_nested_options(simple_state):
+    """B2: the interpolation signal reflects the real prompt even in the nested
+    ``options`` shape (mirrors _node_required_input_fields' fallback)."""
+    from elspeth.web.composer.service import _summarize_pipeline_for_advisor
+
+    node = NodeSpec(
+        id="rate",
+        node_type="transform",
+        plugin="llm",
+        input="rows",
+        on_success="rated",
+        on_error=None,
+        options={"options": {"prompt_template": "Summarise {{ row.title }}."}},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    state = simple_state.with_node(node)
+    summary = _summarize_pipeline_for_advisor(state)
+    annotation_line = next(line for line in summary.splitlines() if "interpolates row fields:" in line)
+    assert "title" in annotation_line
+
+
+def test_summary_with_many_large_prompts_stays_under_char_cap():
+    """B-cap: several LLM nodes each with a ~1000-char prompt still produce an
+    END user-message under composer_advisor_max_prompt_tokens * 4 chars."""
+    from elspeth.web.composer.service import _build_advisor_user_message
+
+    settings = _make_settings()
+    char_cap = settings.composer_advisor_max_prompt_tokens * 4
+
+    big_prompt = "Judge {{ row.url }} using its body {{ row.content }}. " + ("detail " * 140)
+    assert len(big_prompt) >= 1000
+    nodes = tuple(_llm_node(f"n{i}", prompt_template=big_prompt) for i in range(4))
+    state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="rows", options={"path": "in.csv"}, on_validation_failure="discard"),
+        nodes=nodes,
+        edges=(),
+        outputs=(OutputSpec(name="rated", plugin="csv", options={"path": "out.csv"}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=2,
+    )
+
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    args = service._build_checkpoint_arguments(phase="end", state=state)
+    total_chars = len(_build_advisor_user_message(args))
+    assert total_chars < char_cap, f"{total_chars} >= {char_cap}; no headroom"
+
+
+def test_end_checkpoint_problem_summary_carries_degeneracy_rubric(make_service, simple_state):
+    """C: the END problem_summary appends the degenerate-output directive, the
+    early one does not, and CLEAN/FLAGGED stays the final sentence."""
+    service = make_service()
+    end_args = service._build_checkpoint_arguments(phase="end", state=simple_state)
+    early_args = service._build_checkpoint_arguments(phase="early", state=simple_state)
+
+    end_summary = end_args["problem_summary"]
+    early_summary = early_args["problem_summary"]
+
+    assert "interpolate the row field" in end_summary
+    assert "fabricate" in end_summary
+    assert end_summary.rstrip().endswith("Start your reply with CLEAN or FLAGGED.")
+
+    assert "interpolate the row field" not in early_summary
+    assert "fabricate" not in early_summary

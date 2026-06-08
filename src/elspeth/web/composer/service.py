@@ -45,6 +45,7 @@ from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerP
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.core.templates import extract_jinja2_fields
 from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
@@ -4066,7 +4067,17 @@ class ComposerServiceImpl:
             "problem_summary": (
                 "Final sign-off. Does this pipeline fulfil the user's intent and is it "
                 "sound? Flag any unmet intent, broken field contract, or subjective rubric "
-                "that should have been surfaced. Start your reply with CLEAN or FLAGGED."
+                "that should have been surfaced. "
+                "Also verify every LLM node's prompt_template will yield REAL, per-row "
+                "output: it must interpolate the row field(s) it judges (each LLM node "
+                "lists its interpolated row fields). FLAG any LLM prompt that interpolates "
+                "no varying content, or that asks the model to judge a page or record from "
+                "a URL or identifier alone — it will fabricate or repeat one answer for "
+                "every row. Do NOT flag identical results that simply reflect "
+                "genuinely-similar inputs; the defect is a prompt that cannot see the "
+                "per-row data, not a question whose true answer happens to be similar "
+                "across rows. "
+                "Start your reply with CLEAN or FLAGGED."
             ),
             "recent_errors": [],
             "attempted_actions": [],
@@ -4636,6 +4647,17 @@ _ADVISOR_SUMMARY_VALUE_KEYS: Final[frozenset[str]] = frozenset(
     }
 )
 _ADVISOR_SUMMARY_VALUE_MAX_CHARS: Final[int] = 120
+# Prompt-shaped option values (``prompt_template``/``template``) get a much
+# larger render budget so the advisor sees the WHOLE prompt — its rubric
+# anchors and (for the degeneracy check) its row-field interpolations — not
+# just the opening line. Kept well under the per-call char_cap
+# (composer_advisor_max_prompt_tokens * 4) enforced in
+# ``_validate_advisor_arguments``; the global 120 cap is deliberately left
+# unchanged so every non-prompt value stays compact.
+_ADVISOR_SUMMARY_PROMPT_VALUE_MAX_CHARS: Final[int] = 1000
+# Option keys whose VALUE is prompt-shaped (free-text the model is told to
+# follow). Rendered with the larger budget above.
+_ADVISOR_SUMMARY_PROMPT_VALUE_KEYS: Final[frozenset[str]] = frozenset({"prompt_template", "template"})
 
 
 def _summarize_pipeline_for_advisor(state: CompositionState) -> str:
@@ -4689,10 +4711,15 @@ def _summarize_pipeline_for_advisor(state: CompositionState) -> str:
             control = _render_node_control_flow(node)
             control_suffix = f" {control}" if control else ""
             opt_text = _render_options_for_advisor(node.options)
+            # LLM nodes get a length-independent degeneracy signal: which row
+            # fields their prompt interpolates (or NONE). An LLM node is a
+            # transform whose plugin is ``llm`` (node_type is never "llm").
+            is_llm = node.plugin == "llm"
+            interp_suffix = f" [{_render_interpolated_row_fields(node)}]" if is_llm else ""
             lines.append(
                 f"  - {node.id}: type={node.node_type} plugin={plugin} "
                 f"reads '{node.input}' -> '{on_success}'{control_suffix} "
-                f"[requires: {req_text}] [{opt_text}]"
+                f"[requires: {req_text}] [{opt_text}]{interp_suffix}"
             )
 
     # Sinks.
@@ -4744,7 +4771,10 @@ def _render_options_for_advisor(options: Mapping[str, Any]) -> str:
     name_only: list[str] = []
     for key in sorted(options.keys()):
         if key in _ADVISOR_SUMMARY_VALUE_KEYS:
-            value_parts.append(f"{key}={_truncate_for_advisor(str(options[key]))}")
+            limit = (
+                _ADVISOR_SUMMARY_PROMPT_VALUE_MAX_CHARS if key in _ADVISOR_SUMMARY_PROMPT_VALUE_KEYS else _ADVISOR_SUMMARY_VALUE_MAX_CHARS
+            )
+            value_parts.append(f"{key}={_truncate_for_advisor(str(options[key]), limit)}")
         else:
             name_only.append(key)
     segments: list[str] = []
@@ -4755,11 +4785,16 @@ def _render_options_for_advisor(options: Mapping[str, Any]) -> str:
     return "; ".join(segments)
 
 
-def _truncate_for_advisor(value: str) -> str:
-    """Bound a rendered value so the summary stays compact. Never raises."""
-    if len(value) <= _ADVISOR_SUMMARY_VALUE_MAX_CHARS:
+def _truncate_for_advisor(value: str, limit: int = _ADVISOR_SUMMARY_VALUE_MAX_CHARS) -> str:
+    """Bound a rendered value so the summary stays compact. Never raises.
+
+    ``limit`` defaults to the global compact cap; prompt-shaped keys pass the
+    larger :data:`_ADVISOR_SUMMARY_PROMPT_VALUE_MAX_CHARS` so the advisor sees
+    the whole prompt. Every other call site is unaffected.
+    """
+    if len(value) <= limit:
         return value
-    return value[: _ADVISOR_SUMMARY_VALUE_MAX_CHARS - 1] + "…"
+    return value[: limit - 1] + "…"
 
 
 def _node_required_input_fields(node: NodeSpec) -> list[str]:
@@ -4777,6 +4812,56 @@ def _node_required_input_fields(node: NodeSpec) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(field) for field in raw if isinstance(field, str)]
     return []
+
+
+def _node_prompt_template(node: NodeSpec) -> str | None:
+    """Return a node's ``prompt_template`` from the flat or nested options shape.
+
+    Mirrors :func:`_node_required_input_fields`' fallback so the degeneracy
+    signal reflects the prompt the plugin will actually use. Coerces only string
+    values; anything else (or absence) yields ``None``. Never raises.
+    """
+    raw: Any = node.options.get("prompt_template")
+    if raw is None:
+        nested = node.options.get("options")
+        if isinstance(nested, Mapping):
+            raw = nested.get("prompt_template")
+    return raw if isinstance(raw, str) else None
+
+
+def _interpolated_row_fields(prompt_template: str) -> list[str]:
+    """Distinct ``row`` fields the prompt interpolates, sorted for determinism.
+
+    Uses the engine's own :func:`extract_jinja2_fields` so the degeneracy signal
+    matches the interpolation syntax the LLM plugin actually accepts and the live
+    composer skill teaches — BOTH ``{{ row.field }}`` and ``{{ row['field'] }}``
+    (a bespoke dot-only regex would mis-annotate a valid bracket-syntax prompt as
+    having no fields, producing a false FLAG at the end gate). Scans the FULL
+    prompt, never the truncated render, so the signal is length-independent.
+    Never raises: a malformed template yields no fields rather than crashing the
+    advisor summary.
+    """
+    try:
+        return sorted(extract_jinja2_fields(prompt_template))
+    except Exception:  # advisor summary must never raise on a malformed prompt
+        return []
+
+
+def _render_interpolated_row_fields(node: NodeSpec) -> str:
+    """Render the length-independent degeneracy signal for an LLM node.
+
+    ``interpolates row fields: [url, content]`` when the prompt references row
+    fields; ``interpolates row fields: NONE`` (rendered loudly) when it does
+    not — a prompt that sees no per-row data will fabricate or repeat one answer
+    for every row. Returns ``""`` for a node with no prompt_template at all.
+    """
+    prompt = _node_prompt_template(node)
+    if prompt is None:
+        return "interpolates row fields: NONE"
+    fields = _interpolated_row_fields(prompt)
+    if not fields:
+        return "interpolates row fields: NONE"
+    return "interpolates row fields: [" + ", ".join(fields) + "]"
 
 
 # ---------------------------------------------------------------------------

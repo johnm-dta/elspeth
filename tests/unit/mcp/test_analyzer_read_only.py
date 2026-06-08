@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from sqlalchemy import insert
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import runs_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
+
+# Root bypasses directory permission bits, so ``chmod(0o555)`` does not actually
+# make a directory read-only for uid 0. CI runs as root (the workflow installs
+# apt packages without sudo), which means the immutable read-only-directory
+# optimization this test exercises legitimately does not engage there: the
+# analyzer can still open ``mode=ro`` against a writable directory and SQLite is
+# free to create the ``-wal`` / ``-shm`` sidecars. The URL-selection logic is
+# covered deterministically, without relying on filesystem permissions, by
+# ``test_sqlite_read_only_url_does_not_use_immutable_for_writable_live_directory``.
+_RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def _create_file_backed_audit_db(db_path: Path) -> None:
@@ -33,6 +45,11 @@ def _create_file_backed_audit_db(db_path: Path) -> None:
         db.close()
 
 
+@pytest.mark.skipif(
+    _RUNNING_AS_ROOT,
+    reason="root bypasses directory permission bits; a 0o555 dir stays writable, "
+    "so the immutable read-only-directory optimization asserted here does not engage",
+)
 def test_landscape_analyzer_reads_sqlite_without_wal_files_in_read_only_directory(tmp_path: Path) -> None:
     db_path = tmp_path / "audit.db"
     _create_file_backed_audit_db(db_path)

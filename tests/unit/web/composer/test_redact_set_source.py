@@ -21,6 +21,7 @@ from elspeth.web.composer.redaction import (
     SetSourceArgumentsModel,
     _redact_via_schema,
     _summarize_set_source_options,
+    redact_source_storage_path,
     redact_tool_call_arguments,
 )
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
@@ -132,6 +133,43 @@ def test_redact_passes_through_when_no_blob_ref() -> None:
     assert isinstance(redacted["options"], str)
     assert "/tmp/data.csv" in redacted["options"]
     assert REDACTED_BLOB_SOURCE_PATH not in redacted["options"]
+
+
+def test_redact_source_storage_path_masks_file_shape_when_blob_ref_present() -> None:
+    """The ``file`` option is an equivalent blob storage-path carrier to ``path``.
+
+    Blob ownership and fork code (blobs/service.py, sessions fork) treat both
+    ``path`` and ``file`` as internal storage-path carriers, so a state with
+    ``options={"blob_ref": ..., "file": <internal storage_path>}`` must have its
+    ``file`` masked too — otherwise the internal blob path leaks through the
+    redaction surface (elspeth-a7aa07b7ce).
+    """
+    state = {
+        "source": {
+            "plugin": "csv",
+            "options": {"file": "/internal/blob/secret-storage.csv", "blob_ref": "abc"},
+        }
+    }
+    redacted = redact_source_storage_path(state)
+    assert redacted["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    assert "/internal/blob/secret-storage.csv" not in str(redacted)
+    # Input is not mutated.
+    assert state["source"]["options"]["file"] == "/internal/blob/secret-storage.csv"
+
+
+def test_redact_source_storage_path_masks_path_shape_when_blob_ref_present() -> None:
+    """Regression: the ``path`` shape stays redacted (elspeth-a7aa07b7ce)."""
+    state = {"source": {"options": {"path": "/internal/blob/p.csv", "blob_ref": "abc"}}}
+    redacted = redact_source_storage_path(state)
+    assert redacted["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+
+
+def test_redact_source_storage_path_leaves_manual_file_without_blob_ref() -> None:
+    """A manual ``file`` path without ``blob_ref`` is not a blob carrier — unchanged."""
+    state = {"source": {"options": {"file": "/tmp/user-data.csv"}}}
+    redacted = redact_source_storage_path(state)
+    assert redacted["source"]["options"]["file"] == "/tmp/user-data.csv"
+    assert REDACTED_BLOB_SOURCE_PATH not in str(redacted)
 
 
 def test_summarize_set_source_options_accepts_coerced_datetime() -> None:

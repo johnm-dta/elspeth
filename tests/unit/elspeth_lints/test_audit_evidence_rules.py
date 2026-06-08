@@ -9,10 +9,13 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext
 from elspeth_lints.rules.audit_evidence.audit_evidence_nominal import RULE as AUDIT_EVIDENCE_NOMINAL_RULE
 from elspeth_lints.rules.audit_evidence.guard_symmetry import RULE as GUARD_SYMMETRY_RULE
 from elspeth_lints.rules.audit_evidence.gve_attribution import RULE as GVE_ATTRIBUTION_RULE
+from elspeth_lints.rules.audit_evidence.shared import load_class_allowlist
 from elspeth_lints.rules.audit_evidence.tier_1_decoration import RULE as TIER_1_DECORATION_RULE
 
 
@@ -35,12 +38,96 @@ def test_audit_evidence_nominal_reports_to_audit_dict_without_base() -> None:
 
 
 def test_audit_evidence_nominal_accepts_direct_base() -> None:
+    # The base must be the canonical AuditEvidenceBase (imported from
+    # elspeth.contracts.audit_evidence) — see elspeth-584d4ea502.
     findings = list(
         AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
             _tree("""
+            from elspeth.contracts.audit_evidence import AuditEvidenceBase
+
             class Compliant(AuditEvidenceBase, RuntimeError):
                 def to_audit_dict(self):
                     return {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_audit_evidence_nominal_flags_spoofed_base_name() -> None:
+    # elspeth-584d4ea502: a base merely NAMED AuditEvidenceBase (here a local
+    # class, not imported from the canonical module) must NOT satisfy nominal
+    # inheritance — it is the spoofing bypass.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AuditEvidenceBase:
+                pass
+
+            class Spoof(AuditEvidenceBase, RuntimeError):
+                def to_audit_dict(self):
+                    return {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["AEN1"]
+    assert "Spoof" in findings[0].message
+
+
+def test_audit_evidence_nominal_accepts_local_base_inside_canonical_module() -> None:
+    # Inside contracts/audit_evidence.py the base is defined locally and a
+    # subclass inherits it without an import — that local reference IS the real
+    # base and cannot be spoofed (the file path is the canonical module).
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AuditEvidenceBase:
+                pass
+
+            class Sub(AuditEvidenceBase):
+                def to_audit_dict(self):
+                    return {}
+            """),
+            Path("contracts/audit_evidence.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_audit_evidence_nominal_flags_annotated_assignment_form() -> None:
+    # elspeth-37879426d1: an annotated assignment WITH a value defines a real
+    # to_audit_dict descriptor and must be detected.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class AnnMimic(RuntimeError):
+                to_audit_dict: object = lambda self: {}
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["AEN1"]
+    assert "AnnMimic" in findings[0].message
+
+
+def test_audit_evidence_nominal_ignores_bare_annotation_without_value() -> None:
+    # A bare annotation (no value) creates no runtime attribute, so it does not
+    # define to_audit_dict and must not be flagged.
+    findings = list(
+        AUDIT_EVIDENCE_NOMINAL_RULE.analyze(
+            _tree("""
+            class Annotated(RuntimeError):
+                to_audit_dict: object
             """),
             Path("example.py"),
             RuleContext(root=Path(".")),
@@ -95,6 +182,60 @@ allow_classes:
     assert _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path) == []
 
 
+def test_load_class_allowlist_rejects_malformed_expiry(tmp_path: Path) -> None:
+    """A typoed ``expires`` must fail closed, not silently drop the time bound.
+
+    Regression for elspeth-2d73b966c5 / elspeth-44d771caad: the shared
+    ``load_class_allowlist`` parser swallowed malformed dates and returned
+    ``expires=None``, so ``fail_on_expired`` could never enforce a typoed
+    expiry and a one-character diff silently disabled the bound.
+    """
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: bad.py:AEN1:Mimic
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: not-a-date
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expires"):
+        load_class_allowlist(allowlist)
+
+
+def test_audit_evidence_nominal_fails_closed_on_malformed_expiry(tmp_path: Path) -> None:
+    """End-to-end: a malformed expiry propagates out of ``analyze`` as a hard error."""
+    _write(
+        tmp_path / "bad.py",
+        """
+        class Mimic(RuntimeError):
+            def to_audit_dict(self):
+                return {}
+        """,
+    )
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: bad.py:AEN1:Mimic
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: not-a-date
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expires"):
+        _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path)
+
+
 def test_tier_1_decoration_reports_missing_tier_marker() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
@@ -126,6 +267,75 @@ def test_tier_1_decoration_reports_missing_caller_module() -> None:
 
     assert [finding.rule_id for finding in findings] == ["TDE2"]
     assert "caller_module" in findings[0].message
+
+
+def test_tier_1_decoration_reports_missing_reason() -> None:
+    # elspeth-08b0336287: a tier_1_error decorator without a reason does not
+    # satisfy the Tier-1 decoration requirement (runtime rejects it).
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            _tree("""
+            @tier_1_error(caller_module=__name__)
+            class MissingReasonError(Exception):
+                pass
+            """),
+            Path("errors.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "MissingReasonError" in findings[0].message
+
+
+def test_tier_1_decoration_reports_empty_reason() -> None:
+    # elspeth-08b0336287: an empty reason is equivalent to no reason.
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            _tree("""
+            @tier_1_error(reason="", caller_module=__name__)
+            class EmptyReasonError(Exception):
+                pass
+            """),
+            Path("errors.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "EmptyReasonError" in findings[0].message
+
+
+def test_tier_1_decoration_enforces_tde2_outside_errors_py(tmp_path: Path) -> None:
+    # elspeth-f8650893f1: the caller_module spoofing guard (TDE2) must apply to
+    # tier_1_error call sites in files OTHER than errors.py. TDE1 (class
+    # decoration) stays scoped to errors.py — a *Error class elsewhere is not
+    # flagged for missing decoration.
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir(parents=True)
+    (contracts_dir / "errors.py").write_text("# canonical target — no classes\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text(
+        textwrap.dedent("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
+            @tier_1_error(reason="missing caller module")
+            class OtherError(Exception):
+                pass
+        """),
+        encoding="utf-8",
+    )
+
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert any(f.rule_id == "TDE2" and "other.py" in f.file_path for f in findings)
+    # TDE1 is errors.py-scoped: OtherError (a *Error class outside errors.py) is not flagged.
+    assert not any(f.rule_id == "TDE1" for f in findings)
 
 
 def test_tier_1_decoration_accepts_caller_module_name(tmp_path: Path) -> None:
@@ -470,6 +680,75 @@ def test_gve_attribution_detects_qualified_call_and_mixed_good_bad() -> None:
     assert "line 3" in findings[0].message
 
 
+def test_gve_attribution_reports_aliased_raise() -> None:
+    """elspeth-c36485165b: an aliased import must not evade attribution checks."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            from elspeth.core.dag.models import GraphValidationError as GVE
+
+            def validate():
+                raise GVE("aliased, no component_id")
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["GA1"]
+
+
+def test_gve_attribution_accepts_aliased_raise_with_component_id() -> None:
+    """An aliased raise that is properly attributed stays clean."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            from elspeth.core.dag.models import GraphValidationError as GVE
+
+            def validate():
+                raise GVE("ok", component_id="node_1")
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_gve_attribution_flags_component_id_none() -> None:
+    """elspeth-16f41371f8: component_id=None is null attribution, not attribution."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            def validate():
+                raise GraphValidationError("bad", component_id=None)
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["GA1"]
+    assert "component_id=None" in findings[0].message
+
+
+def test_gve_attribution_accepts_component_id_from_variable() -> None:
+    """A non-None component_id expression is genuine attribution (no false positive)."""
+    findings = list(
+        GVE_ATTRIBUTION_RULE.analyze(
+            _tree("""
+            def validate(node_id):
+                raise GraphValidationError("ok", component_id=node_id)
+            """),
+            Path("example.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
 def test_gve_attribution_reports_relative_path_and_skips_syntax_errors(tmp_path: Path) -> None:
     _write(tmp_path / "bad_syntax.py", "def broken(:\n    pass\n")
     _write(
@@ -508,6 +787,41 @@ per_file_rules:
     )
 
     assert _root_findings(GVE_ATTRIBUTION_RULE, tmp_path) == []
+
+
+def test_gve_attribution_syntax_errors_surface_as_parse_error_findings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """elspeth-3c73e49cc7 (superseded): the rule skips unparseable files internally,
+    but the CLI whole-repo walk surfaces them as ``parse-error`` findings, so a
+    SyntaxError can never silently pass the gate.
+    """
+    import argparse
+
+    from elspeth_lints.core.cli import _run_check
+    from elspeth_lints.core.registry import RuleRegistry
+
+    _write(tmp_path / "broken.py", "def broken(:\n    pass\n")
+    empty_allowlist = tmp_path / "allowlist"
+    empty_allowlist.mkdir()
+
+    registry = RuleRegistry()
+    registry.register(GVE_ATTRIBUTION_RULE)
+
+    exit_code = _run_check(
+        argparse.Namespace(
+            rules="audit_evidence.gve_attribution",
+            rule_set="static",
+            format="json",
+            root=tmp_path,
+            allowlist_dir=empty_allowlist,
+            files=None,
+        ),
+        registry=registry,
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    rule_ids = {finding["rule_id"] for finding in payload}
+    assert "parse-error" in rule_ids
 
 
 def test_audit_evidence_json_mode_succeeds_on_current_codebase(

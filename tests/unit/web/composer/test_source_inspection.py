@@ -332,6 +332,26 @@ class TestJsonInspection:
         # Successful rows still surface
         assert f.sample_row_count == 2
 
+    def test_json_rejects_non_finite_constants_without_inferred_float(self) -> None:
+        body = b'[{"score": NaN}, {"score": Infinity}]'
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "json"
+        assert any("non-finite" in w for w in f.warnings), f.warnings
+        assert f.inferred_types is None or f.inferred_types.get("score") != "float"
+
+    def test_jsonl_rejects_non_finite_lines_without_inferred_float(self) -> None:
+        body = b'{"score": NaN}\n{"score": Infinity}\n{"name": "safe"}\n'
+        f = inspect_blob_content(content=body, filename="x.jsonl", mime_type="application/jsonl")
+
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "jsonl"
+        assert any("failed to parse" in w for w in f.warnings), f.warnings
+        assert f.sample_row_count == 1
+        assert f.inferred_types is not None
+        assert "score" not in f.inferred_types
+
     def test_nested_structures_warning(self) -> None:
         body = json.dumps([{"id": 1, "tags": ["a", "b"]}]).encode()
         f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Workspace-only static analyzer for ELSPETH-specific CI invariants"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["pyyaml>=6.0,<7"]
+dependencies = ["pyyaml>=6.0,<7", "python-dotenv>=1.2.2,<2"]
 
 [project.optional-dependencies]
 # The 'judge' extra pulls in the OpenAI SDK used by the `justify`
@@ -29,6 +29,8 @@ judge-agent = ["claude-agent-sdk>=0.1"]
 
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"
+diagnose-judge-signatures = "elspeth_lints.core.judge_signature_diagnosis:main"
+sign-judge-signatures = "elspeth_lints.core.judge_signature_signing:main"
 
 [project.entry-points."elspeth_lints.rules"]
 meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer:RULE"

@@ -168,31 +168,22 @@ class SessionManager:
             raise SessionNotFoundError(session_id) from exc
 
     def delete(self, session_id: str) -> None:
-        """Delete a saved session and its audit events sidecar.
+        """Delete a saved session while preserving its audit events sidecar.
 
+        The canonical session JSON is mutable state and is removed on delete.
         The audit events sidecar (``{scratch}/{session_id}.events.jsonl``)
-        is unlinked alongside the canonical session JSON file so the two
-        live and die together. ``missing_ok=True`` on the sidecar:
-        sessions that produced zero recordable events would have no
-        sidecar to begin with, and the absence of a sidecar is not a
-        deletion failure.
+        is append-only Tier-1 evidence and must outlive the session JSON so
+        the final delete_session tombstone can be appended without erasing the
+        prior tool-decision history.
         """
         path = self._session_path(session_id)
         if not path.exists():
             raise SessionNotFoundError(session_id)
-        # Lazy import to avoid a circular import at module load. ``audit``
-        # imports nothing from ``session``, but ``server.py`` (the only
-        # caller hub) imports both modules — keeping the import inside
-        # the function body avoids any future circular-dep regression.
-        from elspeth.composer_mcp.audit import events_sidecar_path
-
-        events_path = events_sidecar_path(self._dir, session_id)
         try:
             with self._locked_session(session_id):
                 if not path.exists():
                     raise SessionNotFoundError(session_id)
                 path.unlink()
-                events_path.unlink(missing_ok=True)
         except FileNotFoundError as exc:
             raise SessionNotFoundError(session_id) from exc
 

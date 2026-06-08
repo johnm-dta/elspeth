@@ -515,6 +515,10 @@ class InterpretationUnsupportedChoiceError(InterpretationResolveError):
     """The requested choice is valid generally but unsupported for this kind."""
 
 
+class QuarantineCleanupError(AuditIntegrityError):
+    """Session archive committed, but staged blob cleanup failed."""
+
+
 class _InterpretationHashDomainV2Payload(TypedDict):
     """Closed hash-domain payload for interpretation review events."""
 
@@ -604,8 +608,10 @@ def _find_llm_transform_node(
             node["options"] if "options" in node else None,
             message=f"{context}: node {affected_node_id!r} has no options mapping",
         )
-        prompt_template = options["prompt_template"] if "prompt_template" in options else None
-        if not isinstance(prompt_template, str) or not prompt_template:
+        if "prompt_template" not in options or not isinstance(options["prompt_template"], str):
+            raise InterpretationPlaceholderConsumedError(f"{context}: node {affected_node_id!r} options.prompt_template is not a string")
+        prompt_template = options["prompt_template"]
+        if not prompt_template:
             raise InterpretationPlaceholderConsumedError(
                 f"{context}: node {affected_node_id!r} must declare non-empty options.prompt_template"
             )
@@ -1061,6 +1067,36 @@ def _resolve_vague_term(
     return state_record.source, final_nodes, resolved_prompt_template_hash
 
 
+def _surfacing_prompt_structure_hash(
+    surfacing_state_record: CompositionStateRecord | None,
+    *,
+    affected_node_id: str,
+) -> str | None:
+    """Skeleton hash of the prompt the user reviewed at surfacing time.
+
+    The ``llm_prompt_template`` review approves the LLM-authored prompt
+    *skeleton* (text segments + the requirement each slot references), which
+    :func:`prompt_structure_hash` deliberately makes invariant under
+    interpretation resolution. Comparing this surfacing skeleton to the live
+    skeleton at resolve time distinguishes a benign vague-term bake (skeleton
+    unchanged → accept) from a genuine prompt edit (skeleton changed → reject as
+    stale).
+
+    Returns ``None`` when the surfacing state, the affected node, or its prompt
+    parts are unavailable (legacy no-parts nodes) — the caller then falls back
+    to rendered-text equality.
+    """
+    if surfacing_state_record is None:
+        return None
+    for node in surfacing_state_record.nodes or ():
+        if node["id"] == affected_node_id:
+            options = node["options"] if "options" in node else None
+            if isinstance(options, Mapping):
+                return prompt_structure_hash_from_options(options)
+            return None
+    return None
+
+
 def _resolve_prompt_template_review(
     state_record: CompositionStateRecord,
     *,
@@ -1068,6 +1104,7 @@ def _resolve_prompt_template_review(
     affected_node_id: str,
     user_term: str,
     accepted_value: str,
+    surfacing_structure_hash: str | None,
 ) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
     node = _find_llm_transform_node(
         state_record,
@@ -1083,7 +1120,24 @@ def _resolve_prompt_template_review(
         raise InterpretationPlaceholderConsumedError(
             f"resolve_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
         )
-    if accepted_value != prompt_template:
+    # Acceptance gate: the user is approving the prompt SKELETON the LLM authored
+    # (text segments + the requirement each slot references). For a structured
+    # node (prompt_template_parts present) the skeleton hash is invariant under
+    # vague-term resolution — resolving a sibling vague_term first rewrites the
+    # rendered options.prompt_template but PRESERVES the parts — so we gate on
+    # skeleton equality, NOT rendered-text equality. Gating on rendered text
+    # permanently bricked this review whenever a sibling vague_term was resolved
+    # first (elspeth-e51216d305: the frozen surfacing draft could never again
+    # equal the post-bake template). A genuine prompt edit changes the skeleton
+    # and is still rejected as stale. Legacy no-parts nodes have no skeleton;
+    # they fall back to the original rendered-text equality.
+    live_structure_hash = prompt_structure_hash_from_options(options)
+    if live_structure_hash is not None or surfacing_structure_hash is not None:
+        if live_structure_hash != surfacing_structure_hash:
+            raise InterpretationPlaceholderConsumedError(
+                "resolve_interpretation_event: llm_prompt_template prompt skeleton no longer matches the structure the review approved"
+            )
+    elif accepted_value != prompt_template:
         raise InterpretationPlaceholderConsumedError(
             "resolve_interpretation_event: llm_prompt_template accepted value must equal current options.prompt_template"
         )
@@ -2255,7 +2309,13 @@ class SessionServiceImpl:
             # failure. The session rows may already be gone, but silently
             # returning here would hide the orphaned quarantine state.
             if staged_blob_dir is not None and staged_blob_dir.exists():
-                shutil.rmtree(staged_blob_dir)
+                try:
+                    shutil.rmtree(staged_blob_dir)
+                except OSError as exc:
+                    raise QuarantineCleanupError(
+                        f"archive_session({sid}): session delete committed but quarantine cleanup failed for "
+                        f"{staged_blob_dir}. Manual cleanup of the staged blob directory is required."
+                    ) from exc
 
                 quarantine_root = staged_blob_dir.parent
                 with contextlib.suppress(OSError):
@@ -2766,7 +2826,11 @@ class SessionServiceImpl:
                             node["options"],
                             message=f"create_pending_interpretation_event: node {affected_node_id!r} options is not a mapping",
                         )
-                        prompt_template = cast(str, options["prompt_template"])
+                        if "prompt_template" not in options or not isinstance(options["prompt_template"], str):
+                            raise ValueError(
+                                f"create_pending_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
+                            )
+                        prompt_template = options["prompt_template"]
                         if llm_draft != prompt_template:
                             raise ValueError(
                                 "create_pending_interpretation_event: llm_prompt_template event draft must match current options.prompt_template"
@@ -2859,12 +2923,19 @@ class SessionServiceImpl:
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+                        # Opt-out auto-resolve fires at create time, so the
+                        # surfacing state IS the live state — its skeleton hash
+                        # trivially matches the gate.
                         final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
                             user_term=user_term,
                             accepted_value=llm_draft,
+                            surfacing_structure_hash=_surfacing_prompt_structure_hash(
+                                live_state_record,
+                                affected_node_id=affected_node_id,
+                            ),
                         )
                     elif kind is InterpretationKind.INVENTED_SOURCE:
                         final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
@@ -3161,12 +3232,29 @@ class SessionServiceImpl:
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+                    # Skeleton the user actually reviewed (the surfacing state's
+                    # node). The acceptance gate compares this to the live
+                    # skeleton so a sibling vague_term baked between surfacing and
+                    # resolve does not invalidate this review (elspeth-e51216d305).
+                    surfacing_structure_hash: str | None = None
+                    if event_row.composition_state_id is not None:
+                        surfacing_state_row = conn.execute(
+                            select(composition_states_table)
+                            .where(composition_states_table.c.id == event_row.composition_state_id)
+                            .where(composition_states_table.c.session_id == sid)
+                        ).one_or_none()
+                        if surfacing_state_row is not None:
+                            surfacing_structure_hash = _surfacing_prompt_structure_hash(
+                                self._row_to_state_record(surfacing_state_row),
+                                affected_node_id=event_row.affected_node_id,
+                            )
                     final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
                         user_term=event_row.user_term,
                         accepted_value=accepted_value,
+                        surfacing_structure_hash=surfacing_structure_hash,
                     )
                 elif kind is InterpretationKind.INVENTED_SOURCE:
                     final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(

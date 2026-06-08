@@ -314,6 +314,25 @@ class TestAzureBlobSinkWrite:
         uploaded = mock_blob.upload_blob.call_args[0][0].decode("utf-8")
         assert "|" in uploaded
 
+    def test_csv_partial_custom_headers_raise_for_unmapped_fields(self) -> None:
+        sink = inject_write_failure(
+            AzureBlobSink(
+                _base_config(
+                    format="csv",
+                    schema={"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    headers={"user_id": "User ID"},
+                )
+            )
+        )
+        ctx = _make_sink_ctx()
+        mock_service, _mock_blob = _mock_blob_upload()
+
+        with (
+            patch(PATCH_AUTH, return_value=mock_service),
+            pytest.raises(ValueError, match="CUSTOM header mode has no mapping for field 'amount'"),
+        ):
+            sink.write([{"user_id": "u1", "amount": 100.0}], ctx)
+
     def test_csv_no_header(self) -> None:
         sink = inject_write_failure(
             AzureBlobSink(

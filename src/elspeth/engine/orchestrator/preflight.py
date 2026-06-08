@@ -5,9 +5,9 @@ must assemble :class:`PipelineConfig` identically and run the same four
 route-target validators that the orchestrator runs at run-init. This module
 owns that contract.
 
-**Layer note.** This module sits in ``engine/`` (L2). It cannot import
-``cli_helpers`` (L3) and therefore takes primitives instead of ``PluginBundle``.
-Both call sites unpack their bundle locally before calling.
+**Layer note.** This module sits in ``engine/`` (L2). It cannot import the L3
+runtime plugin factory and therefore takes primitives instead of
+``PluginBundle``. Both call sites unpack their bundle locally before calling.
 
 **Mutation note.** Aggregation transforms have ``node_id`` assigned in this
 helper (mirrors ``service.py`` runtime path). The mutation is intentional —
@@ -151,7 +151,7 @@ def assemble_and_validate_pipeline_config(
     )
 
     # NB: Value-source compliance is enforced upstream in
-    # ``cli_helpers.instantiate_plugins_from_config`` — by the time the
+    # ``runtime_factory.instantiate_plugins_from_config`` — by the time the
     # bundle reaches this function, declared field values have already
     # been validated against their VALUE_SOURCES contracts. Re-running
     # the walker here would be redundant.

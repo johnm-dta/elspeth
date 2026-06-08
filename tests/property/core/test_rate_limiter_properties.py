@@ -31,6 +31,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from elspeth.core.rate_limit import NoOpLimiter, RateLimiter, RateLimitRegistry
+from elspeth.engine.clock import MockClock
 
 # =============================================================================
 # Strategies for generating rate limiter configurations
@@ -149,6 +150,21 @@ class TestRateLimiterAcquireProperties:
             # We don't wait long, just verify no exception
             limiter.acquire()  # Should not raise
 
+    @given(name=valid_names, rpm=st.integers(min_value=1, max_value=10))
+    @settings(max_examples=20)
+    def test_injected_clock_replenishes_without_wall_clock_sleep(self, name: str, rpm: int) -> None:
+        """Property: injected clock controls in-memory limiter windows."""
+        clock = MockClock(start=0.0)
+        with RateLimiter(name=name, requests_per_minute=rpm, window_ms=1000, clock=clock) as limiter:
+            for _ in range(rpm):
+                assert limiter.try_acquire() is True
+
+            assert limiter.try_acquire() is False
+
+            clock.advance(1.01)
+
+            assert limiter.try_acquire() is True
+
 
 class TestRateLimiterTimeoutProperties:
     """Property tests for timeout behavior."""
@@ -206,6 +222,21 @@ class TestRateLimiterPersistenceProperties:
 
             # DB file should exist after close
             assert Path(db_path).exists()
+
+    @given(name=valid_names, rpm=positive_rates)
+    @settings(max_examples=20)
+    def test_persistence_rejects_injected_monotonic_clock(self, name: str, rpm: int) -> None:
+        """Persistent buckets must keep pyrate-limiter's cross-process clock."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = str(Path(tmp_dir) / "rate_limits.db")
+
+            with pytest.raises(ValueError, match="clock injection is only supported"):
+                RateLimiter(
+                    name=name,
+                    requests_per_minute=rpm,
+                    persistence_path=db_path,
+                    clock=MockClock(start=0.0),
+                )
 
 
 # =============================================================================

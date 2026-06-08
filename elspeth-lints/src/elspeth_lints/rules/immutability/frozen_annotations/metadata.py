@@ -12,8 +12,8 @@ RULE_METADATA = RuleMetadata(
     severity=Severity.ERROR,
     category=Category.IMMUTABILITY,
     cwe=("CWE-471",),
-    scope=RuleScope.INCREMENTAL,
+    scope=RuleScope.WHOLE_REPO,
     path_filter=r".*\.py$",
-    examples_violation_count=3,
+    examples_violation_count=5,
     examples_clean_count=3,
 )

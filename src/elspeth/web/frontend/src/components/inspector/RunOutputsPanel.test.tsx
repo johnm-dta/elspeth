@@ -25,6 +25,20 @@ vi.mock("@/api/client", async () => {
 
 const RUN_ID = "run-abc";
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArtifact {
   return {
     artifact_id: "art-1",
@@ -331,6 +345,107 @@ describe("RunOutputsPanel", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByText(/Manifest unavailable/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Refresh/ })).toBeInTheDocument();
+  });
+
+  it("clears prior manifest and preview state as soon as runId changes", async () => {
+    const runBLoad = deferred<RunOutputsResponse>();
+    (fetchRunOutputs as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(manifest([fileArtifact()]))
+      .mockReturnValueOnce(runBLoad.promise);
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({ preview_text: "old-run-preview\n" }),
+    );
+
+    const { rerender } = render(<RunOutputsPanel runId="run-a" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+    await waitFor(() =>
+      expect(screen.getByText("old-run-preview")).toBeInTheDocument(),
+    );
+
+    rerender(<RunOutputsPanel runId="run-b" />);
+
+    expect(screen.queryByText("results.csv")).not.toBeInTheDocument();
+    expect(screen.queryByText("old-run-preview")).not.toBeInTheDocument();
+    expect(screen.getByText(/loading outputs/i)).toBeInTheDocument();
+
+    const apiError: ApiError = { status: 503, detail: "run B manifest failed" };
+    runBLoad.reject(apiError);
+
+    await waitFor(() =>
+      expect(screen.getByText(/run B manifest failed/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("results.csv")).not.toBeInTheDocument();
+    expect(screen.queryByText("old-run-preview")).not.toBeInTheDocument();
+  });
+
+  it("ignores a late manifest response for a previous runId", async () => {
+    const runALoad = deferred<RunOutputsResponse>();
+    (fetchRunOutputs as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(runALoad.promise)
+      .mockResolvedValueOnce(
+        manifest([
+          fileArtifact({
+            artifact_id: "run-b-artifact",
+            path_or_uri: "file:///data/outputs/run-b.csv",
+          }),
+        ]),
+      );
+
+    const { rerender } = render(<RunOutputsPanel runId="run-a" />);
+    rerender(<RunOutputsPanel runId="run-b" />);
+
+    await waitFor(() => expect(screen.getByText("run-b.csv")).toBeInTheDocument());
+
+    runALoad.resolve(
+      manifest([
+        fileArtifact({
+          artifact_id: "run-a-artifact",
+          path_or_uri: "file:///data/outputs/run-a.csv",
+        }),
+      ]),
+    );
+
+    await waitFor(() =>
+      expect(fetchRunOutputs).toHaveBeenCalledWith("run-a"),
+    );
+    expect(screen.queryByText("run-a.csv")).not.toBeInTheDocument();
+    expect(screen.getByText("run-b.csv")).toBeInTheDocument();
+  });
+
+  it("ignores a late preview response for a previous runId", async () => {
+    const oldPreview = deferred<RunOutputArtifactPreview>();
+    (fetchRunOutputs as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(manifest([fileArtifact()]))
+      .mockResolvedValueOnce(
+        manifest([
+          fileArtifact({
+            path_or_uri: "file:///data/outputs/run-b-results.csv",
+          }),
+        ]),
+      );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      oldPreview.promise,
+    );
+
+    const { rerender } = render(<RunOutputsPanel runId="run-a" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+    await waitFor(() =>
+      expect(fetchRunOutputPreview).toHaveBeenCalledWith("run-a", "art-1"),
+    );
+
+    rerender(<RunOutputsPanel runId="run-b" />);
+    await waitFor(() =>
+      expect(screen.getByText("run-b-results.csv")).toBeInTheDocument(),
+    );
+
+    oldPreview.resolve(
+      csvPreview({ preview_text: "stale-run-a-preview\n", artifact_id: "art-1" }),
+    );
+
+    await waitFor(() =>
+      expect(fetchRunOutputs).toHaveBeenCalledWith("run-b"),
+    );
+    expect(screen.queryByText("stale-run-a-preview")).not.toBeInTheDocument();
   });
 
   it("download button calls downloadRunOutputContent with auth (not a plain anchor)", async () => {

@@ -10,7 +10,6 @@ Coordinates:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -25,6 +24,7 @@ from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
 from elspeth.engine._best_effort import best_effort
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
@@ -721,7 +721,7 @@ class RowProcessor:
         Both modes now have BUFFERED (non-terminal) at buffer time,
         so FAILED can be recorded as the terminal outcome for all tokens.
         """
-        error_hash = hashlib.sha256(fctx.error_msg.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(fctx.error_msg, exception_type="TransformError")
         results: list[RowResult] = []
         failure = FailureInfo(exception_type="TransformError", message=fctx.error_msg)
 
@@ -953,7 +953,7 @@ class RowProcessor:
             violation_summary = f"PassThroughContractViolation:{fctx.transform.name}:{sorted(violation.divergence_set)}"
         else:
             violation_summary = f"{type(violation).__name__}:{fctx.transform.name}"
-        error_hash = hashlib.sha256(violation_summary.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(violation_summary)
         base_audit = violation.to_audit_dict()
 
         for token in fctx.buffered_tokens:
@@ -1230,7 +1230,7 @@ class RowProcessor:
             # child tokens if a later step fails — recovery would skip them.
             for i, token in enumerate(fctx.buffered_tokens):
                 if i in quarantined_index_set:
-                    error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
+                    error_hash = compute_error_hash(f"quarantined_in_batch:{fctx.batch_id}:{i}")
                     batch_id = None
                     outcome = TerminalOutcome.FAILURE
                     path = TerminalPath.QUARANTINED_AT_SOURCE
@@ -1761,7 +1761,7 @@ class RowProcessor:
             )
             else "failure"
         )
-        error_hash = hashlib.sha256(f"{type(failure).__name__}:{self._source_node_id}".encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(f"{type(failure).__name__}:{self._source_node_id}")
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
@@ -2226,7 +2226,7 @@ class RowProcessor:
 
         if coalesce_outcome.failure_reason:
             error_msg = coalesce_outcome.failure_reason
-            error_hash = hashlib.sha256(error_msg.encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(error_msg)
 
             # Bug 9z8 fix: Only record if CoalesceExecutor didn't already record
             if not coalesce_outcome.outcomes_recorded:
@@ -2444,7 +2444,7 @@ class RowProcessor:
             )
         except MaxRetriesExceeded as e:
             # All retries exhausted - return FAILED outcome
-            error_hash = hashlib.sha256(str(e).encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(str(e), exception_type=type(e).__name__)
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
                 outcome=TerminalOutcome.FAILURE,
@@ -2597,7 +2597,7 @@ class RowProcessor:
             # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
             # below — see the offensive guard in the routed branch.
             error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
-            quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
+            quarantine_error_hash = compute_error_hash(error_detail)
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
                 outcome=TerminalOutcome.FAILURE,

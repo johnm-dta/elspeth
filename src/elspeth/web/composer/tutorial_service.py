@@ -6,7 +6,6 @@ import asyncio
 import csv
 import hashlib
 import json
-import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +19,6 @@ from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
 from elspeth.contracts import NodeType
-from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -38,7 +36,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
-from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped, record_tutorial_runtime_normalization
+from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import path_or_uri_to_filesystem_path
 from elspeth.web.execution.protocol import ExecutionService
@@ -54,11 +52,9 @@ from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
-    CompositionStateData,
     RunRecord,
     SessionServiceProtocol,
 )
-from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 _TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
@@ -137,12 +133,10 @@ async def run_tutorial_pipeline(
                     current_state=current_state,
                     cache_entry=cache_entry,
                     cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id),
+                    user_id=user.user_id,
+                    auth_provider_type=settings.auth_provider,
                 )
 
-    await _normalise_current_tutorial_state_for_execution(
-        session_service=session_service,
-        session_id=session_uuid,
-    )
     live_run = await _run_live_tutorial(
         request=request,
         user=user,
@@ -161,104 +155,6 @@ async def run_tutorial_pipeline(
     return live_run.response
 
 
-async def _normalise_current_tutorial_state_for_execution(
-    *,
-    session_service: SessionServiceProtocol,
-    session_id: Any,
-) -> None:
-    current_state = await session_service.get_current_state(session_id)
-    if current_state is None:
-        return
-
-    normalised_nodes, changed = _normalise_bare_required_field_templates(current_state.nodes)
-    if not changed:
-        return
-
-    composer_meta = dict(current_state.composer_meta or {})
-    composer_meta["tutorial_runtime_normalized"] = True
-    composer_meta["tutorial_normalization"] = "bare_required_field_templates"
-    composer_meta["tutorial_normalized_from_state_id"] = str(current_state.id)
-    await session_service.save_composition_state(
-        session_id,
-        CompositionStateData(
-            source=current_state.source,
-            nodes=normalised_nodes,
-            edges=current_state.edges,
-            outputs=current_state.outputs,
-            metadata_=current_state.metadata_,
-            is_valid=current_state.is_valid,
-            validation_errors=current_state.validation_errors,
-            composer_meta=composer_meta,
-        ),
-        provenance="tutorial_normalization",
-    )
-    record_tutorial_runtime_normalization("bare_required_field_templates")
-
-
-def _normalise_bare_required_field_templates(
-    nodes: Sequence[Mapping[str, Any]] | None,
-) -> tuple[list[dict[str, Any]] | None, bool]:
-    if nodes is None:
-        return None, False
-
-    changed = False
-    normalised_nodes: list[dict[str, Any]] = []
-    for node in nodes:
-        node_copy = cast(dict[str, Any], deep_thaw(dict(node)))
-        options_obj = node_copy["options"] if "options" in node_copy else None
-        plugin_name = node_copy["plugin"] if "plugin" in node_copy else None
-        if plugin_name != "llm" or type(options_obj) is not dict:
-            normalised_nodes.append(node_copy)
-            continue
-        options = cast(dict[str, Any], options_obj)
-
-        prompt_template = options["prompt_template"] if "prompt_template" in options else None
-        required_input_fields = options["required_input_fields"] if "required_input_fields" in options else None
-        if type(prompt_template) is not str or not _is_string_sequence(required_input_fields):
-            normalised_nodes.append(node_copy)
-            continue
-
-        fields = cast(Sequence[str], required_input_fields)
-        normalised_template = _normalise_tutorial_prompt_template(
-            prompt_template,
-            required_input_fields=fields,
-        )
-
-        if normalised_template != prompt_template:
-            options["prompt_template"] = normalised_template
-            hash_value = options["resolved_prompt_template_hash"] if "resolved_prompt_template_hash" in options else None
-            if type(hash_value) is str:
-                options["resolved_prompt_template_hash"] = stable_hash(normalised_template)
-            changed = True
-        normalised_nodes.append(node_copy)
-
-    return normalised_nodes, changed
-
-
-def _is_string_sequence(value: object) -> bool:
-    return type(value) in {list, tuple} and all(type(item) is str for item in cast(Sequence[object], value))
-
-
-def _normalise_tutorial_prompt_template(
-    prompt_template: str,
-    *,
-    required_input_fields: Sequence[str],
-) -> str:
-    normalised_template = prompt_template
-    for field_name in required_input_fields:
-        if field_name.isidentifier():
-            normalised_template = re.sub(
-                rf"{{{{\s*{re.escape(field_name)}\s*}}}}",
-                f"{{{{ row.{field_name} }}}}",
-                normalised_template,
-            )
-
-    return INTERPRETATION_PLACEHOLDER_RE.sub(
-        lambda match: match.group(1).strip(),
-        normalised_template,
-    )
-
-
 async def _replay_cache_entry(
     *,
     session_service: SessionServiceProtocol,
@@ -267,6 +163,8 @@ async def _replay_cache_entry(
     current_state: Any,
     cache_entry: TutorialCacheEntry,
     cache_key: str,
+    user_id: str,
+    auth_provider_type: str,
 ) -> TutorialRunResponse:
     """Project a cache hit into a synthesised Landscape run.
 
@@ -310,6 +208,8 @@ async def _replay_cache_entry(
                 },
                 openrouter_catalog_sha256=catalog_sha,
                 openrouter_catalog_source=catalog_source,
+                initiated_by_user_id=user_id,
+                auth_provider_type=auth_provider_type,
             )
 
     landscape_run_id = await run_sync_in_worker(_write_landscape_run)

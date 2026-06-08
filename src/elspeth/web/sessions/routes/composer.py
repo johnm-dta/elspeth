@@ -68,6 +68,7 @@ from ._helpers import (
     TurnType,
     UpdateComposerPreferencesRequest,
     UserIdentity,
+    _BadRequestLLMError,
     _composer_chat_history,
     _composer_conversation_messages,
     _composer_preferences_response,
@@ -722,6 +723,36 @@ def register_composer_routes(router: APIRouter) -> None:
                             headline="The composer model is temporarily unavailable.",
                             evidence=("The model provider did not complete the request.",),
                             likely_next="Retry when the provider is available.",
+                            reason="provider_unavailable",
+                        ),
+                    )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=_litellm_error_detail(
+                            "llm_unavailable",
+                            exc,
+                            expose_provider_error=settings.composer_expose_provider_errors,
+                        ),
+                    ) from exc
+                except _BadRequestLLMError as exc:
+                    slog.error(
+                        "recompose_llm_bad_request",
+                        session_id=str(session_id),
+                        exc_class=type(exc).__name__,
+                    )
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=request_id,
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The composer model rejected this retry.",
+                            evidence=("The model provider rejected the composer request as invalid.",),
+                            likely_next="Check the composer provider configuration and request options before retrying.",
                             reason="provider_unavailable",
                         ),
                     )
@@ -2295,6 +2326,8 @@ def register_composer_routes(router: APIRouter) -> None:
                             session_id=str(session_id),
                             blob_service=request.app.state.blob_service,
                             model=settings.composer_model,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
                         )
                     except InvariantError as exc:
                         # Same B1-sanitization rationale as the step_advance
@@ -2648,6 +2681,8 @@ def register_composer_routes(router: APIRouter) -> None:
                         model=settings.composer_model,
                         user_message=body.message,
                         plugin_hint=plugin_hint,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
                     )
                     if source_resolution is not None:
                         finished_at = datetime.now(UTC)
@@ -2872,6 +2907,8 @@ def register_composer_routes(router: APIRouter) -> None:
                         model=settings.composer_model,
                         step=guided.step,
                         user_message=body.message,
+                        temperature=settings.composer_temperature,
+                        seed=settings.composer_seed,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)

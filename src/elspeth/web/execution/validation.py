@@ -724,9 +724,16 @@ def validate_pipeline(
         )
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
-    # Any `path` or `file` key in source/sink options must resolve under
-    # an allowed directory. Uses the shared helpers from AD-4.
-    from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
+    # Local filesystem keys in source/sink options must resolve under allowed
+    # directories. Uses the shared helpers from AD-4.
+    from elspeth.web.paths import (
+        NESTED_LOCAL_PATH_OPTION_KEYS,
+        SINK_LOCAL_PATH_OPTION_KEYS,
+        SOURCE_LOCAL_PATH_OPTION_KEYS,
+        allowed_sink_directories,
+        allowed_source_directories,
+        resolve_data_path,
+    )
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
@@ -734,7 +741,7 @@ def validate_pipeline(
     # SourceSpec with typed .options attribute (Mapping[str, Any]).
     source_options = dict(state.source.options) if state.source is not None else {}
     path_checked = False
-    for key in ("path", "file"):
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         value = source_options.get(key)
         if value is not None:
             path_checked = True
@@ -771,7 +778,7 @@ def validate_pipeline(
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
-        for key in ("path", "file"):
+        for key in SINK_LOCAL_PATH_OPTION_KEYS:
             value = output.options.get(key)
             if value is not None:
                 path_checked = True
@@ -803,6 +810,51 @@ def validate_pipeline(
                             detail=f"sink {output.name} {key} resolves outside allowed output directories",
                             component_id=output.name,
                             component_type="sink",
+                        ),
+                    )
+
+    # Nested transform provider_config path allowlist — RAG retrieval
+    # transforms carry a local Chroma persist_directory under
+    # options.provider_config. It is a read/write target like a sink, so it is
+    # confined to the allowed SINK directories.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        provider_config = node.options.get("provider_config")
+        if not isinstance(provider_config, Mapping):
+            continue
+        for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+            value = provider_config.get(key)
+            if value is not None:
+                path_checked = True
+                resolved = resolve_data_path(value, str(settings.data_dir))
+                if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
+                    return ValidationResult(
+                        is_valid=False,
+                        checks=[
+                            ValidationCheck(
+                                name=_CHECK_PATH_ALLOWLIST,
+                                passed=False,
+                                detail=f"Transform '{node.id}' {key} '{value}' is outside allowed output directories",
+                                affected_nodes=(),
+                                outcome_code=None,
+                            ),
+                            *_skipped_checks(_CHECK_PATH_ALLOWLIST),
+                        ],
+                        errors=[
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=f"Path traversal blocked: transform '{node.id}' {key}='{value}' resolves outside allowed directories",
+                                suggestion="Use a path within the outputs or blobs directory.",
+                                error_code=None,
+                            ),
+                        ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"transform {node.id} {key} resolves outside allowed output directories",
+                            component_id=node.id,
+                            component_type="transform",
                         ),
                     )
 
@@ -1237,7 +1289,11 @@ def validate_pipeline(
             )
             settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
 
-        elspeth_settings = load_settings_from_yaml_string(settings_yaml)
+        # Web-authored pipeline YAML must never expand host ${VAR} placeholders
+        # (parity with the execution path). Known secret inventory names are
+        # resolved above via resolve_secret_refs; any remaining ${VAR} is
+        # user-authored data, not a host-environment lookup.
+        elspeth_settings = load_settings_from_yaml_string(settings_yaml, expand_env_vars=False)
         checks.append(
             ValidationCheck(
                 name=_CHECK_SETTINGS,

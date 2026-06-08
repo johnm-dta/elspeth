@@ -13,26 +13,23 @@ Key Invariants:
 - Successful acquires never exceed the configured limit within a time window
 - Failed try_acquire() calls don't consume tokens
 - Weight correctly affects capacity consumption
-- After waiting a full window, tokens replenish
+- After advancing a full window, tokens replenish
 
-These tests use Hypothesis RuleBasedStateMachine to explore state transitions
-and verify invariants hold.
+These tests use Hypothesis RuleBasedStateMachine and a deterministic clock to
+explore state transitions and verify invariants without wall-clock sleeps.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from itertools import count
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
 from elspeth.core.rate_limit import RateLimiter
-
-pytestmark = pytest.mark.slow
+from elspeth.engine.clock import MockClock
 
 # =============================================================================
 # Strategies (local - not duplicating conftest)
@@ -44,11 +41,11 @@ state_machine_names = st.text(min_size=1, max_size=10, alphabet="abcdefghijklmno
 # Weight values for acquire operations
 weights = st.integers(min_value=1, max_value=3)
 
-# Use a short window so time-based tests complete quickly.
+# Use a short logical window; tests advance MockClock instead of sleeping.
 TEST_WINDOW_SECONDS = 2.0
 TEST_WINDOW_MS = int(TEST_WINDOW_SECONDS * 1000)
-FULL_WINDOW_SLEEP = TEST_WINDOW_SECONDS + 0.1
-PARTIAL_WINDOW_SLEEP = TEST_WINDOW_SECONDS * 0.3
+FULL_WINDOW_ADVANCE = TEST_WINDOW_SECONDS + 0.1
+PARTIAL_WINDOW_ADVANCE = TEST_WINDOW_SECONDS * 0.3
 _STATE_MACHINE_COUNTER = count()
 
 
@@ -109,6 +106,7 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
         # Use a moderate limit that's high enough to allow interesting
         # behavior but low enough to hit the limit during testing
         self.limit = 5
+        self.clock = MockClock(start=0.0)
 
         # Create the actual rate limiter
         # Use a unique name to avoid conflicts between test runs
@@ -116,6 +114,7 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
             name=f"statemachine_{next(_STATE_MACHINE_COUNTER)}",
             requests_per_minute=self.limit,
             window_ms=TEST_WINDOW_MS,
+            clock=self.clock,
         )
 
         # Model tracks our expected state
@@ -135,7 +134,7 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
     @rule(weight=weights)
     def acquire_token(self, weight: int) -> None:
         """Try to acquire token(s) and track the result."""
-        now = time.monotonic()
+        now = self.clock.monotonic()
 
         # Try to acquire
         success = self.limiter.try_acquire(weight=weight)
@@ -152,7 +151,7 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
     @rule()
     def acquire_single_token(self) -> None:
         """Try to acquire a single token (most common case)."""
-        now = time.monotonic()
+        now = self.clock.monotonic()
 
         success = self.limiter.try_acquire()
 
@@ -168,14 +167,14 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
         """Wait for tokens to replenish."""
         if self.consecutive_rejections == 0:
             return
-        time.sleep(PARTIAL_WINDOW_SLEEP)
+        self.clock.advance(PARTIAL_WINDOW_ADVANCE)
 
     @rule()
     def wait_full_window(self) -> None:
         """Wait for a full window to reset the bucket."""
         if not self.model.attempts:
             return
-        time.sleep(FULL_WINDOW_SLEEP)
+        self.clock.advance(FULL_WINDOW_ADVANCE)
         self.consecutive_rejections = 0
 
     # -------------------------------------------------------------------------
@@ -194,7 +193,7 @@ class RateLimiterStateMachine(RuleBasedStateMachine):
         At any point in time, the sum of weights from successful acquires
         in the last window should not exceed the limit.
         """
-        now = time.monotonic()
+        now = self.clock.monotonic()
         tokens_in_window = self.model.successful_tokens_in_window(now)
 
         assert tokens_in_window <= self.limit, f"Acquired {tokens_in_window} tokens in window, limit is {self.limit}"
@@ -205,7 +204,6 @@ TestRateLimiterStateMachine = RateLimiterStateMachine.TestCase
 TestRateLimiterStateMachine.settings = settings(
     max_examples=20,
     stateful_step_count=20,
-    deadline=None,  # Disable deadline due to real time.sleep() calls
 )
 
 
@@ -218,7 +216,7 @@ class TestRateLimiterQuotaInvariants:
     """Property tests for rate limiter quota invariants."""
 
     @given(limit=st.integers(min_value=2, max_value=10))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20)
     def test_rejected_acquire_doesnt_consume_quota(self, limit: int) -> None:
         """Property: If try_acquire fails, the bucket count is unchanged.
 
@@ -245,7 +243,7 @@ class TestRateLimiterQuotaInvariants:
             assert limiter.try_acquire() is False
 
     @given(limit=st.integers(min_value=1, max_value=10))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20)
     def test_accepts_up_to_limit(self, limit: int) -> None:
         """Property: Can acquire exactly `limit` tokens within window."""
         with RateLimiter(
@@ -259,7 +257,7 @@ class TestRateLimiterQuotaInvariants:
                 assert result is True, f"Failed on acquire {i + 1} of {limit}"
 
     @given(limit=st.integers(min_value=1, max_value=10))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20)
     def test_rejects_over_limit(self, limit: int) -> None:
         """Property: After `limit` acquires, next one fails."""
         with RateLimiter(
@@ -274,15 +272,16 @@ class TestRateLimiterQuotaInvariants:
             # Next acquire should fail
             assert limiter.try_acquire() is False
 
-    @pytest.mark.slow
     @given(limit=st.integers(min_value=2, max_value=5))
-    @settings(max_examples=10, deadline=None)
+    @settings(max_examples=10)
     def test_replenishment_after_wait(self, limit: int) -> None:
         """Property: After waiting a full window, tokens replenish."""
+        clock = MockClock(start=0.0)
         with RateLimiter(
             name=f"replenishtest{limit}",
             requests_per_minute=limit,
             window_ms=TEST_WINDOW_MS,
+            clock=clock,
         ) as limiter:
             # Exhaust the limit
             for _ in range(limit):
@@ -291,8 +290,8 @@ class TestRateLimiterQuotaInvariants:
             # Verify exhausted
             assert limiter.try_acquire() is False
 
-            # Wait for full replenishment (slightly more than one window)
-            time.sleep(FULL_WINDOW_SLEEP)
+            # Advance past the full logical window.
+            clock.advance(FULL_WINDOW_ADVANCE)
 
             # Should be able to acquire again
             assert limiter.try_acquire() is True
@@ -301,7 +300,7 @@ class TestRateLimiterQuotaInvariants:
         limit=st.integers(min_value=3, max_value=8),
         weight=st.integers(min_value=2, max_value=3),
     )
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20)
     def test_weight_correctly_consumes_capacity(self, limit: int, weight: int) -> None:
         """Property: Acquiring with weight consumes that many tokens."""
         with RateLimiter(
@@ -323,19 +322,20 @@ class TestRateLimiterQuotaInvariants:
             assert successful >= expected_acquires
             assert successful <= expected_acquires + 1
 
-    @pytest.mark.slow
     @given(limit=st.integers(min_value=1, max_value=10))
-    @settings(max_examples=10, deadline=None)
+    @settings(max_examples=10)
     def test_multiple_rejection_attempts_dont_consume_with_replenish(self, limit: int) -> None:
         """Property: Multiple failed try_acquire calls don't accumulate consumption.
 
         After replenishment, we can acquire the full limit again (proving
         rejections didn't consume quota).
         """
+        clock = MockClock(start=0.0)
         with RateLimiter(
             name=f"multirejecttest{limit}",
             requests_per_minute=limit,
             window_ms=TEST_WINDOW_MS,
+            clock=clock,
         ) as limiter:
             # Exhaust the limit
             for _ in range(limit):
@@ -345,8 +345,8 @@ class TestRateLimiterQuotaInvariants:
             for _ in range(10):
                 assert limiter.try_acquire() is False
 
-            # Wait for replenishment
-            time.sleep(FULL_WINDOW_SLEEP)
+            # Advance past the full logical window.
+            clock.advance(FULL_WINDOW_ADVANCE)
 
             # Should be able to acquire full limit again
             # (if rejections consumed quota, we'd have fewer available)
@@ -358,7 +358,7 @@ class TestRateLimiterQuotaInvariants:
             assert successful == limit, f"After replenishment, expected {limit} successful acquires, got {successful}"
 
     @given(limit=st.integers(min_value=1, max_value=10))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=20)
     def test_multiple_rejection_attempts_dont_consume(self, limit: int) -> None:
         """Property: Multiple failed try_acquire calls don't increase bucket count.
 

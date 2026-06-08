@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b6587ee1c0db70a4"
+    source_file_hash: str | None = "sha256:2365d2d44dc604fe"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -153,7 +153,7 @@ class CSVSource(BaseSource):
 
         # Store quarantine routing destination
         self._on_validation_failure = cfg.on_validation_failure
-        # on_success is injected by the instantiation bridge (cli_helpers.py)
+        # on_success is injected by the instantiation bridge (runtime_factory.py)
 
         # CRITICAL: allow_coercion=True for sources (external data boundary)
         # Sources are the ONLY place where type coercion is allowed

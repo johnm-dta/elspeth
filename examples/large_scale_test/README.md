@@ -88,6 +88,23 @@ SELECT state, COUNT(*) FROM tokens GROUP BY state;
 SELECT * FROM routing_events LIMIT 10;
 ```
 
+## Checkpoint Policy
+
+This example declares a coarse checkpoint policy explicitly:
+
+```yaml
+checkpoint:
+  enabled: true
+  frequency: every_n
+  checkpoint_interval: 100
+  aggregation_boundaries: true
+```
+
+That setting is the intended durability/performance balance for this high-cardinality
+local benchmark. When comparing `every_row`, `every_n`, `aggregation_only`, or
+disabled checkpointing, record the checkpoint policy with the timing results; do
+not rely on runtime defaults.
+
 ## Performance Expectations
 
 Typical throughput on modern hardware:
@@ -98,7 +115,8 @@ Typical throughput on modern hardware:
 | 50,000 | ~5-10 seconds | ~5,000-10,000 rows/sec |
 | 100,000 | ~10-20 seconds | ~5,000-10,000 rows/sec |
 
-*Note: Actual performance depends on hardware, disk I/O, and database backend (SQLite vs PostgreSQL).*
+*Note: Actual performance depends on hardware, disk I/O, database backend
+(SQLite vs PostgreSQL), and the declared checkpoint policy.*
 
 ## What Gets Audited
 

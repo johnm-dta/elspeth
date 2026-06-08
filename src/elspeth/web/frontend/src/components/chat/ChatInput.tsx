@@ -153,7 +153,7 @@ export function ChatInput({
     }
     window.addEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
     return () => window.removeEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
-  }, []);
+  }, [inputRef]);
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();

@@ -81,6 +81,41 @@ class TestElspethSettings:
         )
         assert settings.retry.max_attempts == 5
 
+    def test_rejects_duplicate_collection_probes(self) -> None:
+        """Duplicate probe collections are rejected at config time, before any probe runs.
+
+        Regression for elspeth-b657daab02: probe results are keyed by collection
+        in the commencement gate context, so two probes for the same collection
+        collide. The old guard fired only in resolve_preflight, AFTER each
+        probe.probe() had already run, and raised FrameworkBugError.
+        """
+        from pydantic import ValidationError
+
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError, match="duplicate collection_probes"):
+            ElspethSettings(
+                source={"plugin": "csv", "on_success": "output"},
+                sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
+                collection_probes=[
+                    {"collection": "docs", "provider": "chroma"},
+                    {"collection": "docs", "provider": "chroma"},
+                ],
+            )
+
+    def test_accepts_distinct_collection_probes(self) -> None:
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            source={"plugin": "csv", "on_success": "output"},
+            sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
+            collection_probes=[
+                {"collection": "docs", "provider": "chroma"},
+                {"collection": "images", "provider": "chroma"},
+            ],
+        )
+        assert len(settings.collection_probes) == 2
+
 
 class TestLoadSettings:
     """Test Dynaconf-based settings loading."""
@@ -970,6 +1005,60 @@ class TestGateSettings:
         assert gate.name == "parallel_analysis"
         assert gate.routes == {"true": "fork", "false": "fallback_path"}
         assert gate.fork_to == ["path_a", "path_b"]
+
+    @pytest.mark.parametrize(
+        "bad_condition",
+        [
+            "5",
+            "row['amount'] + 1",
+            "len(row['items'])",
+            "abs(row['x'])",
+            "row['x'] / 2",
+            "row['x'] // 2",
+            "-row['x']",
+        ],
+    )
+    def test_gate_settings_rejects_provably_numeric_condition(self, bad_condition: str) -> None:
+        """Conditions that statically return a numeric value are rejected at config time.
+
+        Regression for elspeth-f78e84f509: GateExecutor accepts only bool (-> 'true'/'false')
+        or str (-> route label). A provably-numeric expression can never produce a valid
+        route label and would TypeError at row execution — reject it at settings validation.
+        """
+        from pydantic import ValidationError
+
+        from elspeth.core.config import GateSettings
+
+        with pytest.raises(ValidationError, match="numeric value"):
+            GateSettings(
+                name="numeric_gate",
+                input="source_out",
+                condition=bad_condition,
+                routes={"high": "a", "low": "b"},
+            )
+
+    @pytest.mark.parametrize(
+        "ok_condition",
+        [
+            "row['tier']",  # unknown type — may be a route-label string
+            "row.get('label')",
+            "'gold' if row['vip'] else 'silver'",  # ternary of strings
+            "row['a'] + row['b']",  # Add of two unknowns — could be str concat
+            "row['name'] * 2",  # Mult — could be str repetition
+            "row['s'] % row['t']",  # Mod — could be str formatting
+        ],
+    )
+    def test_gate_settings_accepts_ambiguous_or_string_condition(self, ok_condition: str) -> None:
+        """Conservative: only PROVABLY-numeric conditions are rejected; ambiguous/string ones pass."""
+        from elspeth.core.config import GateSettings
+
+        gate = GateSettings(
+            name="route_gate",
+            input="source_out",
+            condition=ok_condition,
+            routes={"gold": "a", "silver": "b"},
+        )
+        assert gate.condition == ok_condition
 
     def test_gate_settings_invalid_condition_syntax(self) -> None:
         """Condition must be valid Python syntax."""
@@ -2816,6 +2905,78 @@ sinks:
         assert "url_password_fingerprint" not in result["landscape"]
         assert result["landscape"]["url_password_redacted"] is True
 
+    def test_database_sink_url_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """database sink options.url password should be fingerprinted in audit copy."""
+        from elspeth.core.config import _fingerprint_config_for_audit
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_dict = {
+            "source": {"plugin": "csv", "options": {}},
+            "sinks": {
+                "warehouse": {
+                    "plugin": "database",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        }
+
+        result = _fingerprint_config_for_audit(config_dict)
+        options = result["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "user@host" in options["url"]
+        assert "url_password_fingerprint" in options
+        assert len(options["url_password_fingerprint"]) == 64
+
+    def test_database_sink_url_password_redacted_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """database sink options.url password should be redacted in dev mode."""
+        from elspeth.core.config import _fingerprint_config_for_audit
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        config_dict = {
+            "source": {"plugin": "csv", "options": {}},
+            "sinks": {
+                "warehouse": {
+                    "plugin": "database",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        }
+
+        result = _fingerprint_config_for_audit(config_dict)
+        options = result["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "url_password_fingerprint" not in options
+        assert options["url_password_redacted"] is True
+
+    def test_resolve_config_database_sink_url_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """resolve_config must not return plaintext database sink DSN passwords."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        settings = ElspethSettings(
+            source={"plugin": "csv", "on_success": "warehouse"},
+            sinks={
+                "warehouse": {
+                    "plugin": "database",
+                    "on_write_failure": "discard",
+                    "options": {"url": "postgresql://user:dbsecret@host/db"},  # secret-scan: allow-this-line
+                }
+            },
+        )
+
+        resolved = resolve_config(settings)
+        options = resolved["sinks"]["warehouse"]["options"]
+
+        assert "dbsecret" not in options["url"]
+        assert "url_password_fingerprint" in options
+        assert len(options["url_password_fingerprint"]) == 64
+
     def test_dsn_unparsable_with_credentials_raises(self) -> None:
         """Unparsable URLs with credential patterns must not pass through."""
         from elspeth.core.config import SecretFingerprintError, _sanitize_dsn
@@ -2887,6 +3048,28 @@ sinks:
 
         assert "secret123" not in sanitized
         assert had_password is True
+
+    def test_dsn_odbc_connect_sanitized_is_faithful_not_double_encoded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """elspeth-f9b8ed91a9: scrubbing odbc_connect must remove the password WITHOUT
+        double-encoding the non-secret connection material. The sanitized audit URL
+        must re-parse to the original connection string minus the password."""
+        from sqlalchemy.engine import make_url
+
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BPWD%3Dsecret123%3BServer%3Dhost"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert had_password is True
+        assert "secret123" not in sanitized
+        # No double-encoding: the encoded form of '%3D'/'%20' (i.e. %253D/%2520) must not appear.
+        assert "%253D" not in sanitized
+        assert "%2520" not in sanitized
+        # Faithful: re-parsing the sanitized URL yields the scrubbed connection string.
+        reparsed = make_url(sanitized).query["odbc_connect"]
+        assert reparsed == "DRIVER={SQL Server};Server=host"
 
     def test_dsn_query_param_password_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Query-param password without userinfo password still detected."""
@@ -3594,6 +3777,58 @@ class TestEnvVarExpansion:
         result = _expand_env_vars(config)
 
         assert result["prefix"] == ""
+
+    def test_load_settings_from_yaml_string_expands_env_vars_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The in-memory loader preserves historical ${VAR} expansion by default."""
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+"""
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-server-secret-value-suffix"
+
+    def test_load_settings_from_yaml_string_can_skip_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Opt-out keeps runtime-substituted ${VAR} literal so host secrets are not resolved.
+
+        Web execution uses this after splicing in inline-blob bytes / resolved
+        secrets: the operator tree was already expanded, and attacker-supplied
+        blob text like ${INLINE_PROMPT_SECRET} must stay data, not a host lookup.
+        """
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        monkeypatch.setenv("INLINE_PROMPT_SECRET", "server-secret-value")
+
+        settings = load_settings_from_yaml_string(
+            """
+source:
+  plugin: csv_local
+  on_success: output
+  options:
+    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options: {}
+""",
+            expand_env_vars=False,
+        )
+
+        assert settings.source.options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
 
 
 class TestSinkNameCasing:

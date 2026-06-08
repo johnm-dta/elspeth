@@ -28,6 +28,7 @@ from elspeth.contracts.errors import CapacityError, FrameworkBugError, PluginRet
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputPort
+from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
@@ -467,6 +468,19 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         _process_single_with_state().
         """
         raise NotImplementedError
+
+    def _parse_external_json_response(self, response: Any, *, label: str) -> Any:
+        """Parse an Azure JSON response body with the Tier-3 strict parser."""
+        text = response.text
+        if type(text) is not str:
+            raise MalformedResponseError(f"{label} body must be text, got {type(text).__name__}")
+        try:
+            data, parse_error = parse_json_strict(text)
+        except RecursionError as exc:
+            raise MalformedResponseError(f"Invalid JSON in {label}: {exc}") from exc
+        if parse_error is not None:
+            raise MalformedResponseError(f"Invalid JSON in {label}: {parse_error}")
+        return data
 
     def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> Any:
         """Get or create audited HTTP client for a state_id.

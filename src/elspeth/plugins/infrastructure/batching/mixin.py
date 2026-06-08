@@ -104,6 +104,21 @@ class BatchTransformMixin:
     _batch_wait_timeout: float  # Timeout for waiter.wait() in executor
     _pool_size: int = 30  # Max concurrent rows; used by executor to cap adapter max_pending
 
+    @property
+    def batch_runtime_enabled(self) -> bool:
+        """Runtime marker for the engine's row-pipelined batch path."""
+        return True
+
+    @property
+    def batch_pool_size(self) -> int:
+        """Preferred max pending submissions for the engine output adapter."""
+        return self._pool_size
+
+    @property
+    def batch_wait_timeout(self) -> float:
+        """Max seconds the engine should wait for one row result."""
+        return self._batch_wait_timeout
+
     def accept(self, row: PipelineRow, ctx: TransformContext) -> None:
         """Accept a row for concurrent processing.
 
@@ -228,12 +243,9 @@ class BatchTransformMixin:
         except RuntimeError:
             # The row has already been admitted to the FIFO buffer. Convert a
             # shutdown-time submit race into an explicit row failure so the
-            # waiter/output path is satisfied and no ticket is stranded.
-            if state_id is not None:
-                with self._batch_submissions_lock:
-                    submission_key = (token.token_id, state_id)
-                    if submission_key in self._batch_submissions:
-                        self._batch_submissions.pop(submission_key)
+            # waiter/output path is satisfied and no ticket is stranded. The
+            # release loop remains the sole owner of submission cleanup for
+            # admitted rows, including explicit shutdown-result rows.
 
             from elspeth.contracts import TransformResult
 
@@ -341,7 +353,7 @@ class BatchTransformMixin:
                 # Clean up submission tracking (before emit, in case emit fails)
                 if state_id is not None:
                     with self._batch_submissions_lock:
-                        self._batch_submissions.pop((token.token_id, state_id), None)
+                        del self._batch_submissions[(token.token_id, state_id)]
 
                 # Emit to output port with state_id for correct waiter matching
                 # The port may block if downstream is applying backpressure

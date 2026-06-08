@@ -28,7 +28,7 @@
   audience: "Technical users, reviewers, integrators, assurance staff",
   classification: default-classification,
   status: "Primer -- current as of " + data.doc-date,
-  distribution: "Internal -- Digital Transformation Agency only",
+  distribution: "Public evaluation release copy",
 )
 
 #outline(

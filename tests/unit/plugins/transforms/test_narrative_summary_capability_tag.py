@@ -12,17 +12,23 @@ include a ``summary`` field that Phase 6B's narrative renderer surfaces.
 
 from __future__ import annotations
 
+from typing import cast
+
+from elspeth.plugins.infrastructure.base import BaseTransform
+from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
 from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+NARRATIVE_SUMMARY_TAG = "narrative-summary"
 
 
 def test_batch_classifier_metrics_class_tags_narrative_summary() -> None:
     """Class-level declaration is the authoritative tag set."""
-    assert "narrative-summary" in BatchClassifierMetrics.capability_tags
+    assert NARRATIVE_SUMMARY_TAG in BatchClassifierMetrics.capability_tags
 
 
 def test_batch_distribution_profile_class_tags_narrative_summary() -> None:
-    assert "narrative-summary" in BatchDistributionProfile.capability_tags
+    assert NARRATIVE_SUMMARY_TAG in BatchDistributionProfile.capability_tags
 
 
 def test_narrative_summary_tag_on_real_plugin_instance() -> None:
@@ -40,7 +46,7 @@ def test_narrative_summary_tag_on_real_plugin_instance() -> None:
             "predicted_field": "predicted",
         }
     )
-    assert "narrative-summary" in plugin.capability_tags
+    assert NARRATIVE_SUMMARY_TAG in plugin.capability_tags
 
     profile = BatchDistributionProfile(
         {
@@ -48,4 +54,30 @@ def test_narrative_summary_tag_on_real_plugin_instance() -> None:
             "value_field": "value",
         }
     )
-    assert "narrative-summary" in profile.capability_tags
+    assert NARRATIVE_SUMMARY_TAG in profile.capability_tags
+
+
+def test_registered_narrative_summary_transforms_guarantee_summary_output_field() -> None:
+    """Catalog-tagged transforms must satisfy the narrative renderer contract."""
+    manager = PluginManager()
+    manager.register_builtin_plugins()
+
+    tagged_transforms = [plugin_cls for plugin_cls in manager.get_transforms() if NARRATIVE_SUMMARY_TAG in plugin_cls.capability_tags]
+
+    assert tagged_transforms, "Expected at least one builtin narrative-summary transform."
+
+    failures: list[str] = []
+    for plugin_cls in tagged_transforms:
+        transform_cls = cast(type[BaseTransform], plugin_cls)
+        transform = transform_cls(transform_cls.probe_config())
+        output_schema_config = transform._output_schema_config
+        assert output_schema_config is not None
+        guaranteed_fields = frozenset(output_schema_config.guaranteed_fields or ())
+        if "summary" not in guaranteed_fields:
+            failures.append(f"{plugin_cls.name}: guaranteed_fields={sorted(guaranteed_fields)!r}")
+
+    assert not failures, (
+        "Transforms tagged with narrative-summary must guarantee a summary output field. "
+        "The frontend renderer switches to NarrativeResults from this catalog tag and "
+        "extracts narrative text from output rows named 'summary'. Offences:\n" + "\n".join(failures)
+    )

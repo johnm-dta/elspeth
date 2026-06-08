@@ -28,11 +28,7 @@ from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
-from elspeth.web.composer.service import (
-    _COMPOSER_LLM_TEMPERATURE,
-    _composer_llm_seed_for_model,
-    _litellm_acompletion,
-)
+from elspeth.web.composer.service import _litellm_acompletion
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +195,8 @@ async def maybe_resolve_step_1_source_chat(
     model: str,
     user_message: str,
     plugin_hint: str | None,
+    temperature: float | None,
+    seed: int | None,
 ) -> Step1SourceChatResolution | None:
     """Try to resolve a Step-1 schema-form chat message into source data.
 
@@ -209,16 +207,16 @@ async def maybe_resolve_step_1_source_chat(
     if not user_message:
         raise InvariantError("maybe_resolve_step_1_source_chat: user_message is empty (route validation gap)")
 
-    seed = _composer_llm_seed_for_model(model)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
             {"role": "system", "content": _build_step_1_source_tool_prompt(plugin_hint=plugin_hint)},
             {"role": "user", "content": user_message},
         ],
-        "temperature": _COMPOSER_LLM_TEMPERATURE,
         "tools": [_STEP_1_SOURCE_TOOL],
     }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
     response = await _litellm_acompletion(**kwargs)
@@ -243,6 +241,8 @@ async def solve_step_chat(
     model: str,
     step: GuidedStep,
     user_message: str,
+    temperature: float | None,
+    seed: int | None,
 ) -> str:
     """Send a user chat message to the LLM scoped to *step*; return the assistant reply.
 
@@ -269,15 +269,15 @@ async def solve_step_chat(
         raise InvariantError("solve_step_chat: user_message is empty (route validation gap)")
 
     system_prompt = load_step_chat_skill(step)
-    seed = _composer_llm_seed_for_model(model)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        "temperature": _COMPOSER_LLM_TEMPERATURE,
     }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
     response = await _litellm_acompletion(**kwargs)

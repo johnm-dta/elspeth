@@ -195,6 +195,24 @@ def _validate_ip_address(
             raise SSRFBlockedError(f"Blocked IP range: {ip_str} in {blocked}")
 
 
+def validate_literal_ip_for_ssrf(
+    host: str,
+    *,
+    allowed_ranges: Sequence[IPv4Network | IPv6Network] = (),
+) -> None:
+    """Validate a literal IP hostname against the SSRF blocklist.
+
+    Hostnames that are not literal IP addresses are ignored. This is for
+    config-time validation where DNS must not be resolved as a side effect;
+    request-time validation still goes through ``validate_url_for_ssrf()``.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return
+    _validate_ip_address(host, allowed_ranges=allowed_ranges)
+
+
 @dataclass(frozen=True, slots=True)
 class SSRFSafeRequest:
     """Request with pre-validated IP to prevent DNS rebinding attacks.
@@ -345,7 +363,12 @@ def validate_url_for_ssrf(
     # SNI hostname is always bare (no port) — TLS SNI is hostname-only.
     scheme_lower = parsed.scheme.lower()
     default_port = 443 if scheme_lower == "https" else 80
-    host_header = f"{hostname}:{port}" if port != default_port else hostname
+    # IPv6 literals must be bracketed in the authority / Host header (RFC 3986
+    # §3.2.2, RFC 7230 §5.4); parsed.hostname strips the brackets, so re-add them
+    # for IPv6 (detected by ':') or a non-default port would yield an ambiguous
+    # Host like 2606:...:8080. (elspeth-7144494104)
+    host_for_header = f"[{hostname}]" if ":" in hostname else hostname
+    host_header = f"{host_for_header}:{port}" if port != default_port else host_for_header
 
     return SSRFSafeRequest(
         original_url=url,

@@ -71,12 +71,46 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
+
+
+@pytest.fixture(autouse=True)
+def _stub_advisor_end_gate_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shared CLEAN stub for the END authoritative advisor gate (Task 6).
+
+    The end gate fires ``_run_advisor_checkpoint(phase="end")`` on EVERY
+    no-tool finalize path (``_try_terminate_no_tools`` + the P5 last-chance
+    finalize) and the EARLY advisory pass fires it on the empty->non-empty
+    transition. Both reuse the real audited advisor call, which these
+    full-loop / finalize suites do NOT want to invoke (it would make a real
+    outbound advisor call, inflate ``llm_calls`` counts, or block finalize).
+
+    Patching the *method* (not the inner ``_call_advisor_with_audit``) keeps
+    the per-call ``llm_calls`` audit counts stable — the gate becomes a no-op
+    that always returns CLEAN. A fresh ``AsyncMock`` per test avoids
+    cross-test call-count leakage. Tests that legitimately exercise the gate
+    override ``service._run_advisor_checkpoint`` per-instance (instance attr
+    wins over the class patch), so this default never weakens a real gate
+    assertion.
+
+    Imported and applied as an autouse fixture by every suite that drives a
+    no-tool finalize or the full compose loop; suites that test the gate
+    itself (``test_advisor_checkpoint.py``) deliberately do NOT import it.
+    """
+    monkeypatch.setattr(
+        ComposerServiceImpl,
+        "_run_advisor_checkpoint",
+        AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+        raising=True,
+    )
 
 
 @dataclass

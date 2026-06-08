@@ -1450,3 +1450,361 @@ class TestAuditedHTTPClientGet:
         assert recorded_body["_json_parse_failed"] is True
         assert "NaN" in recorded_body["_error"] or "non-finite" in recorded_body["_error"]
         assert recorded_body["_raw_text"] == json_with_nan
+
+    def test_get_with_sensitive_query_params_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GET query params are fingerprinted in audit records, not on the wire."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.get.return_value = mock_response
+
+            client.get("https://api.example.com/search", params={"q": "hello", "api_key": "SECRET123", "limit": 10})
+
+        mock_client.get.assert_called_once()
+        assert mock_client.get.call_args[1]["params"] == {"q": "hello", "api_key": "SECRET123", "limit": 10}
+
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_params = call_kwargs["request_data"].to_dict()["params"]
+        assert recorded_params["q"] == "hello"
+        assert recorded_params["limit"] == 10
+        assert recorded_params["api_key"] != "SECRET123"
+        assert str(recorded_params["api_key"]).startswith("<fingerprint:")
+
+    def test_get_with_sensitive_url_query_params_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GET URL query params are fingerprinted in audit records, not on the wire."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.get.return_value = mock_response
+
+            client.get("https://api.example.com/search?q=hello&token=SECRET_TOKEN")
+
+        mock_client.get.assert_called_once()
+        assert mock_client.get.call_args[0][0] == "https://api.example.com/search?q=hello&token=SECRET_TOKEN"
+
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_url = call_kwargs["request_data"].to_dict()["url"]
+        assert "q=hello" in recorded_url
+        assert "SECRET_TOKEN" not in recorded_url
+        assert "token=%3Cfingerprint%3A" in recorded_url or "token=<fingerprint:" in recorded_url
+
+    def test_get_sensitive_query_param_without_fingerprint_key_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sensitive query params must not be recorded raw when no fingerprint key exists."""
+        from elspeth.contracts.errors import FrameworkBugError
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+
+            with pytest.raises(FrameworkBugError, match="Sensitive query parameter 'token' cannot be fingerprinted"):
+                client.get("https://api.example.com/search", params={"q": "hello", "token": "SECRET_TOKEN"})
+
+        mock_client.get.assert_not_called()
+        mock_execution.record_call.assert_not_called()
+
+    def test_get_sensitive_query_param_dev_mode_filters_from_audit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Dev mode removes sensitive query params from audit records when no key is configured."""
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.get.return_value = mock_response
+
+            client.get("https://api.example.com/search", params={"q": "hello", "token": "SECRET_TOKEN"})
+
+        mock_client.get.assert_called_once()
+        assert mock_client.get.call_args[1]["params"] == {"q": "hello", "token": "SECRET_TOKEN"}
+
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_params = call_kwargs["request_data"].to_dict()["params"]
+        assert recorded_params == {"q": "hello"}
+
+    def test_request_ssrf_safe_fingerprints_sensitive_query_params_in_audit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SSRF-safe audit records fingerprint URL and explicit query params."""
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        safe_request = SSRFSafeRequest(
+            original_url="https://api.example.com/search?token=URL_SECRET&q=hello",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/search?token=URL_SECRET&q=hello",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        shared_client = MagicMock()
+        ssrf_context = MagicMock()
+        ssrf_client = MagicMock()
+        ssrf_context.__enter__.return_value = ssrf_client
+        ssrf_client.get.return_value = mock_response
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.side_effect = [shared_client, ssrf_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+
+            response, final_url, _call = client.request_ssrf_safe(
+                "GET",
+                safe_request,
+                params={"api_key": "PARAM_SECRET", "q": "hello"},
+            )
+
+        assert response.status_code == 200
+        assert final_url == "https://api.example.com/search?token=URL_SECRET&q=hello"
+        ssrf_client.get.assert_called_once()
+        assert ssrf_client.get.call_args[0][0] == "https://93.184.216.34:443/search?token=URL_SECRET&q=hello"
+        assert ssrf_client.get.call_args[1]["params"] == {"api_key": "PARAM_SECRET", "q": "hello"}
+
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_request = call_kwargs["request_data"].to_dict()
+        assert "URL_SECRET" not in recorded_request["url"]
+        assert "token=%3Cfingerprint%3A" in recorded_request["url"] or "token=<fingerprint:" in recorded_request["url"]
+        assert recorded_request["params"]["q"] == "hello"
+        assert recorded_request["params"]["api_key"] != "PARAM_SECRET"
+        assert str(recorded_request["params"]["api_key"]).startswith("<fingerprint:")
+
+    def test_request_ssrf_safe_telemetry_bug_does_not_double_record(self) -> None:
+        """A telemetry programmer-bug after a successful SSRF record must not
+        produce a second audit row (elspeth-affb35a660).
+
+        _emit_telemetry_after_audit re-raises programmer bugs (TypeError etc.).
+        request_ssrf_safe previously emitted telemetry inside the network try
+        block, so that re-raise was caught by `except Exception` and triggered a
+        second _record_call(ERROR) at the same call_index — a duplicate-index
+        audit write that also misclassifies a telemetry bug as an HTTP failure.
+        The success record+emit must sit OUTSIDE the network try (like post()/
+        get()), so the bug propagates with exactly one SUCCESS record written.
+        """
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        safe_request = SSRFSafeRequest(
+            original_url="https://api.example.com/page",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/page",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        def _telemetry_bug(event: object) -> None:
+            raise TypeError("telemetry bug")
+
+        shared_client = MagicMock()
+        ssrf_context = MagicMock()
+        ssrf_client = MagicMock()
+        ssrf_context.__enter__.return_value = ssrf_client
+        ssrf_client.get.return_value = mock_response
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.side_effect = [shared_client, ssrf_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=_telemetry_bug,
+            )
+            with pytest.raises(TypeError, match="telemetry bug"):
+                client.request_ssrf_safe("GET", safe_request)
+
+        # Exactly one audit row, and it is the SUCCESS record — not a duplicate
+        # ERROR row misattributing the telemetry bug to the HTTP call.
+        assert mock_execution.record_call.call_count == 1
+        assert mock_execution.record_call.call_args_list[0].kwargs["status"] == CallStatus.SUCCESS
+
+    def test_request_ssrf_safe_post_passes_query_params_to_httpx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SSRF-safe POST must preserve explicit query params on the network request."""
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        safe_request = SSRFSafeRequest(
+            original_url="https://api.example.com/search",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/search",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        shared_client = MagicMock()
+        ssrf_context = MagicMock()
+        ssrf_client = MagicMock()
+        ssrf_context.__enter__.return_value = ssrf_client
+        ssrf_client.post.return_value = mock_response
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client_class.side_effect = [shared_client, ssrf_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+
+            client.request_ssrf_safe(
+                "POST",
+                safe_request,
+                json={"ok": True},
+                params={"api_key": "PARAM_SECRET", "q": "hello"},
+            )
+
+        ssrf_client.post.assert_called_once()
+        assert ssrf_client.post.call_args[1]["params"] == {"api_key": "PARAM_SECRET", "q": "hello"}
+
+    def test_redirect_hop_fingerprints_sensitive_query_params_in_audit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Redirect hop audit records fingerprint sensitive query params."""
+        from elspeth.core.security.web import SSRFSafeRequest
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        mock_execution = self._create_mock_execution()
+
+        redirect_response = MagicMock(spec=httpx.Response)
+        redirect_response.is_redirect = True
+        redirect_response.headers = {"location": "/next?signature=REDIRECT_SECRET&q=ok"}
+        redirect_response.request = MagicMock()
+
+        final_response = MagicMock(spec=httpx.Response)
+        final_response.is_redirect = False
+        final_response.status_code = 200
+        final_response.headers = {}
+        final_response.request = MagicMock()
+
+        redirect_request = SSRFSafeRequest(
+            original_url="https://api.example.com/next?signature=REDIRECT_SECRET&q=ok",
+            resolved_ip="93.184.216.34",
+            host_header="api.example.com",
+            port=443,
+            path="/next?signature=REDIRECT_SECRET&q=ok",
+            scheme="https",
+            bare_hostname="api.example.com",
+        )
+
+        shared_client = MagicMock()
+        hop_context = MagicMock()
+        hop_client = MagicMock()
+        hop_context.__enter__.return_value = hop_client
+        hop_client.get.return_value = final_response
+
+        with (
+            patch("httpx.Client") as mock_client_class,
+            patch("elspeth.plugins.infrastructure.clients.http.validate_url_for_ssrf", return_value=redirect_request),
+        ):
+            mock_client_class.side_effect = [shared_client, hop_context]
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+
+            response, redirects_followed, final_url = client._follow_redirects_safe(
+                redirect_response,
+                max_redirects=5,
+                timeout=30.0,
+                original_headers={"Host": "api.example.com"},
+                original_url="https://api.example.com/start?api_key=FROM_SECRET",
+            )
+
+        assert response is final_response
+        assert redirects_followed == 1
+        assert final_url == "https://api.example.com/next?signature=REDIRECT_SECRET&q=ok"
+        hop_client.get.assert_called_once()
+        assert hop_client.get.call_args[0][0] == "https://93.184.216.34:443/next?signature=REDIRECT_SECRET&q=ok"
+
+        call_kwargs = mock_execution.record_call.call_args[1]
+        recorded_request = call_kwargs["request_data"].to_dict()
+        assert recorded_request["hop_number"] == 1
+        assert "REDIRECT_SECRET" not in recorded_request["url"]
+        assert "signature=%3Cfingerprint%3A" in recorded_request["url"] or "signature=<fingerprint:" in recorded_request["url"]
+        assert "FROM_SECRET" not in recorded_request["redirect_from"]
+        assert (
+            "api_key=%3Cfingerprint%3A" in recorded_request["redirect_from"] or "api_key=<fingerprint:" in recorded_request["redirect_from"]
+        )

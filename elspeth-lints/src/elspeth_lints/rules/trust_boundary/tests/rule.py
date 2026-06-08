@@ -70,6 +70,7 @@ from elspeth_lints.core.ast_walker import (
 )
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.trust_boundary.shared import (
+    allowlist_path_for_root,
     display_path,
     extract_keywords,
     filter_allowlisted_findings,
@@ -147,6 +148,8 @@ class TrustBoundaryTestsRule:
             context.root,
             repo_root=context.repo_root,
             allowlist_dir_override=context.allowlist_dir_override,
+            governance_emitted_dirs=context.allowlist_governance_emitted_dirs,
+            emit_allowlist_governance=context.emit_allowlist_governance,
         )
 
 
@@ -343,9 +346,12 @@ def scan_root(
     *,
     repo_root: Path | None = None,
     allowlist_dir_override: Path | None = None,
+    governance_emitted_dirs: set[str] | None = None,
+    emit_allowlist_governance: bool = True,
 ) -> list[Finding]:
     """Walk every Python file under ``root`` and aggregate findings."""
     resolved_repo_root = repository_root(root, repo_root)
+    allowlist_dir = allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root)
     allowlist = load_honesty_gate_allowlist(
         root,
         allowlist_dir_override=allowlist_dir_override,
@@ -362,7 +368,13 @@ def scan_root(
         if isinstance(item, (PythonSyntaxError, PythonFileReadError)):
             continue
         findings.extend(analyze_tree(item.tree, display_path(item.path, root), repo_root=resolved_repo_root))
-    return filter_allowlisted_findings(findings, allowlist)
+    return filter_allowlisted_findings(
+        findings,
+        allowlist,
+        allowlist_dir=allowlist_dir,
+        governance_emitted_dirs=governance_emitted_dirs,
+        emit_allowlist_governance=emit_allowlist_governance,
+    )
 
 
 @dataclass(frozen=True, slots=True)

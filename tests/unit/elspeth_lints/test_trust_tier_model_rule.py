@@ -38,6 +38,7 @@ from elspeth_lints.rules.trust_tier.tier_model.rule import (
     report_json,
     run_check,
     scan_file,
+    scan_layer_imports_file,
 )
 from elspeth_lints.rules.trust_tier.tier_model.rule import (
     _load_tier_model_allowlist as load_allowlist,
@@ -598,6 +599,21 @@ class TestR4BroadExcept:
         r4_findings = [f for f in findings if f.rule_id == "R4"]
         assert len(r4_findings) == 0
 
+    def test_nested_helper_raise_does_not_satisfy_outer_handler(self) -> None:
+        """A raise inside a nested helper is not a re-raise by the handler."""
+        source = dedent("""
+            try:
+                risky_operation()
+            except Exception:
+                def helper():
+                    raise RuntimeError("not the handler")
+                record_problem()
+        """)
+        findings = parse_and_visit(source)
+
+        r4_findings = [f for f in findings if f.rule_id == "R4"]
+        assert len(r4_findings) == 1
+
     def test_ignores_specific_exceptions(self) -> None:
         """Catching specific exceptions should NOT be flagged."""
         source = dedent("""
@@ -641,6 +657,45 @@ class TestR6SilentExcept:
                 def helper():
                     raise RuntimeError("not the handler")
                 helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+    def test_transform_result_error_routed_to_completion_is_explicit(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        shutdown_result = TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
+                        self._complete_ticket(ticket, token, shutdown_result, state_id)
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert r6_findings == []
+
+    def test_transform_result_error_without_completion_route_still_fires(self) -> None:
+        source = dedent("""
+            class Worker:
+                def accept_row(self):
+                    try:
+                        self._batch_executor.submit(self._process)
+                    except RuntimeError:
+                        from elspeth.contracts import TransformResult
+
+                        TransformResult.error(
+                            {"reason": "shutdown_requested"},
+                            retryable=False,
+                        )
         """)
         findings = parse_and_visit(source)
 
@@ -2468,3 +2523,97 @@ class TestC83InFileTransplantDefence:
         al = Allowlist(entries=[entry], per_file_rules=[])
         matched = _match_finding(al, finding)
         assert matched is entry
+
+
+# =============================================================================
+# Layer-import (L1 / TC) scanner — relative & package-root upward imports
+# (elspeth-b8b600e213) and nested TYPE_CHECKING classification (elspeth-b7ef37c4a9)
+# =============================================================================
+
+
+class TestLayerImportScanner:
+    """scan_layer_imports_file: upward layer-import detection and TC classification."""
+
+    @staticmethod
+    def _scan(tmp_path: Path, rel: str, source: str, *, subpackages: tuple[str, ...] = ()) -> tuple[list[Finding], list[Finding]]:
+        # tmp_path acts as the --root (src/elspeth style: paths like core/...).
+        for pkg in subpackages:
+            pkg_dir = tmp_path / pkg
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+        file_path = tmp_path / rel
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(dedent(source), encoding="utf-8")
+        return scan_layer_imports_file(file_path, tmp_path)
+
+    def test_flags_absolute_upward_import(self, tmp_path: Path) -> None:
+        # NO-REGRESSION (the case with no real exemplar): a plain absolute
+        # level-0 upward import must STILL be flagged after the rewrite.
+        violations, tc = self._scan(tmp_path, "core/mod.py", "from elspeth.plugins import transforms\n")
+        assert [f.rule_id for f in violations] == ["L1"]
+        assert tc == []
+
+    def test_flags_relative_upward_import(self, tmp_path: Path) -> None:
+        # elspeth-b8b600e213: `from ..plugins import x` in a core file resolves to
+        # elspeth.plugins (L3) and must be flagged.
+        violations, _ = self._scan(tmp_path, "core/mod.py", "from ..plugins import transforms\n")
+        assert [f.rule_id for f in violations] == ["L1"]
+
+    def test_flags_package_root_subpackage_import(self, tmp_path: Path) -> None:
+        # elspeth-b8b600e213: `from elspeth import plugins` (plugins IS a real
+        # subpackage) must be flagged.
+        violations, _ = self._scan(tmp_path, "core/mod.py", "from elspeth import plugins\n", subpackages=("plugins",))
+        assert [f.rule_id for f in violations] == ["L1"]
+
+    def test_ignores_package_root_attribute_import(self, tmp_path: Path) -> None:
+        # FP trap: `from elspeth import __version__` imports an attribute, not a
+        # subpackage — must NOT be flagged.
+        violations, tc = self._scan(tmp_path, "core/mod.py", "from elspeth import __version__\n")
+        assert violations == []
+        assert tc == []
+
+    def test_one_finding_per_multi_alias_import(self, tmp_path: Path) -> None:
+        # Per-node (not per-alias) emission: `from elspeth.plugins import a, b, c`
+        # is a single upward edge -> exactly one finding.
+        violations, _ = self._scan(tmp_path, "core/mod.py", "from elspeth.plugins import a, b, c\n")
+        assert len(violations) == 1
+
+    def test_nested_type_checking_import_is_warning_not_violation(self, tmp_path: Path) -> None:
+        # elspeth-b7ef37c4a9: an import nested in try/ inside `if TYPE_CHECKING:`
+        # is annotation-only -> TC warning, not an L1 runtime violation.
+        source = """
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                try:
+                    from elspeth.plugins import transforms
+                except ImportError:
+                    transforms = None
+        """
+        violations, tc = self._scan(tmp_path, "core/mod.py", source)
+        assert violations == []
+        assert [f.rule_id for f in tc] == ["TC"]
+
+    def test_type_checking_else_branch_is_runtime(self, tmp_path: Path) -> None:
+        # The else: of `if TYPE_CHECKING:` is the runtime fallback — its imports
+        # are genuine runtime and must stay L1 (getting the walk wrong fails OPEN).
+        source = """
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                pass
+            else:
+                from elspeth.plugins import transforms
+        """
+        violations, tc = self._scan(tmp_path, "core/mod.py", source)
+        assert [f.rule_id for f in violations] == ["L1"]
+        assert tc == []
+
+    def test_sideways_and_downward_imports_not_flagged(self, tmp_path: Path) -> None:
+        # engine (L2) importing core (L1) and contracts (L0) is allowed.
+        violations, _ = self._scan(
+            tmp_path,
+            "engine/mod.py",
+            "from elspeth.core import x\nfrom elspeth.contracts import y\n",
+        )
+        assert violations == []

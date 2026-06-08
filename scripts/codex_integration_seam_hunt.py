@@ -29,6 +29,7 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     AsyncTqdm,
     chunked,
     ensure_log_file,
+    exit_code_from_stats,
     generate_summary,
     get_git_commit,
     is_cache_path,
@@ -279,6 +280,7 @@ async def _run_batches(
 
     summary: dict[str, int] = generate_summary(output_dir, no_defect_marker="No integration seam defect found")
     summary["gated"] = total_gated
+    summary["failed"] = len(failed_files)
     return summary
 
 
@@ -472,7 +474,8 @@ Examples:
     print("   - INTEGRATION_SEAM_LOG.md: Execution log")
     print()
 
-    return 0
+    # Fail closed: exit non-zero when any file failed analysis (partial scan).
+    return exit_code_from_stats(stats)
 
 
 if __name__ == "__main__":

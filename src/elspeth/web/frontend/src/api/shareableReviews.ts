@@ -10,8 +10,10 @@
  * The first two require ownership; the third grants a specific authenticated
  * user read-only access to a session they don't own (the token is a
  * capability, NOT an authenticator — see plan 19a §"Capability vs
- * authenticator"). All three participate in the global 401 logout
- * interceptor via the shared parseResponse helper in api/client.ts.
+ * authenticator"). Owner-auth endpoints participate in the global 401 logout
+ * interceptor via the shared parseResponse helper in api/client.ts; the
+ * shared-inspect capability endpoint preserves the reviewer session so the
+ * caller can render invalid/revoked-link errors in place.
  *
  * Wire shapes mirror src/elspeth/web/shareable_reviews/models.py verbatim;
  * any drift here is a typed-parse failure.
@@ -205,5 +207,8 @@ export async function fetchSharedInspect(
     headers: authHeaders(),
     signal,
   });
-  return validateSharedInspectResponse(await parseResponse<unknown>(response), response.status);
+  return validateSharedInspectResponse(
+    await parseResponse<unknown>(response, { logoutOnUnauthorized: false }),
+    response.status,
+  );
 }

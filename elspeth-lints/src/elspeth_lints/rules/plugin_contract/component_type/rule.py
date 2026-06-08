@@ -8,11 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
+from elspeth_lints.core.allowlist_governance import allowlist_governance_findings_for_root
 from elspeth_lints.core.ast_walker import PythonFileReadError, PythonSyntaxError, walk_python_files
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.plugin_contract.component_type.metadata import LEGACY_RULE_ID, RULE_ID, RULE_METADATA, SUGGESTION
 
 _ALL_RULE_IDS = frozenset({LEGACY_RULE_ID})
+# The documented contract (config_base.DataPluginConfig) and the CT1 remediation
+# message limit _plugin_component_type to exactly these literals. Any other string
+# is an invalid label the gate must ratchet, not silently accept.
+_VALID_COMPONENT_TYPES = frozenset({"source", "sink", "transform"})
 _KNOWN_BASES: dict[str, dict[str, bool]] = {
     "DataPluginConfig": {"is_data_config_descendant": True, "sets_type": False, "is_exempt": True},
     "PathConfig": {"is_data_config_descendant": True, "sets_type": False, "is_exempt": True},
@@ -49,10 +54,21 @@ class ComponentTypeRule:
         """Run a whole-root scan, or a direct tree scan for focused tests."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return find_component_type_findings(scan_tree_classes(tree, display_path(file_path, context.root), []))
-        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
+        return scan_root(
+            context.root,
+            allowlist_dir_override=context.allowlist_dir_override,
+            governance_emitted_dirs=context.allowlist_governance_emitted_dirs,
+            emit_allowlist_governance=context.emit_allowlist_governance,
+        )
 
 
-def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
+def scan_root(
+    root: Path,
+    *,
+    allowlist_dir_override: Path | None = None,
+    governance_emitted_dirs: set[str] | None = None,
+    emit_allowlist_governance: bool = True,
+) -> list[Finding]:
     """Scan a root and apply the legacy component-type allowlist."""
     allowlist_dir = (
         allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_component_type")
@@ -65,11 +81,23 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         source_lines = parsed.source.splitlines()
         all_classes.extend(scan_tree_classes(parsed.tree, display_path(parsed.path, root), source_lines))
     findings = find_component_type_findings(all_classes)
-    return [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    active = [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+    return [
+        *active,
+        *allowlist_governance_findings_for_root(
+            allowlist,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+            emitted_dirs=governance_emitted_dirs,
+            enabled=emit_allowlist_governance,
+        ),
+    ]
 
 
 def scan_tree_classes(tree: ast.AST, file_path: str, source_lines: list[str]) -> list[ClassInfo]:
     """Extract class information from one AST."""
+    aliases = _build_import_aliases(tree)
     classes: list[ClassInfo] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
@@ -81,7 +109,7 @@ def scan_tree_classes(tree: ast.AST, file_path: str, source_lines: list[str]) ->
                 file_path=file_path,
                 line=node.lineno,
                 column=node.col_offset,
-                base_names=_extract_base_names(node),
+                base_names=_extract_base_names(node, aliases),
                 sets_component_type=_class_sets_component_type(node),
                 is_exempt=_class_is_exempt(node),
                 code_snippet=snippet,
@@ -125,11 +153,40 @@ def find_component_type_findings(all_classes: list[ClassInfo]) -> list[Finding]:
     return findings
 
 
-def _extract_base_names(node: ast.ClassDef) -> list[str]:
+def _build_import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map each ``import ... as X`` local alias back to its original symbol name.
+
+    Lets a base referenced under an alias (``from ... import DataPluginConfig as
+    DPC``) resolve to the real base name for descendant/ancestor checks. Module
+    aliases (``import pkg.mod as m``) are keyed by their final component so a
+    ``m.DataPluginConfig`` base still matches; that path is already covered by
+    ``ast.Attribute.attr`` extraction, so the entry is merely harmless backup.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name.split(".")[-1]
+    return aliases
+
+
+def _extract_base_names(node: ast.ClassDef, aliases: dict[str, str]) -> list[str]:
     names: list[str] = []
     for base in node.bases:
         if isinstance(base, ast.Name):
+            # Emit BOTH the literal and the alias-resolved name (when they
+            # differ). Appending — never replacing — preserves the never-loosen
+            # invariant: a base literally named after a known config base keeps
+            # its match even if it is itself a shadowing alias of something else.
             names.append(base.id)
+            resolved = aliases.get(base.id)
+            if resolved is not None and resolved != base.id:
+                names.append(resolved)
         elif isinstance(base, ast.Attribute):
             names.append(base.attr)
     return names
@@ -144,6 +201,7 @@ def _class_sets_component_type(node: ast.ClassDef) -> bool:
             and item.value is not None
             and isinstance(item.value, ast.Constant)
             and isinstance(item.value.value, str)
+            and item.value.value in _VALID_COMPONENT_TYPES
         ):
             return True
         if isinstance(item, ast.Assign):
@@ -153,6 +211,7 @@ def _class_sets_component_type(node: ast.ClassDef) -> bool:
                     and target.id == "_plugin_component_type"
                     and isinstance(item.value, ast.Constant)
                     and isinstance(item.value.value, str)
+                    and item.value.value in _VALID_COMPONENT_TYPES
                 ):
                     return True
     return False

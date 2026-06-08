@@ -26,7 +26,7 @@ from uuid import UUID
 from litellm.exceptions import APIError as LiteLLMAPIError
 from opentelemetry import metrics
 
-from elspeth.web.composer.service import _composer_llm_seed_for_model, _litellm_acompletion
+from elspeth.web.composer.service import _litellm_acompletion
 
 if TYPE_CHECKING:
     from elspeth.web.sessions.protocol import SessionServiceProtocol
@@ -40,7 +40,6 @@ _AUTO_TITLE_SYSTEM_PROMPT = (
 
 _AUTO_TITLE_MAX_LEN = 60
 _AUTO_TITLE_MAX_TOKENS = 20
-_AUTO_TITLE_TEMPERATURE = 0.0
 _AUTO_TITLE_FAILED_COUNTER = metrics.get_meter(__name__).create_counter("composer.auto_title.failed")
 _SURROUNDING_TITLE_QUOTES = (
     '"',
@@ -93,10 +92,12 @@ async def maybe_auto_title_session(
     session_id: UUID,
     user_message: str,
     model: str,
+    temperature: float | None,
+    seed: int | None,
 ) -> None:
     """Generate and persist an auto-title for ``session_id``.
 
-    One-shot LLM completion (no tools, deterministic temperature). On
+    One-shot LLM completion (no tools, operator-set sampling). On
     Provider errors, timeouts, and cancellation are recorded on
     operational telemetry and return without poisoning the chat response.
     Programmer bugs and DB write failures propagate to the caller awaiting
@@ -104,16 +105,16 @@ async def maybe_auto_title_session(
     """
     if not user_message.strip():
         return
-    seed = _composer_llm_seed_for_model(model)
     kwargs: dict[str, object] = {
         "model": model,
         "messages": [
             {"role": "system", "content": _AUTO_TITLE_SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        "temperature": _AUTO_TITLE_TEMPERATURE,
         "max_tokens": _AUTO_TITLE_MAX_TOKENS,
     }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
     try:

@@ -615,6 +615,28 @@ class TestSuccessfulResponses:
         with pytest.raises(DataverseClientError, match=r"@odata.nextLink.*string"):
             client.get_page(f"{ENV_URL}/api/data/v9.2/accounts")
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"value": [], "@odata.nextLink": 123},
+            {"value": [], "@Microsoft.Dynamics.CRM.fetchxmlpagingcookie": 456},
+            {"value": [], "@Microsoft.Dynamics.CRM.morerecords": "maybe"},
+            {"value": [], "@Microsoft.Dynamics.CRM.morerecords": 3.14},
+        ],
+    )
+    def test_pagination_validation_errors_preserve_request_context(
+        self, client: DataverseClient, transport: MockTransport, body: dict[str, Any]
+    ) -> None:
+        """elspeth-392c13aff0: pagination-metadata validation errors must carry
+        request_url and fingerprinted request_headers like the neighbouring protocol
+        errors, so source/sink error audits can record the outbound context."""
+        transport.add_response(_make_json_response(body))
+        with pytest.raises(DataverseClientError) as exc_info:
+            client.get_page(f"{ENV_URL}/api/data/v9.2/accounts")
+        err = exc_info.value
+        assert err.request_url is not None, f"request_url dropped for {body}"
+        assert err.request_headers is not None, f"request_headers dropped for {body}"
+
 
 # ---------------------------------------------------------------------------
 # OData pagination

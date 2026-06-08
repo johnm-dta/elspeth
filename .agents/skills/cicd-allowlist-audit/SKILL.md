@@ -70,6 +70,8 @@ orientation, not a substitute (verdict enums and flags evolve).
 | ---------- | ---- | -------------------- |
 | `rotate` | Mechanical fingerprint reconciliation after an AST refactor. **No judge.** | Yes — entry fingerprints |
 | `justify` | Propose a new entry; the judge (Opus) returns `ACCEPTED`/`BLOCKED`; signs accepted entries. Accepts `--judge-transport {openrouter,agent}` (default `openrouter`). | Yes — new entry |
+| `diagnose-judge-signatures` | Read-only stale-signature triage for signed allowlist entries. Use before asking an operator to sign or before committing allowlist churn. | No |
+| `sign-judge-signatures` | Operator-only bulk repair for signable signed-entry drift. Refuses entries that cannot safely be signed, such as `NO_MATCHING_FINDING`. | Yes — re-signed entries |
 | `audit-verdict` | Human post-review of a judge-**ACCEPTED** entry — confirm or reverse the judge. | Yes — review block |
 | `reaudit` | Re-run the judge across existing entries to detect decay. **Read-only on YAML**; emits a triage report. Accepts `--judge-transport {openrouter,agent}` (default `openrouter`). | No |
 | `migrate-judge-scope` | **Operator-only** (signs; needs the HMAC key). Re-signs v1 (`file_fingerprint`) entries whose signature verifies and whose node still matches a live finding as v2 (`scope_fingerprint`) **without re-running the judge** — it deliberately skips the file_fingerprint byte-freshness gate, so byte-drifted-but-scope-stable entries are the target set, not "CI-green" ones. Gated on integrity (existing v1 signature must verify) + relevance (key still matches a live finding). | Yes — re-signed entries |
@@ -87,6 +89,45 @@ An agent may *propose* a `justify` invocation; only an operator-held environment
 runs it and signs. Full rationale: CLAUDE.md § "CICD Judge Gate: HMAC Key
 Custody". During an audit you therefore *recommend* `justify`/`audit-verdict`
 commands for the operator to run — you do not run the signing path yourself.
+
+### Signed-entry repair workflow
+
+Before committing allowlist churn, run read-only diagnosis with fork-compatible
+signature verification:
+
+```bash
+ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
+  uv run elspeth-lints diagnose-judge-signatures \
+  --root src/elspeth \
+  --allowlist-dir config/cicd/enforce_tier_model \
+  --format text
+```
+
+Classify the output before touching YAML:
+
+- `NO_MATCHING_FINDING`: the signed row has no live finding. The signer will
+  refuse this. Inspect the code; if the finding is gone, remove that stale row
+  from the allowlist. If the finding still matters under a new key, propose a
+  fresh `justify` command for the operator.
+- `SCOPE_BINDING_DRIFT`: the same finding key still exists, but the enclosing
+  scope changed. Do not hand-edit metadata. Propose the emitted `justify`
+  command; the operator runs it with the HMAC key.
+- `AST_PATH_BINDING_DRIFT` with `repair_key`: the live finding moved to a new
+  fingerprint. If an operator-signed replacement row for the `repair_key`
+  already exists and diagnosis reports it `OK_SHAPE_ONLY`/valid, remove the old
+  stale row. If no replacement exists, propose the emitted `justify` command and
+  wait for the operator.
+
+After operator signing, re-run `diagnose-judge-signatures`; only continue when
+no drift/no-match rows remain. Then run the actual trust-tier gate:
+
+```bash
+ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
+  uv run elspeth-lints check --rules trust_tier.tier_model --root src/elspeth
+```
+
+Do not commit backup files created during operator repair, such as temporary
+`*.bak-*` copies, unless the user explicitly asks for them.
 
 ### `--judge-transport` — which LLM serves the verdict
 

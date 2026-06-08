@@ -66,6 +66,10 @@ class TestBatchClassifierMetrics:
         assert result.row["macro_f1"] == pytest.approx(0.5833333333333333)
         assert result.row["weighted_f1"] == pytest.approx(0.6111111111111112)
         assert result.row["micro_f1"] == 0.5
+        assert result.row["summary"] == (
+            "Classifier metrics for actual vs predicted: 4 rows, 4 valid label pairs, "
+            "2 correct, accuracy 0.500, macro F1 0.583, micro F1 0.500."
+        )
 
         per_label = {entry["label"]: entry for entry in result.row["per_label"]}
         assert per_label["A"]["tp"] == 1
@@ -277,6 +281,7 @@ class TestBatchClassifierMetricsConfig:
                 "missing_count",
                 "per_label",
                 "predicted_field",
+                "summary",
                 "weighted_f1",
                 "binary_f1",
                 "binary_fn",

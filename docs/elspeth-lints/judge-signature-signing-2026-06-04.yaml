@@ -1,0 +1,192 @@
+entries:
+  - file_path: composer_mcp/server.py
+    rule: R6
+    symbol: create_server.call_tool
+    fingerprint: a187f54762a062cc
+    rationale: |-
+      LLM tool arguments are Tier-3 external input; this path validates and canonicalizes before state mutation, with audit-safe failure propagation.
+  - file_path: composer_mcp/server.py
+    rule: R6
+    symbol: create_server.call_tool
+    fingerprint: b2caae76fe340e14
+    rationale: |-
+      Audit result canonicalization is intentionally guarded so malformed optional tool-result material records a sentinel without fabricating success or hiding the operation outcome.
+  - file_path: web/app.py
+    rule: R6
+    symbol: _periodic_orphan_cleanup
+    fingerprint: 4cfa0bef5fce8c3f
+    rationale: |-
+      In _periodic_orphan_cleanup (line 180), the catch is narrowed to (SQLAlchemyError, OSError) — recoverable DB-layer transients and SQLite file-level I/O failures from cancel_all_orphaned_runs at a true external boundary (DB engine + filesystem). The correct behaviour for this periodic background loop is to absorb the transient and retry on the next interval. Programmer-bug exceptions (AttributeError, TypeError, AssertionError) are deliberately NOT caught and terminate the task so they surface at lifespan shutdown — the offensive-programming stance. exc_info is omitted to avoid the documented SQLAlchemy __cause__ credential-leak vector. The existing rationale is accurate. Not silent swallowing of bugs; consistent with sibling cleanup sites.
+  - file_path: web/app.py
+    rule: R7
+    symbol: lifespan
+    fingerprint: 99b1d84eb65cf352
+    rationale: |-
+      Shutdown suppresses the exact asyncio cancellation control signal after explicit task cancellation; it does not suppress operational errors.
+  - file_path: web/app.py
+    rule: R1
+    symbol: _BodySizeLimitMiddleware.dispatch
+    fingerprint: 92dd4b5a184dc62a
+    rationale: |-
+      In _BodySizeLimitMiddleware.dispatch (line 501), `request.headers.get("content-length")` reads an optional HTTP header from untrusted client input — Tier 3. content-length is optional and clients may omit it (comment lines 491-495); None means no declared size, in which case the request proceeds to the per-field Pydantic caps which are the actual contract. Notably the int(content_length) conversion at line 502 is deliberately NOT wrapped, so a malformed header propagates to Starlette's 400 handling rather than being defended — absence is handled honestly (skip the early 413) and bad values still crash. This is correct Tier-3 optional-header handling, not bug-hiding.
+  - file_path: web/app.py
+    rule: R1
+    symbol: create_app
+    fingerprint: f23aed5fee50ba7b
+    rationale: |-
+      create_app (app.py:706) reads os.environ.get("ELSPETH_ENV") != "test" as one clause of the production secret_key guard (the guard hard-crashes via SystemExit when secret_key is the default value on a non-local host outside tests). os.environ is a Tier-3 external boundary (process environment, not first-party data); .get() returns None when ELSPETH_ENV is unset and the != "test" comparison correctly treats absence as "not the test environment" without fabricating a substitute. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary(source_param=...) has nothing to bind. This is the canonical shape-safe read of an optional env var with explicit None handling. (Note: existing rationale's "WEB_CONCURRENCY" label is stale — the actual var is ELSPETH_ENV in the secret-key production guard; rewritten from current code.)
+  - file_path: web/app.py
+    rule: R1
+    symbol: create_app
+    fingerprint: bf72ca4a84a3c2e7
+    rationale: |-
+      At app.py:797, os.environ.get("WEB_CONCURRENCY", "1") reads an optional process-environment variable — a genuine Tier-3 boundary external to ELSPETH. The default "1" is meaning-preserving: absence of WEB_CONCURRENCY documents single-worker, and the value is immediately validated by _parse_worker_count(signal_name="WEB_CONCURRENCY") which rejects non-integers. This is an optional env-var read with a documented absence default, not a defensive .get() on a typed first-party object. (Note: the existing existing_reason text mislabels the variable as ELSPETH_ENV, but the code and the verified existing_rationale both correctly describe WEB_CONCURRENCY.)
+  - file_path: web/app.py
+    rule: R4
+    symbol: create_app._prometheus_metrics
+    fingerprint: cace50c86a32e828
+    rationale: |-
+      In _prometheus_metrics (app.py), the broad `except Exception` wraps generate_latest(), which walks the global Prometheus REGISTRY and runs third-party collector code we do not own — a genuine external boundary at a public /metrics scrape endpoint. A corrupted collector raising would otherwise reach Starlette's default 500 handler and leak the traceback into the response body; the handler instead records the failure via `_handler_slog.error("prometheus_scrape_failed", exc_class=..., detail=str(scrape_exc)[:200])` and returns a fixed 503 with a one-line '# scrape failed' body, so scrapers retry gracefully. Audit-primacy (CLAUDE.md): this endpoint reads in-memory OTel counter state only, so a scrape failure is a telemetry-system failure — operational, not legal — which is the sanctioned use of slog (logged, not audited); no Landscape audit event is swallowed. Logging a bounded message is safe here, unlike the secret-bearing DB exceptions in execution/service.py: generate_latest() only formats global-REGISTRY state, every value of which /metrics already serves publicly, so the message identifies which collector broke without exposing anything not already public. Broad except is the correct width for unknown third-party collector failures at an external boundary; the error is recorded for operators, not dropped.
+  - file_path: web/composer/service.py
+    rule: R5
+    symbol: ComposerServiceImpl._serialize_response_via_walker
+    fingerprint: ae6883ce1915b729
+    rationale: |-
+      PRESCRIBED FORM — first-party sum-type dispatch, now mechanically declared. `_serialize_response_via_walker` accepts `_ToolOutcome`, whose `_ToolOutcomeResponse` type alias is `ToolResult | Mapping[str, Any] | None` in web/composer/_compose_loop_carriers.py. P3 constructs `_ToolOutcome` records only through `tool_batch.run_tool_batch._append_tool_outcome`; normal execute-tool, cache-hit, proposal, and session-aware success paths store a `ToolResult`, while the `request_advisor_hint` interception path intentionally stores first-party Mapping envelopes because that tool is outside `execute_tool` and performs an async advisor LLM call. Those Mapping envelopes are the disabled/budget-exhausted/advisor-error/timeout/success payloads produced in tool_batch.py and are redacted by the manifest entry for `request_advisor_hint`, whose known response keys include the sensitive `guidance` field. The external advisor text crosses its Tier-3 boundary in `_call_advisor_with_audit`, which validates non-empty content and records an inner ComposerLLMCall before building the first-party envelope. The `isinstance(response, Mapping)` branch therefore dispatches a declared internal union so P4 can either deep-thaw the advisor Mapping envelope or call `ToolResult.to_dict()`; it is not masking an unexpected contract violation or fabricating data.
+  - file_path: web/auth/oidc.py
+    rule: R1
+    symbol: JWKSTokenValidator.decode_token
+    fingerprint: 7f739b2cc0f07da8
+    rationale: |-
+      In JWKSTokenValidator.decode_token (oidc.py:390), kid = header.get("kid") reads the optional 'kid' header from an unverified JWT header (jwt.get_unverified_header). The JWT and its header are external-origin Tier-3 data from a remote IdP, and 'kid' is explicitly OPTIONAL per RFC 7515 JWS. A None result flows into the key-matching loop and, if no JWK matches, raises a typed AuthenticationError (line 398) — absence is recorded and surfaced as an auth failure, never fabricated. Direct subscript would raise KeyError on a legitimately kid-less token, converting an expected optional-claim case into a crash. This is meaning-preserving Tier-3 boundary handling, not silent data loss.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R2
+    symbol: _litellm_error_detail
+    fingerprint: 3ca0bb6706462b74
+    rationale: |-
+      In _litellm_error_detail (_helpers.py:508), getattr(exc, "status_code", None) reads status_code from a LiteLLM-native exception in the else-branch — a third-party-SDK exception object whose attribute surface is provider/SDK-controlled, i.e. Tier-3 external data even though our code holds the reference (our own _BadRequestLLMError carrier is dispatched by exact type in the other branch with direct attribute access). The follow-up `type(natural_status_code) is int` narrows to a validated shape and falls back to None, recording absence rather than fabricating a status code. This is the legitimate Tier-3 shape-guard, not a defensive read of a first-party contract. Existing rationale matches.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R5
+    symbol: _extract_runtime_model_snapshot
+    fingerprint: 23dc9504f1c66975
+    rationale: |-
+      In _extract_runtime_model_snapshot (line 639), `if not isinstance(options, Mapping): raise AuditIntegrityError(...)` is an OFFENSIVE Tier-1 guard, not defensive suppression. The composition_state JSON is written by our own writer, which guarantees the structural envelope (options is a Mapping; model/model_version are str-or-absent) even though the values inside are LLM-authored. A non-Mapping options is therefore corruption of our own audit data — the code crashes with a typed AuditIntegrityError (and uses `type(value) is str`, not duck-typing, on the inner keys, lines 647/653) rather than coercing garbage into the audit row or hiding the writer bug behind a NULL. isinstance here is the exact-shape envelope check that surfaces our-code corruption by raising. Legitimate offensive use; absent optional keys are correctly recorded as None (line 645-646), not fabricated.
+
+
+      The @trust_boundary decorator nudge would mark this function tier=3 with source_param=`state` — but that is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary. `state` is a CompositionStateRecord written by our own composition_state writer: node["id"]/node["options"] are read by required direct-subscript (Tier-1, crash-on-absence) and the isinstance(options, Mapping) guard raises AuditIntegrityError on a non-Mapping — an OFFENSIVE check that surfaces corruption of OUR data, not a zero-trust rejection of external input. A @trust_boundary(tier=3) here would (a) misrepresent the trust tier in the audit-tooling record and (b) suppress the offensive guard that is doing exactly the Tier-1 job CLAUDE.md mandates. The honest representation is this per-line allowlist entry documenting a sanctioned Tier-1 offensive isinstance, NOT a Tier-3 boundary decorator.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R1
+    symbol: _extract_runtime_model_snapshot
+    fingerprint: bce5d1bfa9700829
+    rationale: |-
+      HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R1
+    symbol: _extract_runtime_model_snapshot
+    fingerprint: ad64db4a8b3325db
+    rationale: |-
+      In _extract_runtime_model_snapshot (_helpers.py:645/646), `options.get("model")` / `options.get("model_version")` read LEGITIMATELY-OPTIONAL keys from a Tier-1 composition_state node written by our own writer. The REQUIRED keys (`node["id"]`, `node["options"]`) are read by direct subscript (crash-on-absence, correct for Tier-1), and a non-Mapping options raises AuditIntegrityError (offensive). model/model_version are optional BY DESIGN — an LLM transform without an explicit pin uses an LLM-pack default at runtime — so `.get`-returns-None faithfully records 'no runtime model pinned' (the audit columns are nullable) without fabricating a default. A non-str value at either key still raises AuditIntegrityError (line 647/653). The bare `.get` is the honest optional-key read; rewriting it surfaces no decision. R1 over-fires on these optional Tier-1 reads; per-line entry is the reviewed suppression.
+
+      The @trust_boundary nudge (source_param=state, tier=3) is a TIER MISLABEL that would launder Tier-1 audit data as a Tier-3 external boundary and is therefore rejected: `state` is our own composition_state, the offensive AuditIntegrityError guards are doing the Tier-1 job CLAUDE.md mandates, and a tier=3 decorator would both misrepresent the trust tier and suppress those offensive checks.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R6
+    symbol: _handle_convergence_error
+    fingerprint: bc7bce58e1ea7cdd
+    rationale: |-
+      _handle_convergence_error (_helpers.py:1956) catches except SQLAlchemyError as save_err around a best-effort persistence of partial composer state at a Tier-3 DB-persistence boundary. The catch is narrowed to the SQLAlchemyError family per CLAUDE.md Tier-1 semantics (TypeError/KeyError from state.to_dict()/CompositionStateData would be Tier-1 invariant bugs and deliberately propagate). It does not swallow: it records the failure class via slog (class name only, str(exc) deliberately omitted because SQLAlchemyError text can carry DB URLs/credentials/bound payloads) and surfaces the outcome to the caller by setting partial_state_save_failed=True and partial_state_save_error in the HTTP response body. The recovery is deliberate — a persistence failure must not upgrade a 422 convergence error to a 500. Record-then-degrade-with-explicit-signal, not a silent default. Legitimate.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R6
+    symbol: _handle_plugin_crash
+    fingerprint: 330794dc236b4b2e
+    rationale: |-
+      In _handle_plugin_crash (_helpers.py:2098), `except SQLAlchemyError as save_err` wraps the partial-state save during plugin-crash handling so that a DB write failure does not mask the original plugin-crash 500 response. The catch is narrow (full SQLAlchemyError family deliberately, to avoid OperationalError/ProgrammingError escaping; ValueError/TypeError/KeyError Tier-1 invariant bugs are NOT caught here and propagate) and the error is not swallowed: it is recorded via slog (class name only, to avoid leaking SQL params/secrets) and surfaced to the frontend as explicit partial_state_save_failed / partial_state_save_error fields so the UI can distinguish 'state captured' from 'state lost'. This is record-then-continue at an audit-DB-degradation boundary, not silent data loss.
+  - file_path: web/sessions/routes/_helpers.py
+    rule: R6
+    symbol: _handle_runtime_preflight_failure
+    fingerprint: a2fdcb3a8186e070
+    rationale: |-
+      In _handle_runtime_preflight_failure (line 2331), `except SQLAlchemyError as save_err` wraps a best-effort audit-DB save of the partial composition state during error handling. The persistence-fallback contract is explicit: a DB write failure must NOT mask the original runtime-preflight 500. The catch is narrowed to SQLAlchemyError (not bare except), records the failure via slog as an audit-system-failure event (class name only, no exc_info, per the documented credential-redaction rationale), and surfaces partial_state_save_failed in the response body. This matches CLAUDE.md's audit-system-failure / persistence-fallback exemption. Programmer bugs are not caught and propagate. Not silent swallowing — the failure is recorded and surfaced.
+  - file_path: core/security/web.py
+    rule: R6
+    symbol: validate_literal_ip_for_ssrf
+    fingerprint: 82650ca4aa6dc216
+    rationale: |-
+      Literal-IP SSRF validation treats parser rejection as a negative literal-IP result; DNS-bearing host validation occurs at request time and is not silently trusted here.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_csv
+    fingerprint: 01eb9c785ca84c0c
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_csv
+    fingerprint: b51a1a008766dc02
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_csv
+    fingerprint: 924ecd7ca0576ab3
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_csv
+    fingerprint: db1ffffc202c253f
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_json_array
+    fingerprint: 48845cdce0bd6e0f
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_json_array catch narrow external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, and (json.JSONDecodeError, ValueError) on json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault, since parse_constant only fires on parsed JSON tokens). Neither is a silent swallow: both route through the local _record_file_level_error helper, which builds a raw_row (container, blob_path, error) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: malformed external JSON is recorded and quarantined at the boundary, the run is not crashed. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_json_array
+    fingerprint: f4247a38d45a894e
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_json_array catch narrow external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, and (json.JSONDecodeError, ValueError) on json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault, since parse_constant only fires on parsed JSON tokens). Neither is a silent swallow: both route through the local _record_file_level_error helper, which builds a raw_row (container, blob_path, error) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: malformed external JSON is recorded and quarantined at the boundary, the run is not crashed. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_jsonl
+    fingerprint: ca746611979869b8
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_jsonl catch narrow external-origin parse faults on raw blob bytes: (json.JSONDecodeError, ValueError) on the per-line json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault), and UnicodeDecodeError raised by the streaming TextIOWrapper on a truncated byte sequence. Neither is a silent swallow: each builds a raw_row carrying audit metadata (raw line or raw bytes hex, line number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing; suppresses only the quarantine yield, never the audit record). Per-line JSONL parse handling continues to the next line on a bad line (a line-level quarantine); the file-level UnicodeDecodeError records and returns. This is the CLAUDE.md source doctrine: a malformed JSONL line is recorded and quarantined, the rest of the file keeps processing. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/sources/azure_blob_source.py
+    rule: R6
+    symbol: AzureBlobSource._load_jsonl
+    fingerprint: 2578d0e48ba13cc1
+    rationale: |-
+      PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_jsonl catch narrow external-origin parse faults on raw blob bytes: (json.JSONDecodeError, ValueError) on the per-line json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault), and UnicodeDecodeError raised by the streaming TextIOWrapper on a truncated byte sequence. Neither is a silent swallow: each builds a raw_row carrying audit metadata (raw line or raw bytes hex, line number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing; suppresses only the quarantine yield, never the audit record). Per-line JSONL parse handling continues to the next line on a bad line (a line-level quarantine); the file-level UnicodeDecodeError records and returns. This is the CLAUDE.md source doctrine: a malformed JSONL line is recorded and quarantined, the rest of the file keeps processing. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
+  - file_path: plugins/infrastructure/batching/mixin.py
+    rule: R6
+    symbol: BatchTransformMixin._complete_ticket
+    fingerprint: f6b5a60d4c2ae50c
+    rationale: |-
+      In BatchTransformMixin._complete_ticket (mixin.py:305), `except (KeyError, ShutdownError)` catches two specific, named exceptions representing legitimate expected races: a ticket already evicted by timeout (KeyError) or a buffer shutdown (ShutdownError). These are documented control-flow signals that a late worker completion arriving after eviction/shutdown is expected and discardable. The discard is recorded via debug log with token_id and state_id for traceability; re-raising would crash a worker thread over a benign race the design tolerates. This is a narrow EAFP catch, not a broad swallow — the handling IS the explicit policy for these two conditions. Existing rationale accurate.
+  - file_path: plugins/infrastructure/batching/mixin.py
+    rule: R6
+    symbol: BatchTransformMixin._release_loop
+    fingerprint: ba03beb6f92aa4ff
+    rationale: |-
+      In BatchTransformMixin._release_loop (mixin.py:350), except TimeoutError -> continue handles the documented poll sentinel from wait_for_next_release(timeout=1.0): 'no result ready in this window'. It is a normal condition during low load, not an error; re-raising would kill the release thread and stall the pipeline. The catch is narrowly typed, and the same try/except routes ShutdownError -> break (clean exit, line 354) and other Exception -> wrap-as-ExceptionResult/emit with TIER_1_ERRORS re-raised (lines 361-380) — discriminated control flow, not a catch-all swallow. R6's concern (errors vanishing without re-raise or error result) does not apply to a documented timeout sentinel used for poll-and-retry. Matches the existing rationale.
+  - file_path: plugins/infrastructure/batching/mixin.py
+    rule: R6
+    symbol: BatchTransformMixin._release_loop
+    fingerprint: 781da1282d945b7e
+    rationale: |-
+      In BatchTransformMixin._release_loop (mixin.py:354), except ShutdownError -> break is the dedicated release thread's only clean-exit path. ShutdownError is an ELSPETH-internal typed control-flow signal (a RuntimeError subclass defined in row_reorder_buffer.py) raised by buffer.shutdown(); shutdown_batch_processing() drains all workers before shutting the buffer, so reaching break carries the invariant that all results have been emitted. The same try/except routes TimeoutError -> continue (line 350) and other Exception -> wrap/emit with TIER_1_ERRORS re-raised (line 361). This is a narrowly-typed wakeup signal used as control flow, not silent swallowing of a real error. Matches the existing rationale.
+  - file_path: plugins/infrastructure/batching/mixin.py
+    rule: R9
+    symbol: BatchTransformMixin.evict_submission
+    fingerprint: 443d069fd81386c2
+    rationale: |-
+      In BatchTransformMixin.evict_submission (mixin.py:445), ticket = self._batch_submissions.pop(key, None) implements the function's documented return contract: True if evicted, False if not found or already completed. The docstring states the worker may have already completed and removed the entry, so the None sentinel directly maps to the False-return branch (line 447-448). This is process-internal coordination state under the submissions lock, and the race is real and intended — not defensive masking of a schema invariant. No audit corruption or data loss; the False return is the audited outcome. Legitimate R9 suppression. Matches the existing rationale.
+  - file_path: plugins/infrastructure/clients/http.py
+    rule: R1
+    symbol: AuditedHTTPClient._send_ssrf_safe_request
+    fingerprint: 54961c9c041be486
+    rationale: |-
+      False positive on HTTP client.get method dispatch; this is not dict.get default fabrication, and the response remains inside the audited request path.

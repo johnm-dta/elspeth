@@ -149,17 +149,108 @@ class TestResolveContractFromContext:
         assert sink._output_contract is None
 
     def test_skips_if_contract_already_set(self) -> None:
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
         from elspeth.plugins.infrastructure.display_headers import (
             resolve_contract_from_context_if_needed,
         )
 
-        existing = MagicMock()
+        existing = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(
+                    normalized_name="amount",
+                    original_name="Amount USD",
+                    python_type=int,
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
         sink = _StubSink(HeaderMode.ORIGINAL)
         sink._output_contract = existing
         ctx = MagicMock()
-        ctx.contract = MagicMock()
+        ctx.contract = existing
         resolve_contract_from_context_if_needed(sink, ctx)
         assert sink._output_contract is existing
+
+    def test_raises_if_context_contract_conflicts_with_cached_original_header(self) -> None:
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.plugins.infrastructure.display_headers import (
+            resolve_contract_from_context_if_needed,
+        )
+
+        sink = _StubSink(HeaderMode.ORIGINAL)
+        sink._output_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(
+                    normalized_name="amount",
+                    original_name="Amount A",
+                    python_type=int,
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        ctx = MagicMock()
+        ctx.contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(
+                    normalized_name="amount",
+                    original_name="Amount B",
+                    python_type=int,
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+
+        with pytest.raises(ValueError, match="same normalized field maps to different original headers"):
+            resolve_contract_from_context_if_needed(sink, ctx)
+
+    def test_merges_non_conflicting_context_contract_fields(self) -> None:
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.plugins.infrastructure.display_headers import (
+            resolve_contract_from_context_if_needed,
+        )
+
+        sink = _StubSink(HeaderMode.ORIGINAL)
+        sink._output_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(
+                    normalized_name="amount",
+                    original_name="Amount USD",
+                    python_type=int,
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        ctx = MagicMock()
+        ctx.contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(
+                    normalized_name="customer_id",
+                    original_name="Customer ID",
+                    python_type=str,
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+
+        resolve_contract_from_context_if_needed(sink, ctx)
+
+        assert sink._output_contract.find_field("amount").original_name == "Amount USD"
+        assert sink._output_contract.find_field("customer_id").original_name == "Customer ID"
 
 
 class TestResolveDisplayHeadersIfNeeded:

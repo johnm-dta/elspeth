@@ -5,6 +5,7 @@ to ExecutionRepository. Uses make_source_context() for real landscape integratio
 and manual PluginContext construction for guard-clause tests.
 """
 
+import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import Mock
@@ -222,6 +223,26 @@ class TestRecordValidationErrorHappyPath:
         )
         assert isinstance(token, ValidationErrorToken)
         assert len(token.row_id) == 16
+
+    def test_non_canonical_row_does_not_leak_row_content_to_logger(self, caplog: pytest.LogCaptureFixture) -> None:
+        """elspeth-05a5727489: when stable_hash() fails on non-canonical row data, the
+        fallback warning must log only the error TYPE, never str(e). Hashing
+        canonicalization errors embed `Got: {obj!r}` (raw row content), which must
+        stay in Landscape, not cross a normal logging boundary."""
+        ctx = make_source_context()
+        secret = "ROW-SECRET-payload-42"
+        with caplog.at_level(logging.WARNING, logger="elspeth.contracts.plugin_context"):
+            token = ctx.record_validation_error(
+                row={"data": frozenset({secret})},  # frozenset -> non-canonical -> repr_hash fallback
+                error="non-serializable external data",
+                schema_mode="flexible",
+                destination="discard",
+            )
+        assert isinstance(token, ValidationErrorToken)
+        assert len(token.row_id) == 16  # repr_hash fallback still produced an id
+        log_text = "\n".join(r.getMessage() for r in caplog.records)
+        assert secret not in log_text  # row content must not leak through the logger
+        assert "TypeError" in log_text  # the diagnostic error type is still logged
 
     def test_custom_destination_propagated(self) -> None:
         """Destination string flows through to the returned token."""

@@ -32,7 +32,7 @@ from elspeth.contracts.config.protocols import (
 )
 from elspeth.contracts.engine import RetryPolicy
 from elspeth.contracts.enums import _IMPLEMENTED_BACKPRESSURE_MODES, BackpressureMode, TelemetryGranularity
-from elspeth.contracts.freeze import freeze_fields, require_int
+from elspeth.contracts.freeze import freeze_fields, require_bool, require_int
 
 
 def _merge_policy_with_defaults(policy: RetryPolicy) -> dict[str, Any]:
@@ -331,7 +331,14 @@ class RuntimeRateLimitConfig:
 
     def __post_init__(self) -> None:
         """Validate rate limit config and freeze mutable services mapping."""
+        require_bool(self.enabled, "enabled")
         require_int(self.default_requests_per_minute, "default_requests_per_minute", min_value=1)
+        # Settings->Runtime is mechanical: a services value that isn't a
+        # RuntimeServiceRateLimit (e.g. a raw dict) would satisfy the Mapping
+        # protocol but fail later in get_service_config. Reject at the boundary.
+        for service_name, service in self.services.items():
+            if not isinstance(service, RuntimeServiceRateLimit):
+                raise TypeError(f"services[{service_name!r}] must be RuntimeServiceRateLimit, got {type(service).__name__}: {service!r}")
         # Freeze services mapping to prevent external mutation
         object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
 
@@ -471,6 +478,8 @@ class RuntimeCheckpointConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
+        require_bool(self.enabled, "enabled")
+        require_bool(self.aggregation_boundaries, "aggregation_boundaries")
         require_int(self.frequency, "frequency", min_value=0)
         require_int(self.checkpoint_interval, "checkpoint_interval", optional=True, min_value=0)
 
@@ -555,6 +564,8 @@ class ExporterConfig:
 
     def __post_init__(self) -> None:
         """Validate exporter configuration."""
+        if not isinstance(self.name, str):
+            raise TypeError(f"exporter name must be str, got {type(self.name).__name__}: {self.name!r}")
         if not self.name:
             raise ValueError("exporter name cannot be empty")
         freeze_fields(self, "options")
@@ -592,7 +603,21 @@ class RuntimeTelemetryConfig:
 
     def __post_init__(self) -> None:
         """Validate telemetry config invariants."""
+        require_bool(self.enabled, "enabled")
+        require_bool(self.fail_on_total_exporter_failure, "fail_on_total_exporter_failure")
+        if not isinstance(self.granularity, TelemetryGranularity):
+            raise TypeError(f"granularity must be TelemetryGranularity, got {type(self.granularity).__name__}: {self.granularity!r}")
+        if not isinstance(self.backpressure_mode, BackpressureMode):
+            raise TypeError(
+                f"backpressure_mode must be BackpressureMode, got {type(self.backpressure_mode).__name__}: {self.backpressure_mode!r}"
+            )
         require_int(self.max_consecutive_failures, "max_consecutive_failures", min_value=1)
+        # A non-ExporterConfig entry (e.g. a raw dict) satisfies the tuple type but
+        # fails later in the telemetry factory (exporter_config.name -> AttributeError).
+        # Reject at the contract boundary, mirroring the services guard above.
+        for i, exporter in enumerate(self.exporter_configs):
+            if not isinstance(exporter, ExporterConfig):
+                raise TypeError(f"exporter_configs[{i}] must be ExporterConfig, got {type(exporter).__name__}: {exporter!r}")
 
     @classmethod
     def default(cls) -> "RuntimeTelemetryConfig":

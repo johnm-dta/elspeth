@@ -10,7 +10,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import typer
 import yaml
@@ -33,12 +33,13 @@ from elspeth.core.dependency_config import PreflightResult
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
 
 if TYPE_CHECKING:
-    from elspeth.cli_helpers import PluginBundle
     from elspeth.contracts import SinkProtocol, SourceProtocol
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.run_result import RunResult
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
+    from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
 __all__ = [
     "app",
     "load_settings",  # Re-exported from config for convenience
@@ -387,7 +388,7 @@ def run(
     Requires --execute flag to actually run (safety feature).
     Use --dry-run to validate configuration without executing.
     """
-    from elspeth.cli_helpers import instantiate_plugins_from_config
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
     settings_path = Path(settings).expanduser()
 
@@ -494,7 +495,6 @@ def run(
         raise typer.Exit(1) from None
 
     # Resolve dependencies and commencement gates before pipeline execution
-    from elspeth.cli_helpers import bootstrap_and_run
     from elspeth.engine.bootstrap import resolve_preflight
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
 
@@ -824,6 +824,52 @@ class _OrchestratorContext:
     orchestrator: Orchestrator
 
 
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+def _close_orchestrator_resources(
+    rate_limit_registry: _Closeable | None,
+    telemetry_manager: _Closeable | None,
+    *,
+    pending_exc: BaseException | None,
+) -> None:
+    """Close orchestrator teardown resources without masking an in-flight pipeline exception.
+
+    Mirrors the db.close() teardown guard used in the run/resume finally blocks:
+    Tier-1/audit-integrity errors always propagate (audit corruption outranks
+    even the primary failure); any other close failure is logged and suppressed
+    when a pipeline exception is already pending, and surfaced when the run was
+    otherwise clean. Both resources are always attempted so a failure closing the
+    first does not leak the second (elspeth-5310f58a2b).
+    """
+    import structlog
+
+    teardown_error: Exception | None = None
+    for resource, name in (
+        (rate_limit_registry, "rate_limit_registry"),
+        (telemetry_manager, "telemetry_manager"),
+    ):
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as close_exc:
+            # Teardown close failure must not mask the original pipeline exception.
+            structlog.get_logger(__name__).warning(
+                "Orchestrator teardown close failed",
+                component=name,
+                pipeline_exception_pending=pending_exc is not None,
+                close_error=f"{type(close_exc).__name__}: {close_exc}",
+            )
+            if teardown_error is None:
+                teardown_error = close_exc
+    if teardown_error is not None and pending_exc is None:
+        raise teardown_error
+
+
 @contextmanager
 def _orchestrator_context(
     config: ElspethSettings,
@@ -941,10 +987,13 @@ def _orchestrator_context(
             orchestrator=orchestrator,
         )
     finally:
-        if rate_limit_registry is not None:
-            rate_limit_registry.close()
-        if telemetry_manager is not None:
-            telemetry_manager.close()
+        import sys
+
+        _close_orchestrator_resources(
+            rate_limit_registry,
+            telemetry_manager,
+            pending_exc=sys.exc_info()[1],
+        )
 
 
 def _execute_pipeline_with_instances(
@@ -1022,7 +1071,7 @@ def _execute_pipeline_with_instances(
             formatter_prefix="Run",
             output_format=output_format,
         ) as ctx:
-            from elspeth.cli_helpers import _make_sink_factory
+            from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
             from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 
             # CLI path: no FastAPI lifespan, so the live OpenRouter probe
@@ -1038,7 +1087,7 @@ def _execute_pipeline_with_instances(
                 payload_store=payload_store,
                 secret_resolutions=secret_resolutions,
                 preflight_results=preflight_results,
-                sink_factory=_make_sink_factory(config),
+                sink_factory=make_sink_factory(config),
                 openrouter_catalog_sha256=catalog_sha,
                 openrouter_catalog_source=catalog_source,
             )
@@ -1050,6 +1099,113 @@ def _execute_pipeline_with_instances(
             }
     finally:
         db.close()
+
+
+def bootstrap_and_run(settings_path: Path) -> RunResult:
+    """Load config, instantiate plugins, build graph, and run a sub-pipeline.
+
+    This is the programmatic equivalent of ``elspeth run --execute`` used by
+    dependency resolution. It lives in the CLI layer because it intentionally
+    shares CLI secret loading and output-directory preparation.
+    """
+    from elspeth.cli_helpers import resolve_audit_passphrase
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.core.payload_store import FilesystemPayloadStore
+    from elspeth.engine.bootstrap import resolve_preflight
+    from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config, make_sink_factory
+
+    config, secret_resolutions = _load_settings_with_secrets(settings_path)
+
+    plugins = instantiate_plugins_from_config(config)
+    execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
+
+    graph = ExecutionGraph.from_plugin_instances(
+        source=plugins.source,
+        source_settings=plugins.source_settings,
+        transforms=plugins.transforms,
+        sinks=execution_sinks,
+        aggregations=plugins.aggregations,
+        gates=list(config.gates),
+        coalesce_settings=list(config.coalesce) if config.coalesce else None,
+    )
+    graph.validate()
+
+    dir_errors = _ensure_output_directories(config)
+    if dir_errors:
+        raise ValueError(f"Failed to create output directories: {'; '.join(dir_errors)}")
+
+    probes = build_collection_probes(config.collection_probes) if config.collection_probes else []
+    preflight = resolve_preflight(config, settings_path, probes=probes, runner=bootstrap_and_run)
+
+    passphrase = resolve_audit_passphrase(config.landscape)
+    if passphrase is not None and config.landscape.dump_to_jsonl:
+        import structlog
+
+        structlog.get_logger().warning(
+            "JSONL journal is not encrypted",
+            hint="The JSONL change journal is written in plaintext even when the audit database is encrypted with SQLCipher.",
+        )
+
+    db = LandscapeDB.from_url(
+        config.landscape.url,
+        passphrase=passphrase,
+        dump_to_jsonl=config.landscape.dump_to_jsonl,
+        dump_to_jsonl_path=config.landscape.dump_to_jsonl_path,
+        dump_to_jsonl_fail_on_error=config.landscape.dump_to_jsonl_fail_on_error,
+        dump_to_jsonl_include_payloads=config.landscape.dump_to_jsonl_include_payloads,
+        dump_to_jsonl_payload_base_path=(
+            str(config.payload_store.base_path)
+            if config.landscape.dump_to_jsonl_payload_base_path is None
+            else config.landscape.dump_to_jsonl_payload_base_path
+        ),
+    )
+
+    if config.payload_store.backend != "filesystem":
+        raise ValueError(f"Unsupported payload store backend '{config.payload_store.backend}'. Only 'filesystem' is currently supported.")
+    payload_store = FilesystemPayloadStore(config.payload_store.base_path)
+
+    try:
+        with _orchestrator_context(
+            config,
+            graph,
+            plugins,
+            db=db,
+            output_format="none",
+        ) as ctx:
+            from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
+
+            catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
+            return ctx.orchestrator.run(
+                ctx.pipeline_config,
+                graph=graph,
+                settings=config,
+                payload_store=payload_store,
+                preflight_results=preflight,
+                secret_resolutions=secret_resolutions,
+                sink_factory=make_sink_factory(config),
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
+            )
+    finally:
+        import sys
+
+        import structlog
+
+        pending_exc = sys.exc_info()[1]
+        try:
+            db.close()
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as close_exc:
+            # db.close() failure must not mask the original pipeline exception.
+            if pending_exc is not None:
+                structlog.get_logger(__name__).warning(
+                    "db.close() failed during exception cleanup — suppressed",
+                    close_error=f"{type(close_exc).__name__}: {close_exc}",
+                )
+            else:
+                raise
 
 
 def _format_validation_error(
@@ -1098,7 +1254,7 @@ def validate(
     ),
 ) -> None:
     """Validate pipeline configuration without running."""
-    from elspeth.cli_helpers import instantiate_plugins_from_config
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
     settings_path = Path(settings).expanduser()
 
@@ -1755,7 +1911,7 @@ def resume(
         recovery_manager = RecoveryManager(db, checkpoint_manager)
 
         # Instantiate plugins once — reused for validation graph, execution graph, and sink checks
-        from elspeth.cli_helpers import instantiate_plugins_from_config
+        from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
         try:
             plugins = instantiate_plugins_from_config(settings_config)

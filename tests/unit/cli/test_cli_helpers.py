@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from elspeth.cli_helpers import PluginBundle, instantiate_plugins_from_config
 from elspeth.core.config import load_settings
 from elspeth.core.dag import WiredTransform
 from elspeth.plugins.infrastructure.base import BaseSink, BaseSource, BaseTransform
+from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 
 
 def test_instantiate_returns_plugin_bundle(tmp_path: Path):
@@ -236,8 +236,8 @@ def test_instantiate_plugins_raises_on_invalid_plugin():
     """Verify helper raises clear error for unknown plugin."""
     from pydantic import TypeAdapter
 
-    from elspeth.cli_helpers import instantiate_plugins_from_config
     from elspeth.core.config import ElspethSettings
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
     config_dict = {
         "source": {"plugin": "nonexistent", "on_success": "out", "options": {}},

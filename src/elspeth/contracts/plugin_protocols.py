@@ -412,13 +412,13 @@ class TransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protoco
         ...
 
     # Error routing configuration
-    # Injected by cli_helpers.py bridge from TransformSettings.on_error.
+    # Injected by runtime_factory.py bridge from TransformSettings.on_error.
     # Always non-None at runtime (TransformSettings requires on_error).
     # Protocol retains str | None because injection happens post-construction.
     on_error: str | None
 
     # Success routing configuration
-    # Injected by cli_helpers.py bridge from TransformSettings.on_success.
+    # Injected by runtime_factory.py bridge from TransformSettings.on_success.
     # Always non-None at runtime (TransformSettings requires on_success).
     # Protocol retains str | None because injection happens post-construction.
     on_success: str | None
@@ -584,11 +584,11 @@ class BatchTransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Pr
     requires_runtime_preflight: bool
 
     # Error routing configuration
-    # Injected by cli_helpers.py bridge from AggregationSettings/TransformSettings.
+    # Injected by runtime_factory.py bridge from AggregationSettings/TransformSettings.
     on_error: str | None
 
     # Success routing configuration
-    # Injected by cli_helpers.py bridge from AggregationSettings.on_success.
+    # Injected by runtime_factory.py bridge from AggregationSettings.on_success.
     on_success: str | None
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -714,7 +714,7 @@ class SinkProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     # Empty frozenset = no required-field check = all fields optional.
     declared_required_fields: frozenset[str]
 
-    # Write failure routing — injected by cli_helpers from SinkSettings.
+    # Write failure routing — injected by runtime_factory from SinkSettings.
     # "discard" = drop failed rows with audit record, else = failsink name.
     _on_write_failure: str | None
 

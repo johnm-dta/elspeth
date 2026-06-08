@@ -256,3 +256,24 @@ class TestReorderBufferProperties:
         # Must have exactly n results
         assert len(all_results) == n
         assert buffer.pending_count == 0
+
+
+class TestReorderBufferClockSkew:
+    """elspeth-a67e7cfc46: perf_counter can appear non-monotonic across worker/
+    release threads (virtualized/NUMA); a negative buffer_wait_ms must clamp to 0,
+    not crash BufferEntry's non-negative-and-finite contract."""
+
+    def test_negative_buffer_wait_is_clamped(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from elspeth.plugins.infrastructure.pooling import reorder_buffer as rb
+
+        # submit=10.0, complete=20.0, emit=19.0 (emit before complete → skew).
+        ticks = iter([10.0, 20.0, 19.0])
+        monkeypatch.setattr(rb.time, "perf_counter", lambda: next(ticks))
+
+        buffer = ReorderBuffer()
+        idx = buffer.submit()
+        buffer.complete(idx, "result_0")
+        ready = buffer.get_ready_results()  # must not raise
+
+        assert len(ready) == 1
+        assert ready[0].buffer_wait_ms == 0.0

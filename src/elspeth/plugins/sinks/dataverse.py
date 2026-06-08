@@ -8,6 +8,7 @@ modes are deferred per the design spec.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 import urllib.parse
 from datetime import UTC, datetime
@@ -54,6 +55,18 @@ logger = structlog.get_logger(__name__)
 # "Unexpected HTTP status" rather than an explicit client error, because an
 # Unprocessable-Entity response is about this row's payload.
 _DIVERTABLE_STATUS_CODES: frozenset[int] = frozenset({400, 404, 409, 412, 422})
+
+# An @odata.bind value sits in the UNQUOTED entity-key position of the bind
+# reference (``/entity(value)``), unlike the alternate-key URL where the value
+# is a quoted string literal. Row values are Tier-3 data; a value containing
+# OData/URI structural characters (e.g. ``abc)/contacts(emailaddress1='x')``)
+# could change the bind reference's navigation shape — an injection. Restrict
+# bind values to a record-reference key token (alphanumerics + hyphen, which
+# covers Dataverse record GUIDs) and reject anything else clearly at the sink
+# boundary. Validate-and-reject is safe whether or not Dataverse percent-decodes
+# the bind reference; percent-encoding in an unquoted position would not be
+# (elspeth-e7d31117df).
+_SAFE_LOOKUP_BIND_VALUE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class LookupConfig(BaseModel):
@@ -237,7 +250,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5f2235c199ef9a6e"
+    source_file_hash: str | None = "sha256:2eaad637a25997bd"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
@@ -400,9 +413,25 @@ class DataverseSink(BaseSink):
             if self._lookups and pipeline_field in self._lookups:
                 lookup = self._lookups[pipeline_field]
                 if value is not None:
-                    # OData bind syntax: "field@odata.bind": "/entity(guid)"
+                    # OData bind syntax: "field@odata.bind": "/entity(guid)".
+                    # The value is interpolated into the UNQUOTED key position,
+                    # so reject any value that isn't a plain record-reference
+                    # token before it can change the bind URI's shape. Mirrors
+                    # the offensive alternate_key guard in write(): a structurally
+                    # unsafe bind value fails clearly at the boundary rather than
+                    # producing an ambiguous/injectable outbound payload.
+                    bind_value = str(value)
+                    if not _SAFE_LOOKUP_BIND_VALUE.match(bind_value):
+                        raise ValueError(
+                            f"lookup field {pipeline_field!r} value {value!r} is "
+                            f"not a valid record reference for @odata.bind to "
+                            f"entity {lookup.target_entity!r}: only alphanumerics "
+                            f"and hyphens are allowed (e.g. a record GUID). Values "
+                            f"with OData/URI structural characters are rejected to "
+                            f"prevent bind URI injection."
+                        )
                     bind_key = f"{lookup.target_field}@odata.bind"
-                    payload[bind_key] = f"/{lookup.target_entity}({value})"
+                    payload[bind_key] = f"/{lookup.target_entity}({bind_value})"
                 # None value = don't include bind (leaves lookup unset)
             else:
                 payload[dataverse_column] = value
@@ -483,7 +512,7 @@ class DataverseSink(BaseSink):
                 latency_ms = (time.perf_counter() - start_time) * 1000
 
                 # Audit first (primacy), then telemetry
-                request_data = {
+                request_data: dict[str, Any] = {
                     "method": "PATCH",
                     "url": url,
                     "headers": response.request_headers,
@@ -520,6 +549,7 @@ class DataverseSink(BaseSink):
                 request_data = {
                     "method": "PATCH",
                     "url": url,
+                    "headers": e.request_headers,  # Fingerprinted by client; mirrors the success path
                     "json": payload,
                 }
                 ctx.record_call(

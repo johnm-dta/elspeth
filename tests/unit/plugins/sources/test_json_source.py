@@ -1487,6 +1487,39 @@ class TestJSONSourceKeyNormalization:
         assert rows[0].row["client_name"] == "Alice"
         assert rows[0].row["order_id"] == 101
 
+    def test_sparse_field_mapping_is_order_independent(self, tmp_path: Path) -> None:
+        """elspeth-2ad0cebfcd: an optional mapped field that appears only in a later
+        row must (a) not quarantine the sparse first row and (b) still map to its
+        target name regardless of row order. The strict resolve_field_names check
+        previously masked an else-branch that mis-maps a later-only mapped key."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        def load(lines: list[str]) -> list[Any]:
+            jf = tmp_path / "sparse_map.jsonl"
+            jf.write_text("\n".join(lines) + "\n")
+            src = JSONSource(
+                {
+                    "path": str(jf),
+                    "format": "jsonl",
+                    "schema": {"mode": "flexible", "fields": ["id: int"]},
+                    "on_validation_failure": QUARANTINE_SINK,
+                    "field_mapping": {"customer_name": "client_name"},
+                }
+            )
+            return list(src.load(make_source_context(plugin_name="json")))
+
+        # Sparse row first; the mapped 'Customer Name' appears only in the later row.
+        sparse_first = load(['{"id": 1}', '{"id": 2, "Customer Name": "Alice"}'])
+        assert [r.is_quarantined for r in sparse_first] == [False, False]
+        assert sparse_first[0].row == {"id": 1}
+        assert sparse_first[1].row == {"id": 2, "client_name": "Alice"}
+
+        # Reversed order must produce identical normalized output (order-independence).
+        mapped_first = load(['{"id": 2, "Customer Name": "Alice"}', '{"id": 1}'])
+        assert [r.is_quarantined for r in mapped_first] == [False, False]
+        assert mapped_first[0].row == {"id": 2, "client_name": "Alice"}
+        assert mapped_first[1].row == {"id": 1}
+
     def test_get_field_resolution_returns_mapping(self, tmp_path: Path, ctx: PluginContext) -> None:
         """get_field_resolution() returns the resolution mapping after load()."""
         from elspeth.plugins.sources.json_source import JSONSource
@@ -1515,6 +1548,38 @@ class TestJSONSourceKeyNormalization:
         assert mapping["Customer Name"] == "customer_name"
         assert mapping["Order ID"] == "order_id"
         assert version is not None
+
+    def test_observed_sparse_keys_are_added_to_emitted_row_contract(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Later sparse JSON keys must be under schema-contract custody."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"a": 1}, {"a": 2, "b": "new"}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert rows[0].is_quarantined is False
+        assert rows[1].is_quarantined is False
+        assert rows[1].row == {"a": 2, "b": "new"}
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        assert mapping == {"a": "a", "b": "b"}
+
+        second_contract = rows[1].contract
+        assert second_contract is not None
+        assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
+        assert second_contract.get_field("b").original_name == "b"
 
     def test_first_row_quarantined_key_rebuild(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When first row is quarantined and second row has different keys, resolution rebuilds.

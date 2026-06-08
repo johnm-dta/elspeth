@@ -354,12 +354,12 @@ export function GraphView() {
         FALLBACK_MINIMAP_NODE_COLOR_VAR,
       );
     },
-    [miniMapNodeKindById, resolvedTheme],
+    [miniMapNodeKindById],
   );
 
   const getMiniMapNodeStrokeColor = useCallback(
     () => readThemeColor(MINIMAP_NODE_STROKE_COLOR_VAR, FALLBACK_MINIMAP_NODE_COLOR_VAR),
-    [resolvedTheme],
+    [],
   );
 
   // Node click handler — toggle selection

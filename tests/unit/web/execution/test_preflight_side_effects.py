@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode, plugin_preflight_mode_enabled
+from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sources.csv_source import CSVSource
 from elspeth.web.async_workers import run_sync_in_worker
@@ -61,6 +61,41 @@ def _csv_worker_probe_state(tmp_path: Path) -> CompositionState:
                 name="primary",
                 plugin="csv",
                 options={"path": str(outputs_dir / "out.csv"), "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _chroma_persist_outside_data_dir_state(tmp_path: Path) -> CompositionState:
+    blobs_dir = tmp_path / "blobs"
+    outputs_dir = tmp_path / "outputs"
+    blobs_dir.mkdir(exist_ok=True)
+    outputs_dir.mkdir(exist_ok=True)
+    input_path = blobs_dir / "input.csv"
+    input_path.write_text("id,text\n1,Ada\n", encoding="utf-8")
+    return CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="primary",
+            options={"path": str(input_path), "schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="primary",
+                plugin="chroma_sink",
+                options={
+                    "collection": "docs",
+                    "mode": "persistent",
+                    "persist_directory": str(tmp_path.parent / "outside-chroma"),
+                    "field_mapping": {"id_field": "id", "document_field": "text"},
+                    "schema": {"mode": "fixed", "fields": ["id: str", "text: str"]},
+                },
                 on_write_failure="discard",
             ),
         ),
@@ -269,6 +304,15 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
 
     assert result.is_valid is True
     assert observed == [("source", True), ("sink", True)]
+
+
+def test_validate_pipeline_rejects_chroma_persist_directory_outside_data_dir(tmp_path: Path) -> None:
+    result = validate_pipeline(_chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator)
+
+    assert result.is_valid is False
+    assert result.checks[0].name == "path_allowlist"
+    assert result.checks[0].passed is False
+    assert "persist_directory" in result.checks[0].detail
 
 
 def test_runtime_mode_default_does_not_enable_preflight_context(

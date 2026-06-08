@@ -9,9 +9,7 @@ worker via ``_run_sync``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
-from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.sessions.protocol import CompositionStateData
 
 
@@ -84,39 +82,6 @@ class StatePayload:
 
     data: CompositionStateData
     derived_from_state_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolOutcome:
-    """Result of one tool call within a compose turn.
-
-    The ``call`` and ``response`` fields are typed ``Any`` because the
-    compose loop populates them with framework-specific objects (LiteLLM
-    ToolCall, Pydantic response models, plain dicts, etc.) that this
-    module deliberately does not couple to. At runtime these values are
-    typically dicts or ``Mapping`` types, so the ``frozen=True``
-    declaration alone is a lie about immutability — the dataclass
-    attribute cannot be reassigned, but the dict it points to remains
-    fully mutable through the reference.
-
-    CLAUDE.md's ``freeze_fields`` contract is unconditional for frozen
-    dataclasses with container/Any fields: ``__post_init__`` must call
-    ``freeze_fields`` on every such field. ``deep_freeze`` (which
-    ``freeze_fields`` invokes per field) is identity-preserving for
-    values that are already frozen, so the cost of running it on
-    already-immutable inputs (e.g. an integer-only ``call``, which
-    won't happen in practice but is contractually possible) is zero.
-    """
-
-    call: Any  # ToolCall — typed in protocol module
-    response: Any  # tool response object or None on error
-    error_class: str | None
-    error_message: str | None
-    pre_version: int
-    post_version: int
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "call", "response")
 
 
 @dataclass(frozen=True, slots=True)

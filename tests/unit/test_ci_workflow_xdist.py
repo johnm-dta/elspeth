@@ -167,6 +167,28 @@ def test_integration_job_runs_on_rc_branch_pushes() -> None:
     assert "startsWith(github.ref, 'refs/heads/RC')" in condition
 
 
+def test_integration_lane_fails_closed_on_real_test_failures() -> None:
+    """A real integration failure must fail the lane.
+
+    The historical ``... || echo "Integration tests skipped (no API keys)"``
+    swallowed *every* non-zero pytest exit — assertion regressions, collection
+    errors, import failures, and infra faults all left the job green, and
+    ``build-push.yaml`` would then build an image off a broken CI run. The lane
+    must propagate real failures and tolerate only pytest's exit code 5 ("no
+    tests collected").
+    """
+    workflow = _ci_workflow()
+    integration_job = workflow["jobs"]["integration"]
+    run = _step_run(integration_job, "Run integration tests")
+
+    # The blanket failure-swallow must be gone.
+    assert "|| echo" not in run
+    # Real failures propagate via the captured status.
+    assert 'exit "$status"' in run
+    # Only "no tests collected" (pytest exit 5) is tolerated as a skip.
+    assert "-eq 5" in run
+
+
 def test_xdist_auto_defaults_to_parallel_in_ci_controller(monkeypatch: pytest.MonkeyPatch) -> None:
     """CI controllers should get the same xdist default as local runs."""
     monkeypatch.setenv("CI", "true")
@@ -221,6 +243,19 @@ def test_postgres_testcontainer_ci_stays_sequential() -> None:
     assert "-n auto" not in run
 
 
+def test_postgres_testcontainer_lane_gates_ci_success() -> None:
+    """Postgres testcontainer regressions must fail the aggregate CI result."""
+    workflow = _ci_workflow()
+    ci_success = workflow["jobs"]["ci-success"]
+
+    assert "test-postgres-testcontainer" in ci_success["needs"]
+
+    run = _step_run(ci_success, "Check all jobs passed")
+
+    assert "needs.test-postgres-testcontainer.result" in run
+    assert "Postgres testcontainer job failed" in run
+
+
 def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     """Generated composer skill inventory must be checked in CI, not only pre-commit."""
     workflow = _ci_workflow()
@@ -252,3 +287,19 @@ def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() ->
         assert "github.event.pull_request.head.repo.full_name != github.repository" in verify_mode
         assert "shape-only-when-key-missing" in verify_mode
         assert "required" in verify_mode
+
+
+def test_trust_tier_ci_failure_points_to_signature_diagnosis_command() -> None:
+    """Signed allowlist failures should point operators at the repair triage command."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    trust_tier_run = _step_run(static_analysis, "Run trust-tier elspeth-lints rule")
+    sarif_run = _step_run(static_analysis, "Emit elspeth-lints trust-tier SARIF artifact")
+
+    for run in (trust_tier_run, sarif_run):
+        assert "diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model" in run
+        assert "sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model" in run
+        assert "--env-file /path/to/operator.env --owner" in run
+        assert "judge_metadata_signature" in run
+        assert "scope_fingerprint" in run

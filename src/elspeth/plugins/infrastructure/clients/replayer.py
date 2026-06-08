@@ -185,10 +185,18 @@ class CallReplayer:
         request_hash = stable_hash(request_data)
         sequence_key = (call_type, request_hash)
 
-        # Get the current sequence index for this request and increment it
-        # Using defaultdict(int) ensures missing keys default to 0
-        sequence_index = self._sequence_counters[sequence_key]
-        self._sequence_counters[sequence_key] = sequence_index + 1
+        # Read the current sequence index WITHOUT mutating it. The counter is
+        # advanced only after a concrete result exists (cache hit or successful
+        # lookup), at the return points below. This ensures an exceptional exit
+        # — ReplayMissError, ReplayPayloadMissingError, or AuditIntegrityError —
+        # leaves the counter untouched so a retry re-attempts the SAME recorded
+        # occurrence instead of skipping to the next one (which would hide or
+        # misattribute the original failure). Mirrors CallVerifier, which
+        # advances solely through _record_result() (elspeth-55dbfec615).
+        if sequence_key in self._sequence_counters:
+            sequence_index = self._sequence_counters[sequence_key]
+        else:
+            sequence_index = 0
 
         # Cache key includes sequence index to store multiple responses separately
         cache_key = (call_type, request_hash, sequence_index)
@@ -196,6 +204,7 @@ class CallReplayer:
         # Check cache first
         if cache_key in self._cache:
             resp, latency, was_error, error, _call_id = self._cache[cache_key]
+            self._sequence_counters[sequence_key] = sequence_index + 1
             return ReplayedCall(
                 response_data=resp,
                 original_latency_ms=latency,
@@ -264,6 +273,12 @@ class CallReplayer:
             error_data,
             call.call_id,
         )
+
+        # Concrete result obtained — advance the sequence so the next replay of
+        # the same request returns the next recorded occurrence. (See the
+        # read-without-mutating note above: advancement is deferred to here so
+        # that any failure before this point does not consume the occurrence.)
+        self._sequence_counters[sequence_key] = sequence_index + 1
 
         return ReplayedCall(
             response_data=response_data,

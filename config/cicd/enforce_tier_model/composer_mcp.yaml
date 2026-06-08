@@ -7,42 +7,44 @@ per_file_rules:
     also uses isinstance to narrow the result type
   expires: null
   max_hits: 4
+allow_hits: []
+
 allow_hits:
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=bbe2757f46dc0db3
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=a187f54762a062cc
   owner: john
   reason: |-
-    At src/elspeth/composer_mcp/server.py line 620, `except (ValueError, TypeError) as canon_exc` wraps `canonical_json(arguments)` / `stable_hash(arguments)` operating on `arguments` — the LLM-supplied tool-call arguments, which are external-authored (Tier 3) and can carry non-finite floats or non-serializable types that rfc8785 rejects. The catch is not a silent swallow: it builds a forensic sentinel via the shared `build_canonicalization_sentinel` helper (type-name + value-free message + sorted top-level keys), records the failure in `canonicalization_failed`, and at line 673-675 synthesizes an explicit ARG_ERROR result so the audit row still lands and the LLM still receives a structured error. The narrow two-type catch and the record-then-surface-as-ARG_ERROR flow are the prescribed 'wrap at a Tier-3 boundary' pattern; nothing is fabricated and no audit record is dropped.
+    LLM tool arguments are Tier-3 external input; this path validates and canonicalizes before state mutation, with audit-safe failure propagation.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
+  expires: '2026-09-02'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:37:41.307837+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
+  judge_recorded_at: '2026-06-04T03:23:18.461004+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.93
+  judge_confidence: 0.86
   judge_rationale: |-
-    PRESCRIBED FORM at a Tier-3 boundary. `arguments` is LLM-supplied external data; `canonical_json`/`stable_hash` are the boundary operations that may legitimately reject non-finite floats (rfc8785) or non-serializable types. The except catches narrow types only (ValueError, TypeError), does NOT silently swallow: it builds a value-free forensic sentinel via the shared `build_canonicalization_sentinel` helper, preserves the original exception in `canonicalization_failed`, and at server.py:673-675 surfaces it as an explicit ARG_ERROR via `_argument_error_result`, which sets `status = ComposerToolStatus.ARG_ERROR`, populates the audit payload, and returns `CallToolResult(isError=True)` — verified by reading the file. The audit envelope around the dispatch guarantees the record lands. R6 is not in the decorator's suppressible set ({R1,R5}), so a structural refactor is not the remediation here.
+    RULE MISFIRES / PRESCRIBED FORM. The except block does not swallow the error — it captures the exception into `canonicalization_failed`, builds a forensic sentinel via `build_canonicalization_sentinel(canon_exc, arguments)`, and substitutes a sentinel-derived canonical/hash so the audit record is complete. The surrounding code shows the audit envelope explicitly threads ARG_ERROR/PLUGIN_CRASH status through to the recorder, so the exception is structurally propagated as an audit outcome rather than silently dropped. This is the prescribed Tier-3 boundary form for LLM tool arguments: canonicalization failure on external input is recorded with a value-free sentinel, not crashed and not hidden. R6's concern (swallow-without-explicit-result) does not apply.
   judge_signature_version: 2
-  scope_fingerprint: d440c4521bea969796fbcf10d240abf0870beb1d482a29e073e81fa09329c45e
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[52]/body[11]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e5d15de20e7e42eba2d9edc75132843fd5c94862ba32093654d126673932065d'
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=98007a473ebfd71b
+  scope_fingerprint: 56455b7fdf8553ac9cff81fddce38213a6ade1a4972eae499cdfcd91bca96669
+  judge_transport: openrouter
+  ast_path: 'body[53]/body[11]/body[5]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:73c064785c2e8415e72e25b91b46eeae4e8a666801fb3ac2312f46de7afb5a5a'
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=b2caae76fe340e14
   owner: john
   reason: |-
-    At src/elspeth/composer_mcp/server.py line 782, `except (ValueError, TypeError) as canon_result_exc` wraps `canonical_json(result_dict)` / `stable_hash(result_dict)` inside the dispatch's `finally` block. `result_dict` is not merely 'our own output': on the success path it embeds composer-LLM-authored CompositionState (see lines 729-751, `CompositionState.from_dict(result_dict["state"])`), so a non-finite float or non-serializable value can legitimately originate from that external-authored config (Tier 3), which rfc8785 rejects. The catch is in a `finally` whose sole job is to land the audit row, and it deliberately does not re-raise because raising from `finally` would both mask the LLM's success return and destroy the audit record — violating audit primacy; instead it records the failure via the shared `build_canonicalization_sentinel` so the audit row truthfully states 'canonicalization failed' rather than silently dropping. Even were a malformed value to originate from our own dispatch, it surfaces visibly as a recorded canonicalization-failure sentinel rather than being swallowed, keeping this on the right side of R6.
+    Audit result canonicalization is intentionally guarded so malformed optional tool-result material records a sentinel without fabricating success or hiding the operation outcome.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
+  expires: '2026-09-02'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:39:00.191811+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
+  judge_recorded_at: '2026-06-04T03:23:25.429812+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.82
   judge_rationale: |-
-    PRESCRIBED FORM. R6 fires by shape (no re-raise) but the code is the policy-prescribed quarantine: canonical_json/stable_hash failures are diverted through build_canonicalization_sentinel (web/composer/audit.py:135-174), which produces an explicit, bounded error payload that is then recorded in the ComposerToolInvocation audit row — not silent. The site is in a finally whose sole purpose is to land the audit row; the rationale plainly states why re-raise would violate audit primacy (mask the LLM-returned response AND destroy the audit record), and the surrounding code confirms it: the symmetric Tier-1 read-back path at server.py:752-760 does re-raise as PLUGIN_CRASH for invariant breaks earlier in the dispatch, so by the time finally runs, the failure mode being guarded is RFC 8785 strictness against payload contents that already passed json.dumps (a real Tier-3 gap where LLM-authored CompositionState values can be non-canonicalizable, e.g. non-finite floats). The shared sentinel discipline is documented and used in the parallel web path. Audit row carries the failure explicitly; this is the prescribed quarantine, not a silent swallow.
+    PRESCRIBED FORM. This is the audit-record finalization path running in `finally`: canonicalizing the already-returned successful result for the audit row. A raise from finally would mask the legitimate success return to the LLM and corrupt the audit trail. The except catches narrow serialization errors (ValueError/TypeError from canonical_json) and substitutes a documented shared sentinel (build_canonicalization_sentinel) that records the failure mode rather than fabricating success — the audit row still lands with a faithful sentinel, which matches the Auditability Standard's 'record what we got' discipline. The error is not swallowed silently; it is converted into a recorded canonical sentinel keyed to the exception.
   judge_signature_version: 2
-  scope_fingerprint: d440c4521bea969796fbcf10d240abf0870beb1d482a29e073e81fa09329c45e
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[52]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:48aa8e79193e3c20d3544edf3d65beb4e68b7f07ca232acad5e6aa58d30cfbe7'
+  scope_fingerprint: 56455b7fdf8553ac9cff81fddce38213a6ade1a4972eae499cdfcd91bca96669
+  judge_transport: openrouter
+  ast_path: 'body[53]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c84d3dca07fefd8577d8b5aea996808ce24041aba80d3820735112fc311e3577'

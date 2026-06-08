@@ -10,10 +10,16 @@ from typing import Any
 
 import yaml
 
-from elspeth.cli_helpers import PluginBundle, instantiate_plugins_from_config
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.dag.graph import ExecutionGraph
+from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
 from elspeth.web.execution.protocol import ValidationSettings
-from elspeth.web.paths import resolve_data_path
+from elspeth.web.paths import (
+    NESTED_LOCAL_PATH_OPTION_KEYS,
+    SINK_LOCAL_PATH_OPTION_KEYS,
+    SOURCE_LOCAL_PATH_OPTION_KEYS,
+    resolve_data_path,
+)
 
 RUNTIME_CHECK_PLUGIN_INSTANTIATION = "plugin_instantiation"
 RUNTIME_CHECK_GRAPH_STRUCTURE = "graph_structure"
@@ -43,6 +49,22 @@ class RuntimeGraphBundle:
     graph: ExecutionGraph
 
 
+@trust_boundary(
+    tier=3,
+    source=(
+        "operator/composer-authored pipeline YAML produced by YamlGenerator and re-parsed "
+        "here; carries Tier-3 source/sink/transform path options (e.g. persist_directory)"
+    ),
+    source_param="pipeline_yaml",
+    suppresses=("R1",),
+    invariant=(
+        "raises TypeError on structurally malformed generator output (non-dict top-level, "
+        "non-dict source/options/sinks, non-list transforms); optional path keys are read "
+        "with .get and confined to data_dir, never coerced or defaulted"
+    ),
+    test_ref="tests/unit/web/execution/test_service.py::TestResolveYamlPaths::test_non_dict_yaml_raises_type_error",
+    test_fingerprint="0b6962a40eb0f2ab584fb2c1de368235d046257d81da266750c8f8011e651c36",
+)
 def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     """Rewrite relative source/sink paths in pipeline YAML to absolute paths.
 
@@ -59,8 +81,8 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     if not isinstance(config, dict):
         raise TypeError(f"YAML generator produced non-dict top-level value (got {type(config).__name__})")
 
-    source = config.get("source")
-    if source is not None:
+    if "source" in config:
+        source = config["source"]
         if not isinstance(source, dict):
             raise TypeError(f"YAML generator produced non-dict 'source' value (got {type(source).__name__})")
         # yaml_generator always emits 'options' under a present source
@@ -73,25 +95,47 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
         opts = source["options"]
         if not isinstance(opts, dict):
             raise TypeError(f"YAML generator produced non-dict 'source.options' value (got {type(opts).__name__})")
-        for key in ("path", "file"):
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
             if key in opts and not Path(str(opts[key])).is_absolute():
                 opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
 
-    sinks = config.get("sinks")
-    if sinks is not None:
+    if "sinks" in config:
+        sinks = config["sinks"]
         if not isinstance(sinks, dict):
             raise TypeError(f"YAML generator produced non-dict 'sinks' value (got {type(sinks).__name__})")
         for sink_name, sink_cfg in sinks.items():
             if sink_cfg is not None:
                 if not isinstance(sink_cfg, dict):
                     raise TypeError(f"YAML generator produced non-dict sink '{sink_name}' value (got {type(sink_cfg).__name__})")
-                opts = sink_cfg.get("options")
-                if opts is not None:
-                    if not isinstance(opts, dict):
-                        raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
-                    for key in ("path", "file"):
-                        if key in opts and not Path(str(opts[key])).is_absolute():
-                            opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+                if "options" not in sink_cfg:
+                    continue
+                opts = sink_cfg["options"]
+                if not isinstance(opts, dict):
+                    raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
+                for key in SINK_LOCAL_PATH_OPTION_KEYS:
+                    if key in opts and not Path(str(opts[key])).is_absolute():
+                        opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+
+    # Nested transform provider_config paths (RAG retrieval transforms carry a
+    # local Chroma persist_directory under options.provider_config). Confine
+    # the same way as sink paths: rewrite relative values to absolute under
+    # data_dir so the allowlist approves what the plugin actually reads/writes.
+    transforms = config.get("transforms")
+    if transforms is not None:
+        if not isinstance(transforms, list):
+            raise TypeError(f"YAML generator produced non-list 'transforms' value (got {type(transforms).__name__})")
+        for transform in transforms:
+            if not isinstance(transform, dict):
+                continue
+            opts = transform.get("options")
+            if not isinstance(opts, dict):
+                continue
+            provider_config = opts.get("provider_config")
+            if not isinstance(provider_config, dict):
+                continue
+            for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+                if key in provider_config and not Path(str(provider_config[key])).is_absolute():
+                    provider_config[key] = str(resolve_data_path(str(provider_config[key]), data_dir))
 
     return yaml.dump(config, default_flow_style=False)
 

@@ -138,8 +138,12 @@ class ReorderBuffer[T]:
                         f"ReorderBuffer internal error: entry {entry.submit_index} is_complete=True but complete_index is None"
                     )
 
-                # Calculate buffer wait time (time between completion and emission)
-                buffer_wait_ms = (now - entry.complete_timestamp) * 1000
+                # Calculate buffer wait time (time between completion and emission).
+                # Clamp to 0: perf_counter can appear non-monotonic across worker/
+                # release threads (virtualized/NUMA), so now < complete_timestamp is
+                # possible and would violate BufferEntry's non-negative contract.
+                # Mirrors RowReorderBuffer (batching/row_reorder_buffer.py). (elspeth-a67e7cfc46)
+                buffer_wait_ms = max(0.0, (now - entry.complete_timestamp) * 1000)
 
                 ready.append(
                     BufferEntry(

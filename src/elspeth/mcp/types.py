@@ -119,6 +119,7 @@ class OperationCallRecord(TypedDict):
     latency_ms: float | None
     request_hash: str
     response_hash: str | None
+    resolved_prompt_template_hash: str | None
     created_at: str | None
 
 

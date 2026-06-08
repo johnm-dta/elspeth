@@ -33,7 +33,7 @@ from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.plugin_assistance import PluginAssistance, PluginAssistanceExample
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import register_value_source_plugin
@@ -1040,7 +1040,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f0485bad9f8e2eeb"
+    source_file_hash: str | None = "sha256:bb3e0f267aa98f99"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1578,8 +1578,39 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 plugin_name="llm",
                 issue_code=None,
                 summary="Call an LLM provider (Azure OpenAI or OpenRouter) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
+                examples=(
+                    PluginAssistanceExample(
+                        # A minimal before/after option diff (the established example
+                        # shape) showing the one load-bearing lesson: interpolate the
+                        # per-row content, not just an identifier. A summarization task
+                        # (not scoring) so the example carries no authored-judgment
+                        # semantics that would oblige a vague_term review per the hints
+                        # below. Illustrative placeholders only — no real URLs or data.
+                        title="Interpolate the per-row content, not just an identifier",
+                        # WRONG: summarizes each row from an identifier alone, so every
+                        # row sends identical input and the model fabricates a summary
+                        # instead of reading anything.
+                        before={
+                            "prompt_template": "Summarize the page at {{ row.url }} in one sentence.",
+                            "response_field": "summary",
+                            "required_input_fields": ["url"],
+                        },
+                        # RIGHT: interpolates the per-row content, so the model reads each
+                        # row and the summaries differ. required_input_fields must declare
+                        # every row field the template references, or the LLM config
+                        # validator rejects the node.
+                        after={
+                            "prompt_template": "Summarize this page in one sentence, based on its content: {{ row.content }}.",
+                            "response_field": "summary",
+                            "required_input_fields": ["content"],
+                        },
+                    ),
+                ),
                 composer_hints=(
                     "Call list_models before pinning 'model:' — deployments don't all ship the same providers.",
+                    "Interpolate every row field your prompt needs with `{{ row.<field> }}`. A template naming no varying field sends identical input to every row and identical output; to score, classify, or summarize content, inject the content field (e.g. `{{ row.content }}`), not an identifier.",
+                    "Never ask the model to judge a page or record from its URL or identifier alone — with no content interpolated it fabricates a plausible answer instead of reading anything. When the judgement needs fetched text, interpolate the fetch/scrape field into the prompt_template.",
+                    "Identical answers across rows are only wrong when the inputs genuinely differ. A discriminating prompt injects the per-row data; do not pad prompts for artificial variety. The defect to avoid is one that CANNOT discriminate because it never interpolated the per-row field.",
                     "If you create a prompt template from the user's goal, data, or prose instead of copying it verbatim, stage an llm_prompt_template review for the authored prompt text.",
                     "When you author LLM judgment semantics — a scoring scale, rubric, category meaning, threshold, signal weighting, cutoff, comparison set, or subjective criterion definition — stage a vague_term review on the LLM node before set_pipeline.",
                     "Measurable adjectives are not exempt: if the user gives the metric/cutoff, use it; if you choose a cutoff such as 'over 6 ft' or a ranking rule such as 'top quartile', review that authored threshold semantics.",

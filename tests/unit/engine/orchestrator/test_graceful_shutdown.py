@@ -159,11 +159,11 @@ class TestCheckpointInterruptedProgress:
         try:
             orchestrator = Orchestrator(db=db)
             # Enable checkpointing so the method doesn't early-return on config check
-            orchestrator._checkpoint_config = Mock()
-            orchestrator._checkpoint_config.enabled = True
-            orchestrator._checkpoint_manager = Mock()
-            orchestrator._current_graph = Mock()
-            orchestrator._sequence_number = 0
+            orchestrator._checkpoints._checkpoint_config = Mock()
+            orchestrator._checkpoints._checkpoint_config.enabled = True
+            orchestrator._checkpoints._checkpoint_manager = Mock()
+            orchestrator._checkpoints._active_graph = Mock()
+            orchestrator._checkpoints._sequence_number = 0
 
             # Build a LoopContext where all token resolution paths return None:
             # - no aggregation nodes
@@ -182,7 +182,7 @@ class TestCheckpointInterruptedProgress:
             loop_ctx.last_token_id = None
 
             with structlog.testing.capture_logs() as captured:
-                orchestrator._checkpoint_interrupted_progress(
+                orchestrator._checkpoints.checkpoint_interrupted_progress(
                     run_id="run-test-123",
                     loop_ctx=loop_ctx,
                     sink_id_map={},
@@ -190,7 +190,7 @@ class TestCheckpointInterruptedProgress:
                 )
 
             # Verify NO checkpoint was created
-            orchestrator._checkpoint_manager.create_checkpoint.assert_not_called()
+            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_not_called()
 
             # Verify warning was emitted via structlog
             events = [entry["event"] for entry in captured]
@@ -214,12 +214,12 @@ class TestCheckpointInterruptedProgress:
         db = make_landscape_db()
         try:
             orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoint_config = Mock()
-            orchestrator._checkpoint_config.enabled = True
-            orchestrator._checkpoint_config.frequency = 1  # every_row
-            orchestrator._checkpoint_manager = Mock()
-            orchestrator._current_graph = Mock()
-            orchestrator._sequence_number = 0
+            orchestrator._checkpoints._checkpoint_config = Mock()
+            orchestrator._checkpoints._checkpoint_config.enabled = True
+            orchestrator._checkpoints._checkpoint_config.frequency = 1  # every_row
+            orchestrator._checkpoints._checkpoint_manager = Mock()
+            orchestrator._checkpoints._active_graph = Mock()
+            orchestrator._checkpoints._sequence_number = 0
 
             coalesce_state = CoalesceCheckpointState(
                 version="1.0",
@@ -232,15 +232,15 @@ class TestCheckpointInterruptedProgress:
             mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
             mock_processor.get_coalesce_checkpoint_state.return_value = coalesce_state
 
-            factory = orchestrator._make_checkpoint_after_sink_factory("run-x", mock_processor)
+            factory = orchestrator._checkpoints.make_checkpoint_after_sink_factory("run-x", mock_processor)
             callback = factory("sink_0")
 
             token = Mock(spec=TokenInfo)
             token.token_id = "tok-1"
             callback(token)
 
-            orchestrator._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args.kwargs
+            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
+            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
             assert call_kwargs["coalesce_state"] is coalesce_state
         finally:
             db.close()
@@ -260,11 +260,11 @@ class TestCheckpointInterruptedProgress:
         db = make_landscape_db()
         try:
             orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoint_config = Mock()
-            orchestrator._checkpoint_config.enabled = True
-            orchestrator._checkpoint_manager = Mock()
-            orchestrator._current_graph = Mock()
-            orchestrator._sequence_number = 0
+            orchestrator._checkpoints._checkpoint_config = Mock()
+            orchestrator._checkpoints._checkpoint_config.enabled = True
+            orchestrator._checkpoints._checkpoint_manager = Mock()
+            orchestrator._checkpoints._active_graph = Mock()
+            orchestrator._checkpoints._sequence_number = 0
 
             # Coalesce state with NO pending but HAS completed_keys
             coalesce_state = CoalesceCheckpointState(
@@ -285,15 +285,15 @@ class TestCheckpointInterruptedProgress:
             loop_ctx.last_token_id = "token-99"
 
             source_id = NodeID("source_0")
-            orchestrator._checkpoint_interrupted_progress(
+            orchestrator._checkpoints.checkpoint_interrupted_progress(
                 run_id="run-completed-keys",
                 loop_ctx=loop_ctx,
                 sink_id_map={},
                 source_id=source_id,
             )
 
-            orchestrator._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args.kwargs
+            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
+            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
             assert call_kwargs["coalesce_state"] is coalesce_state
             assert call_kwargs["coalesce_state"].completed_keys == (
                 ("merge_1", "row-1"),
@@ -311,11 +311,11 @@ class TestCheckpointInterruptedProgress:
         db = make_landscape_db()
         try:
             orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoint_config = Mock()
-            orchestrator._checkpoint_config.enabled = True
-            orchestrator._checkpoint_manager = Mock()
-            orchestrator._current_graph = Mock()
-            orchestrator._sequence_number = 0
+            orchestrator._checkpoints._checkpoint_config = Mock()
+            orchestrator._checkpoints._checkpoint_config.enabled = True
+            orchestrator._checkpoints._checkpoint_manager = Mock()
+            orchestrator._checkpoints._active_graph = Mock()
+            orchestrator._checkpoints._sequence_number = 0
 
             mock_processor = Mock()
             mock_agg_state = Mock()
@@ -329,7 +329,7 @@ class TestCheckpointInterruptedProgress:
             loop_ctx.last_token_id = "token-42"  # Has a last token
 
             source_id = NodeID("source_0")
-            orchestrator._checkpoint_interrupted_progress(
+            orchestrator._checkpoints.checkpoint_interrupted_progress(
                 run_id="run-test-456",
                 loop_ctx=loop_ctx,
                 sink_id_map={},
@@ -337,8 +337,8 @@ class TestCheckpointInterruptedProgress:
             )
 
             # Checkpoint SHOULD have been created with the fallback token
-            orchestrator._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args
+            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
+            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args
             assert call_kwargs.kwargs["token_id"] == "token-42"
             assert call_kwargs.kwargs["node_id"] == str(source_id)
         finally:

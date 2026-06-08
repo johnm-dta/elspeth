@@ -220,6 +220,7 @@ def resolve_field_names(
     raw_headers: list[str] | None,
     field_mapping: dict[str, str] | None,
     columns: list[str] | None,
+    require_all_mapping_keys: bool = True,
 ) -> FieldResolution:
     """Resolve final field names from raw headers and config.
 
@@ -232,6 +233,12 @@ def resolve_field_names(
         raw_headers: Headers from file, or None if using columns config
         field_mapping: Optional mapping overrides (keys are effective names)
         columns: Explicit column names for headerless mode
+        require_all_mapping_keys: When True (default), every field_mapping key must
+            be present in the resolved headers — correct for tabular sources with a
+            fixed header row (CSV), where a missing mapped column is a config error.
+            JSON-like sources with sparse, per-row-heterogeneous records pass False:
+            a mapped key absent from THIS record is simply not applied to it, instead
+            of quarantining an otherwise-valid row (elspeth-2ad0cebfcd and siblings).
 
     Returns:
         FieldResolution with final headers, audit mapping, and algorithm version
@@ -255,10 +262,11 @@ def resolve_field_names(
 
     # Apply field mapping if provided
     if field_mapping:
-        # Validate all mapping keys exist
+        # Validate all mapping keys exist (tabular sources only; sparse JSON-like
+        # records legitimately omit optional mapped keys per row).
         available = set(effective_headers)
         missing = set(field_mapping.keys()) - available
-        if missing:
+        if missing and require_all_mapping_keys:
             raise ValueError(f"field_mapping keys not found in headers: {sorted(missing)}. Available: {sorted(available)}")
 
         # Apply mapping: mapped headers use new name, unmapped pass through

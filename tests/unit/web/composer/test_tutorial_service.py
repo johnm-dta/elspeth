@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from elspeth.contracts import NodeType
 from elspeth.core.canonical import stable_hash
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import run_attributions_table
 from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
 from elspeth.web.composer.skills import load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialRunOutput
@@ -21,18 +23,17 @@ from elspeth.web.composer.tutorial_service import (
     _cache_seed_skip_reason,
     _coalesce_run_source_hashes,
     _count_discarded_rows,
-    _normalise_bare_required_field_templates,
-    _normalise_current_tutorial_state_for_execution,
     _parse_rows_file,
     _plugin_nodes_from_composition_state,
     _plugin_nodes_from_pipeline_dict,
+    _replay_cache_entry,
     _rows_from_artifacts,
     _state_matches_cached_topology,
     _store_successful_live_projection,
     tutorial_model_id,
 )
 from elspeth.web.config import WebSettings
-from elspeth.web.preferences.tutorial_cache import TutorialCache
+from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT, TutorialCache, TutorialCacheEntry, tutorial_cache_key
 from elspeth.web.sessions.protocol import CompositionStateRecord, RunRecord
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
@@ -48,100 +49,6 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
-
-
-def test_normalise_bare_required_field_templates_uses_row_namespace() -> None:
-    original_template = "URL: {{url}}\nContent: {{ content }}\nOther: {{ ignored }}"
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": original_template,
-                "required_input_fields": ["url", "content"],
-                "resolved_prompt_template_hash": stable_hash(original_template),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    prompt = cast(str, options["prompt_template"])
-    assert prompt == "URL: {{ row.url }}\nContent: {{ row.content }}\nOther: {{ ignored }}"
-    assert options["resolved_prompt_template_hash"] == stable_hash(prompt)
-    original_options = cast(dict[str, Any], nodes[0]["options"])
-    assert original_options["prompt_template"] == original_template
-
-
-def test_normalise_bare_required_field_templates_leaves_row_namespace_alone() -> None:
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": "URL: {{ row.url }}",
-                "required_input_fields": ["url"],
-                "resolved_prompt_template_hash": stable_hash("URL: {{ row.url }}"),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is False
-    assert normalised == nodes
-
-
-def test_normalise_bare_required_field_templates_replaces_interpretation_placeholders() -> None:
-    original_template = "Rate how {{interpretation:cool}} this is, then explain why it is {{ interpretation: cool }}."
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "rate_coolness",
-            "plugin": "llm",
-            "options": {
-                "prompt_template": original_template,
-                "required_input_fields": ["content"],
-                "resolved_prompt_template_hash": stable_hash(original_template),
-            },
-        }
-    ]
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    prompt = cast(str, options["prompt_template"])
-    assert prompt == "Rate how cool this is, then explain why it is cool."
-    assert options["resolved_prompt_template_hash"] == stable_hash(prompt)
-
-
-def test_normalise_bare_required_field_templates_thaws_frozen_state_nodes() -> None:
-    original_template = "Content: {{ content }}"
-    nodes = (
-        MappingProxyType(
-            {
-                "id": "rate_coolness",
-                "plugin": "llm",
-                "options": MappingProxyType(
-                    {
-                        "prompt_template": original_template,
-                        "required_input_fields": ("content",),
-                    }
-                ),
-            }
-        ),
-    )
-
-    normalised, changed = _normalise_bare_required_field_templates(nodes)
-
-    assert changed is True
-    assert normalised is not None
-    options = cast(dict[str, Any], normalised[0]["options"])
-    assert options["prompt_template"] == "Content: {{ row.content }}"
 
 
 def test_count_discarded_rows_counts_only_discard_destination() -> None:
@@ -233,6 +140,72 @@ def _run_record(
         landscape_run_id="landscape-run-1",
         pipeline_yaml="source:\n  plugin: 'null'\nsinks:\n  out:\n    plugin: json\n",
     )
+
+
+@pytest.mark.asyncio
+async def test_replay_cache_entry_attributes_synthesised_landscape_run_to_requester(tmp_path: Path) -> None:
+    """Cached tutorial replays must have the same Landscape user attribution as live runs."""
+    landscape_url = f"sqlite:///{tmp_path / 'landscape.db'}"
+    settings = _make_tutorial_settings(tmp_path, landscape_url=landscape_url)
+    current_state = _make_state_record(
+        source={"plugin": "null"},
+        transform_nodes=[],
+        outputs=[{"name": "out", "plugin": "json"}],
+    )
+    started_at = datetime(2026, 5, 19, tzinfo=UTC)
+    run_record = RunRecord(
+        id=uuid4(),
+        session_id=current_state.session_id,
+        state_id=current_state.id,
+        status="pending",
+        started_at=started_at,
+        finished_at=None,
+        rows_processed=0,
+        rows_succeeded=0,
+        rows_failed=0,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+        rows_quarantined=0,
+        error=None,
+        landscape_run_id=None,
+        pipeline_yaml=None,
+    )
+    cache_entry = TutorialCacheEntry(
+        canonical_prompt=CANONICAL_SEED_PROMPT,
+        model_id="tutorial-model",
+        cached_at=started_at,
+        rows=[{"url": "https://example.gov", "rating": 5}],
+        source_data_hash="0" * 64,
+        llm_call_count=2,
+        pipeline_yaml="source:\n  plugin: 'null'\nsinks:\n  out:\n    plugin: json\n",
+    )
+
+    class _StubSessionService:
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[Any, dict[str, Any]]] = []
+
+        async def create_run(self, **_kwargs: Any) -> RunRecord:
+            return run_record
+
+        async def update_run_status(self, run_id: Any, **kwargs: Any) -> None:
+            self.status_updates.append((run_id, dict(kwargs)))
+
+    await _replay_cache_entry(
+        session_service=cast(Any, _StubSessionService()),
+        settings=settings,
+        session_id=current_state.session_id,
+        current_state=current_state,
+        cache_entry=cache_entry,
+        cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, "tutorial-model"),
+        user_id="alice",
+        auth_provider_type="local",
+    )
+
+    with LandscapeDB.from_url(landscape_url, create_tables=False) as db, db.read_only_connection() as conn:
+        attribution_row = conn.execute(select(run_attributions_table)).one()
+
+    assert attribution_row.initiated_by_user_id == "alice"
+    assert attribution_row.auth_provider_type == "local"
 
 
 def test_cache_seed_skip_reason_returns_none_for_clean_completed_run() -> None:
@@ -721,81 +694,6 @@ def test_state_matches_cached_topology_returns_false_when_plugins_differ() -> No
         "sinks:\n  out:\n    plugin: jsonl\n"
     )
     assert _state_matches_cached_topology(record, cached_yaml) is False
-
-
-# --- _normalise_current_tutorial_state_for_execution provenance ---
-# A4: the tutorial-runtime template rewrite must be persisted with the
-# distinct ``tutorial_normalization`` provenance value rather than the
-# (validator-failure) ``convergence_persist`` it previously aliased.
-
-
-def test_normalise_current_tutorial_state_persists_tutorial_normalization_provenance() -> None:
-    """The pre-execution template rewrite saves with provenance='tutorial_normalization'.
-
-    Asserts both the call observed on ``save_composition_state`` and the
-    fact that ``convergence_persist`` is NOT written by this path —
-    distinguishing the tutorial rewrite from the validator-failure writer
-    in routes.py.
-    """
-    import asyncio
-    from datetime import UTC, datetime
-    from typing import Any
-    from uuid import UUID, uuid4
-
-    record = CompositionStateRecord(
-        id=uuid4(),
-        session_id=uuid4(),
-        version=1,
-        source={"plugin": "inline_blob"},
-        nodes=[
-            {
-                "id": "rate",
-                "node_type": "transform",
-                "plugin": "llm",
-                "options": {
-                    "prompt_template": "URL: {{url}}",
-                    "required_input_fields": ["url"],
-                },
-            }
-        ],
-        edges=[],
-        outputs=[{"name": "out", "plugin": "jsonl"}],
-        metadata_={},
-        is_valid=True,
-        validation_errors=None,
-        created_at=datetime(2026, 5, 19, tzinfo=UTC),
-        derived_from_state_id=None,
-        composer_meta=None,
-    )
-
-    saved: list[dict[str, Any]] = []
-
-    class _StubSessionService:
-        async def get_current_state(self, _session_id: UUID) -> CompositionStateRecord:
-            return record
-
-        async def save_composition_state(
-            self,
-            session_id: UUID,
-            state: Any,
-            *,
-            provenance: str,
-        ) -> CompositionStateRecord:
-            saved.append({"session_id": session_id, "state": state, "provenance": provenance})
-            return record
-
-    asyncio.run(
-        _normalise_current_tutorial_state_for_execution(
-            session_service=cast(Any, _StubSessionService()),
-            session_id=record.session_id,
-        )
-    )
-
-    assert len(saved) == 1, "normalise must save exactly one composition state"
-    assert saved[0]["provenance"] == "tutorial_normalization", (
-        "Tier-1 audit attribution: tutorial pre-execution template rewrite must NOT "
-        "be persisted under convergence_persist (the validator-failure writer's value)."
-    )
 
 
 def test_state_matches_cached_topology_returns_false_when_transform_count_differs() -> None:

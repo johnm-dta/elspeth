@@ -51,6 +51,7 @@ from elspeth.web.composer.state import (
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 # ---------------------------------------------------------------------------
 # Test doubles — mirror the shapes used by tests/unit/web/composer/test_service.py

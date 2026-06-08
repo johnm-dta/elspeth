@@ -401,11 +401,13 @@ class PluginContext:
             except (ValueError, TypeError) as e:
                 # Non-canonical data (NaN, Infinity, or other non-serializable types)
                 # Hash the repr() instead - not canonical, but preserves audit trail.
-                # Log only the error type, not row content (logging policy: no row data outside Landscape).
+                # Log ONLY the error type, never str(e): contracts.hashing
+                # canonicalization errors embed `Got: {obj!r}` (raw row content), and
+                # row data must stay in Landscape, not cross a normal logging boundary
+                # (logging policy; elspeth-05a5727489).
                 logger.warning(
-                    "Row data not canonically serializable, using repr() hash: %s (%s)",
+                    "Row data not canonically serializable, using repr() hash: %s",
                     type(e).__name__,
-                    str(e),
                 )
                 row_id = repr_hash(row)[:16]
 

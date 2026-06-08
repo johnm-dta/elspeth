@@ -51,7 +51,7 @@ class TestOrchestratorCheckpointing:
             db=landscape_db,
             checkpoint_config=config,
         )
-        assert orchestrator._checkpoint_config == config
+        assert orchestrator._checkpoints._checkpoint_config == config
 
     def test_maybe_checkpoint_creates_on_every_row(self, landscape_db: LandscapeDB, payload_store) -> None:
         """_maybe_checkpoint creates checkpoint when frequency=every_row."""

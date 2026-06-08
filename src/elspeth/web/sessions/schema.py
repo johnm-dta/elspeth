@@ -334,18 +334,52 @@ def _validate_named_unique_constraints(inspector: Inspector, table_name: str, ta
     SQLite case; ``_validate_named_indexes`` strips the same names from
     its check to avoid double-counting.
     """
-    expected = {
-        str(constraint.name) for constraint in table.constraints if type(constraint) is UniqueConstraint and constraint.name is not None
-    } | {str(index.name) for index in table.indexes if index.unique and index.name is not None}
-    actual = {str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None} | {
-        str(index["name"]) for index in inspector.get_indexes(table_name) if index["unique"] and index["name"] is not None
-    }
+    # Column names are narrowed to non-None: the session schema uses only plain
+    # column indexes (no expression indexes), where SQLAlchemy/inspector report
+    # str names. Filtering None keeps the frozenset[str] type honest without
+    # masking real drift for this schema.
+    expected_cols: dict[str, frozenset[str]] = {}
+    for constraint in table.constraints:
+        if type(constraint) is UniqueConstraint and constraint.name is not None:
+            expected_cols[str(constraint.name)] = frozenset(c.name for c in constraint.columns if c.name is not None)
+    for index in table.indexes:
+        if index.unique and index.name is not None:
+            expected_cols[str(index.name)] = frozenset(c.name for c in index.columns if c.name is not None)
+
+    actual_cols: dict[str, frozenset[str]] = {}
+    for uc in inspector.get_unique_constraints(table_name):
+        if uc["name"] is not None:
+            actual_cols[str(uc["name"])] = frozenset(c for c in uc["column_names"] if c is not None)
+    for idx in inspector.get_indexes(table_name):
+        if idx["unique"] and idx["name"] is not None:
+            actual_cols[str(idx["name"])] = frozenset(c for c in idx["column_names"] if c is not None)
+
+    expected = set(expected_cols)
+    actual = set(actual_cols)
     if actual != expected:
         _schema_error(
             f"{table_name} UNIQUE constraint mismatch",
             expected=sorted(expected),
             actual=sorted(actual),
         )
+
+    # Same-named entries must also constrain the same column SET. Comparing
+    # column sets (not ordered lists) is semantically correct for uniqueness —
+    # which is order-independent — and robust against inspector column-ordering
+    # quirks. Name-only comparison silently accepted a same-named index recreated
+    # on a different column set (e.g. uq_chat_messages_tool_call_id recreated on
+    # (session_id) alone), over-restricting the intended invariant
+    # (elspeth-97bedcd9c4). Partial-index WHERE predicates remain a model-layer
+    # static check (_validate_partial_index_dialect_symmetry): the inspector's
+    # reported WHERE text diverges from the model's compiled SQL across dialects,
+    # so a runtime comparison would be brittle.
+    for name in sorted(expected & actual):
+        if expected_cols[name] != actual_cols[name]:
+            _schema_error(
+                f"{table_name}.{name} UNIQUE constraint column mismatch",
+                expected=sorted(expected_cols[name]),
+                actual=sorted(actual_cols[name]),
+            )
 
 
 def _validate_named_indexes(inspector: Inspector, table_name: str, table: Table) -> None:
@@ -360,18 +394,36 @@ def _validate_named_indexes(inspector: Inspector, table_name: str, table: Table)
     actual_unique = {
         str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None
     } | {str(index["name"]) for index in inspector.get_indexes(table_name) if index["unique"] and index["name"] is not None}
-    expected = {str(index.name) for index in table.indexes if index.name is not None and not index.unique} - expected_unique
-    actual = {
-        str(index["name"])
+    expected_cols = {
+        str(index.name): frozenset(c.name for c in index.columns if c.name is not None)
+        for index in table.indexes
+        if index.name is not None and not index.unique and str(index.name) not in expected_unique
+    }
+    actual_cols = {
+        str(index["name"]): frozenset(c for c in index["column_names"] if c is not None)
         for index in inspector.get_indexes(table_name)
         if index["name"] is not None and not index["unique"] and str(index["name"]) not in actual_unique
     }
+    expected = set(expected_cols)
+    actual = set(actual_cols)
     if actual != expected:
         _schema_error(
             f"{table_name} index mismatch",
             expected=sorted(expected),
             actual=sorted(actual),
         )
+
+    # Same-named residual (non-unique) indexes must also cover the same column
+    # set; name-only comparison missed a same-named index recreated on different
+    # columns (elspeth-97bedcd9c4). Column SET (not order) keeps this robust
+    # against inspector column-ordering quirks while still catching shape drift.
+    for name in sorted(expected & actual):
+        if expected_cols[name] != actual_cols[name]:
+            _schema_error(
+                f"{table_name}.{name} index column mismatch",
+                expected=sorted(expected_cols[name]),
+                actual=sorted(actual_cols[name]),
+            )
 
 
 def _validate_partial_index_dialect_symmetry() -> None:

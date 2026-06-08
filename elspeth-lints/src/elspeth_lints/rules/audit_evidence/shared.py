@@ -205,5 +205,8 @@ def _optional_date(value: object, *, source_file: str, index: int) -> date | Non
         raise ValueError(f"{source_file}: allow_classes[{index}].expires must be YYYY-MM-DD, null, or absent")
     try:
         return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC).date()
-    except ValueError:
-        return None
+    except ValueError as exc:
+        # Fail closed: a malformed ``expires`` must raise, not silently become
+        # ``None``. Swallowing it leaves ``fail_on_expired`` unable to enforce a
+        # typoed expiry, so a one-character diff disables the time bound.
+        raise ValueError(f"{source_file}: allow_classes[{index}].expires must be YYYY-MM-DD, null, or absent") from exc

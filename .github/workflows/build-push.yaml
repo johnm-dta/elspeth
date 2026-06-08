@@ -61,60 +61,58 @@ jobs:
   build-push:
     name: Build and Push
     runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
-    # Only run if CI passed (for workflow_run trigger) or always for tags/dispatch
+    # Only run if CI passed for a trusted push in this repository, or always
+    # for tags/dispatch. The workflow_run branch filter alone is not a trust
+    # boundary: fork pull_request runs can report a matching head branch name.
     if: |
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
 
     permissions:
       actions: read
+      checks: read
       contents: read
       packages: write
+      statuses: read
       id-token: write
 
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
       ghcr_image: ${{ steps.ghcr-push.outputs.digest && format('ghcr.io/{0}/{1}@{2}', github.repository_owner, env.IMAGE_NAME, steps.ghcr-push.outputs.digest) || '' }}
       acr_image: ${{ steps.acr-push.outputs.digest && format('{0}/{1}@{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, steps.acr-push.outputs.digest) || '' }}
+      # Which registries were actually pushed, so the smoke-test job tests the
+      # image that exists rather than unconditionally pulling GHCR.
+      push_ghcr: ${{ steps.registries.outputs.push_ghcr }}
+      push_acr: ${{ steps.registries.outputs.push_acr }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ env.IMAGE_SHA }}
 
-      - name: Verify CI success for image commit
+      - name: Verify required checks for image commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            echo "Workflow run trigger already supplied successful CI conclusion for ${IMAGE_SHA}."
-            exit 0
-          fi
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${IMAGE_SHA}/check-runs?check_name=CI%20Success" > ci-success-check-runs.json
-          python3 - <<'PY'
-          import json
-          import sys
-
-          with open("ci-success-check-runs.json", encoding="utf-8") as handle:
-              payload = json.load(handle)
-
-          runs = payload.get("check_runs", [])
-          successes = [run for run in runs if run.get("conclusion") == "success"]
-          if not successes:
-              print("No successful CI Success check run found for IMAGE_SHA; refusing to publish image.", file=sys.stderr)
-              sys.exit(1)
-          print(f"Found successful CI Success check for IMAGE_SHA ({successes[0].get('html_url', 'no URL')}).")
-          PY
+          python3 scripts/cicd/check_release_required_checks.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$IMAGE_SHA" \
+            --ruleset-name main
 
       - name: Set up QEMU (for multi-platform builds)
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
 
       # -----------------------------------------------------------------------
       # Determine which registries to push to
@@ -151,7 +149,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
@@ -168,7 +166,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Login to GHCR
         if: steps.registries.outputs.push_ghcr == 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -176,7 +174,7 @@ jobs:
 
       - name: Login to ACR
         if: steps.registries.outputs.push_acr == 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ${{ secrets.ACR_REGISTRY }}
           username: ${{ secrets.AZURE_CLIENT_ID }}
@@ -188,7 +186,7 @@ jobs:
       - name: Build and push to GHCR
         id: ghcr-push
         if: steps.registries.outputs.push_ghcr == 'true'
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
@@ -208,7 +206,7 @@ jobs:
       - name: Build and push to ACR
         id: acr-push
         if: steps.registries.outputs.push_acr == 'true'
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
@@ -278,25 +276,63 @@ jobs:
     name: Smoke Test
     runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push]
+    # Only smoke-test when an image was actually pushed. An ACR-only manual
+    # dispatch sets push_ghcr=false; if neither registry was pushed there is
+    # nothing to test (and the old job would have failed pulling a GHCR image
+    # the workflow intentionally did not push).
+    if: needs.build-push.outputs.push_ghcr == 'true' || needs.build-push.outputs.push_acr == 'true'
     steps:
       - name: Checkout code (for example files)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ env.IMAGE_SHA }}
 
+      # Pick the image to smoke-test from the registry that was actually pushed.
+      # GHCR is preferred when present (the common path); ACR is used for an
+      # ACR-only dispatch. The chosen image and registry are exported so the
+      # login steps and every test step below operate on the real artifact.
+      - name: Determine smoke-test image
+        env:
+          PUSH_GHCR: ${{ needs.build-push.outputs.push_ghcr }}
+          PUSH_ACR: ${{ needs.build-push.outputs.push_acr }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUSH_GHCR" == "true" ]]; then
+            echo "SMOKE_REGISTRY=ghcr" >> "$GITHUB_ENV"
+            echo "SMOKE_IMAGE=ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          elif [[ "$PUSH_ACR" == "true" ]]; then
+            echo "SMOKE_REGISTRY=acr" >> "$GITHUB_ENV"
+            echo "SMOKE_IMAGE=${ACR_REGISTRY}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          else
+            echo "No image was pushed; nothing to smoke-test." >&2
+            exit 1
+          fi
+
       - name: Login to GHCR (to pull image)
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        if: env.SMOKE_REGISTRY == 'ghcr'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ACR (to pull image)
+        if: env.SMOKE_REGISTRY == 'acr'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Basic CLI tests
         env:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "Testing image: $IMAGE"
 
@@ -317,7 +353,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "=== Test 4: Run actual pipeline (threshold_gate_container example) ==="
 
@@ -391,7 +427,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+          IMAGE="$SMOKE_IMAGE"
 
           echo "=== Test 6: Run representative no-secret examples ==="
           for example in boolean_routing batch_aggregation json_explode schema_contracts_demo; do
@@ -432,10 +468,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844
         with:
           generate_release_notes: true
           body: |

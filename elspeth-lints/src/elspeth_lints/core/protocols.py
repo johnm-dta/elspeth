@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -98,6 +98,8 @@ class RuleContext:
     allowlist: Allowlist | None = None
     allowlist_dir_override: Path | None = None
     repo_root: Path | None = None
+    emit_allowlist_governance: bool = False
+    allowlist_governance_emitted_dirs: set[str] = field(default_factory=set, compare=False)
 
 
 @runtime_checkable

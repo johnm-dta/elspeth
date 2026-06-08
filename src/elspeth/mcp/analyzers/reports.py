@@ -60,15 +60,7 @@ def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> R
         row_count = conn.execute(select(func.count()).select_from(rows_table).where(rows_table.c.run_id == run_id)).scalar() or 0
 
         # Count tokens
-        token_count = (
-            conn.execute(
-                select(func.count())
-                .select_from(tokens_table)
-                .join(rows_table, tokens_table.c.row_id == rows_table.c.row_id)
-                .where(rows_table.c.run_id == run_id)
-            ).scalar()
-            or 0
-        )
+        token_count = conn.execute(select(func.count()).select_from(tokens_table).where(tokens_table.c.run_id == run_id)).scalar() or 0
 
         # Count nodes
         node_count = conn.execute(select(func.count()).select_from(nodes_table).where(nodes_table.c.run_id == run_id)).scalar() or 0

@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-05-20 (synchronized with RC-5.2 documentation line)
-**Framework Version:** 0.5.2 (RC-5.2 release documentation; package metadata remains 0.5.1 in this checkout)
+**Last Updated:** 2026-06-05 (synchronized with RC-5.3 documentation line)
+**Framework Version:** 0.5.3 (RC-5.3 release documentation; package metadata aligned at 0.5.3)
 **Status:** Pre-release
 
 ---

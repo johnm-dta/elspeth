@@ -98,7 +98,7 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     name = "azure_prompt_shield"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8353fb154041529a"
+    source_file_hash: str | None = "sha256:a5fbb2d19dca4d39"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
 
@@ -152,6 +152,9 @@ class AzurePromptShield(BaseAzureSafetyTransform):
         """Exercise the real single-row validation path with a local fake client."""
 
         class _ProbeResponse:
+            text = '{"userPromptAnalysis":{"attackDetected":false},"documentsAnalysis":[{"attackDetected":false}]}'
+            content = text.encode("utf-8")
+
             def raise_for_status(self) -> None:
                 return None
 
@@ -244,10 +247,7 @@ class AzurePromptShield(BaseAzureSafetyTransform):
         # - attackDetected=null would be falsy → fail OPEN (security vulnerability)
         # - attackDetected="true" would be truthy but for wrong reason
         # - Non-list documentsAnalysis would crash or misbehave
-        try:
-            data = response.json()
-        except (ValueError, TypeError) as e:
-            raise MalformedResponseError(f"Invalid JSON in response: {e}") from e
+        data = self._parse_external_json_response(response, label="Prompt Shield response")
 
         # Tier 3 boundary: validate top-level response structure first
         if not isinstance(data, dict):

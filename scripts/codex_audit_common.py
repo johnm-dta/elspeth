@@ -810,6 +810,19 @@ def _structured_findings(report_path: Path) -> list[dict[str, Any]] | None:
     sidecar = structured_output_path_for_report(report_path)
     if not sidecar.exists():
         return None
+    # Fail closed against stale sidecars: a structured sidecar is authoritative
+    # only when it is at least as new as its Markdown report. A rerun with
+    # --no-structured-output, a manual rewrite, or a partial cleanup can leave an
+    # old sidecar beside fresh Markdown — trusting it would count findings the
+    # current report no longer makes (false positive) or, worse, mask a real
+    # finding behind an empty sidecar (false negative). When the sidecar predates
+    # the report, ignore it and let the caller parse the authoritative Markdown.
+    if report_path.exists() and sidecar.stat().st_mtime < report_path.stat().st_mtime:
+        print(
+            f"⚠️  Ignoring stale structured sidecar (older than its report): {sidecar}",
+            file=sys.stderr,
+        )
+        return None
     try:
         raw_data = json.loads(sidecar.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -870,6 +883,17 @@ def _evidence_from_structured_finding(finding: Mapping[str, Any]) -> str:
         else:
             entries.append(location)
     return "; ".join(entries)
+
+
+def exit_code_from_stats(stats: Mapping[str, int]) -> int:
+    """Return a non-zero exit code when any per-target analysis failed.
+
+    Fail closed: when files/entries raised during analysis the scan is partial.
+    A partial scan must not present to CI or operators as a successful, complete
+    run — missing reports would otherwise hide behind a green process exit. Each
+    runner's ``main`` returns this so a partial run exits non-zero.
+    """
+    return 1 if stats.get("failed", 0) else 0
 
 
 def generate_summary(output_dir: Path, *, no_defect_marker: str) -> dict[str, int]:
@@ -981,7 +1005,7 @@ def write_summary_file(
     """Write summary statistics file for triage dashboard."""
     summary_path = output_dir / "SUMMARY.md"
 
-    non_finding_keys = {"no_defect", "gated", "unknown", "merged", *USAGE_STAT_KEYS}
+    non_finding_keys = {"no_defect", "gated", "unknown", "merged", "failed", *USAGE_STAT_KEYS}
     total_defects = sum(v for k, v in stats.items() if k not in non_finding_keys)
     no_defect_count = stats.get("no_defect", 0)
     gated = stats.get("gated", 0)
@@ -1189,7 +1213,7 @@ def print_summary(stats: dict[str, int], *, icon: str, title: str) -> None:
     print(f"{icon} {title}")
     print("=" * 60)
 
-    non_finding_keys = {"no_defect", "gated", "unknown", "merged", *USAGE_STAT_KEYS}
+    non_finding_keys = {"no_defect", "gated", "unknown", "merged", "failed", *USAGE_STAT_KEYS}
     total_defects = sum(v for k, v in stats.items() if k not in non_finding_keys)
 
     if total_defects > 0:

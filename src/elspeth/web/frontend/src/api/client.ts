@@ -106,14 +106,22 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
  *
  * Includes a global 401 interceptor: any API call returning 401 triggers
  * authStore.logout() to handle token expiry mid-session without requiring
- * each caller to check for auth failures.
+ * each caller to check for auth failures. Callers that intentionally handle
+ * a non-session capability boundary may opt out of the logout side effect.
  *
  * Error envelope handling priority:
  *   1. error_type (if present in response body) -- most specific
  *   2. HTTP status code -- structural fallback
  *   3. detail text -- human-readable description
  */
-export async function parseResponse<T>(response: Response): Promise<T> {
+interface ParseResponseOptions {
+  logoutOnUnauthorized?: boolean;
+}
+
+export async function parseResponse<T>(
+  response: Response,
+  options: ParseResponseOptions = {},
+): Promise<T> {
   if (!response.ok) {
     // Global 401 interceptor -- trigger logout on any auth failure.
     // Dynamic import avoids circular dependency at module load time
@@ -125,7 +133,7 @@ export async function parseResponse<T>(response: Response): Promise<T> {
     // the response arrives AFTER a successful login completes, it would wipe
     // the freshly-acquired token. Guarding on token!==null defuses that race
     // without changing the legitimate "token expired mid-session" path.
-    if (response.status === 401) {
+    if (response.status === 401 && options.logoutOnUnauthorized !== false) {
       const { useAuthStore } = await import("@/stores/authStore");
       if (useAuthStore.getState().token !== null) {
         await useAuthStore.getState().logout();

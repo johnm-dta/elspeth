@@ -207,6 +207,84 @@ def test_component_type_json_mode_succeeds_on_current_codebase(
     assert json.loads(result.stdout) == []
 
 
+def test_component_type_flags_alias_imported_base() -> None:
+    # elspeth-20add2bd90: a base imported under an alias must still be resolved
+    # back to its known config-base name so the descendant is checked.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import DataPluginConfig as DPC
+
+            class AliasMissing(DPC):
+                path: str
+            """),
+            Path("bad.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["CT1"]
+    assert "AliasMissing" in findings[0].message
+
+
+def test_component_type_aliased_base_with_declared_type_is_clean() -> None:
+    # The alias resolution must not over-flag: a properly declared type on an
+    # aliased-base subclass stays clean.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import DataPluginConfig as DPC
+
+            class AliasDeclared(DPC):
+                _plugin_component_type = "transform"
+                path: str
+            """),
+            Path("good.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
+def test_component_type_flags_invalid_component_type_value() -> None:
+    # elspeth-a2b240c29b: an out-of-contract string label must be flagged, not
+    # silently accepted. The documented contract allows only source/sink/transform.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import DataPluginConfig
+
+            class BadValue(DataPluginConfig):
+                _plugin_component_type = "nonsense"
+            """),
+            Path("bad.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["CT1"]
+    assert "BadValue" in findings[0].message
+
+
+def test_component_type_accepts_each_valid_value() -> None:
+    # The tightening must keep every legitimate label clean.
+    for value in ("source", "sink", "transform"):
+        findings = list(
+            COMPONENT_TYPE_RULE.analyze(
+                _tree(f"""
+                from elspeth.plugins.infrastructure.config_base import DataPluginConfig
+
+                class ValidValue(DataPluginConfig):
+                    _plugin_component_type = "{value}"
+                """),
+                Path("good.py"),
+                RuleContext(root=Path(".")),
+            )
+        )
+        assert findings == [], f"value {value!r} should be accepted"
+
+
 def test_plugin_hashes_reports_missing_source_file_hash(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "missing_hash.py",

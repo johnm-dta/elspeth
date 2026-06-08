@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator,
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
+from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -50,6 +51,16 @@ class WebSettings(BaseModel):
     # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
     tutorial_cache_dir: Path | None = Field(default=None)
     composer_model: str = "gpt-5.5"
+    # Operator-set LLM sampling. Default None means omitted from the
+    # provider request, which is the coherent default for reasoning-model
+    # defaults like gpt-5.5 that reject non-default temperature values.
+    # Sent verbatim when set; provider rejection is the operator's config
+    # error and is validated at boot. See
+    # docs/superpowers/specs/2026-06-03-composer-operator-set-sampling-config-design.md.
+    composer_temperature: float | None = Field(default=None, ge=0, le=2)
+    composer_seed: int | None = None
+    # Tests/offline development can disable the real provider boot probe.
+    composer_boot_probe_enabled: bool = True
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
@@ -65,11 +76,6 @@ class WebSettings(BaseModel):
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
-    # Advisor escape hatch: lets the composer LLM phone a frontier model
-    # for guidance when stuck. Disabled by default; enabling it filters
-    # the request_advisor_hint tool into get_tool_definitions(). Budget
-    # is per-compose-request (local counter), not per-session lifetime.
-    composer_advisor_enabled: bool = False
     composer_advisor_model: str = "anthropic/claude-sonnet-4-6"
     composer_advisor_max_calls_per_compose: int = Field(
         default=4,
@@ -84,6 +90,24 @@ class WebSettings(BaseModel):
             "cost is bounded by composer_rate_limit_per_minute, not this setting. "
             "Raise this for heavyweight workloads (e.g. business-analysis pipelines "
             "with many plugins where the LLM benefits from multiple intro consultations)."
+        ),
+    )
+    composer_advisor_checkpoint_max_passes: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Max END advisor-checkpoint passes per compose request (the initial "
+            "end sign-off plus its re-reviews), counted SEPARATELY from "
+            "_MAX_REPAIR_TURNS. The EARLY advisory pass is separate and does NOT "
+            "consume this counter (spec §13). On the last budgeted pass a "
+            "still-flagged end gate fails closed (no repair — it cannot "
+            "re-review). Checkpoint calls are bounded SOLELY by this knob and are "
+            "NOT counted against composer_advisor_max_calls_per_compose (which "
+            "bounds LLM-initiated hints + proactive-security). "
+            "(Spec §7 envisioned composer_advisor_max_calls_per_compose as a "
+            "unified backstop across all advisor calls including checkpoints; "
+            "that unification is not implemented — checkpoints are bounded "
+            "separately. Operator decision pending.)"
         ),
     )
     composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)
@@ -414,6 +438,17 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
+            assert self.oidc_issuer is not None
+            object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
+            if self.oidc_authorization_endpoint is not None:
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=self.oidc_issuer,
+                    ),
+                )
         elif self.auth_provider == "entra":
             # oidc_issuer is NOT required — EntraAuthProvider derives it
             # from entra_tenant_id (login.microsoftonline.com/{tid}/v2.0).
@@ -428,6 +463,16 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
+            if self.oidc_authorization_endpoint is not None:
+                assert self.entra_tenant_id is not None
+                object.__setattr__(
+                    self,
+                    "oidc_authorization_endpoint",
+                    validate_oidc_authorization_endpoint(
+                        self.oidc_authorization_endpoint,
+                        issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
+                    ),
+                )
         return self
 
     @model_validator(mode="after")
@@ -442,6 +487,28 @@ class WebSettings(BaseModel):
                 f"got {self.composer_timeout_seconds}s, maximum {max_backend_timeout_seconds}s "
                 f"(transport idle ceiling {self.composer_transport_idle_ceiling_seconds}s - "
                 f"headroom {self.composer_transport_headroom_seconds}s)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_advisor_distinct_from_primary(self) -> WebSettings:
+        """The advisor must be a different model from the primary composer.
+
+        Independence of failure modes: a model checking its own work shares
+        its blind spots. Exact-string distinctness on the canonical model id
+        (final path segment, so provider prefixes like ``openrouter/openai/``
+        do not mask a same-model pairing). The advisor is mandatory — there is
+        no enable flag — so this runs for every boot.
+        """
+
+        def _canonical(model_id: str) -> str:
+            return model_id.rsplit("/", 1)[-1].strip()
+
+        if _canonical(self.composer_advisor_model) == _canonical(self.composer_model):
+            raise ValueError(
+                "composer_advisor_model must differ from composer_model "
+                f"(both resolve to {_canonical(self.composer_model)!r}); the advisor "
+                "is the independent reviewer and cannot be the primary composer"
             )
         return self
 

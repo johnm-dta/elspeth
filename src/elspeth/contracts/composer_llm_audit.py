@@ -70,16 +70,12 @@ class ComposerLLMCall:
     assistant chat content. Missing fields stay ``None`` rather than being
     fabricated.
 
-    ``temperature`` and ``seed`` capture deterministic-sampling parameters
-    set on composer LLM requests. Temperature is constant in the current
-    implementation (``0.0``). Seed is ``42`` only for LiteLLM providers that
-    advertise support for the OpenAI ``seed`` parameter, and ``None`` when
-    omitted from the provider request. The audit row records the value
-    actually sent so a reviewer can detect drift and correlate individual
-    failures with the precise sampling regime that produced them. RGR
-    investigation 2026-05-06 §4.4 traced ~33% hard-GREEN ceiling on the
-    URL→download→line-explode scenario primarily to uncontrolled default
-    sampling (~1.0) on the previous code path.
+    ``temperature`` and ``seed`` capture the sampling parameters actually sent
+    on composer LLM requests. Both are operator-set
+    (``WebSettings.composer_temperature`` / ``composer_seed``) and recorded as
+    sent: the configured value when set, or ``None`` when the operator left it
+    unset and it was omitted from the request. The audit row mirrors the request
+    so a reviewer can correlate failures with the precise sampling regime.
     """
 
     model_requested: str
@@ -96,7 +92,7 @@ class ComposerLLMCall:
     finished_at: datetime
     error_class: str | None
     error_message: str | None
-    temperature: float
+    temperature: float | None
     seed: int | None
     cached_prompt_tokens: int | None = None
     cache_creation_input_tokens: int | None = None

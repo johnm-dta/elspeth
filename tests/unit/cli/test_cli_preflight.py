@@ -49,7 +49,7 @@ class TestCLIRunCallsResolvePreflight:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets") as mock_load,
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.cli_helpers.resolve_audit_passphrase", return_value=None),
@@ -108,7 +108,7 @@ class TestCLIRunCallsResolvePreflight:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets") as mock_load,
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.cli_helpers.resolve_audit_passphrase", return_value=None),
@@ -146,7 +146,7 @@ class TestCLIRunCallsResolvePreflight:
 
         with (
             patch("elspeth.cli._load_settings_with_secrets") as mock_load,
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config") as mock_plugins,
             patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
             patch("elspeth.cli._ensure_output_directories", return_value=[]),
             patch("elspeth.cli_helpers.resolve_audit_passphrase", return_value=None),

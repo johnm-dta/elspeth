@@ -24,7 +24,11 @@ from uuid import UUID
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.composer._compose_loop_carriers import _CallModelOutcome, _DispatchOutcome
+from elspeth.web.composer._compose_loop_carriers import (
+    _CallModelOutcome,
+    _DispatchOutcome,
+    _ToolOutcome,
+)
 from elspeth.web.composer._required_paths_validator import (
     _TOOL_REQUIRED_PATHS,
     _find_missing_required_paths,
@@ -75,7 +79,6 @@ from elspeth.web.composer.tools import (
     is_session_aware_tool,
 )
 from elspeth.web.execution.schemas import ValidationResult
-from elspeth.web.sessions._persist_payload import _ToolOutcome
 
 if TYPE_CHECKING:
     from elspeth.web.composer.service import (
@@ -653,38 +656,6 @@ async def run_tool_batch(
             # policy/error feedback with no usable guidance is still
             # a non-mutating correction turn, so it consumes discovery
             # budget before the loop asks the primary model again.
-            if not ctx.service._settings.composer_advisor_enabled:
-                # Defense-in-depth: the tool was filtered out of
-                # _get_litellm_tools() but the LLM somehow named it
-                # anyway (replayed transcript, stale state, prompt
-                # injection). Fail without making any outbound call.
-                error_payload = {
-                    "error": "request_advisor_hint is disabled on this deployment.",
-                }
-                recorder.record(
-                    finish_success(
-                        audit,
-                        result_payload=error_payload,
-                        version_after=state.version,
-                    )
-                )
-                _append_tool_outcome(
-                    response=error_payload,
-                    error_class=None,
-                    error_message=None,
-                    post_version=state.version,
-                )
-                anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                llm_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(error_payload),
-                    }
-                )
-                turn_has_discovery = True
-                continue
-
             budget = ctx.service._settings.composer_advisor_max_calls_per_compose
             if advisor_calls_used >= budget:
                 budget_payload = {

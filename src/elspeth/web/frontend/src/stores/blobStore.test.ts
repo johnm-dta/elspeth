@@ -36,6 +36,20 @@ function makeBlob(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("blobStore", () => {
   beforeEach(() => {
     useBlobStore.getState().reset();
@@ -73,6 +87,42 @@ describe("blobStore", () => {
       expect(state.error).toBe("Failed to load files.");
       expect(state.isLoading).toBe(false);
       expect(state.blobs).toEqual([]);
+    });
+
+    it("drops stale blob results when an older session load resolves last", async () => {
+      const sessionA = deferred<BlobMetadata[]>();
+      const sessionB = deferred<BlobMetadata[]>();
+      const blobA = makeBlob({
+        id: "blob-a",
+        session_id: "session-a",
+        filename: "a.csv",
+      });
+      const blobB = makeBlob({
+        id: "blob-b",
+        session_id: "session-b",
+        filename: "b.csv",
+      });
+      const { listBlobs } = await import("@/api/client");
+      (listBlobs as ReturnType<typeof vi.fn>).mockImplementation(
+        (sessionId: string) => {
+          if (sessionId === "session-a") return sessionA.promise;
+          if (sessionId === "session-b") return sessionB.promise;
+          throw new Error(`unexpected session ${sessionId}`);
+        },
+      );
+
+      const loadA = useBlobStore.getState().loadBlobs("session-a");
+      const loadB = useBlobStore.getState().loadBlobs("session-b");
+
+      sessionB.resolve([blobB]);
+      await loadB;
+      expect(useBlobStore.getState().blobs).toEqual([blobB]);
+      expect(useBlobStore.getState().isLoading).toBe(false);
+
+      sessionA.resolve([blobA]);
+      await loadA;
+      expect(useBlobStore.getState().blobs).toEqual([blobB]);
+      expect(useBlobStore.getState().error).toBeNull();
     });
   });
 

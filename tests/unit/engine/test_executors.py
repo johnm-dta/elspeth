@@ -52,6 +52,7 @@ Invariant: Token outcomes only recorded after sink durability (crash recovery sa
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
@@ -1708,17 +1709,23 @@ class TestGateExecutor:
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
     def test_config_gate_int_result_raises_type_error(self) -> None:
-        """Expression returning int raises TypeError — only bool/str are valid."""
+        """Expression returning int at runtime raises TypeError — only bool/str are valid.
+
+        Provably-numeric conditions (e.g. "40 + 2") are now rejected at config time by
+        GateSettings (elspeth-f78e84f509), so this exercises a statically-ambiguous
+        condition that only resolves to int once row values are known — confirming the
+        executor's runtime type guard remains live.
+        """
         factory = _make_factory()
         executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
         config = GateSettings(
             name="my_gate",
             input="in_conn",
-            condition="40 + 2",
+            condition="row['a'] + row['b']",
             routes={"true": "next_conn", "false": "error_sink"},
         )
         contract = _make_contract()
-        token = _make_token(contract=contract)
+        token = _make_token(data={"value": "test", "a": 40, "b": 2}, contract=contract)
         ctx = make_context()
 
         with pytest.raises(TypeError, match="int"):
@@ -5381,12 +5388,41 @@ class TestReRaiseGuardPattern:
 
 
 class TestTransformExecutorBatchPath:
-    """Tests for the BatchTransformMixin code path in TransformExecutor.
+    """Tests for the row-pipelined batch runtime path in TransformExecutor.
 
     The executor has an entirely separate branch for transforms that implement
-    BatchTransformMixin: adapter creation, register(), accept(), waiter.wait(),
-    and timeout-eviction. These tests verify that branch at the executor level.
+    BatchTransformRuntimeProtocol: adapter creation, register(), accept(),
+    waiter.wait(), and timeout-eviction. These tests verify that branch at the
+    executor level.
     """
+
+    def test_transform_executor_uses_contract_protocol_not_plugin_mixin_import(self) -> None:
+        source = Path("src/elspeth/engine/executors/transform.py").read_text(encoding="utf-8")
+
+        assert "elspeth.plugins.infrastructure.batching.mixin" not in source
+        assert "BatchTransformRuntimeProtocol" in source
+
+    def test_batch_transform_mixin_satisfies_runtime_protocol(self) -> None:
+        from elspeth.contracts import BatchTransformRuntimeProtocol
+        from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
+
+        class _ConcreteBatchTransform(BatchTransformMixin):
+            def __init__(self) -> None:
+                self.node_id = "node_batch"
+                self._pool_size = 4
+                self._batch_wait_timeout = 2.5
+
+            def accept(self, row: PipelineRow, ctx: Any) -> None:
+                pass
+
+            def connect_output(self, output: Any, max_pending: int = 30) -> None:
+                pass
+
+        transform = _ConcreteBatchTransform()
+
+        assert isinstance(transform, BatchTransformRuntimeProtocol)
+        assert transform.batch_pool_size == 4
+        assert transform.batch_wait_timeout == 2.5
 
     # --- Helpers ---
 
@@ -5398,43 +5434,44 @@ class TestTransformExecutorBatchPath:
         pool_size: int = 5,
         batch_wait_timeout: float = 10.0,
     ) -> MagicMock:
-        """Create a mock transform that passes isinstance(BatchTransformMixin).
+        """Create a mock transform that satisfies BatchTransformRuntimeProtocol.
 
-        Uses spec_set on a real subclass so isinstance checks succeed while
+        Uses spec on a real mixin subclass so protocol checks succeed while
         all methods remain mockable.
         """
         from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 
-        # Build a concrete subclass to use as spec target — only needed for isinstance
         class _FakeBatchTransform(BatchTransformMixin):
             is_batch_aware = False
             output_schema = _PermissiveSchema
 
-            def effective_static_contract(self) -> frozenset[str]:
-                return frozenset()
+            def __init__(self) -> None:
+                self.name = name
+                self.node_id = node_id
+                self.on_error = on_error
+                self.declared_output_fields = frozenset()
+                self.declared_input_fields = frozenset()
+                self.is_batch_aware = False
+                self.input_schema = _PermissiveSchema  # Accepts any row — validation is a no-op
+                self.output_schema = _PermissiveSchema  # Accepts any row — validation is a no-op
+                self._on_start_called = True
+                self._pool_size = pool_size
+                self._batch_wait_timeout = batch_wait_timeout
+                self.passes_through_input = False
+                self.can_drop_rows = False
+                self._output_schema_config = None
+                self.accept = MagicMock()
+                self.connect_output = MagicMock()
+                self.evict_submission = MagicMock(return_value=True)
+                self.effective_static_contract = MagicMock(return_value=frozenset())
 
-        t = MagicMock(spec=_FakeBatchTransform)
-        t.name = name
-        t.node_id = node_id
-        t.on_error = on_error
-        t.declared_output_fields = frozenset()
-        t.declared_input_fields = frozenset()
-        t.is_batch_aware = False
-        t.input_schema = _PermissiveSchema  # Accepts any row — validation is a no-op
-        t.output_schema = _PermissiveSchema  # Accepts any row — validation is a no-op
-        t._on_start_called = True
-        t._pool_size = pool_size
-        t._batch_wait_timeout = batch_wait_timeout
-        t.passes_through_input = False
-        t.can_drop_rows = False
-        t._output_schema_config = None
-        t.effective_static_contract.return_value = frozenset()
+        t = _FakeBatchTransform()
         return t
 
     # --- Mixin detection ---
 
     def test_batch_path_invoked_for_mixin_transform(self) -> None:
-        """When transform implements BatchTransformMixin, accept() is called instead of process()."""
+        """When transform implements batch runtime protocol, accept() is called instead of process()."""
         from elspeth.engine.batch_adapter import SharedBatchAdapter
 
         factory = _make_factory()
@@ -5478,7 +5515,7 @@ class TestTransformExecutorBatchPath:
         assert transform.is_batch_aware is False
 
     def test_non_batch_transform_uses_process(self) -> None:
-        """A regular transform (no BatchTransformMixin) uses process(), not accept()."""
+        """A regular transform (no batch runtime protocol) uses process(), not accept()."""
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
@@ -5597,12 +5634,12 @@ class TestTransformExecutorBatchPath:
         # Verify register was called before accept (via call_args_list order is not
         # available across objects, so we verify both were called — the production code
         # structurally guarantees register-before-accept by line order)
-        mock_waiter.wait.assert_called_once_with(timeout=transform._batch_wait_timeout, shutdown_event=None)
+        mock_waiter.wait.assert_called_once_with(timeout=transform.batch_wait_timeout, shutdown_event=None)
 
     # --- Timeout and eviction ---
 
     def test_timeout_triggers_evict_submission(self) -> None:
-        """TimeoutError from waiter.wait() calls evict_submission() on the mixin."""
+        """TimeoutError from waiter.wait() calls evict_submission() on the batch runtime."""
         from elspeth.engine.batch_adapter import SharedBatchAdapter
 
         factory = _make_factory()

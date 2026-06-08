@@ -62,6 +62,27 @@ def _make_mock_audit_ctx() -> Any:
     return make_context()
 
 
+class TestChromaSinkCompletionTelemetry:
+    """elspeth-ee69831e4c: on_complete telemetry emit must be best-effort.
+
+    Telemetry fires AFTER successful writes and their audit record; an emit
+    failure must not fail completion. Tier-1/audit-integrity errors still
+    propagate (audit corruption outranks).
+    """
+
+    def test_telemetry_failure_does_not_fail_completion(self) -> None:
+        sink = ChromaSink(_make_config())
+        sink._telemetry_emit = MagicMock(side_effect=RuntimeError("telemetry transport down"))
+        sink.on_complete(_make_lifecycle_ctx())  # must not raise
+        sink._telemetry_emit.assert_called_once()
+
+    def test_tier1_error_during_telemetry_propagates(self) -> None:
+        sink = ChromaSink(_make_config())
+        sink._telemetry_emit = MagicMock(side_effect=AuditIntegrityError("audit corruption during emit"))
+        with pytest.raises(AuditIntegrityError):
+            sink.on_complete(_make_lifecycle_ctx())
+
+
 class TestChromaSinkOnStart:
     def test_constructs_persistent_client(self) -> None:
         sink = inject_write_failure(ChromaSink(_make_config()))
@@ -289,6 +310,33 @@ class TestChromaSinkWriteError:
 
         assert "d1" in exc_info.value.duplicate_ids
         assert "d3" in exc_info.value.duplicate_ids
+        mock_collection.add.assert_not_called()
+
+    def test_error_mode_preflights_full_batch_no_partial_add(self) -> None:
+        """Error mode must preflight the full logical batch before any add.
+
+        Regression for elspeth-f56603c31a: a batch that splits into a metadata
+        sub-batch (d1, new) and a no-metadata sub-batch (d2, duplicate) must not
+        add d1 to ChromaDB before discovering d2's duplicate in the next
+        sub-batch — that would leave a partial external write with no success
+        audit. The full batch is duplicate-checked before any collection.add().
+        """
+        mock_collection = MagicMock()
+        mock_collection.get.return_value = {"ids": ["d2"]}  # d2 already exists
+        sink = _make_sink_with_collection(mock_collection, on_duplicate="error", schema={"mode": "observed"})
+
+        ctx = _make_sink_ctx()
+
+        rows = [
+            {"doc_id": "d1", "text": "A", "topic": "t"},  # metadata -> meta sub-batch (new)
+            {"doc_id": "d2", "text": "B"},  # no metadata -> no-metadata sub-batch (duplicate)
+        ]
+
+        with pytest.raises(DuplicateDocumentError) as exc_info:
+            sink.write(rows, ctx)
+
+        assert "d2" in exc_info.value.duplicate_ids
+        # No partial write: d1 (the new metadata row) must NOT have been added.
         mock_collection.add.assert_not_called()
 
     def test_error_mode_succeeds_when_no_duplicates(self) -> None:
@@ -757,6 +805,32 @@ class TestChromaSinkEmptyMetadata:
         assert result.artifact.metadata is not None
         assert result.artifact.metadata["row_count"] == 2
         assert len(result.diversions) == 0
+
+    def test_mixed_batch_content_hash_covers_aligned_payload(self) -> None:
+        """elspeth-b19ee26dc2: content_hash must cover a length-consistent payload.
+
+        A mixed metadata/no-metadata batch previously extended ids/documents for
+        all rows but metadatas only for metadata rows, hashing ids/docs length 2
+        with metadatas length 1 — a payload ChromaDB never received and that cannot
+        be replayed to verify the actual calls. The faithful aggregate aligns
+        metadatas to ids with None for no-metadata rows.
+        """
+        mock_collection = MagicMock()
+        config = _make_config(
+            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": ["topic"]},
+            schema={"mode": "flexible", "fields": ["doc_id: str", "text: str", "topic: str"]},
+        )
+        sink = inject_write_failure(ChromaSink(config))
+        sink._collection = mock_collection
+        ctx = _make_sink_ctx()
+        rows = [
+            {"doc_id": "d1", "text": "with meta", "topic": "science"},
+            {"doc_id": "d2", "text": "no meta"},  # topic absent
+        ]
+        result = sink.write(rows, ctx)
+
+        expected_hash, _ = sink._compute_payload_hash(["d1", "d2"], ["with meta", "no meta"], [{"topic": "science"}, None])
+        assert result.artifact.content_hash == expected_hash
 
     def test_all_metadata_fields_absent_skip_mode(self) -> None:
         """Skip mode works correctly when metadata fields are absent."""

@@ -261,6 +261,10 @@ class PluginConfig(BaseModel):
             ) from e
 
 
+_VALID_PLUGIN_COMPONENT_TYPES: tuple[str, ...] = ("source", "sink", "transform")
+"""Allowed values for ``_plugin_component_type`` on DataPluginConfig subclasses."""
+
+
 class DataPluginConfig(PluginConfig):
     """Base class for data-processing plugin configurations.
 
@@ -301,6 +305,15 @@ class DataPluginConfig(PluginConfig):
                 f"set _plugin_component_type. Set it to 'source', 'sink', or "
                 f"'transform' (directly or via an intermediate base like "
                 f"SourceDataConfig, SinkPathConfig, or TransformDataConfig)."
+            )
+        if cls._plugin_component_type not in _VALID_PLUGIN_COMPONENT_TYPES:
+            # A non-None but invalid label would otherwise reach downstream
+            # validation and audit attribution (PluginConfigError.component_type)
+            # unchecked — reject it at class creation. (elspeth-d876f7b31b)
+            raise TypeError(
+                f"{cls.__qualname__} sets _plugin_component_type="
+                f"{cls._plugin_component_type!r}, which must be one of "
+                f"{', '.join(repr(t) for t in _VALID_PLUGIN_COMPONENT_TYPES)}."
             )
 
     # Override parent's Optional field with required field.
@@ -363,7 +376,7 @@ class SourceDataConfig(PathConfig):
 
     Note: on_success routing is defined at the settings level
     (SourceSettings in core/config.py), not here. The bridge in
-    cli_helpers.py injects on_success after plugin construction.
+    runtime_factory.py injects on_success after plugin construction.
     """
 
     _plugin_component_type: ClassVar[str | None] = "source"

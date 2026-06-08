@@ -716,53 +716,38 @@ def test_pipeline_decision_boundary_rejects_raw_html_mapping_preservation() -> N
 
 
 @pytest.mark.asyncio
-async def test_request_interpretation_review_accepts_prompt_template_kind() -> None:
-    state = _state_with(_prompt_template_review_node())
+async def test_request_interpretation_review_rejects_prompt_template_kind() -> None:
+    """The LLM may no longer surface ``llm_prompt_template`` reviews via the tool.
 
-    result = await _handle_request_interpretation_review(
-        {
-            "affected_node_id": "identify_colour",
-            "kind": "llm_prompt_template",
-            "user_term": "llm_prompt_template:identify_colour",
-            "llm_draft": "Read {{ row.html }} and return JSON.",
-        },
-        state,
-        session_id=uuid4(),
-        composition_state_id=uuid4(),
-        tool_call_id="call_prompt_template",
-        now=_now(),
-        per_term_cap=3,
-        per_session_day_cap=10,
-        create_pending_interpretation_event=_fake_create_pending_interpretation_event,
-        list_interpretation_events=_empty_list_interpretation_events,
-        **_provenance_kwargs(),
-    )
+    The prompt-template review is auto-staged on every LLM node and surfaced by
+    the BACKEND against the frozen final skeleton at turn finalization (Case B
+    fix, elspeth-e51216d305). ``request_interpretation_review`` therefore rejects
+    ``kind="llm_prompt_template"`` at the Tier-3 boundary, immediately after the
+    argument parse — before any service call — naming the allowed kinds and
+    pointing the model at backend finalization.
 
-    assert result.success is True
-    assert result.data["affected_node_id"] == "identify_colour"
-    assert result.data["kind"] == "llm_prompt_template"
-    assert result.data["llm_draft"] == "Read {{ row.html }} and return JSON."
-
-
-@pytest.mark.asyncio
-async def test_request_interpretation_review_rejects_stale_prompt_template_draft() -> None:
+    NOTE: this folds the former ``test_request_interpretation_review_rejects_stale_prompt_template_draft``.
+    The stale-draft guard in ``_assert_affected_component`` (sessions.py:1293)
+    is now UNREACHABLE for this kind because the top-level kind guard rejects
+    the call first; the backend owns prompt-template surfacing.
+    """
     state = _state_with(_prompt_template_review_node())
 
     async def fail_if_called(**_: Any) -> InterpretationEventRecord:
-        pytest.fail("stale prompt-template drafts must be rejected before creating an audit row")
+        pytest.fail("llm_prompt_template must be rejected before any service/DB write")
 
-    with pytest.raises(ToolArgumentError, match=r"llm_draft|prompt_template"):
+    with pytest.raises(ToolArgumentError) as exc_info:
         await _handle_request_interpretation_review(
             {
                 "affected_node_id": "identify_colour",
                 "kind": "llm_prompt_template",
                 "user_term": "llm_prompt_template:identify_colour",
-                "llm_draft": "Read {{ row.body }} and return JSON.",
+                "llm_draft": "Read {{ row.html }} and return JSON.",
             },
             state,
             session_id=uuid4(),
             composition_state_id=uuid4(),
-            tool_call_id="call_prompt_template_stale",
+            tool_call_id="call_prompt_template",
             now=_now(),
             per_term_cap=3,
             per_session_day_cap=10,
@@ -770,6 +755,17 @@ async def test_request_interpretation_review_rejects_stale_prompt_template_draft
             list_interpretation_events=_empty_list_interpretation_events,
             **_provenance_kwargs(),
         )
+
+    message = str(exc_info.value)
+    # Names the allowed kinds the LLM may still surface.
+    assert "vague_term" in message
+    assert "invented_source" in message
+    assert "pipeline_decision" in message
+    assert "llm_model_choice" in message
+    # Names the rejected kind and points at backend finalization.
+    assert "llm_prompt_template" in message
+    assert "backend" in message.lower()
+    assert "finalization" in message.lower()
 
 
 @pytest.mark.asyncio

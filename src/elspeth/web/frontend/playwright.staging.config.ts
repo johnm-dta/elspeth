@@ -37,7 +37,10 @@ const STAGING_BASE_URL =
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**"],
+  // `**/*.test.ts` are vitest unit tests (e.g. harness/classify.test.ts) which
+  // import `vitest` — that collides with Playwright's expect. Playwright owns
+  // `*.spec.ts`; vitest owns `*.test.ts`.
+  testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**", "**/*.test.ts"],
   // Sequential, single-worker for staging — we are talking to a shared
   // service and don't want parallel test runs colliding on the same
   // dta_user account's preferences row.

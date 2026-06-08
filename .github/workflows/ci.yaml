@@ -55,12 +55,12 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-static-analysis
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -156,9 +156,16 @@ jobs:
           ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
           ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
+          set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
             --root src/elspeth
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=Trust-tier signed allowlist diagnosis::If this failure mentions judge_metadata_signature, file_fingerprint, scope_fingerprint, or ast_path drift, run: diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model. To repair diagnosed drift from an operator shell, run: sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --env-file /path/to/operator.env --owner \"\$USER\""
+          fi
+          exit "$status"
 
       - name: Run trust-boundary honesty-gate elspeth-lints rules
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -176,6 +183,11 @@ jobs:
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules meta.no-new-bespoke-cicd-enforcer \
             --root .
+
+      - name: Run adapter facade budget legacy gate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          uv run python scripts/cicd/enforce_adapter_budget.py
 
       - name: Emit elspeth-lints SARIF artifact
         if: always()
@@ -289,12 +301,13 @@ jobs:
             --format sarif > elspeth-lints-trust-tier.sarif
           status=$?
           if [ "$status" -gt 1 ]; then
+            echo "::error title=Trust-tier signed allowlist diagnosis::If this failure mentions judge_metadata_signature, file_fingerprint, scope_fingerprint, or ast_path drift, run: diagnose-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model. To repair diagnosed drift from an operator shell, run: sign-judge-signatures --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --env-file /path/to/operator.env --owner \"\$USER\""
             exit "$status"
           fi
 
       - name: Upload elspeth-lints SARIF artifact
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: elspeth-lints-sarif
           path: |
@@ -342,12 +355,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -397,7 +410,7 @@ jobs:
 
       - name: Upload coverage report
         if: matrix.coverage && always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: coverage-report
           path: ${{ env.CI_CHECKOUT_PATH }}/coverage.xml
@@ -417,12 +430,12 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-integration
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -443,7 +456,22 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: uv run pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
+        run: |
+          # Fail closed: a real integration failure — assertion regression,
+          # collection/import error (exit 2), internal error (exit 3), or
+          # infra fault — must fail the lane so build-push.yaml never builds an
+          # image off a broken CI run. The only tolerated outcome is pytest's
+          # exit code 5 ("no tests collected"); integration tests self-skip via
+          # pytest.skip / importorskip when their credentials are absent, which
+          # is exit 0 anyway. ``|| status=$?`` captures the code without letting
+          # ``set -e`` abort before we can inspect it.
+          status=0
+          uv run pytest tests/integration/ -v -m integration || status=$?
+          if [ "$status" -eq 5 ]; then
+            echo "No integration tests collected (exit 5) — treating as a skip."
+            exit 0
+          fi
+          exit "$status"
 
   # ===========================================================================
   # Stage 3b: Testcontainer Postgres lane (CL-PP-11 dialect-portability proof)
@@ -473,17 +501,17 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-test-postgres-testcontainer
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -542,12 +570,12 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-supply-chain-audit
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -572,6 +600,7 @@ jobs:
             --frozen \
             --all-extras \
             --no-emit-project \
+            --no-emit-package elspeth-lints \
             --format requirements-txt \
             --output-file requirements-audit.txt
           # CVE-2025-45768 / PYSEC-2025-183 has no fixed PyJWT release;
@@ -603,7 +632,7 @@ jobs:
 
       - name: Upload Python license report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: python-license-report
           path: ${{ env.CI_CHECKOUT_PATH }}/python-license-report.md
@@ -622,17 +651,17 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-e2e-frontend
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -654,7 +683,7 @@ jobs:
         run: uv sync --frozen --all-extras
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: "22"
           cache: "npm"
@@ -687,7 +716,7 @@ jobs:
 
       - name: Upload Playwright HTML report
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: playwright-report
           path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/playwright-report/
@@ -695,7 +724,7 @@ jobs:
 
       - name: Upload Playwright traces
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: playwright-traces
           path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/test-results/
@@ -719,12 +748,12 @@ jobs:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-frontend-unit
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: "22"
           cache: "npm"
@@ -753,10 +782,7 @@ jobs:
     needs:
       - static-analysis
       - test
-      # test-postgres-testcontainer is intentionally NOT a gate: Postgres is
-      # deferred (SQLite-only stance) and the session-DB schema is not yet
-      # PG-portable. The job's tests are skipped; re-add this here when PG
-      # portability lands — tracked in filigree elspeth-f18d996d71.
+      - test-postgres-testcontainer
       - supply-chain-audit
       - e2e-frontend
       - frontend-unit
@@ -770,6 +796,10 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
+            echo "Postgres testcontainer job failed"
             exit 1
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then

@@ -478,6 +478,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         api.fetchCompositionProposals(id),
         api.fetchComposerPreferences(id),
       ]);
+      // The user may switch sessions while these requests are in flight.
+      // Drop stale payloads so an older selection cannot overwrite the
+      // newly active session's messages or composition state.
+      if (get().activeSessionId !== id) {
+        return;
+      }
       set({
         messages,
         compositionState,
@@ -558,6 +564,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const stateId = get().compositionState?.id;
       const result = await api.sendMessage(activeSessionId, content, stateId, signal);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       // Sync the chat panel against the durable DB state before applying the
       // POST's metadata. After this await, get().messages contains every
       // assistant row the compose loop persisted (and the canonical user row
@@ -566,6 +575,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // isComposing) without re-appending the final assistant message that
       // the poll has already pulled in.
       await get().loadInflightMessages(activeSessionId);
+      // Navigation can also happen during the post-completion message sync.
+      // Keep the compose response scoped to the session that initiated it.
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       const { message, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -663,6 +677,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             recoveryStartedCompositionVersion,
           }
         : {};
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       set((state) => ({
         isComposing: false,
         error: errorMessage,
@@ -988,9 +1005,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // persisted from the original send. Calling sendMessage again
       // would insert a duplicate user message.
       const result = await api.recompose(activeSessionId, signal);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       // Sync the chat panel against the DB state (see sendMessage for
       // rationale).
       await get().loadInflightMessages(activeSessionId);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       const { message: assistantMessage, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -1063,6 +1086,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         : {};
 
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       set((state) => ({
         isComposing: false,
         error: errorMessage,

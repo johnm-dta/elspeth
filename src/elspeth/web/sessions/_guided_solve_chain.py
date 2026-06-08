@@ -78,6 +78,8 @@ async def solve_chain_with_auto_drop(
     sink: SinkResolved,
     recipe_match: Any | None = None,
     repair_context: str | None = None,
+    temperature: float | None,
+    seed: int | None,
 ) -> tuple[ChainProposal | None, GuidedSession]:
     """Wrap ``solve_chain`` with the auto-drop-on-transient contract (I2).
 
@@ -151,6 +153,8 @@ async def solve_chain_with_auto_drop(
             recipe_match=recipe_match,
             repair_context=repair_context,
             recorder=recorder,
+            temperature=temperature,
+            seed=seed,
         )
         return proposal, session
     except (

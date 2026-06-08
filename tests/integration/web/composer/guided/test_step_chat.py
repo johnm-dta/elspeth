@@ -763,6 +763,47 @@ class TestStepChatServerInvariants:
         audit_rows = _chat_turn_audit_rows(composer_test_client, session_id)
         assert audit_rows[0].composition_state_id is not None
 
+    def test_chat_audit_unwind_preserves_primary_error_if_slog_raises(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch,
+    ) -> None:
+        """A logger failure in the final audit-drain fallback must not replace the primary chat error.
+
+        The route is already unwinding a sanitized HTTPException from the
+        chat solver. If the final ``slog.error`` fallback also raises,
+        Python would otherwise let that secondary logger exception replace
+        the in-flight HTTPException from the ``finally`` block.
+        """
+        from elspeth.web.sessions.routes import composer as composer_module
+
+        session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
+
+        async def _raising_persist_chat_turns(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated chat-audit persist failure")
+
+        def _raising_only_for_unwind_log(event: str, *args: object, **kwargs: object) -> None:
+            if event == "guided.chat_turn_persist_failed_during_exception_handling":
+                raise RuntimeError("simulated logger failure")
+
+        monkeypatch.setattr(composer_module, "_persist_chat_turns", _raising_persist_chat_turns)
+        monkeypatch.setattr(composer_module.slog, "error", _raising_only_for_unwind_log)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 500, body
+        assert body["detail"] == self._STATIC_DETAIL
+
     def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
         session_id = _create_session(composer_test_client)

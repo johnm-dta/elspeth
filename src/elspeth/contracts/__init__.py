@@ -56,6 +56,7 @@ from elspeth.contracts.audit import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.batch_runtime import BatchTransformRuntimeProtocol
 from elspeth.contracts.call_data import (
     CallPayload,
     HTTPCallError,
@@ -483,6 +484,7 @@ __all__ = [  # Grouped by category for readability
     "TransformErrorToken",
     "ValidationErrorToken",
     # plugin protocols
+    "BatchTransformRuntimeProtocol",
     "BatchTransformProtocol",
     "SinkProtocol",
     "SourceProtocol",

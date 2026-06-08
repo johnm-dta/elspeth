@@ -13,6 +13,8 @@ Landscape audit database.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy import (
     DDL,
     Boolean,
@@ -96,13 +98,53 @@ from sqlalchemy.types import JSON
 #        bypass the verbatim-side nullability invariant.
 #   17 → interpretation_events.kind CHECK gains pipeline_decision for
 #        LLM-authored cleanup/shape decisions that gate execution.
-SESSION_SCHEMA_EPOCH = 17
+#   18 → sessions.forked_from_session_id self-referential foreign key constraint
+#        removed to allow physical deletion of parent sessions (no-durable-history
+#        archive path) when child forks exist.
+SESSION_SCHEMA_EPOCH = 18
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
+_POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
 
 
-def _sql_non_blank_text(column_name: str) -> str:
-    return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
+def _sql_non_blank_text(column_name: str, *, dialect: Literal["sqlite", "postgresql"]) -> str:
+    if dialect == "sqlite":
+        return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
+    return f"length(btrim({column_name}, {_POSTGRESQL_ASCII_WHITESPACE})) > 0"
+
+
+def _composition_proposals_composer_provenance_check(*, dialect: Literal["sqlite", "postgresql"]) -> str:
+    return (
+        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
+        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
+        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
+        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('composer_model_identifier', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_model_version', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_provider', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('composer_skill_hash', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('tool_arguments_hash', dialect=dialect)}))"
+    )
+
+
+def _blobs_creating_llm_provenance_check(*, dialect: Literal["sqlite", "postgresql"]) -> str:
+    return (
+        "((creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) AND "
+        "created_from_message_id IS NOT NULL AND "
+        f"{_sql_non_blank_text('created_from_message_id', dialect=dialect)} AND "
+        "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
+        "creating_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('creating_model_identifier', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_model_version', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_provider', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_composer_skill_hash', dialect=dialect)} AND "
+        f"{_sql_non_blank_text('creating_arguments_hash', dialect=dialect)}) OR "
+        "(creation_modality = 'verbatim' AND "
+        "creating_model_identifier IS NULL AND creating_model_version IS NULL AND "
+        "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
+        "creating_arguments_hash IS NULL)"
+    )
 
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
@@ -163,10 +205,12 @@ sessions_table = Table(
     Column("density_default", String, nullable=False, server_default="high"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Historical provenance only. This deliberately is not a live
+    # ForeignKey("sessions.id") so no-durable-history archive can physically
+    # delete a parent session while preserving child fork provenance.
     Column(
         "forked_from_session_id",
         String,
-        ForeignKey("sessions.id"),
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),
@@ -376,16 +420,20 @@ composition_states_table = Table(
     #   - ``convergence_persist``     — routes.py _handle_convergence_error
     #   - ``plugin_crash_persist``    — routes.py _handle_plugin_crash
     #   - ``preflight_persist``       — routes.py _handle_runtime_preflight_failure
-    #   - ``tutorial_normalization``  — tutorial_service.py
-    #                                    _normalise_current_tutorial_state_for_execution
-    #                                    (Phase 4 hello-world tutorial: rewrites
-    #                                    bare ``{{ field }}`` placeholders to
-    #                                    the ``row.field`` namespace before the
-    #                                    live composer pass executes the
-    #                                    pipeline. Distinct audit category so the
-    #                                    rewrite is not conflated with the
-    #                                    validator-failure writer
-    #                                    ``convergence_persist``.)
+    #   - ``tutorial_normalization``  — DORMANT (no live writer). Formerly
+    #                                    written by tutorial_service.py's
+    #                                    pre-execution template normalizer
+    #                                    (Phase 4 hello-world tutorial), which
+    #                                    rewrote bare ``{{ field }}`` placeholders
+    #                                    to the ``row.field`` namespace before the
+    #                                    live pass. Removed for tutorial-vs-regular
+    #                                    backend parity (the composer already emits
+    #                                    ``row.field`` templates; a 10-run live
+    #                                    battery showed the rewrite firing 0/10).
+    #                                    The value is retained in this CHECK so
+    #                                    historical audit rows remain representable;
+    #                                    re-activation is a governance action per
+    #                                    the NO SILENT EXTENSION block below.
     #   - ``session_seed``            — service.py create_session + set_active_state
     #                                    (also: routes.py post-compose state advance
     #                                     + fork source-storage rewrite — these two
@@ -488,15 +536,13 @@ composition_proposals_table = Table(
         name="ck_composition_proposals_committed_state",
     ),
     CheckConstraint(
-        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
-        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
-        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
-        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL AND "
-        f"{_sql_non_blank_text('composer_model_identifier')} AND {_sql_non_blank_text('composer_model_version')} AND "
-        f"{_sql_non_blank_text('composer_provider')} AND {_sql_non_blank_text('composer_skill_hash')} AND "
-        f"{_sql_non_blank_text('tool_arguments_hash')}))",
+        _composition_proposals_composer_provenance_check(dialect="sqlite"),
         name="ck_composition_proposals_composer_provenance_all_or_none",
-    ),
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        _composition_proposals_composer_provenance_check(dialect="postgresql"),
+        name="ck_composition_proposals_composer_provenance_all_or_none",
+    ).ddl_if(dialect="postgresql"),
 )
 
 # Per-event ``payload`` JSON contract (Tier-1 schema; CLAUDE.md
@@ -1190,21 +1236,13 @@ blobs_table = Table(
     # lets partial/whitespace creating_* values on verbatim rows pass as
     # "not fully populated", which weakens the audit nullability contract.
     CheckConstraint(
-        "((creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) AND "
-        "created_from_message_id IS NOT NULL AND "
-        f"{_sql_non_blank_text('created_from_message_id')} AND "
-        "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
-        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
-        "creating_arguments_hash IS NOT NULL AND "
-        f"{_sql_non_blank_text('creating_model_identifier')} AND {_sql_non_blank_text('creating_model_version')} AND "
-        f"{_sql_non_blank_text('creating_provider')} AND {_sql_non_blank_text('creating_composer_skill_hash')} AND "
-        f"{_sql_non_blank_text('creating_arguments_hash')}) OR "
-        "(creation_modality = 'verbatim' AND "
-        "creating_model_identifier IS NULL AND creating_model_version IS NULL AND "
-        "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
-        "creating_arguments_hash IS NULL)",
+        _blobs_creating_llm_provenance_check(dialect="sqlite"),
         name="ck_blobs_creating_llm_provenance_nullability",
-    ),
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        _blobs_creating_llm_provenance_check(dialect="postgresql"),
+        name="ck_blobs_creating_llm_provenance_nullability",
+    ).ddl_if(dialect="postgresql"),
     CheckConstraint(
         "created_by IN ('user', 'assistant', 'pipeline')",
         name="ck_blobs_created_by",

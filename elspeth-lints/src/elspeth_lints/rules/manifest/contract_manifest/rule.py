@@ -25,6 +25,8 @@ from elspeth_lints.rules.manifest.contract_manifest.metadata import (
 _REGISTER_FUNC_NAME = "register_declaration_contract"
 _MANIFEST_SYMBOL = "EXPECTED_CONTRACT_SITES"
 _DECORATOR_NAME = "implements_dispatch_site"
+_CANONICAL_CONTRACTS_MODULE = "elspeth.contracts.declaration_contracts"
+_MARKER_SITE_KEYWORD = "site_name"
 _VALID_DISPATCH_SITES: frozenset[str] = frozenset(
     {
         "pre_emission_check",
@@ -33,6 +35,48 @@ _VALID_DISPATCH_SITES: frozenset[str] = frozenset(
         "boundary_check",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalBindings:
+    """Per-file local names that PROVABLY resolve to the canonical contract API.
+
+    The scanner must not trust the textual final name of a call or decorator:
+    a module can locally shadow ``register_declaration_contract`` or
+    ``implements_dispatch_site`` with a no-op of the same name and slip a fake
+    registration past CI (runtime would never register it). A symbol counts only
+    when it is imported from ``elspeth.contracts.declaration_contracts``.
+    """
+
+    register_names: frozenset[str]
+    marker_names: frozenset[str]
+    module_aliases: frozenset[str]
+
+
+def _canonical_bindings(tree: ast.AST) -> CanonicalBindings:
+    """Collect the local names bound to the canonical contract API in one file."""
+    register_names: set[str] = set()
+    marker_names: set[str] = set()
+    module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module != _CANONICAL_CONTRACTS_MODULE:
+                continue
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if alias.name == _REGISTER_FUNC_NAME:
+                    register_names.add(local)
+                elif alias.name == _DECORATOR_NAME:
+                    marker_names.add(local)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == _CANONICAL_CONTRACTS_MODULE and alias.asname:
+                    module_aliases.add(alias.asname)
+    return CanonicalBindings(
+        register_names=frozenset(register_names),
+        marker_names=frozenset(marker_names),
+        module_aliases=frozenset(module_aliases),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,22 +258,30 @@ def _scan_file(file_path: Path, source_root: Path) -> list[RegistrationCall]:
     source = file_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(file_path))
     relative_path = repo_relative_display_path(file_path, source_root)
+    bindings = _canonical_bindings(tree)
     classes_by_name = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
     calls: list[RegistrationCall] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_register_call(node):
-            calls.append(_resolve_call(node, classes_by_name, relative_path))
+        if isinstance(node, ast.Call) and _is_register_call(node, bindings):
+            calls.append(_resolve_call(node, classes_by_name, relative_path, bindings))
     return calls
 
 
-def _is_register_call(node: ast.Call) -> bool:
+def _is_register_call(node: ast.Call, bindings: CanonicalBindings) -> bool:
     func = node.func
-    return (isinstance(func, ast.Name) and func.id == _REGISTER_FUNC_NAME) or (
-        isinstance(func, ast.Attribute) and func.attr == _REGISTER_FUNC_NAME
-    )
+    if isinstance(func, ast.Name):
+        return func.id in bindings.register_names
+    if isinstance(func, ast.Attribute) and func.attr == _REGISTER_FUNC_NAME:
+        return isinstance(func.value, ast.Name) and func.value.id in bindings.module_aliases
+    return False
 
 
-def _resolve_call(call_node: ast.Call, classes_by_name: dict[str, ast.ClassDef], relative_path: str) -> RegistrationCall:
+def _resolve_call(
+    call_node: ast.Call,
+    classes_by_name: dict[str, ast.ClassDef],
+    relative_path: str,
+    bindings: CanonicalBindings,
+) -> RegistrationCall:
     if len(call_node.args) != 1:
         return RegistrationCall(
             file_path=relative_path,
@@ -260,7 +312,7 @@ def _resolve_call(call_node: ast.Call, classes_by_name: dict[str, ast.ClassDef],
                 contract_name=None,
                 detail=f'class {class_name!r} has no statically-resolvable ``name = "..."`` class-level string attribute.',
             )
-        marker_sites, trivial_sites = _extract_marker_sites_and_trivial_bodies(class_node)
+        marker_sites, trivial_sites = _extract_marker_sites_and_trivial_bodies(class_node, bindings)
         return RegistrationCall(
             file_path=relative_path,
             line=call_node.lineno,
@@ -309,13 +361,15 @@ def _extract_class_name_attribute(class_node: ast.ClassDef) -> str | None:
     return None
 
 
-def _extract_marker_sites_and_trivial_bodies(class_node: ast.ClassDef) -> tuple[frozenset[str], frozenset[str]]:
+def _extract_marker_sites_and_trivial_bodies(
+    class_node: ast.ClassDef, bindings: CanonicalBindings
+) -> tuple[frozenset[str], frozenset[str]]:
     marker_sites: set[str] = set()
     trivial_sites: set[str] = set()
     for stmt in class_node.body:
         if not isinstance(stmt, ast.FunctionDef):
             continue
-        site_name = _dispatch_site_marker(stmt)
+        site_name = _dispatch_site_marker(stmt, bindings)
         if site_name is None:
             continue
         marker_sites.add(site_name)
@@ -324,13 +378,39 @@ def _extract_marker_sites_and_trivial_bodies(class_node: ast.ClassDef) -> tuple[
     return frozenset(marker_sites), frozenset(trivial_sites)
 
 
-def _dispatch_site_marker(function_node: ast.FunctionDef) -> str | None:
+def _dispatch_site_marker(function_node: ast.FunctionDef, bindings: CanonicalBindings) -> str | None:
     for decorator in function_node.decorator_list:
-        if not isinstance(decorator, ast.Call) or _call_name(decorator) != _DECORATOR_NAME or not decorator.args:
+        if not isinstance(decorator, ast.Call) or not _is_canonical_marker(decorator, bindings):
             continue
-        site_arg = decorator.args[0]
-        if isinstance(site_arg, ast.Constant) and isinstance(site_arg.value, str):
-            return site_arg.value
+        site = _marker_site_value(decorator)
+        if site is not None:
+            return site
+    return None
+
+
+def _is_canonical_marker(decorator: ast.Call, bindings: CanonicalBindings) -> bool:
+    func = decorator.func
+    if isinstance(func, ast.Name):
+        return func.id in bindings.marker_names
+    if isinstance(func, ast.Attribute) and func.attr == _DECORATOR_NAME:
+        return isinstance(func.value, ast.Name) and func.value.id in bindings.module_aliases
+    return False
+
+
+def _marker_site_value(decorator: ast.Call) -> str | None:
+    """Read the dispatch-site name from positional OR ``site_name=`` keyword form.
+
+    The runtime decorator accepts ``site_name`` as a normal keyword parameter, so
+    ``@implements_dispatch_site(site_name="post_emission_check")`` is a valid
+    marker the scanner must recognise (else it raises a spurious MC3b).
+    """
+    if decorator.args:
+        first = decorator.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+    for keyword in decorator.keywords:
+        if keyword.arg == _MARKER_SITE_KEYWORD and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
     return None
 
 
@@ -370,6 +450,25 @@ def compute_findings(
                     line=call.line,
                     contract_name=f"<unresolved:{call.file_path}:{call.line}>",
                     detail=f"register_declaration_contract call is not statically resolvable: {call.detail}",
+                )
+            )
+            continue
+
+        if call.contract_name in registered_names_found:
+            # Runtime register_declaration_contract raises ValueError on a
+            # duplicate name; CI must fail closed on a tree bootstrap would
+            # reject rather than silently dedup it into a set.
+            findings.append(
+                ContractFinding(
+                    rule_id=RULE_MC1,
+                    file_path=call.file_path,
+                    line=call.line,
+                    contract_name=f"{call.contract_name}::duplicate@L{call.line}",
+                    detail=(
+                        f"contract name {call.contract_name!r} is registered more than once; runtime "
+                        "register_declaration_contract rejects duplicate names with ValueError. Remove the "
+                        "redundant register_declaration_contract(...) call."
+                    ),
                 )
             )
             continue
@@ -502,12 +601,15 @@ def _parse_date(raw: object) -> date | None:
         return None
     if isinstance(raw, date):
         return raw
-    if isinstance(raw, str):
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).date()
-        except ValueError:
-            return None
-    return None
+    # Fail closed: a malformed ``expires`` must raise, not silently become
+    # ``None``. Swallowing it leaves ``fail_on_expired`` unable to enforce a
+    # typoed expiry, so a one-character diff disables the time bound.
+    if not isinstance(raw, str):
+        raise ValueError(f"allow_contracts entry expires must be YYYY-MM-DD, null, or absent; got {raw!r}")
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).date()
+    except ValueError as exc:
+        raise ValueError(f"allow_contracts entry expires must be YYYY-MM-DD; got {raw!r}") from exc
 
 
 def repo_relative_display_path(file_path: Path, source_root: Path) -> str:

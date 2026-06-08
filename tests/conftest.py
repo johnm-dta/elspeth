@@ -53,6 +53,8 @@ if sys.flags.optimize != 0:
 # helpers, which are pytest-gated (issue elspeth-cc511e7234 / C3).
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 
+pytest_plugins = ["tests.fixtures.azurite"]
+
 # ---------------------------------------------------------------------------
 # Marker Registration
 # ---------------------------------------------------------------------------

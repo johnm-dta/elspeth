@@ -71,6 +71,9 @@ from elspeth.web.interpretation_state import (
     strip_authoring_options,
 )
 from elspeth.web.paths import (
+    NESTED_LOCAL_PATH_OPTION_KEYS,
+    SINK_LOCAL_PATH_OPTION_KEYS,
+    SOURCE_LOCAL_PATH_OPTION_KEYS,
     allowed_sink_directories,
     allowed_source_directories,
     resolve_data_path,
@@ -1146,7 +1149,7 @@ def _validate_source_path(
 
     allowed = allowed_source_directories(data_dir)
 
-    for key in ("path", "file"):
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         if key in options:
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
@@ -1172,15 +1175,57 @@ def _validate_sink_path(
 
     allowed = allowed_sink_directories(data_dir)
 
-    for key in ("path", "file"):
+    for key in SINK_LOCAL_PATH_OPTION_KEYS:
         if key in options:
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
-                    f"Path violation (S2): '{options[key]}' is outside the "
+                    f"Path violation (S2): '{key}' value '{options[key]}' is outside the "
                     f"allowed directories. Sink output paths "
                     f"must be under {data_dir}/outputs/ or {data_dir}/blobs/."
                 )
+    return None
+
+
+def _validate_transform_provider_config_path(
+    options: Mapping[str, Any],
+    data_dir: str | None,
+) -> str | None:
+    """Validate nested provider_config path options are under allowed dirs.
+
+    RAG retrieval transforms carry a local Chroma persist_directory under
+    ``options["provider_config"]``. It is a read/write target like a sink, so
+    it is confined to the allowed sink directories. Non-RAG transforms have no
+    provider_config dict and are skipped cleanly.
+
+    Returns an error message if validation fails, None if OK.
+    """
+    if data_dir is None:
+        return None
+
+    provider_config = options.get("provider_config")
+    if not isinstance(provider_config, Mapping):
+        return None
+
+    allowed = allowed_sink_directories(data_dir)
+
+    for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+        if key not in provider_config:
+            continue
+        value = provider_config[key]
+        # A null nested path must be skipped, not resolved — Path(None) raises.
+        # Mirrors the runtime siblings (service/validation) which guard on
+        # ``value is not None`` before resolving.
+        if value is None:
+            continue
+        resolved = resolve_data_path(value, data_dir)
+        if not any(resolved.is_relative_to(d) for d in allowed):
+            return (
+                f"Path violation (S2): provider_config '{key}' value "
+                f"'{value}' is outside the allowed directories. "
+                f"Transform provider paths must be under {data_dir}/outputs/ "
+                f"or {data_dir}/blobs/."
+            )
     return None
 
 

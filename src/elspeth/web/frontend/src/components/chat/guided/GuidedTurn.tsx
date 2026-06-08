@@ -59,15 +59,24 @@ interface GuidedTurnProps {
   disabled?: boolean;
 }
 
+function guidedTurnInstanceKey(turn: TurnPayload): string {
+  return JSON.stringify([turn.step_index, turn.type, turn.payload]);
+}
+
 export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps) {
   const guardedSubmit = (body: GuidedRespondRequest) => {
     if (disabled) return;
     onSubmit(body);
   };
+  // Stateful leaf widgets initialise local input state from their payload.
+  // Key by live turn identity so same-type payload changes remount the leaf
+  // instead of carrying stale local form/custom state into the next turn.
+  const turnInstanceKey = guidedTurnInstanceKey(turn);
   switch (turn.type) {
     case "single_select":
       return (
         <SingleSelectTurn
+          key={turnInstanceKey}
           payload={turn.payload as SingleSelectPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -76,6 +85,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
     case "inspect_and_confirm":
       return (
         <InspectAndConfirmTurn
+          key={turnInstanceKey}
           payload={turn.payload as InspectAndConfirmPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -84,6 +94,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
     case "multi_select_with_custom":
       return (
         <MultiSelectWithCustomTurn
+          key={turnInstanceKey}
           payload={turn.payload as MultiSelectWithCustomPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -92,6 +103,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
     case "schema_form":
       return (
         <SchemaFormTurn
+          key={turnInstanceKey}
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -100,6 +112,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
     case "propose_chain":
       return (
         <ProposeChainTurn
+          key={turnInstanceKey}
           payload={turn.payload as ProposeChainPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -108,6 +121,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
     case "recipe_offer":
       return (
         <SchemaFormTurn
+          key={turnInstanceKey}
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
@@ -124,6 +138,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
       const event = turn.payload as InterpretationEvent;
       return (
         <InterpretationReviewTurn
+          key={turnInstanceKey}
           event={event}
           sessionId={event.session_id}
         />

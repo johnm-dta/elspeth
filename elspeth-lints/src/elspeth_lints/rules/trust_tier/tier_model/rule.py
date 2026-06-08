@@ -27,7 +27,7 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -350,13 +350,21 @@ def _get_import_target_layer(module_name: str) -> int | None:
 
 
 def _find_type_checking_lines(tree: ast.Module) -> set[int]:
-    """Collect line numbers of import statements inside ``if TYPE_CHECKING:`` blocks."""
+    """Collect line numbers of import statements inside ``if TYPE_CHECKING:`` blocks.
+
+    Recurses into the block body so imports nested inside ``try``/``if``/``with``
+    under ``if TYPE_CHECKING:`` are still recognised as annotation-only (they would
+    otherwise be misclassified as runtime L1 violations). Only ``node.body`` is
+    walked, NOT ``node.orelse`` — the ``else:`` branch of ``if TYPE_CHECKING:`` is
+    the runtime fallback and its imports are genuinely runtime.
+    """
     lines: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
-            for child in node.body:
-                if isinstance(child, (ast.Import, ast.ImportFrom)):
-                    lines.add(child.lineno)
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if isinstance(child, (ast.Import, ast.ImportFrom)):
+                        lines.add(child.lineno)
     return lines
 
 
@@ -902,11 +910,52 @@ class TierModelVisitor(ast.NodeVisitor):
             return len(value.keys) == 0
         return False
 
+    def _is_transform_result_error_call(self, node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "error"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "TransformResult"
+        )
+
+    def _assigned_transform_error_names(self, nodes: list[ast.AST]) -> set[str]:
+        names: set[str] = set()
+        for child in nodes:
+            if isinstance(child, ast.Assign) and self._is_transform_result_error_call(child.value):
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+                and child.value is not None
+                and self._is_transform_result_error_call(child.value)
+            ):
+                names.add(child.target.id)
+        return names
+
+    def _routes_transform_error_to_completion(self, nodes: list[ast.AST]) -> bool:
+        """True when a handler delivers an explicit TransformResult.error."""
+        error_names = self._assigned_transform_error_names(nodes)
+        for child in nodes:
+            if not (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and child.func.attr == "_complete_ticket"):
+                continue
+            for arg in child.args:
+                if self._is_transform_result_error_call(arg):
+                    return True
+                if isinstance(arg, ast.Name) and arg.id in error_names:
+                    return True
+        return False
+
     def _handler_is_silent(self, node: ast.ExceptHandler) -> bool:
         """Return True if the except handler swallows errors without re-raise or explicit return."""
         own_scope_nodes = [child for statement in node.body for child in iter_own_scope(statement)]
         has_raise = any(isinstance(child, ast.Raise) for child in own_scope_nodes)
         if has_raise:
+            return False
+
+        if self._routes_transform_error_to_completion(own_scope_nodes):
             return False
 
         returns: list[ast.Return] = [child for child in own_scope_nodes if isinstance(child, ast.Return)]
@@ -1187,6 +1236,34 @@ class TierModelVisitor(ast.NodeVisitor):
             return
         state.assign_targets(targets, is_derived=self._value_depends_on_boundary(value, snapshot))
 
+    def _set_current_derived_names(self, names: frozenset[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        state.names.clear()
+        state.names.update(names)
+
+    def _visit_statement_sequence_from_snapshot(
+        self,
+        field_name: str,
+        statements: Sequence[ast.stmt],
+        snapshot: frozenset[str],
+    ) -> frozenset[str]:
+        self._set_current_derived_names(snapshot)
+        for index, statement in enumerate(statements):
+            self._visit_ast_list_item(field_name, index, statement)
+        state = self._current_derived_state()
+        return frozenset() if state is None else state.snapshot()
+
+    @staticmethod
+    def _intersect_snapshots(snapshots: Sequence[frozenset[str]]) -> frozenset[str]:
+        if not snapshots:
+            return frozenset()
+        joined = set(snapshots[0])
+        for snapshot in snapshots[1:]:
+            joined.intersection_update(snapshot)
+        return frozenset(joined)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         state = self._current_derived_state()
         snapshot = frozenset() if state is None else state.snapshot()
@@ -1230,6 +1307,64 @@ class TierModelVisitor(ast.NodeVisitor):
 
         if state is not None:
             state.assign_target(node.target, is_derived=is_derived)
+
+    def visit_If(self, node: ast.If) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+
+        self._visit_ast_child("test", node.test)
+        branch_start = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, branch_start)
+        orelse_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, branch_start) if node.orelse else branch_start
+        self._set_current_derived_names(self._intersect_snapshots((body_end, orelse_end)))
+
+    def _visit_try_like(self, node: ast.Try | ast.TryStar) -> None:
+        state = self._current_derived_state()
+        if state is None or not node.handlers:
+            self.generic_visit(node)
+            return
+
+        branch_start = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, branch_start)
+        if node.orelse:
+            body_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, body_end)
+        branch_ends = [body_end]
+
+        for index, handler in enumerate(node.handlers):
+            self.path_stack.append(f"handlers[{index}]")
+            try:
+                if handler.type is not None:
+                    self._visit_ast_child("type", handler.type)
+                branch_ends.append(self._visit_statement_sequence_from_snapshot("body", handler.body, branch_start))
+            finally:
+                self.path_stack.pop()
+
+        self._set_current_derived_names(self._intersect_snapshots(tuple(branch_ends)))
+        for index, statement in enumerate(node.finalbody):
+            self._visit_ast_list_item("finalbody", index, statement)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try_like(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try_like(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            self.generic_visit(node)
+            return
+
+        self._visit_ast_child("test", node.test)
+        loop_entry = state.snapshot()
+        body_end = self._visit_statement_sequence_from_snapshot("body", node.body, loop_entry)
+        joined = self._intersect_snapshots((loop_entry, body_end))
+        if node.orelse:
+            orelse_end = self._visit_statement_sequence_from_snapshot("orelse", node.orelse, joined)
+            joined = self._intersect_snapshots((joined, orelse_end))
+        self._set_current_derived_names(joined)
 
     def _visit_for_like(self, node: ast.For | ast.AsyncFor) -> None:
         state = self._current_derived_state()
@@ -1437,9 +1572,12 @@ class TierModelVisitor(ast.NodeVisitor):
         if is_broad:
             # Check if the handler re-raises
             has_reraise = False
-            for child in ast.walk(node):
-                if isinstance(child, ast.Raise):
-                    has_reraise = True
+            for statement in node.body:
+                for child in iter_own_scope(statement):
+                    if isinstance(child, ast.Raise):
+                        has_reraise = True
+                        break
+                if has_reraise:
                     break
 
             if not has_reraise:
@@ -1591,11 +1729,30 @@ def scan_layer_imports_file(
     # a future reader mistaking these sites for a missed AST-subject one.
     module_scope_fingerprint = compute_scope_fingerprint(None, module=tree)
 
+    # Resolve `from elspeth import X` against the real package dir so a subpackage
+    # (X=plugins) is treated as a layer import while a plain attribute
+    # (X=__version__) is not. Root-robust: --root may be src/elspeth (paths like
+    # core/...) or src (paths like elspeth/core/...).
+    elspeth_pkg_root = root / "elspeth" if relative_path.split("/")[0] == "elspeth" else root
+
     for node in ast.walk(tree):
         # Collect (module_name, line, col) targets from import nodes
         targets: list[tuple[str, int, int]] = []
-        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            targets.append((node.module, node.lineno, node.col_offset))
+        if isinstance(node, ast.ImportFrom):
+            # Resolve relative imports (level>0) and absolute ones to the target
+            # module. The layer is keyed on the resolved module's top-level
+            # package, so only the bare-``elspeth`` package-root form needs
+            # per-alias resolution.
+            resolved = _resolve_relative_module(relative_path, node.level, node.module)
+            if resolved is None:
+                pass
+            elif resolved == "elspeth":
+                for alias in node.names:
+                    candidate = f"elspeth.{alias.name}"
+                    if _module_name_to_path(candidate, elspeth_pkg_root) is not None:
+                        targets.append((candidate, node.lineno, node.col_offset))
+            else:
+                targets.append((resolved, node.lineno, node.col_offset))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 targets.append((alias.name, node.lineno, node.col_offset))
@@ -1986,27 +2143,70 @@ def scan_dump_edges(
             }
         )
 
-    # SCC detection — Δ5 mandate. Edge endpoints not previously in nodes_out (edges may
-    # cross into other layers if include_layers spans more than one) are added so the
-    # graph is closed. Non-trivial SCCs (size ≥ 2) reported.
-    try:
-        import networkx as nx
-    except ImportError:
-        # NetworkX is in the project dep stack (per CLAUDE.md), so this is a tooling
-        # break, not a normal failure. Surface it loudly and emit no SCCs.
-        print("Warning: networkx unavailable; SCC detection skipped.", file=sys.stderr)
-        return nodes_out, edges_out, []
-
-    graph: nx.DiGraph[str] = nx.DiGraph()
-    for n in nodes_out:
-        graph.add_node(n["id"])
-    for e in edges_out:
-        graph.add_edge(e["from"], e["to"])
-
-    sccs_raw = [sorted(scc) for scc in nx.strongly_connected_components(graph) if len(scc) >= 2]
-    sccs_raw.sort(key=lambda items: (len(items), items[0] if items else ""))
+    # SCC detection — Δ5 mandate. Edge endpoints not previously in nodes_out
+    # (edges may cross into other layers if include_layers spans more than one)
+    # are included by the local Tarjan implementation so the graph is closed.
+    # Non-trivial SCCs (size ≥ 2) are reported.
+    sccs_raw = _nontrivial_strongly_connected_components(
+        node_ids=[n["id"] for n in nodes_out],
+        edge_pairs=[(e["from"], e["to"]) for e in edges_out],
+    )
 
     return nodes_out, edges_out, sccs_raw
+
+
+def _nontrivial_strongly_connected_components(
+    *,
+    node_ids: list[str],
+    edge_pairs: list[tuple[str, str]],
+) -> list[list[str]]:
+    """Return deterministic non-trivial SCCs using Tarjan's algorithm."""
+    adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    for src, tgt in edge_pairs:
+        adjacency.setdefault(src, set()).add(tgt)
+        adjacency.setdefault(tgt, set())
+
+    index_counter = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def strongconnect(node_id: str) -> None:
+        nonlocal index_counter
+        indices[node_id] = index_counter
+        lowlinks[node_id] = index_counter
+        index_counter += 1
+        stack.append(node_id)
+        on_stack.add(node_id)
+
+        for successor in sorted(adjacency[node_id]):
+            if successor not in indices:
+                strongconnect(successor)
+                lowlinks[node_id] = min(lowlinks[node_id], lowlinks[successor])
+            elif successor in on_stack:
+                lowlinks[node_id] = min(lowlinks[node_id], indices[successor])
+
+        if lowlinks[node_id] != indices[node_id]:
+            return
+
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node_id:
+                break
+        if len(component) >= 2:
+            components.append(sorted(component))
+
+    for node_id in sorted(adjacency):
+        if node_id not in indices:
+            strongconnect(node_id)
+
+    components.sort(key=lambda items: (len(items), items[0] if items else ""))
+    return components
 
 
 # =============================================================================

@@ -1,13 +1,13 @@
 """TransformExecutor - wraps transform.process() with audit recording."""
 
-import hashlib
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import (
+    BatchTransformRuntimeProtocol,
     ExecutionError,
     TokenInfo,
     TransformProtocol,
@@ -41,6 +41,7 @@ from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import (
     run_post_emission_checks,
@@ -48,7 +49,6 @@ from elspeth.engine.executors.declaration_dispatch import (
 )
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
-from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 
 if TYPE_CHECKING:
     from elspeth.engine.batch_adapter import SharedBatchAdapter
@@ -107,7 +107,7 @@ class TransformExecutor:
         self._max_workers = max_workers
         self._error_edge_ids = error_edge_ids or {}
         # Adapter storage keyed by node_id — one SharedBatchAdapter per
-        # mixin-based transform, owned by the executor (not monkey-patched
+        # row-pipelined batch transform, owned by the executor (not monkey-patched
         # onto the transform instance).
         self._batch_adapters: dict[str, "SharedBatchAdapter"] = {}  # noqa: UP037 — forward ref, no __future__ annotations
         # OpenTelemetry counter for pass-through cross-check violations now lives
@@ -139,7 +139,7 @@ class TransformExecutor:
             summary = f"PassThroughContractViolation:{transform.name}:{sorted(violation.divergence_set)}"
         else:
             summary = f"{type(violation).__name__}:{transform.name}"
-        error_hash = hashlib.sha256(summary.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(summary)
         audit_context = violation.to_audit_dict()
 
         try:
@@ -159,18 +159,18 @@ class TransformExecutor:
                 f"Original violation: {violation!s}"
             ) from record_failure
 
-    def _get_batch_adapter(self, transform: TransformProtocol) -> "SharedBatchAdapter":
-        """Get or create shared batch adapter for a mixin-based transform.
+    def _get_batch_adapter(self, transform: BatchTransformRuntimeProtocol) -> "SharedBatchAdapter":
+        """Get or create shared batch adapter for a row-pipelined transform.
 
         Creates adapter once per transform and stores it in the executor's
         own dict (keyed by node_id). On first call, connects the adapter as
         the transform's output port.
 
-        Caller must verify isinstance(transform, BatchTransformMixin) before
-        calling — this method accesses mixin attributes directly.
+        Caller must verify ``isinstance(transform, BatchTransformRuntimeProtocol)``
+        before calling.
 
         Args:
-            transform: Transform using BatchTransformMixin (must have node_id set)
+            transform: Row-pipelined batch transform (must have node_id set)
 
         Returns:
             SharedBatchAdapter for this transform
@@ -188,12 +188,10 @@ class TransformExecutor:
 
             # Connect output (one-time setup)
             # Cap pool_size to max_workers if configured (global concurrency limit)
-            # Safe: caller guarantees isinstance(transform, BatchTransformMixin)
-            mixin = cast(BatchTransformMixin, transform)
-            max_pending = mixin._pool_size
+            max_pending = transform.batch_pool_size
             if self._max_workers is not None:
                 max_pending = min(max_pending, self._max_workers)
-            mixin.connect_output(output=adapter, max_pending=max_pending)
+            transform.connect_output(output=adapter, max_pending=max_pending)
 
         return self._batch_adapters[node_id]
 
@@ -213,7 +211,7 @@ class TransformExecutor:
 
         Supports two execution modes:
         1. Synchronous: transform.process() returns TransformResult immediately
-        2. Asynchronous (BatchTransformMixin): transform.accept() submits work,
+        2. Asynchronous row-pipelined batch runtime: transform.accept() submits work,
            results flow through output port and are awaited synchronously
 
         Error Routing:
@@ -259,11 +257,12 @@ class TransformExecutor:
         input_dict = token.row_data.to_dict()
         input_hash = stable_hash(input_dict)
 
-        # Detect mixin-based concurrent transforms (accept/connect_output pattern).
-        # isinstance is the correct narrowing — these transforms inherit
-        # BatchTransformMixin but have is_batch_aware=False (that flag is for
-        # aggregation via BatchTransformProtocol, a separate concept).
-        mixin: BatchTransformMixin | None = transform if isinstance(transform, BatchTransformMixin) else None
+        # Detect row-pipelined concurrent transforms (accept/connect_output pattern).
+        # ``is_batch_aware`` is intentionally not used here: that flag belongs to
+        # aggregation via BatchTransformProtocol, a separate concept.
+        batch_runtime: BatchTransformRuntimeProtocol | None = (
+            transform if isinstance(transform, BatchTransformRuntimeProtocol) and transform.batch_runtime_enabled else None
+        )
 
         # NodeStateGuard guarantees the node state reaches terminal status.
         # If any unhandled exception occurs before guard.complete() is called
@@ -386,10 +385,10 @@ class TransformExecutor:
             ):
                 start = time.perf_counter()
                 try:
-                    if mixin is not None:
+                    if batch_runtime is not None:
                         # Batch transform: use accept() with SharedBatchAdapter
                         # One adapter per transform, multiple waiters per adapter
-                        adapter = self._get_batch_adapter(transform)
+                        adapter = self._get_batch_adapter(batch_runtime)
 
                         # Register waiter for THIS token AND attempt (before accept!)
                         # Using (token_id, state_id) ensures retry safety: if a timeout
@@ -398,7 +397,7 @@ class TransformExecutor:
                         waiter = adapter.register(token.token_id, guard.state_id)
 
                         # Submit work - this returns immediately
-                        mixin.accept(token.row_data, ctx)
+                        batch_runtime.accept(token.row_data, ctx)
 
                         # Block until THIS row's result arrives.
                         #
@@ -418,7 +417,7 @@ class TransformExecutor:
                         # Timeout is derived from transform's batch_wait_timeout config
                         # (default 3600s = 1 hour) to allow for sustained rate limiting
                         # and AIMD backoff during capacity errors.
-                        result = waiter.wait(timeout=mixin._batch_wait_timeout, shutdown_event=ctx.shutdown_event)
+                        result = waiter.wait(timeout=batch_runtime.batch_wait_timeout, shutdown_event=ctx.shutdown_event)
                     else:
                         # Regular transform: synchronous process()
                         result = transform.process(token.row_data, ctx)
@@ -447,9 +446,9 @@ class TransformExecutor:
                     # 2. We call evict_submission() to remove buffer entry
                     # 3. Retry attempt gets new sequence number and can proceed
                     # 4. Original worker may still complete, but result is discarded
-                    if isinstance(e, TimeoutError) and mixin is not None:
+                    if isinstance(e, TimeoutError) and batch_runtime is not None:
                         try:
-                            mixin.evict_submission(token.token_id, guard.state_id)
+                            batch_runtime.evict_submission(token.token_id, guard.state_id)
                         except Exception as evict_err:
                             raise RuntimeError(f"Failed to evict timed-out submission for token {token.token_id}") from evict_err
 

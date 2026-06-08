@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-ELSPETH is currently on the `0.5.2` / RC-5.2 release-candidate line. Security
+ELSPETH is currently on the `0.5.3` / RC-5.3 release-candidate line. Security
 fixes are prioritised against the current release-candidate branch and `main`.
 Older release-candidate snapshots are retained for provenance, but are not
 maintained as separately supported long-term release lines.

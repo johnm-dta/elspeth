@@ -33,6 +33,7 @@ import asyncio
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Literal
 
 import structlog
 
@@ -52,6 +53,14 @@ slog = structlog.get_logger()
 _SUBSCRIBER_QUEUE_MAXSIZE = 1000
 
 _TERMINAL_EVENT_TYPES = frozenset({"completed", "failed", "cancelled"})
+type BroadcastDropReason = Literal["loop_closed"]
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastResult:
+    scheduled_count: int = 0
+    dropped_count: int = 0
+    drop_reason: BroadcastDropReason | None = None
 
 
 @dataclass(slots=True)
@@ -129,7 +138,7 @@ class ProgressBroadcaster:
             if run_id in self._subscribers and queue in self._subscribers[run_id]:
                 del self._subscribers[run_id][queue]
 
-    def broadcast(self, run_id: str, event: RunEvent) -> None:
+    def broadcast(self, run_id: str, event: RunEvent) -> BroadcastResult:
         """Thread-safe broadcast — callable from background threads.
 
         Appends the event to each subscriber's bounded pending deque and
@@ -152,25 +161,44 @@ class ProgressBroadcaster:
                         run_id=run_id,
                         event_type=event.event_type,
                     )
-                return
+                return BroadcastResult()
             if event.event_type in self._TERMINAL_EVENT_TYPES:
                 self._terminalized.add(run_id)
             # Absence of the run_id key, or an empty map, both mean "no
             # subscribers for this run" — nothing to deliver. Test membership
             # explicitly, then subscript directly.
             if run_id not in self._subscribers:
-                return
+                return BroadcastResult()
             sub_map = self._subscribers[run_id]
             if not sub_map:
-                return
+                return BroadcastResult()
             states_to_schedule: list[_SubState] = []
             for state in sub_map.values():
                 self._append_pending_locked(state, event)
                 if not state.drain_scheduled:
                     state.drain_scheduled = True
                     states_to_schedule.append(state)
-        for state in states_to_schedule:
-            self._loop.call_soon_threadsafe(self._drain_pending, run_id, state)
+        if self._loop.is_closed() is True:
+            return self._drop_pending_for_closed_loop(run_id)
+        try:
+            for state in states_to_schedule:
+                self._loop.call_soon_threadsafe(self._drain_pending, run_id, state)
+        except RuntimeError:
+            if self._loop.is_closed() is True:
+                return self._drop_pending_for_closed_loop(run_id)
+            raise
+        return BroadcastResult(scheduled_count=len(states_to_schedule))
+
+    def _drop_pending_for_closed_loop(self, run_id: str) -> BroadcastResult:
+        with self._lock:
+            if run_id in self._subscribers:
+                states_to_drop = list(self._subscribers[run_id].values())
+            else:
+                states_to_drop = []
+            for state in states_to_drop:
+                state.pending.clear()
+                state.drain_scheduled = False
+        return BroadcastResult(dropped_count=len(states_to_drop), drop_reason="loop_closed")
 
     @staticmethod
     def _append_pending_locked(state: _SubState, event: RunEvent) -> None:

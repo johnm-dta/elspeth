@@ -45,6 +45,7 @@ _BASE_METRIC_FIELDS = frozenset(
         "missing_count",
         "per_label",
         "predicted_field",
+        "summary",
         "weighted_f1",
     }
 )
@@ -151,7 +152,7 @@ class BatchClassifierMetrics(BaseTransform):
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:128c9eca5770883f"
+    source_file_hash: str | None = "sha256:1b14e60f23f8848e"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -322,6 +323,12 @@ class BatchClassifierMetrics(BaseTransform):
             return None
         return numerator / denominator
 
+    @staticmethod
+    def _format_metric(value: float | None) -> str:
+        if value is None:
+            return "undefined"
+        return f"{value:.3f}"
+
     def _per_label_metrics(
         self,
         *,
@@ -427,6 +434,12 @@ class BatchClassifierMetrics(BaseTransform):
             "micro_precision": micro_precision,
             "micro_recall": micro_recall,
             "micro_f1": micro_f1,
+            "summary": (
+                f"Classifier metrics for {self._actual_field} vs {self._predicted_field}: "
+                f"{batch_size} rows, {count} valid label pairs, {correct} correct, "
+                f"accuracy {self._format_metric(accuracy)}, macro F1 {self._format_metric(macro_f1)}, "
+                f"micro F1 {self._format_metric(micro_f1)}."
+            ),
         }
 
         if missing_indices:

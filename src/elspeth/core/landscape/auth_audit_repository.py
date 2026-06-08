@@ -19,6 +19,23 @@ AUTH_AUDIT_EVENT_TYPES: tuple[AuthAuditEventType, ...] = ("login", "token_issued
 AUTH_AUDIT_SUCCESS: AuthAuditOutcome = "success"
 AUTH_AUDIT_FAILURE: AuthAuditOutcome = "failure"
 AUTH_AUDIT_OUTCOMES: tuple[AuthAuditOutcome, ...] = (AUTH_AUDIT_SUCCESS, AUTH_AUDIT_FAILURE)
+AUTH_AUDIT_PRINCIPAL_MAX_LENGTH = 256
+"""Maximum stored length for auth_events.user_id and auth_events.username.
+
+Defence-in-depth for the audit principal. Local-auth usernames are already
+bounded at the request boundary (LoginRequest/RegisterRequest), but the
+signed-claim paths (OIDC sub/email) reach this layer without that boundary,
+and SQLite does not enforce the String(256) column width.
+"""
+
+
+def _bounded_principal(value: str | None) -> str | None:
+    """Constrain auth principal text to the auth_events schema length."""
+    if value is None:
+        return None
+    if len(value) <= AUTH_AUDIT_PRINCIPAL_MAX_LENGTH:
+        return value
+    return value[:AUTH_AUDIT_PRINCIPAL_MAX_LENGTH]
 
 
 class AuthAuditRepository:
@@ -59,8 +76,8 @@ class AuthAuditRepository:
                 event_type=event_type,
                 outcome=outcome,
                 provider=provider,
-                user_id=user_id,
-                username=username,
+                user_id=_bounded_principal(user_id),
+                username=_bounded_principal(username),
                 failure_category=failure_category,
                 request_id=request_id,
                 client_host=client_host,

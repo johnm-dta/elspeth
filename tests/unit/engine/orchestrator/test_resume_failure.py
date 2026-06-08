@@ -86,6 +86,7 @@ class TestResumeFinalizesAsFailed:
 
         # Mock the checkpoint manager requirement
         orch._checkpoint_manager = MagicMock()
+        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
 
         # Create a mock resume_point
         resume_point = MagicMock()
@@ -114,11 +115,11 @@ class TestResumeFinalizesAsFailed:
 
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
         with (
-            patch.object(orch, "_process_resumed_rows", side_effect=RuntimeError("test failure")),
-            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
-            patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=MagicMock()),
+            patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=RuntimeError("test failure")),
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
+            patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", return_value=MagicMock()),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
-            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch._ceremony, "emit_telemetry"),
             pytest.raises(RuntimeError, match="test failure"),
         ):
             orch.resume(
@@ -183,14 +184,16 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
-            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")),
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")
+            ),
             patch(
-                "elspeth.engine.orchestrator.core.derive_resume_terminal_status_from_audit",
+                "elspeth.engine.orchestrator.resume.derive_resume_terminal_status_from_audit",
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
-            patch.object(orch, "_emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -304,10 +307,12 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
-            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
-            patch.object(orch, "_emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")
+            ),
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -401,15 +406,15 @@ class TestBuildProcessorCallsCleanupOnFailure:
             coalesce_id_map={},
         )
 
-        # _build_processor fails after on_start has been called on all plugins
+        # build_processor fails after on_start has been called on all plugins
         with (
-            patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
-            # cleanup_plugins is now a module function; patch it where core.py looks
-            # it up (the imported name in core's namespace), not on the instance.
-            patch("elspeth.engine.orchestrator.core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
+            patch.object(orch._run_core, "build_processor", side_effect=RuntimeError("processor build failed")),
+            # cleanup_plugins is now a module function; patch it where run_core.py looks
+            # it up (the imported name in run_core's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.run_core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
-            orch._initialize_run_context(
+            orch._run_core.initialize_run_context(
                 mock_factory,
                 "test-run",
                 config,

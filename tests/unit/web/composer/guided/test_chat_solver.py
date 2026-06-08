@@ -78,10 +78,7 @@ async def test_solver_sends_step_scoped_system_prompt(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
 
-    # Disable seed lookup network/litellm call by stubbing it
-    monkeypatch.setattr(chat_solver, "_composer_llm_seed_for_model", lambda _model: None)
-
-    reply = await solve_step_chat(model="test/model", step=step, user_message="hi")
+    reply = await solve_step_chat(model="test/model", step=step, user_message="hi", temperature=None, seed=None)
 
     assert reply == "here's some advice"
     messages = captured["messages"]
@@ -99,14 +96,13 @@ async def test_solver_sends_step_scoped_system_prompt(monkeypatch: pytest.Monkey
 @pytest.mark.asyncio
 async def test_empty_user_message_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty user message is a route-handler-validation gap; we crash loudly."""
-    # Stub seed lookup to avoid litellm import
-    monkeypatch.setattr(chat_solver, "_composer_llm_seed_for_model", lambda _model: None)
-
     with pytest.raises(InvariantError, match="user_message is empty"):
         await solve_step_chat(
             model="test/model",
             step=GuidedStep.STEP_1_SOURCE,
             user_message="",
+            temperature=None,
+            seed=None,
         )
 
 
@@ -118,13 +114,14 @@ async def test_missing_response_content_raises(monkeypatch: pytest.MonkeyPatch) 
         return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None))])
 
     monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
-    monkeypatch.setattr(chat_solver, "_composer_llm_seed_for_model", lambda _model: None)
 
     with pytest.raises(InvariantError, match="missing message content"):
         await solve_step_chat(
             model="test/model",
             step=GuidedStep.STEP_1_SOURCE,
             user_message="hello",
+            temperature=None,
+            seed=None,
         )
 
 
@@ -136,11 +133,12 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
         return _ok_response("   \n  \t  \n")
 
     monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
-    monkeypatch.setattr(chat_solver, "_composer_llm_seed_for_model", lambda _model: None)
 
     with pytest.raises(InvariantError, match="missing message content"):
         await solve_step_chat(
             model="test/model",
             step=GuidedStep.STEP_2_SINK,
             user_message="hello",
+            temperature=None,
+            seed=None,
         )

@@ -267,13 +267,11 @@ audit-integrity paths.
   migration — blocked upstream by `openapi-typescript` still requiring
   TypeScript 5.x.
 
-> **Known issue at release cut.** `test_baseline_capture_is_self_consistent`
-> is red at the RC-5.3 HEAD: `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json` drifted
-> (+6 raw `trust_tier.tier_model` findings) as RC-5.3 commits landed without the
-> mechanical baseline regeneration. Regenerating it safely requires the
-> operator-held `ELSPETH_JUDGE_METADATA_HMAC_KEY` to confirm the enforce gate is
-> green first, so it is deferred to an operator step before the release is
-> tagged.
+> **Baseline drift — resolved before release.**
+> `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json` drifted as
+> RC-5.3 commits landed. The baseline was regenerated after the signed enforce
+> gate verified green and the signed `tier_model` allowlists were reconciled;
+> `test_baseline_capture_is_self_consistent` passes at the release HEAD.
 
 ---
 

@@ -21,7 +21,6 @@ from elspeth.mcp.analyzer import LandscapeAnalyzer
 # free to create the ``-wal`` / ``-shm`` sidecars. The URL-selection logic is
 # covered deterministically, without relying on filesystem permissions, by
 # ``test_sqlite_read_only_url_does_not_use_immutable_for_writable_live_directory``.
-_RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def _create_file_backed_audit_db(db_path: Path) -> None:
@@ -46,7 +45,7 @@ def _create_file_backed_audit_db(db_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    _RUNNING_AS_ROOT,
+    os.geteuid() == 0,
     reason="root bypasses directory permission bits; a 0o555 dir stays writable, "
     "so the immutable read-only-directory optimization asserted here does not engage",
 )

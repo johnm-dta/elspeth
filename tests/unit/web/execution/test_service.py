@@ -998,10 +998,15 @@ class TestInlineBlobRuntimePreflight:
         content = b"You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}."
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
         order: list[str] = []
+        # The valid same-session path: run and blob share an owning session, so
+        # the cross-session guard added for elspeth-195ecb1d58 passes through.
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1121,9 +1126,12 @@ sinks:
         content = b"You are an audited prompt."
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1183,9 +1191,12 @@ sinks:
         del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(b"small prompt").hexdigest()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1249,11 +1260,14 @@ sinks:
         del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
         blob_ids = [uuid4() for _ in range(5)]
         run_id = uuid4()
+        owner_session = uuid4()
         hashes = [hashlib.sha256(f"blob-{index}".encode()).hexdigest() for index in range(5)]
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
 
         records_by_id: dict[UUID, Any] = {}
         for blob_id, blob_hash in zip(blob_ids, hashes, strict=True):
             record = MagicMock(spec=object)
+            record.session_id = owner_session
             record.status = "ready"
             record.content_hash = blob_hash
             record.mime_type = "text/plain"
@@ -1320,6 +1334,7 @@ sinks:
         mock_runtime_graph: MagicMock,
         mock_orch_cls: MagicMock,
         service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from elspeth.web.blobs.protocol import BlobIntegrityError
@@ -1329,10 +1344,13 @@ sinks:
         content = b"actual prompt bytes"
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
         hash_counter = MagicMock(spec=["add"])
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = hashlib.sha256(content).hexdigest()
         blob_record.mime_type = "text/plain"
@@ -1371,6 +1389,107 @@ sinks:
         hash_counter.add.assert_called_once_with(1, {"run_id": str(run_id)})
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "case",
+        ["missing", "cross_session_ready_hash_match", "cross_session_ready_hash_mismatch"],
+    )
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_run_pipeline_rejects_cross_session_inline_blob_uniformly(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        case: str,
+    ) -> None:
+        """IDOR/metadata-oracle regression (elspeth-195ecb1d58).
+
+        A crafted inline_content marker naming another session's blob must be
+        rejected uniformly as ``BlobNotFoundError`` — byte-identical *type* to a
+        genuinely-missing blob — BEFORE any status/hash/size comparison and
+        before ``link_blob_to_run`` / ``read_blob_content`` are reached, so the
+        metadata (status/hash/size) of another session's blob is never an oracle.
+
+        Pre-fix, the three cases surface differently: ``missing`` raises
+        ``BlobNotFoundError`` (control); ``cross_session_ready_hash_match`` sails
+        through (link/read awaited, run proceeds); ``cross_session_ready_hash_mismatch``
+        raises ``BlobIntegrityError``. The cross-session cases therefore do NOT
+        match the missing control pre-fix. Post-fix all three collapse to
+        ``BlobNotFoundError`` with link/read never awaited.
+        """
+        from elspeth.web.blobs.protocol import BlobNotFoundError
+
+        del mock_payload_cls, mock_landscape_cls, mock_load, mock_runtime_graph, mock_orch_cls
+
+        owner_session = uuid4()
+        other_session = uuid4()
+        content = b"another session's secret prompt"
+        marker_sha = hashlib.sha256(content).hexdigest()
+        blob_id = uuid4()
+        run_id = uuid4()
+
+        # The run is owned by ``owner_session``.
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+
+        if case == "missing":
+            # get_blob raises for a genuinely-missing blob (the control surface).
+            async def get_blob(_blob_id: UUID) -> Any:
+                raise BlobNotFoundError(str(_blob_id))
+
+            blob_service = MagicMock(spec=object)
+            blob_service.get_blob = AsyncMock(side_effect=get_blob)
+        else:
+            blob_record = MagicMock(spec=object)
+            blob_record.session_id = other_session  # owned by a DIFFERENT session
+            blob_record.status = "ready"
+            blob_record.mime_type = "text/plain"
+            blob_record.size_bytes = len(content)
+            blob_record.content_hash = marker_sha if case == "cross_session_ready_hash_match" else "b" * 64
+            blob_service = MagicMock(spec=object)
+            blob_service.get_blob = AsyncMock(return_value=blob_record)
+
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        cast(Any, service)._blob_service = blob_service
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {marker_sha}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(BlobNotFoundError):
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        # No metadata of the cross-session blob is ever consumed: the run never
+        # links or reads it, and never records an inline resolution.
+        blob_service.link_blob_to_run.assert_not_awaited()
+        blob_service.read_blob_content.assert_not_awaited()
+        mock_session_service.record_blob_inline_resolutions.assert_not_called()
 
 
 class TestWebRuntimeConfigLoading:
@@ -4433,6 +4552,131 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
             await service.execute(session_id=uuid4())
 
         assert excinfo.value.placeholders == (("rate_node", "cool"),)
+        mock_session_service.create_run.assert_not_awaited()
+
+    @staticmethod
+    def _set_drifted_invented_source_state(
+        mock_session_service: MagicMock,
+        *,
+        node_id: str = "rate_node",
+    ) -> None:
+        """LLM-authored source whose content_hash drifted after its review.
+
+        The invented_source requirement is RESOLVED, but the accepted artifact
+        hash no longer matches the current source content_hash. This is a
+        readiness blocker — it must surface as a structured interpretation
+        review (UnresolvedInterpretationPlaceholderError -> HTTP 422), NOT as a
+        bare ValueError that the route layer mis-maps to a 404. The transform
+        node carries no pending interpretation so the source drift is the only
+        site (elspeth-5a94855935).
+        """
+        from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "json",
+            "on_success": "rate_in",
+            "on_validation_failure": "discard",
+            "options": {
+                "path": "blobs/rows.json",
+                "format": "json",
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "b" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        }
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rate_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "prompt_template": "Rate the rows.",
+                    "model": "test-model",
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        # Both node-level reviews are pre-resolved so the source
+                        # drift is the ONLY pending site. Pre-fix this means
+                        # materialize reaches _materialize_source_for_execution
+                        # and raises a bare ValueError (the defect), rather than
+                        # short-circuiting on a node site.
+                        {
+                            "id": f"model_choice_review:{node_id}",
+                            "kind": "llm_model_choice",
+                            "user_term": f"llm_model_choice:{node_id}",
+                            "status": "resolved",
+                            "draft": "test-model",
+                            "event_id": "model-choice-accepted",
+                            "accepted_value": "test-model",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("test-model"),
+                        },
+                        {
+                            "id": f"prompt_template_review:{node_id}",
+                            "kind": "llm_prompt_template",
+                            "user_term": f"llm_prompt_template:{node_id}",
+                            "status": "resolved",
+                            "draft": "Rate the rows.",
+                            "event_id": "prompt-template-accepted",
+                            "accepted_value": "Rate the rows.",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("Rate the rows."),
+                        },
+                    ],
+                },
+            }
+        ]
+        state.edges = None
+        state.outputs = [
+            {
+                "name": "results",
+                "plugin": "json",
+                "options": {"path": "outputs/scored.json", "format": "json"},
+                "on_write_failure": "discard",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_drifted_invented_source_as_pending_review(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """elspeth-5a94855935: a resolved invented_source whose content_hash
+        drifted after review is rejected with the same contract as any other
+        pending interpretation review (typed error -> HTTP 422), NOT a bare
+        ValueError that the route layer mis-maps to a 404."""
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        self._set_drifted_invented_source_state(mock_session_service)
+
+        with patch.object(service, "_run_pipeline"), pytest.raises(UnresolvedInterpretationPlaceholderError) as excinfo:
+            await service.execute(session_id=uuid4())
+
+        source_sites = [s for s in excinfo.value.sites if s.component_type == "source"]
+        assert len(source_sites) == 1
+        assert source_sites[0].kind.value == "invented_source"
+        assert source_sites[0].component_id == "source"
         mock_session_service.create_run.assert_not_awaited()
 
     @pytest.mark.asyncio

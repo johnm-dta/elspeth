@@ -725,8 +725,111 @@ def test_resolved_invented_source_requirement_requires_matching_artifact_hash() 
         version=1,
     )
 
-    with pytest.raises(ValueError, match="invented source review drift"):
-        materialize_state_for_execution(state)
+    # Drift after review (accepted_artifact_hash != current source content_hash)
+    # is a readiness blocker surfaced through the structured interpretation-review
+    # machinery, NOT a bare ValueError that leaks to the route layer as a 404/500.
+    # (This assertion was previously `pytest.raises(ValueError, ...)`, which
+    # codified the defect rather than the desired behaviour — inverted for
+    # elspeth-5a94855935.)
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].component_type == "source"
+    assert result.sites[0].component_id == "source"
+    assert result.sites[0].kind is InterpretationKind.INVENTED_SOURCE
+
+
+def test_resolved_invented_source_drift_surfaces_as_pending_review_site() -> None:
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="json",
+            on_success="rows",
+            on_validation_failure="fail",
+            options={
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "b" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    # The readiness detector (single source of truth for /validate and /execute)
+    # must report the drifted-after-review source as a pending review site, so the
+    # existing InterpretationReviewPending path handles it instead of the
+    # downstream bare ValueError.
+    sites = interpretation_sites(state)
+
+    assert len(sites) == 1
+    assert sites[0].component_type == "source"
+    assert sites[0].component_id == "source"
+    assert sites[0].kind is InterpretationKind.INVENTED_SOURCE
+    assert sites[0].user_term == "inline_source_url_list"
+
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].kind is InterpretationKind.INVENTED_SOURCE
+
+
+def test_resolved_invented_source_matching_hash_does_not_block_execution() -> None:
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="json",
+            on_success="rows",
+            on_validation_failure="fail",
+            options={
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "a" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    assert interpretation_sites(state) == ()
+    result = materialize_state_for_execution(state)
+    assert not isinstance(result, InterpretationReviewPending)
 
 
 def test_strip_authoring_options_removes_metadata_keys() -> None:

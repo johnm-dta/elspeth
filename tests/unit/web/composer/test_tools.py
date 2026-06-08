@@ -779,7 +779,7 @@ class TestUpsertNode:
                 "on_success": None,
                 "options": {},
                 "condition": "row['x'] > 0",
-                "routes": {"high": "s1", "low": "s2"},
+                "routes": {"true": "s1", "false": "s2"},
             },
             state,
             catalog,
@@ -852,6 +852,60 @@ class TestUpsertNode:
         )
         assert result.success is False
         assert "Invalid gate condition syntax" in result.data["error"]
+        assert result.updated_state.version == 1
+
+    def test_gate_boolean_condition_custom_labels_rejected(self) -> None:
+        """upsert_node rejects a boolean gate condition with non-true/false labels.
+
+        Mirrors GateSettings.validate_boolean_routes at the tool boundary so the
+        composer does not green-light a pipeline runtime config later rejects.
+        Regression for elspeth-08e17b9253.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "g1",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "in",
+                "on_success": None,
+                "options": {},
+                "condition": "row['x'] > 0",
+                "routes": {"high": "s1", "low": "s2"},
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "boolean condition" in result.data["error"]
+        assert result.updated_state.version == 1
+
+    def test_gate_numeric_condition_rejected(self) -> None:
+        """upsert_node rejects a provably-numeric gate condition (never a route label).
+
+        Regression for elspeth-08e17b9253.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "g1",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "in",
+                "on_success": None,
+                "options": {},
+                "condition": "row['x'] + 1",
+                "routes": {"a": "s1"},
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "numeric value" in result.data["error"]
         assert result.updated_state.version == 1
 
     def test_gate_eval_call_rejected(self) -> None:

@@ -42,6 +42,7 @@ from elspeth.web.composer.state import (
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
+    _validate_gate_route_parity,
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
@@ -85,6 +86,7 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
+    _delimiter_extra_for_csv_blob,
     _header_only_inline_csv_conflict,
     _options_with_source_blob_review,
     _reject_manual_source_authoring,
@@ -358,9 +360,19 @@ def _execute_set_pipeline(
         # external-data condition.
         inferred_plugin, inferred_options = _MIME_TO_SOURCE[prepared_inline_blob.mime_type]
         mime_options: dict[str, str] = inferred_options if inferred_plugin == src_plugin else {}
+        # A ``.tsv`` inline blob (uploaded as text/csv) must bind a tab
+        # delimiter; ``_MIME_TO_SOURCE`` is mime-keyed and cannot express it.
+        # Derive it from the filename like ``inspect_blob_content`` does, gated
+        # on the plugin actually being bound and not clobbering a caller value.
+        delimiter_options = _delimiter_extra_for_csv_blob(
+            src_plugin,
+            prepared_inline_blob.filename,
+            src_options,
+        )
         src_options = {
             **src_options,
             **mime_options,
+            **delimiter_options,
             "path": str(prepared_inline_blob.storage_path),
             "blob_ref": prepared_inline_blob.blob_id,
             **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
@@ -423,6 +435,9 @@ def _execute_set_pipeline(
             expr_error = _validate_gate_expression(node.condition)
             if expr_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {expr_error}")
+            parity_error = _validate_gate_route_parity(node.condition, node.routes)
+            if parity_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {parity_error}")
 
     # 3. Validate output plugins and options
     #

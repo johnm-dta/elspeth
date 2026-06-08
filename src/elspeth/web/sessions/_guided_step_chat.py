@@ -116,7 +116,12 @@ async def solve_step_chat_with_auto_drop(
     The transient exception set mirrors the project canonical at
     ``composer/service.py`` / ``_guided_solve_chain.py``:
     ``LiteLLMAPIError``, ``LiteLLMAuthError``, ``LiteLLMBadRequestError``,
-    plus ``TimeoutError`` for asyncio timeouts. ``IndexError``,
+    plus the non-``APIError`` operational classes ``BudgetExceededError``,
+    ``BlockedPiiEntityError``, ``GuardrailRaisedException`` and
+    ``GuardrailInterventionNormalStringError`` (direct ``Exception``
+    subclasses — provider budget / content-policy failures that must be
+    absorbed, matching ``_explain_run_diagnostics``), and ``TimeoutError``
+    for asyncio timeouts. ``IndexError``,
     ``AttributeError``, and ``json.JSONDecodeError`` cover malformed-
     response shape from the LiteLLM response unpacking inside
     ``solve_step_chat`` (empty ``choices``, missing ``message``).
@@ -153,6 +158,12 @@ async def solve_step_chat_with_auto_drop(
     from litellm.exceptions import APIError as LiteLLMAPIError
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+    )
 
     started = time.perf_counter()
     try:
@@ -174,6 +185,10 @@ async def solve_step_chat_with_auto_drop(
         LiteLLMAPIError,
         LiteLLMAuthError,
         LiteLLMBadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
         TimeoutError,
         IndexError,
         AttributeError,

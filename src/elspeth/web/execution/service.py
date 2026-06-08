@@ -1098,9 +1098,29 @@ class ExecutionServiceImpl:
                         )
 
                     try:
+                        # IDOR contract (mirrors the source blob_ref path at
+                        # lines 645-647 and the /validate _blob_get_metadata
+                        # path at 862-871): inline-content markers carry a
+                        # caller-supplied blob_id, so the cross-session and the
+                        # genuinely-missing cases MUST be indistinguishable.
+                        # ``get_blob`` is global (not session-scoped), so we
+                        # resolve the run's owning session once and treat any
+                        # blob owned by another session exactly as missing —
+                        # raising ``BlobNotFoundError`` BEFORE any status / hash
+                        # / size comparison in ``_enforce_blob_content_ref_metadata``
+                        # or any ``link_blob_to_run`` / ``read_blob_content``
+                        # access, so no metadata of another session's blob is
+                        # ever observable.
+                        owning_session_id = self._call_async(self._session_service.get_run(run_uuid)).session_id
+
+                        async def _get_blob_scoped(blob_id: UUID) -> BlobRecord:
+                            record = await blob_service.get_blob(blob_id)
+                            if record.session_id != owning_session_id:
+                                raise BlobNotFoundError(str(blob_id))
+                            return record
 
                         async def _gather_inline_blob_metadata() -> list[Any]:
-                            return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+                            return await asyncio.gather(*(_get_blob_scoped(blob_id) for blob_id in unique_blob_ids))
 
                         metadata_records = self._call_async(_gather_inline_blob_metadata())
                         records_by_blob_id: dict[UUID, BlobRecord] = {

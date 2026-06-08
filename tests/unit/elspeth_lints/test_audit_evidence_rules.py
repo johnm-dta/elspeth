@@ -338,6 +338,63 @@ def test_tier_1_decoration_enforces_tde2_outside_errors_py(tmp_path: Path) -> No
     assert not any(f.rule_id == "TDE1" for f in findings)
 
 
+def test_tier_1_decoration_tde2_pass_skips_excluded_dirs_with_unparseable_files(tmp_path: Path) -> None:
+    # The repo-wide TDE2 pass must reuse the shared excluded-dir filter, NOT a
+    # raw rglob. A vendored tree (.venv, .uv-cache, ...) routinely contains files
+    # that do not parse as py313 source (BOM prefixes, py2 syntax). If the walk
+    # descends into them, _parse_or_raise turns one third-party file into a hard
+    # crash of the entire gate. With --root pointed at a repo that has a .venv,
+    # the scan must simply skip it.
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir(parents=True)
+    (contracts_dir / "errors.py").write_text("# canonical target — no classes\n", encoding="utf-8")
+    vendored = tmp_path / ".venv" / "lib" / "thirdparty"
+    vendored.mkdir(parents=True)
+    (vendored / "broken.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+    # Must not raise — the unparseable vendored file is excluded from the walk.
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert findings == []
+
+
+def test_tier_1_decoration_tde2_pass_does_not_scan_excluded_dirs(tmp_path: Path) -> None:
+    # Exclusion is semantic, not merely crash-avoidance: a tier_1_error call site
+    # inside an excluded vendored tree is out of scope and must NOT be flagged,
+    # even though the file parses cleanly.
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir(parents=True)
+    (contracts_dir / "errors.py").write_text("# canonical target — no classes\n", encoding="utf-8")
+    vendored = tmp_path / ".venv" / "lib" / "pkg"
+    vendored.mkdir(parents=True)
+    (vendored / "vendored.py").write_text(
+        textwrap.dedent("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
+            @tier_1_error(reason="vendored, no caller module")
+            class VendoredError(Exception):
+                pass
+        """),
+        encoding="utf-8",
+    )
+
+    findings = list(
+        TIER_1_DECORATION_RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert findings == []
+
+
 def test_tier_1_decoration_accepts_caller_module_name(tmp_path: Path) -> None:
     findings = _tier_1_findings_from_file(
         tmp_path,

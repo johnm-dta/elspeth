@@ -6,7 +6,13 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonFileReadError, PythonSyntaxError, parse_python_file
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    iter_python_files,
+    parse_python_file,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.shared import (
     allowlist_path_for_root,
@@ -60,7 +66,11 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         parsed = _parse_or_raise(path)
         display = repo_relative_display_path(path, root) if path.name == "errors.py" else display_path(path, root)
         findings.extend(scan_tree(parsed.tree, display, parsed.source.splitlines()))
-    for path in sorted(root.rglob("*.py")):
+    # iter_python_files applies the shared excluded-dir filter (.venv, .uv-cache,
+    # .git, build, dist, node_modules, __pycache__, ...). A raw rglob here would
+    # descend into a vendored tree and let _parse_or_raise turn one third-party
+    # file (BOM prefix, py2 syntax) into a hard crash of the whole gate.
+    for path in iter_python_files(root):
         if path.resolve() in candidate_set:
             continue
         parsed = _parse_or_raise(path)
@@ -108,7 +118,9 @@ def _scan_candidates(root: Path) -> list[Path]:
     source_target = root / "contracts" / "errors.py"
     if source_target.exists():
         return [source_target]
-    return sorted(root.rglob("*.py"))
+    # Same excluded-dir discipline as the TDE2 pass: never raw-rglob a tree that
+    # may contain a vendored / cache subdir whose files do not parse.
+    return list(iter_python_files(root))
 
 
 def _tde1_finding(file_path: str, node: ast.ClassDef, source_lines: list[str]) -> Finding | None:

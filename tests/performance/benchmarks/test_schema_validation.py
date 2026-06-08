@@ -63,6 +63,7 @@ transforms:
 sinks:
   output:
     plugin: json
+    on_write_failure: discard
     options:
       path: output.json
       schema:
@@ -114,6 +115,7 @@ transforms:
 sinks:
   output:
     plugin: json
+    on_write_failure: discard
     options:
       path: output.json
       schema:
@@ -183,6 +185,7 @@ transforms:
 sinks:
   output:
     plugin: json
+    on_write_failure: discard
     options:
       path: output.json
       schema:

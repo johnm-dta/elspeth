@@ -107,6 +107,11 @@ _SAFE_BUILTINS: MappingProxyType[str, Any] = MappingProxyType(
 
 _SAFE_CONSTANTS: frozenset[str] = frozenset({"True", "False", "None"})
 
+# Allowed builtins whose result is statically guaranteed to be numeric (never
+# bool or str). Used by is_provably_non_routable() to reject gate conditions
+# that can never produce a route label.
+_ALWAYS_NUMERIC_BUILTINS: frozenset[str] = frozenset({"len", "abs"})
+
 
 class _ExpressionValidator(ast.NodeVisitor):
     """AST visitor that validates expressions for security.
@@ -786,6 +791,55 @@ class ExpressionParser:
             return self._is_boolean_node(node.body) and self._is_boolean_node(node.orelse)
 
         # Everything else (field access, arithmetic, etc.) is not guaranteed boolean
+        return False
+
+    def is_provably_non_routable(self) -> bool:
+        """Check if the expression's result is statically guaranteed to be neither bool nor str.
+
+        Gate conditions route on a bool result (-> "true"/"false") or a str result
+        (-> route label). An expression that provably returns a numeric value can
+        never produce a valid route label and would raise TypeError at row
+        execution (see GateExecutor). This lets GateSettings reject such configs at
+        validation time instead of deferring the failure to the first row.
+
+        CONSERVATIVE by design: returns True only when there is no way the result is
+        bool or str. Ambiguous shapes (string concatenation, str repetition/format,
+        field access of unknown type, ternaries) are treated as routable.
+        """
+        return self._is_non_routable_node(self._ast.body)
+
+    @staticmethod
+    def _is_numeric_constant(node: ast.expr) -> bool:
+        """True for an int/float/complex literal (bool excluded — bool is routable)."""
+        return isinstance(node, ast.Constant) and isinstance(node.value, (int, float, complex)) and not isinstance(node.value, bool)
+
+    def _is_non_routable_node(self, node: ast.expr) -> bool:
+        """Recursively check if a node provably returns a non-bool, non-str (numeric) value."""
+        # Numeric literal (bool excluded — True/False route to "true"/"false").
+        if self._is_numeric_constant(node):
+            return True
+
+        # Calls to builtins whose result is always numeric (len, abs).
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _ALWAYS_NUMERIC_BUILTINS:
+            return True
+
+        # Unary numeric operators: -x, +x. (Unary `not` returns bool and is handled
+        # by is_boolean_expression, so it is intentionally excluded here.)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            return True
+
+        if isinstance(node, ast.BinOp):
+            # Operators that str does not support at all → numeric or TypeError, never str.
+            if isinstance(node.op, (ast.Sub, ast.Div, ast.FloorDiv)):
+                return True
+            # Add: `str + number` raises TypeError, so an Add with a numeric-literal
+            # operand cannot be string concatenation — it is numeric or an error,
+            # never a routable str. (Mult/Mod are left routable: str supports
+            # repetition `s * n` and printf-style formatting `fmt % x`.)
+            if isinstance(node.op, ast.Add):
+                return self._is_numeric_constant(node.left) or self._is_numeric_constant(node.right)
+
+        # Field access, ambiguous ops, ternaries, str-returning calls: routable.
         return False
 
     def evaluate(self, context: dict[str, Any] | PipelineRow) -> Any:

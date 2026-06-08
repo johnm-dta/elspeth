@@ -250,7 +250,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c9969a6102d3e7bc"
+    source_file_hash: str | None = "sha256:2eaad637a25997bd"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
@@ -512,7 +512,7 @@ class DataverseSink(BaseSink):
                 latency_ms = (time.perf_counter() - start_time) * 1000
 
                 # Audit first (primacy), then telemetry
-                request_data = {
+                request_data: dict[str, Any] = {
                     "method": "PATCH",
                     "url": url,
                     "headers": response.request_headers,
@@ -549,6 +549,7 @@ class DataverseSink(BaseSink):
                 request_data = {
                     "method": "PATCH",
                     "url": url,
+                    "headers": e.request_headers,  # Fingerprinted by client; mirrors the success path
                     "json": payload,
                 }
                 ctx.record_call(

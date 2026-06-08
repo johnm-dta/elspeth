@@ -4,7 +4,6 @@ Coalesce is a stateful barrier that holds tokens until merge conditions are met.
 Tokens are correlated by row_id (same source row that was forked).
 """
 
-import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -33,6 +32,7 @@ from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.spans import SpanFactory
 
@@ -505,7 +505,7 @@ class CoalesceExecutor:
             # Late arrival after merge/failure already happened
             # Record failure audit trail for this late token
             failure_reason = "late_arrival_after_merge"
-            error_hash = hashlib.sha256(failure_reason.encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(failure_reason)
             state = self._execution.begin_node_state(
                 token_id=token.token_id,
                 node_id=node_id,
@@ -704,7 +704,7 @@ class CoalesceExecutor:
         coalesce_name = key[0]
         pending = self._pending[key]
         consumed_tokens = tuple(e.token for e in pending.branches.values())
-        error_hash = hashlib.sha256(failure_reason.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(failure_reason)
         now = self._clock.monotonic()
 
         # Complete pending node states with failure
@@ -1054,7 +1054,7 @@ class CoalesceExecutor:
             raise
         except Exception as merge_exc:
             # Generate error_hash once for all branches (consistent audit trail).
-            error_hash = hashlib.sha256(str(merge_exc).encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(str(merge_exc), exception_type=type(merge_exc).__name__)
 
             for _branch, entry in pending.branches.items():
                 # Skip branches already completed in the happy path —

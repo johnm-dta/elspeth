@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.errors import GracefulShutdownError, TelemetryExporterError
+from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.events import (
     PhaseError,
     PipelinePhase,
@@ -88,25 +88,46 @@ class RunCeremony:
     def safe_flush_telemetry(self) -> None:
         """Flush telemetry in a finally block, preserving any pending exception.
 
-        If flush_telemetry() raises TelemetryExporterError (fail_on_total=True),
-        only re-raises when no other exception is pending — telemetry failures
-        must not mask run errors.
+        flush_telemetry() can raise more than TelemetryExporterError: the
+        TelemetryManager re-raises ANY exception stored by its export thread on
+        flush() (manager.py), including non-transport programming errors. When a
+        run exception is already in flight, none of these may replace it —
+        telemetry failures must not mask run errors — so the flush runs inside
+        best_effort, which logs and suppresses any Exception. When no run
+        exception is pending, a telemetry failure should surface rather than
+        vanish, so the flush runs raw and propagates.
+
+        EXCEPTION: Tier-1 / audit-integrity errors always propagate, even with a
+        run exception pending — audit corruption outranks even the primary
+        failure. The export thread stores FrameworkBugError/AuditIntegrityError
+        (manager.py types _stored_exception as BaseException for exactly this),
+        and these are not-yet-surfaced audit signals; best_effort's broad
+        suppression would silently discard them, so they are re-raised before it.
+        Mirrors the cli.py _close_orchestrator_resources teardown guard.
+
+        (Previously this caught only TelemetryExporterError, so a stored
+        programming error escaped the finally and replaced the run error —
+        elspeth-1e4ca5b1db.)
         """
         import sys
 
-        logger = slog
-        pending_exc = sys.exc_info()[0]
+        # Live attribute access of the lazily materialized TIER_1_ERRORS tuple —
+        # never a from-import snapshot (which would capture an empty/stale tuple
+        # and let Tier-1 errors fall through to best_effort's broad suppression).
+        import elspeth.contracts.errors as contract_errors
 
-        try:
-            self.flush_telemetry()
-        except TelemetryExporterError as e:
-            logger.warning(
-                "Telemetry flush failed - will raise after cleanup if no other exception pending",
-                exporter=e.exporter_name,
-                error=e.message,
-            )
-            if pending_exc is None:
+        if sys.exc_info()[0] is not None:
+            try:
+                self.flush_telemetry()
+            except contract_errors.TIER_1_ERRORS:
                 raise
+            except Exception:
+                # Re-raise inside best_effort so its safe, class-only logging and
+                # suppression apply to non-Tier-1 telemetry failures.
+                with best_effort("Telemetry flush during exception cleanup"):
+                    raise
+        else:
+            self.flush_telemetry()
 
     def emit_interrupted_ceremony(
         self,

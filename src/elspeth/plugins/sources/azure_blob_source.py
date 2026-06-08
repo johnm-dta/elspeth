@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d87e86de4a9a5fbc"
+    source_file_hash: str | None = "sha256:24059797ce50799a"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -962,6 +962,7 @@ class AzureBlobSource(BaseSource):
                 raw_headers=raw_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
             if self._contract_builder is None and self.get_schema_contract() is None:
@@ -978,7 +979,13 @@ class AzureBlobSource(BaseSource):
             if key in mapping:
                 normalized[mapping[key]] = value
             else:
-                normalized[normalize_field_name(key)] = value
+                # New key not in the cached resolution — normalize it, then apply
+                # field_mapping by normalized name so a mapped key that first appears
+                # in a LATER row still maps to its target. (Relaxing the strict resolve
+                # check for sparse records unmasks this path — elspeth-bdcdce6f58.)
+                nk = normalize_field_name(key)
+                final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
+                normalized[final_name] = value
                 has_unmapped_fields = True
 
         if has_unmapped_fields:
@@ -986,6 +993,7 @@ class AzureBlobSource(BaseSource):
                 raw_headers=list(row.keys()),
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
         return normalized

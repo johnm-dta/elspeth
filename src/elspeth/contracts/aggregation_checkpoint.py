@@ -271,6 +271,11 @@ class AggregationNodeCheckpoint:
             raise AuditIntegrityError(
                 f"Corrupted aggregation node checkpoint '{node_id}': 'tokens' must be a list, got {type(tokens_data).__name__}"
             )
+        for i, token_entry in enumerate(tokens_data):
+            if not isinstance(token_entry, dict):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation node checkpoint '{node_id}': tokens[{i}] must be a dict, got {type(token_entry).__name__}."
+                )
 
         batch_id = data["batch_id"]
         if tokens_data and batch_id is None:
@@ -347,9 +352,15 @@ class AggregationCheckpointState:
         Raises:
             AuditIntegrityError: If ``_version`` is missing or structure is invalid.
         """
+        if not isinstance(data, dict):
+            raise AuditIntegrityError(f"Corrupted aggregation checkpoint: top-level value must be a dict, got {type(data).__name__}.")
         if "_version" not in data:
             raise AuditIntegrityError(f"Corrupted aggregation checkpoint: missing '_version' key. Found keys: {sorted(data.keys())}.")
         version = data["_version"]
+        if not isinstance(version, str):
+            raise AuditIntegrityError(
+                f"Corrupted aggregation checkpoint: '_version' must be a str, got {type(version).__name__}: {version!r}."
+            )
 
         nodes: dict[str, AggregationNodeCheckpoint] = {}
         for key, value in data.items():
@@ -359,6 +370,8 @@ class AggregationCheckpointState:
                 raise AuditIntegrityError(
                     f"Corrupted aggregation checkpoint: unexpected reserved key {key!r}. Only '_version' is a valid metadata key."
                 )
+            if not isinstance(value, dict):
+                raise AuditIntegrityError(f"Corrupted aggregation checkpoint: node {key!r} must be a dict, got {type(value).__name__}.")
             nodes[key] = AggregationNodeCheckpoint.from_dict(key, value)
 
         return cls(version=version, nodes=nodes)

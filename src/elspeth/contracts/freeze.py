@@ -169,3 +169,22 @@ def require_int(
         raise TypeError(f"{field_name} must be int, got {type(value).__name__}: {value!r}")
     if min_value is not None and value < min_value:
         raise ValueError(f"{field_name} must be >= {min_value}, got {value}")
+
+
+def require_bool(value: object, field_name: str) -> None:
+    """Validate that a value is strictly bool.
+
+    Tier 1 offensive validation: crash immediately on wrong types. Settings→Runtime
+    conversion is meant to be mechanical, so a bool-typed runtime field that receives
+    an int/str/None via direct construction is a contract violation that must fail at
+    the boundary, not satisfy a protocol and fail later.
+
+    Args:
+        value: The value to validate.
+        field_name: Field name for error messages.
+
+    Raises:
+        TypeError: If value is not strictly bool.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"{field_name} must be bool, got {type(value).__name__}: {value!r}")

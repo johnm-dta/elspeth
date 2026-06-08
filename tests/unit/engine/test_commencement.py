@@ -84,6 +84,21 @@ class TestEvaluateCommencementGates:
         assert "abc123" not in str(snapshot)
         assert "xyz789" not in str(snapshot)
 
+    def test_non_bool_result_does_not_echo_env_secret(self) -> None:
+        """elspeth-83261b699c: a gate that returns an env secret string (non-bool) must
+        not embed the raw value in the failure reason/message — the audit snapshot is
+        scrubbed but the reason text bypasses that protection."""
+        secret = "sk-SUPERSECRET-9f3a"
+        gates = [CommencementGateConfig(name="check", condition="env['API_KEY']")]
+        context = {"dependency_runs": {}, "collections": {}, "env": {"API_KEY": secret}}
+        with pytest.raises(CommencementGateFailedError) as exc_info:
+            evaluate_commencement_gates(gates, context)
+        err = exc_info.value
+        assert secret not in str(err)
+        assert secret not in (err.reason or "")
+        # The diagnostic type is still present.
+        assert "str" in (err.reason or "")
+
     def test_snapshot_is_deep_frozen(self) -> None:
         gates = [
             CommencementGateConfig(

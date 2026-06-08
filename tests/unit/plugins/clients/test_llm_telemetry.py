@@ -17,6 +17,89 @@ from elspeth.plugins.infrastructure.clients.llm import (
 )
 
 
+class TestLLMClientErrorBranchTelemetry:
+    """elspeth-a960d22540: malformed-response error branches must emit telemetry.
+
+    Several provider-response error branches recorded a Landscape ERROR call
+    then raised WITHOUT emitting ExternalCallCompleted(ERROR), unlike the SDK
+    error / null-content / success branches that do. Telemetry dashboards
+    therefore undercounted malformed/content-filtered failures even though
+    audit primacy was preserved.
+    """
+
+    def _execution(self) -> MagicMock:
+        execution = MagicMock()
+        counter = itertools.count()
+        execution.allocate_call_index.side_effect = lambda _: next(counter)
+        recorded = MagicMock()
+        recorded.request_hash = "req"
+        recorded.response_hash = "resp"
+        execution.record_call.return_value = recorded
+        return execution
+
+    def _response(
+        self,
+        *,
+        content: Any = "Hi",
+        finish_reason: str = "stop",
+        choices_empty: bool = False,
+        model_dump_fails: bool = False,
+    ) -> Mock:
+        message = Mock()
+        message.content = content
+        choice = Mock()
+        choice.message = message
+        choice.finish_reason = finish_reason
+        usage = Mock()
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+        response = Mock()
+        response.choices = [] if choices_empty else [choice]
+        response.model = "gpt-4"
+        response.usage = usage
+        if model_dump_fails:
+            response.model_dump = Mock(side_effect=TypeError("unserializable response"))
+        else:
+            response.model_dump = Mock(return_value={"id": "resp_123"})
+        return response
+
+    def _run_expecting_error(self, response: Mock) -> list[ExternalCallCompleted]:
+        events: list[ExternalCallCompleted] = []
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+        client = AuditedLLMClient(
+            execution=self._execution(),
+            state_id="state_123",
+            underlying_client=openai_client,
+            provider="azure",
+            run_id="run_abc",
+            telemetry_emit=events.append,
+        )
+        with pytest.raises(LLMClientError):
+            client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Hi"}])
+        return events
+
+    def test_empty_choices_emits_error_telemetry(self) -> None:
+        events = self._run_expecting_error(self._response(choices_empty=True))
+        assert len(events) == 1
+        assert events[0].status == CallStatus.ERROR
+
+    def test_unsupported_tool_calls_emits_error_telemetry(self) -> None:
+        events = self._run_expecting_error(self._response(content=None, finish_reason="tool_calls"))
+        assert len(events) == 1
+        assert events[0].status == CallStatus.ERROR
+
+    def test_non_string_content_emits_error_telemetry(self) -> None:
+        events = self._run_expecting_error(self._response(content=[1, 2, 3]))
+        assert len(events) == 1
+        assert events[0].status == CallStatus.ERROR
+
+    def test_response_serialization_failure_emits_error_telemetry(self) -> None:
+        events = self._run_expecting_error(self._response(model_dump_fails=True))
+        assert len(events) == 1
+        assert events[0].status == CallStatus.ERROR
+
+
 class TestLLMClientTelemetry:
     """Tests for telemetry emission from AuditedLLMClient."""
 

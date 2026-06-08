@@ -12,7 +12,6 @@ Dependencies held by this driver:
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -43,6 +42,7 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.canonical import sanitize_for_canonical, stable_hash
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.operations import track_operation
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     flush_remaining_aggregation_buffers,
@@ -230,7 +230,7 @@ class SourceIterationDriver:
         # Compute error_hash for QUARANTINED outcome audit trail
         # Per CLAUDE.md: every row must reach exactly one terminal state
         # Do NOT record outcome here — record after sink durability in SinkExecutor.write()
-        quarantine_error_hash = hashlib.sha256(quarantine_error_msg.encode()).hexdigest()[:16]
+        quarantine_error_hash = compute_error_hash(quarantine_error_msg)
 
         # Pass PendingOutcome with error_hash - outcome recorded after sink durability
         pending_tokens[quarantine_sink].append(

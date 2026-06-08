@@ -353,3 +353,41 @@ class TestRateLimitRegistryCleanup:
         # Should be a different instance after close
         assert original is not new
         registry.close()
+
+
+class TestRateLimitRegistryNameCollision:
+    """elspeth-2af4e98ee2: distinct service names must not collide onto one
+    persistent SQLite bucket via a non-injective sanitizer."""
+
+    def _config(self, tmp_path, rpm=1):  # type: ignore[no-untyped-def]
+        settings = RateLimitSettings(
+            enabled=True,
+            default_requests_per_minute=rpm,
+            persistence_path=str(tmp_path / "rl.db"),
+        )
+        return RuntimeRateLimitConfig.from_settings(settings)
+
+    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
+        try:
+            a = registry.get_limiter("api.example")
+            b = registry.get_limiter("api_example")
+            assert a is not b
+            assert isinstance(a, RateLimiter) and isinstance(b, RateLimiter)
+            # Distinct persistent bucket names (the SQLite table is f"ratelimit_{name}").
+            assert a.name != b.name
+            # Independent RPM=1 buckets: exhausting one must not exhaust the other.
+            assert a.try_acquire() is True
+            assert b.try_acquire() is True
+        finally:
+            registry.close()
+
+    def test_already_valid_name_bucket_is_unchanged(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        """Stability guard: an already-valid service name keeps its byte-identical
+        bucket name (edge-only migration — common case is untouched)."""
+        registry = RateLimitRegistry(self._config(tmp_path, rpm=10))
+        try:
+            assert registry.get_limiter("openai").name == "openai"
+            assert registry.get_limiter("api_example").name == "api_example"
+        finally:
+            registry.close()

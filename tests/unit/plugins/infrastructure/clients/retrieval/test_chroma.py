@@ -509,6 +509,36 @@ class TestTier3ResultBoundary:
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
 
+    def test_non_mapping_metadata_raises_retrieval_error(self):
+        """A truthy non-mapping metadata from a corrupt index must become RetrievalError.
+
+        `dict(metadata)` raises TypeError (not ValueError) for a non-mapping truthy
+        value (e.g. an int or a list of non-pairs); that escaped the `except ValueError`
+        chunk-construction guard and bypassed search()'s audit-ERROR handler.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"t3m-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        config = ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral")
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider._collection.add(documents=["test doc"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["test doc"]],
+                    "distances": [[0.1]],
+                    "metadatas": [[12345]],  # truthy non-mapping → dict(12345) raises TypeError
+                },
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
     def test_none_inner_list_raises_retrieval_error(self):
         """If SDK returns None where inner list expected, should get RetrievalError."""
         from unittest.mock import patch
@@ -760,6 +790,80 @@ class TestPostQueryFailureAudit:
                 provider._collection,
                 "query",
                 return_value={"ids": [["doc1"]], "documents": None, "distances": [[0.1]], "metadatas": [[{}]]},
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_length_mismatch_records_error_call(self):
+        """Mismatched result array lengths produce audit record, not a bare ValueError.
+
+        Regression for elspeth-c0fac78210: zip(..., strict=True) over arrays of
+        unequal length raised plain ValueError after the external query returned,
+        bypassing the RetrievalError-only post-query audit handler.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"pqlm-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1", "doc2"]],  # two ids
+                    "documents": [["doc a"]],  # one document — length mismatch
+                    "distances": [[0.1, 0.2]],
+                    "metadatas": [[{}, {}]],
+                },
+            ),
+            pytest.raises(RetrievalError, match="mismatched"),
+        ):
+            provider.search("test", top_k=2, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_non_serializable_metadata_records_error_call(self):
+        """RetrievalChunk ValueError (non-JSON metadata) produces audit record, not a bare ValueError.
+
+        Same root cause as elspeth-c0fac78210: a ValueError from chunk
+        construction in the post-query parse path must be converted to
+        RetrievalError so search()'s audit handler records the ERROR call.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"pqms-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["doc a"]],
+                    "distances": [[0.1]],
+                    "metadatas": [[{"bad": float("nan")}]],  # NaN → not JSON-serializable
+                },
             ),
             pytest.raises(RetrievalError),
         ):

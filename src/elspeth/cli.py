@@ -10,7 +10,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import typer
 import yaml
@@ -824,6 +824,52 @@ class _OrchestratorContext:
     orchestrator: Orchestrator
 
 
+class _Closeable(Protocol):
+    def close(self) -> None: ...
+
+
+def _close_orchestrator_resources(
+    rate_limit_registry: _Closeable | None,
+    telemetry_manager: _Closeable | None,
+    *,
+    pending_exc: BaseException | None,
+) -> None:
+    """Close orchestrator teardown resources without masking an in-flight pipeline exception.
+
+    Mirrors the db.close() teardown guard used in the run/resume finally blocks:
+    Tier-1/audit-integrity errors always propagate (audit corruption outranks
+    even the primary failure); any other close failure is logged and suppressed
+    when a pipeline exception is already pending, and surfaced when the run was
+    otherwise clean. Both resources are always attempted so a failure closing the
+    first does not leak the second (elspeth-5310f58a2b).
+    """
+    import structlog
+
+    teardown_error: Exception | None = None
+    for resource, name in (
+        (rate_limit_registry, "rate_limit_registry"),
+        (telemetry_manager, "telemetry_manager"),
+    ):
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as close_exc:
+            # Teardown close failure must not mask the original pipeline exception.
+            structlog.get_logger(__name__).warning(
+                "Orchestrator teardown close failed",
+                component=name,
+                pipeline_exception_pending=pending_exc is not None,
+                close_error=f"{type(close_exc).__name__}: {close_exc}",
+            )
+            if teardown_error is None:
+                teardown_error = close_exc
+    if teardown_error is not None and pending_exc is None:
+        raise teardown_error
+
+
 @contextmanager
 def _orchestrator_context(
     config: ElspethSettings,
@@ -941,10 +987,13 @@ def _orchestrator_context(
             orchestrator=orchestrator,
         )
     finally:
-        if rate_limit_registry is not None:
-            rate_limit_registry.close()
-        if telemetry_manager is not None:
-            telemetry_manager.close()
+        import sys
+
+        _close_orchestrator_resources(
+            rate_limit_registry,
+            telemetry_manager,
+            pending_exc=sys.exc_info()[1],
+        )
 
 
 def _execute_pipeline_with_instances(

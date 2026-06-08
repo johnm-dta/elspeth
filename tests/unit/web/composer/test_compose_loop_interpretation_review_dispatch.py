@@ -2253,3 +2253,300 @@ async def test_end_advisor_gate_reaches_prompt_template_pipeline_p5_budget_exhau
     assert end_calls, "P5 budget-exhaustion END advisor gate must fire for a PT pipeline"
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
     assert any(e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Advisor-blocked terminal return must ALSO surface PT (+ run the orphan gate).
+#
+# The three advisor-blocked terminal returns (P2 unavailable, P2 exhausted,
+# P5 unavailable/exhausted) bypass the shared finalize tail that auto-surfaces
+# the llm_prompt_template review and runs the unfiltered orphan gate. A tool
+# turn that (re-)drafts an LLM node's prompt_template stages a pending PT
+# requirement but no pending EVENT; if the END advisor then blocks/is
+# unavailable, the persisted max-version state carries a PT *site* with no
+# pending *event*. RUN reads that state via get_current_state and
+# materialize_state_for_execution raises UnresolvedInterpretationPlaceholderError
+# even though the frontend pendingCount (events) is zero. This is the live
+# staging asymmetry (3/8 tutorial RUNs failing with HTTP 500).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_advisor_unavailable_terminal_return_surfaces_prompt_template(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """P2 advisor-UNAVAILABLE blocked return must surface the PT review event.
+
+    Reproduces the staging asymmetry: a node with a pending auto-staged
+    ``llm_prompt_template`` requirement and NO pending event reaches the END
+    advisor gate; the advisor is unavailable (``ok=False``) so the
+    ``_try_terminate_no_tools`` blocked return fires. Pre-fix that return
+    bypasses the auto-surface + orphan gate, so NO pending PT event exists ->
+    pendingCount(events) == 0 while interpretation_sites scan == 1, and a
+    later RUN raises ``UnresolvedInterpretationPlaceholderError``. Post-fix the
+    blocked return surfaces the resolvable pending event first.
+    """
+
+    from unittest.mock import AsyncMock
+
+    from elspeth.web.composer.audit import BufferingRecorder
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    # Force the blocked-return branch (ok=False == unavailable). Instance attr
+    # wins over the autouse class-level CLEAN stub.
+    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
+        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    )
+
+    class _AssistantMessage:
+        content = "Done — the pipeline is ready."
+
+    outcome = await composer._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[],
+        state=state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=composer._new_runtime_preflight_cache(),
+        session_scope=str(session_id),
+        mutation_success_seen=True,
+        recorder=BufferingRecorder(),
+        progress=None,
+        repair_turns_used=0,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=0,
+    )
+
+    assert outcome.action == "return"
+    assert outcome.result is not None
+
+    # The events-side realignment: exactly one resolvable pending PT event now
+    # exists, surfaced by the backend against the frozen final skeleton. (Pre-fix
+    # there are ZERO pending events — the assertion below fails for the right
+    # reason: the placeholder reached the runnable state with no card.)
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt) == 1
+    assert pt[0].affected_node_id == "rate_node"
+    assert pt[0].tool_call_id.startswith("backend_auto_surface:")
+
+    # The PT site is now resolvable (a pending event matches it), so the orphan
+    # gate sees no orphan for it.
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+    assert all(site[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE for site in missing)
+
+    # GUARD (do NOT weaken execution/service.py:519): the execution materializer
+    # scans STRUCTURE, not events; the placeholder is removed only by the BAKE
+    # when the user resolves the card. So the state still materializes-as-pending
+    # right after the turn. The fix re-aligns the frontend events gate, it does
+    # NOT auto-resolve the review.
+    from elspeth.web.interpretation_state import (
+        InterpretationReviewPending,
+        materialize_state_for_execution,
+    )
+
+    materialized = materialize_state_for_execution(state)
+    assert isinstance(materialized, InterpretationReviewPending)
+
+
+@pytest.mark.asyncio
+async def test_advisor_exhausted_terminal_return_surfaces_prompt_template(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """P2 advisor-EXHAUSTED (blocking on last pass) blocked return surfaces PT.
+
+    Variant of the unavailable case: the advisor FLAGS the pipeline
+    (``blocking=True``) on the last budgeted pass, driving the
+    ``reason="exhausted"`` blocked return. That return must also surface the
+    resolvable pending PT event so the persisted runnable state is resolvable.
+    """
+
+    from unittest.mock import AsyncMock
+
+    from elspeth.web.composer.audit import BufferingRecorder
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
+        return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review the prompt")
+    )
+
+    class _AssistantMessage:
+        content = "Done — the pipeline is ready."
+
+    outcome = await composer._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[],
+        state=state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=composer._new_runtime_preflight_cache(),
+        session_scope=str(session_id),
+        mutation_success_seen=True,
+        recorder=BufferingRecorder(),
+        progress=None,
+        repair_turns_used=0,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+        # Force last-pass so (used + 1) >= max_passes -> the "exhausted" return.
+        advisor_checkpoint_passes_used=composer._settings.composer_advisor_checkpoint_max_passes - 1,
+    )
+
+    assert outcome.action == "return"
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt) == 1
+    assert pt[0].tool_call_id.startswith("backend_auto_surface:")
+
+
+@pytest.mark.asyncio
+async def test_p5_budget_exhaustion_advisor_blocked_return_surfaces_prompt_template(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """P5 budget-exhaustion advisor-blocked terminal return surfaces PT.
+
+    The THIRD blocked-return site lives in ``_classify_and_budget_turn`` (the
+    B-4D-3 budget-exhaustion last-chance finalize). With
+    ``max_composition_turns=1`` the single ``set_pipeline`` mutation exhausts the
+    composition budget; the bonus call returns no tool calls, and the END advisor
+    gate is forced UNAVAILABLE (``ok=False``) so the P5 blocked return fires
+    instead of falling through to the shared finalize tail. Pre-fix that return
+    bypasses auto-surface -> zero pending events for the staged PT requirement
+    (the eventless-placeholder asymmetry); post-fix it surfaces the resolvable
+    event. Threading uses ``persist.current_state_id`` (the mutation persisted
+    before classify), exercising the P5-specific plumbing the P2 tests do not.
+    """
+
+    from unittest.mock import AsyncMock
+
+    composer = _build_composer(tmp_path, sessions_service, max_composition_turns=1)
+    state = _state_with_prompt_template_review_node()  # model-less PT node: PT is the ONLY orphan site
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    # Pre-condition: PT is the only orphaned pre-check site (no genuine non-PT
+    # orphan that would legitimately suppress the END advisor), so genuine_orphans
+    # is empty and the P5 END gate fires (see the CLEAN counterpart
+    # test_end_advisor_gate_reaches_prompt_template_pipeline_p5_budget_exhaustion).
+    sites = await composer._missing_pending_interpretation_review_sites(state, session_id=str(session_id))
+    assert sites and all(site[2] is InterpretationKind.LLM_PROMPT_TEMPLATE for site in sites)
+
+    # Force the P5 blocked-return branch (ok=False == unavailable -> fail closed).
+    advisor_mock = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable"))
+    composer._run_advisor_checkpoint = advisor_mock  # type: ignore[method-assign]
+
+    # set_metadata (not set_pipeline) so the model-less PT node is not
+    # re-canonicalized; the single mutation exhausts max_composition_turns=1 ->
+    # the B-4D-3 bonus call returns plain text -> the P5 finalize pre-check runs.
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_metadata",
+                tool_name="set_metadata",
+                arguments={"patch": {"name": "Rate pipeline"}},
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+        ]
+    )
+
+    await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_state=state,
+        message="give it a name",
+    )
+
+    # The P5 END advisor gate fired and returned the blocked path; the fix runs
+    # the surface+gate pair on that blocked return, so the PT event is surfaced.
+    end_calls = [call for call in advisor_mock.await_args_list if call.kwargs.get("phase") == "end"]
+    assert end_calls, "P5 budget-exhaustion END advisor gate must fire for a PT pipeline"
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    pt = [e for e in events if e.kind is InterpretationKind.LLM_PROMPT_TEMPLATE]
+    assert len(pt) == 1, "P5 advisor-blocked finalize must auto-surface the PT review"
+    assert pt[0].affected_node_id == "rate_node"
+    assert pt[0].tool_call_id.startswith("backend_auto_surface:")
+
+
+@pytest.mark.asyncio
+async def test_advisor_blocked_terminal_return_still_fails_closed_on_bare_token_orphan(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Guard: a GENUINE (non-PT) orphan stays fail-closed at the no-tool finalize.
+
+    A bare ``{{interpretation:cool}}`` vague-term token with no pending event is
+    a case-a orphan that auto-surface skips (no PT requirement). With the repair
+    budget exhausted, ``genuine_orphans`` is non-empty so the END advisor gate is
+    SKIPPED and control falls through to the CLEAN tail's UNFILTERED orphan gate
+    (NOT the advisor-blocked return). The turn must fail closed there exactly as
+    before this fix — the shared ``_surface_pt_and_gate_orphans_or_none`` helper
+    preserves the case-a fail-closed behaviour (surface no-ops, unfiltered gate
+    blocks). Pins that the DRY refactor did not regress genuine orphans.
+    """
+
+    from unittest.mock import AsyncMock
+
+    from elspeth.web.composer.audit import BufferingRecorder
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_llm_node()  # bare {{interpretation:cool}}, no PT requirement, no event
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    composer._run_advisor_checkpoint = AsyncMock(  # type: ignore[method-assign]
+        return_value=AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="unavailable")
+    )
+
+    class _AssistantMessage:
+        content = "Done — the pipeline is ready."
+
+    outcome = await composer._try_terminate_no_tools(
+        assistant_message=_AssistantMessage(),
+        message="rate how cool the pages are",
+        llm_messages=[],
+        state=state,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_version=1,
+        user_id="alice",
+        last_runtime_preflight=None,
+        runtime_preflight_cache=composer._new_runtime_preflight_cache(),
+        session_scope=str(session_id),
+        mutation_success_seen=True,
+        recorder=BufferingRecorder(),
+        progress=None,
+        # Exhaust the repair budget so the model-repairable vague-term branch is
+        # skipped and control reaches the advisor gate + the orphan gate (the
+        # blocked-return path under test).
+        repair_turns_used=2,
+        persisted_assistant_message_id=None,
+        persisted_tool_call_turn=False,
+        advisor_checkpoint_passes_used=0,
+    )
+
+    assert outcome.action == "return"
+    assert outcome.result is not None
+    preflight = outcome.result.runtime_preflight
+    assert preflight is not None
+    assert preflight.is_valid is False
+    assert preflight.readiness.execution_ready is False
+    assert {blocker.code for blocker in preflight.readiness.blockers} == {"interpretation_review_orphaned"}

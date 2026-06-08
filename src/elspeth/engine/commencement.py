@@ -96,7 +96,11 @@ def evaluate_commencement_gates(
                     gate_name=gate.name,
                     condition=gate.condition,
                     reason=(
-                        f"Gate expression returned {type(result).__name__} ({result!r}), "
+                        # NB: do NOT include {result!r} — for a gate like env['API_KEY']
+                        # the result IS the raw secret value, and this reason bypasses the
+                        # env-scrubbed audit snapshot (elspeth-83261b699c). The type alone
+                        # is the actionable diagnostic.
+                        f"Gate expression returned {type(result).__name__}, "
                         f"not bool. Commencement gates must evaluate to True or False — "
                         f"use a comparison (e.g., '> 0', '== \"expected\"') instead of "
                         f"relying on Python truthiness."

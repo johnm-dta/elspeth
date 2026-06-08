@@ -318,3 +318,6 @@ wardline.yaml
 .loomweave/instance_id
 .claude/skills/loomweave-workflow/.fingerprint
 .claude/skills/loomweave-workflow/SKILL.md
+
+# Filigree issue tracker
+.weft/

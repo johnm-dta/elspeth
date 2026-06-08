@@ -2,7 +2,17 @@
 Configuration schema and loading for Elspeth pipelines.
 
 Uses Pydantic for validation and Dynaconf for multi-source loading.
-Settings are frozen (immutable) after construction.
+
+Immutability model (see elspeth-c9a2397270): Pydantic ``frozen=True`` blocks
+attribute *reassignment* after construction, but nested containers (option
+dicts, route maps, lists) remain mutable in-process. They are deliberately NOT
+deep-frozen here: deep-freezing wraps containers in ``MappingProxyType``, which
+is not picklable and breaks the ``copy.deepcopy`` used in the loading pipeline.
+Deep immutability is instead enforced downstream at the DAG ``NodeInfo`` layer,
+where ``config`` is wrapped in ``MappingProxyType`` once the graph is built.
+Config is operator-authored (never external-input-driven), and the audit
+snapshot is taken from ``settings.model_dump()`` in ``resolve_config()``, so the
+residual mutability window is first-party in-process only.
 """
 
 import ast
@@ -138,6 +148,14 @@ def _validate_connection_or_sink_name(value: str, *, field_label: str) -> str:
     return value
 
 
+_ENV_VAR_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+"""Valid POSIX environment-variable name: leading letter/underscore, then word chars.
+
+Anchored with \\A...\\Z (not ^...$): $ matches just before a trailing newline, so
+"NAME\\n" would otherwise be wrongly accepted.
+"""
+
+
 class SecretsConfig(BaseModel):
     """Configuration for secret loading.
 
@@ -219,6 +237,26 @@ class SecretsConfig(BaseModel):
 
         # Normalize: strip trailing slash
         return v.rstrip("/")
+
+    @field_validator("mapping")
+    @classmethod
+    def validate_mapping_env_var_names(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject invalid environment-variable names before any Key Vault I/O.
+
+        Mapping keys become ``os.environ[name] = value`` assignments in the
+        sequential apply phase (core/security/config_secrets.py). Python rejects
+        a name containing ``=`` with ValueError and an empty name with OSError,
+        and the apply loop sets entries one at a time — so a valid entry ahead of
+        an invalid one would mutate process env before the late failure, despite
+        the apply phase's atomicity comment. Reject malformed names mechanically
+        at config-construction time. (elspeth-1afd07cb77)
+        """
+        for env_var_name in v:
+            if not _ENV_VAR_NAME_RE.match(env_var_name):
+                raise ValueError(
+                    f"secrets mapping key {env_var_name!r} is not a valid environment variable name (must match [A-Za-z_][A-Za-z0-9_]*)"
+                )
+        return v
 
     @model_validator(mode="after")
     def validate_keyvault_requirements(self) -> "SecretsConfig":
@@ -657,6 +695,15 @@ class GateSettings(BaseModel):
                 msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
 
                 raise ValueError(" ".join(msg_parts))
+        elif parser.is_provably_non_routable():
+            # The expression statically returns a numeric value, which GateExecutor
+            # cannot turn into a route label (it accepts only bool or str). Reject at
+            # config time rather than deferring the TypeError to the first row.
+            raise ValueError(
+                f"Gate '{self.name}' condition ({self.condition!r}) statically returns a numeric value, "
+                f"which can never be a route label. Gate conditions must evaluate to a boolean "
+                f'(routes "true"/"false") or to a string route label.'
+            )
 
         return self
 
@@ -1334,7 +1381,11 @@ class ElspethSettings(BaseModel):
     """Top-level Elspeth configuration matching architecture specification.
 
     This is the single source of truth for pipeline configuration.
-    All settings are validated and frozen after construction.
+    All settings are validated at construction. Pydantic ``frozen=True`` blocks
+    attribute reassignment; note that nested containers (e.g. ``source.options``,
+    gate ``routes``) are NOT deeply frozen here — see the module docstring for the
+    full immutability model (deep immutability is enforced at the DAG NodeInfo
+    layer; deep-freezing Settings would break the deepcopy loading pipeline).
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -1497,6 +1548,27 @@ class ElspethSettings(BaseModel):
         """At least one sink is required."""
         if not v:
             raise ValueError("At least one sink is required")
+        return v
+
+    @field_validator("collection_probes")
+    @classmethod
+    def validate_unique_collection_probes(cls, v: list[CollectionProbeConfig]) -> list[CollectionProbeConfig]:
+        """Reject duplicate probe collections at config time, before any probe I/O.
+
+        Probe results are keyed by collection name in the commencement gate
+        context, so two probes for the same collection collide. The uniqueness
+        guard previously lived in resolve_preflight and only fired AFTER each
+        probe.probe() had already run, raising FrameworkBugError. Enforce it
+        mechanically at config construction. (elspeth-b657daab02)
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for probe in v:
+            if probe.collection in seen and probe.collection not in duplicates:
+                duplicates.append(probe.collection)
+            seen.add(probe.collection)
+        if duplicates:
+            raise ValueError(f"duplicate collection_probes for collection(s): {duplicates}")
         return v
 
     @field_validator("sinks")
@@ -1714,18 +1786,22 @@ def _sanitize_dsn(
                 query_password_value = value if isinstance(value, str) else value[0]
         elif key.lower() == "odbc_connect" and isinstance(value, str):
             import re
-            import urllib.parse
 
-            decoded = urllib.parse.unquote(value)
-            if re.search(r"(?i)(PWD|Password)\s*=", decoded):
+            # SQLAlchemy's URL parser already percent-decodes query values, so `value`
+            # is the plain connection string. Operate on it directly (do NOT unquote
+            # again — that double-decodes any literal '%') and store the scrubbed result
+            # DECODED, so URL.create() below encodes it exactly once. Pre-encoding here
+            # would double-encode the non-secret connection material, making the audit
+            # URL unfaithful (elspeth-f9b8ed91a9).
+            if re.search(r"(?i)(PWD|Password)\s*=", value):
                 query_had_password = True
                 # Extract the password value for fingerprinting
-                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", decoded)
+                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", value)
                 if match and query_password_value is None:
                     query_password_value = match.group(1)
                 # Scrub PWD/Password from the connect string
-                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", decoded)
-                scrubbed_query[key] = urllib.parse.quote(scrubbed_connect, safe="")
+                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", value)
+                scrubbed_query[key] = scrubbed_connect
             else:
                 scrubbed_query[key] = value
         else:

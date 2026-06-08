@@ -74,6 +74,14 @@ per_file_rules:
     emission (must not crash audit trail — same pattern as AuditedHTTPClient._record_and_emit)
   expires: null
   max_hits: 2
+- pattern: plugins/sinks/chroma_sink.py
+  rules:
+  - R4
+  reason: R4 broad except in on_complete() post-audit telemetry emission — best-effort
+    operational visibility after writes+audit; must not fail completion (Tier-1 errors
+    re-raise first). Same pattern as plugins/sinks/dataverse.py. (elspeth-ee69831e4c)
+  expires: null
+  max_hits: 1
 - pattern: plugins/infrastructure/clients/llm.py
   rules:
   - R5

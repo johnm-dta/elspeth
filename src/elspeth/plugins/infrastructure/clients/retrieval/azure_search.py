@@ -274,7 +274,7 @@ class AzureSearchProvider:
         source="Azure AI Search /docs/search JSON response body (the result items and their per-item fields)",
         source_param="response_data",
         suppresses=("R1",),
-        invariant="raises RetrievalError when the top-level 'value' array is absent; per-item missing/invalid fields are coerced to a recorded skip (absence captured in skipped_items), never fabricated",
+        invariant="raises RetrievalError when the top-level 'value' array is absent or not a list; per-item non-dict members and missing/invalid fields are coerced to a recorded skip (absence captured in skipped_items), never fabricated",
         test_ref="tests/unit/plugins/infrastructure/clients/retrieval/test_azure_search.py::TestParseResponse::test_missing_value_key_raises",
         test_fingerprint="af5342f173e6c43afedff0b28a3de9acf5a0fc990f0325f9dc5ff61aaa581d98",
     )
@@ -283,11 +283,28 @@ class AzureSearchProvider:
             raise RetrievalError("Azure AI Search response missing 'value' array", retryable=False)
 
         results = response_data["value"]
+        # Tier 3 boundary: 'value' may be present but not an array (object/string).
+        # Iterating a non-list would reach `item.get(...)` and raise raw
+        # AttributeError — a structural violation of the response, so raise
+        # RetrievalError here, parallel to the missing-'value' case above.
+        if not isinstance(results, list):
+            raise RetrievalError(
+                f"Azure AI Search response 'value' must be an array, got {type(results).__name__}",
+                retryable=False,
+            )
         chunks: list[RetrievalChunk] = []
         # Track items skipped at Tier 3 boundary — "record what we didn't get"
         skipped_items: list[dict[str, Any]] = []
 
         for item in results:
+            # Tier 3 boundary: a non-object array member (string, number, null)
+            # cannot be probed for fields. Record it as a skip rather than
+            # crash the whole page on AttributeError — one garbage member must
+            # not discard the valid results alongside it.
+            if not isinstance(item, dict):
+                skipped_items.append({"reason": "invalid_item_type", "type": type(item).__name__})
+                continue
+
             raw_score = item.get("@search.score")
             if raw_score is None:
                 skipped_items.append({"reason": "missing_score", "id": item.get("id")})

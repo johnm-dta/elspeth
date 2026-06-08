@@ -793,6 +793,31 @@ class TestDataverseSourceConstruction:
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"]["status_code"] == 500
 
+    def test_error_page_call_audit_preserves_request_headers(self) -> None:
+        """elspeth-98855f307a: the page-fetch error audit must include the
+        fingerprinted request_headers the client preserved on the error, mirroring
+        the success path — otherwise replay/verify loses outbound metadata."""
+        source = _make_source(_base_config())
+        ctx = _mock_source_context()
+        err = DataverseClientError(
+            "boom",
+            retryable=False,
+            status_code=500,
+            request_url="https://test.crm.dynamics.com/api/data/v9.2/contacts",
+            request_headers={"Authorization": "<fingerprint:abc>"},
+        )
+
+        source._record_page_call(
+            ctx,
+            url="https://test.crm.dynamics.com/api/data/v9.2/contacts",
+            error=err,
+            error_reason="protocol error",
+        )
+
+        ctx.record_call.assert_called_once()
+        req = ctx.record_call.call_args.kwargs["request_data"]
+        assert req["headers"] == {"Authorization": "<fingerprint:abc>"}
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Build query URL tests
@@ -1794,3 +1819,25 @@ class TestUnmappedFieldsRebuildResolution:
         mapping, _ = resolution
         # Only the original fields should be in the mapping
         assert set(mapping.keys()) == {"contactid", "fullname"}
+
+
+class TestDataverseSparseFieldMapping:
+    """elspeth-594221617d: sparse Dataverse rows + field_mapping order-independence."""
+
+    def test_sparse_field_mapping_is_order_independent(self) -> None:
+        """An optional mapped attribute appearing only in a later row must neither
+        quarantine the sparse first row nor mis-map the later-only key. Order-
+        independence pins both the quarantine and the else-branch mis-mapping."""
+        # Sparse row first; mapped 'Customer Name' appears only in the later row.
+        src = _make_source(_base_config(field_mapping={"customer_name": "client_name"}))
+        r1 = src._normalize_row_fields({"contactid": "1"}, is_first_row=True)
+        r2 = src._normalize_row_fields({"contactid": "2", "Customer Name": "Alice"}, is_first_row=False)
+        assert r1 == {"contactid": "1"}
+        assert r2 == {"contactid": "2", "client_name": "Alice"}
+
+        # Reversed order must produce identical normalized output.
+        src2 = _make_source(_base_config(field_mapping={"customer_name": "client_name"}))
+        r1b = src2._normalize_row_fields({"contactid": "2", "Customer Name": "Alice"}, is_first_row=True)
+        r2b = src2._normalize_row_fields({"contactid": "1"}, is_first_row=False)
+        assert r1b == {"contactid": "2", "client_name": "Alice"}
+        assert r2b == {"contactid": "1"}

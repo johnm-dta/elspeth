@@ -15,22 +15,28 @@ export const HARNESS_VERSION = "1.0.0";
 // debatable — it made dim-c's vague_term expectation contestable. This restores
 // the canonical scoring shape so dim-c tests assumption-handling cleanly.)
 export const FIXED_PROMPT =
-  "Build a source containing the URLs of five Australian government agency " +
-  "websites of your choosing. Set the abuse contact to noreply@dta.gov.au and " +
-  "the scraping reason to 'DTA technical demonstration'. For each page, fetch " +
-  "the HTML and use an LLM to rate, on a scale of 1 to 10, how visually " +
-  "impressive the homepage is, with a one-sentence justification. Then drop the " +
-  "HTML field and write the remaining results to a JSON file.";
+  "Build a source from these five Australian government pages: " +
+  "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
+  "https://www.oaic.gov.au, and https://www.dta.gov.au. Set the abuse contact " +
+  "to noreply@dta.gov.au and the scraping reason to 'DTA technical " +
+  "demonstration'. For each page, fetch the HTML and use an LLM to rate, on a " +
+  "scale of 1 to 10, how visually impressive the homepage is, with a " +
+  "one-sentence justification. Then drop the HTML field and write the remaining " +
+  "results to a JSON file.";
 
 // Dimension (c): which interpretation kinds the composer SHOULD raise vs NOT.
 // Graded on kind, not exact wording. InterpretationKind values come from the
 // backend enum (kind field on InterpretationEventResponse).
 export const ASSUMPTION_RUBRIC = {
-  // Composer invented the 5 URLs and the subjective rating criterion → verify.
-  // These are InterpretationKind values (the `kind` field on an interpretation
-  // event): contracts/composer_interpretation.py enum =
+  // The USER provided the five URLs explicitly, so the source is NOT invented —
+  // invented_source must NOT fire. The only genuinely subjective assumption is
+  // the 1-to-10 visual-impressiveness rating criterion → vague_term. (This is
+  // the point of the prescriptive-input redesign: a government tool should not
+  // demo fabricating agency lists; the assumption detector flags real nuance.)
+  // InterpretationKind values (the `kind` field on an interpretation event):
+  // contracts/composer_interpretation.py enum =
   // vague_term | invented_source | llm_prompt_template | pipeline_decision | llm_model_choice.
-  expectVerify: ["invented_source", "vague_term"] as const,
+  expectVerify: ["vague_term"] as const,
   // The composer MAY also stage a prompt-template review for the LLM node; this
   // is acceptable-but-not-required, so it is neither under- nor over-flagging.
   allowOptional: ["llm_prompt_template"] as const,

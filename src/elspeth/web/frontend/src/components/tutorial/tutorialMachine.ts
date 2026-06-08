@@ -1,11 +1,12 @@
 import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
 
 export const CANONICAL_TUTORIAL_PROMPT =
-  "Create a data source with URLs for five public government agency web pages " +
-  "that you choose. Use abuse contact noreply@dta.gov.au and " +
-  "scraping reason 'DTA technical demonstration'. Read the HTML for each " +
-  "page, have an LLM identify the primary colours for each government agency. " +
-  "Remove the HTML and save the rest to a json file.";
+  "Create a data source from these five Australian government pages: " +
+  "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
+  "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
+  "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
+  "Read the HTML for each page, have an LLM identify the primary colours for " +
+  "each government agency. Remove the HTML and save the rest to a json file.";
 
 export type TutorialStep =
   | "welcome"

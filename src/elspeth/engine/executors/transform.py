@@ -1,6 +1,5 @@
 """TransformExecutor - wraps transform.process() with audit recording."""
 
-import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +41,7 @@ from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import (
     run_post_emission_checks,
@@ -139,7 +139,7 @@ class TransformExecutor:
             summary = f"PassThroughContractViolation:{transform.name}:{sorted(violation.divergence_set)}"
         else:
             summary = f"{type(violation).__name__}:{transform.name}"
-        error_hash = hashlib.sha256(summary.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(summary)
         audit_context = violation.to_audit_dict()
 
         try:

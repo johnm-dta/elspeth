@@ -1036,7 +1036,11 @@ class TestComposerMultiTurnToolCalls:
         # Turn 3: text
         turn3 = _make_llm_response(content="Pipeline configured.")
 
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
             mock_llm.side_effect = [turn1, turn2, turn3]
             result = await service.compose("Build a pipeline", [], state)
 
@@ -2119,7 +2123,11 @@ class TestComposerMultipleToolCallsPerTurn:
         # Turn 2: text
         text = _make_llm_response(content="Done.")
 
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
             mock_llm.side_effect = [multi_call, text]
             result = await service.compose("Setup", [], state)
 
@@ -2193,7 +2201,11 @@ class TestDiscoveryCache:
         )
         text = _make_llm_response(content="Done.")
 
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
             mock_llm.side_effect = [disc1, mutate, disc2, text]
             result = await service.compose("Build", [], state)
 

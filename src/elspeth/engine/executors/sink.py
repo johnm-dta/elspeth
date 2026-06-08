@@ -1,6 +1,5 @@
 """SinkExecutor - wraps sink.write() with artifact recording."""
 
-import hashlib
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -42,6 +41,7 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
 from elspeth.engine.spans import SpanFactory
 
@@ -298,7 +298,7 @@ class SinkExecutor:
         base_context = dict(violation.to_audit_dict())
         failing_token_id = base_context["token_id"] if "token_id" in base_context else None
         failing_row_id = base_context["row_id"] if "row_id" in base_context else None
-        error_hash = hashlib.sha256(f"{type(violation).__name__}:{sink_name}:{phase}".encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(f"{type(violation).__name__}:{sink_name}:{phase}")
 
         for token in tokens:
             context = dict(base_context)
@@ -991,7 +991,7 @@ class SinkExecutor:
                 # Record DIVERTED outcomes
                 for token, idx, _primary_state in primary_divert_states:
                     diversion = diversion_by_index[idx]
-                    error_hash = hashlib.sha256(diversion.reason.encode()).hexdigest()[:16]
+                    error_hash = compute_error_hash(diversion.reason)
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
                         outcome=TerminalOutcome.TRANSIENT,
@@ -1041,7 +1041,7 @@ class SinkExecutor:
                         error=discard_error,
                     )
 
-                    error_hash = hashlib.sha256(diversion.reason.encode()).hexdigest()[:16]
+                    error_hash = compute_error_hash(diversion.reason)
                     # ADR-019: discard-mode diversions are predicate-input
                     # failures, not transient failsink bookkeeping.
                     self._data_flow.record_token_outcome(

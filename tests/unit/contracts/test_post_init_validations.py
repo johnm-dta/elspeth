@@ -6,7 +6,13 @@ and RoutingAction reason copy.
 
 import pytest
 
-from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
+from elspeth.contracts.config.runtime import (
+    ExporterConfig,
+    RuntimeCheckpointConfig,
+    RuntimeRateLimitConfig,
+    RuntimeServiceRateLimit,
+    RuntimeTelemetryConfig,
+)
 from elspeth.contracts.enums import BackpressureMode, RoutingKind, RoutingMode, TelemetryGranularity
 from elspeth.contracts.errors import ConfigGateReason
 from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
@@ -40,6 +46,115 @@ class TestRuntimeTelemetryConfigPostInit:
     def test_default_factory_passes_validation(self) -> None:
         config = RuntimeTelemetryConfig.default()
         assert config.max_consecutive_failures == 10
+
+    # elspeth-665fd96f28: bool/enum fields must be validated on direct construction.
+    def _telemetry_kwargs(self, **overrides: object) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "enabled": True,
+            "granularity": TelemetryGranularity.LIFECYCLE,
+            "backpressure_mode": BackpressureMode.BLOCK,
+            "fail_on_total_exporter_failure": True,
+            "max_consecutive_failures": 10,
+            "exporter_configs": (),
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_rejects_non_bool_enabled(self) -> None:
+        with pytest.raises(TypeError, match="enabled must be bool"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(enabled=1))  # type: ignore[arg-type]
+
+    def test_rejects_non_bool_fail_on_total(self) -> None:
+        with pytest.raises(TypeError, match="fail_on_total_exporter_failure must be bool"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(fail_on_total_exporter_failure="yes"))  # type: ignore[arg-type]
+
+    def test_rejects_non_enum_granularity(self) -> None:
+        with pytest.raises(TypeError, match="granularity must be TelemetryGranularity"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(granularity="lifecycle"))  # type: ignore[arg-type]
+
+    def test_rejects_non_enum_backpressure_mode(self) -> None:
+        with pytest.raises(TypeError, match="backpressure_mode must be BackpressureMode"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(backpressure_mode="block"))  # type: ignore[arg-type]
+
+    def test_rejects_non_exporter_config_entry(self) -> None:
+        """A raw dict in exporter_configs satisfies the tuple type but fails later in
+        the telemetry factory (exporter_config.name -> AttributeError). Reject at the
+        contract boundary, mirroring the RuntimeRateLimitConfig.services guard."""
+        with pytest.raises(TypeError, match=r"exporter_configs\[0\] must be ExporterConfig"):
+            RuntimeTelemetryConfig(**self._telemetry_kwargs(exporter_configs=({"name": "console"},)))  # type: ignore[arg-type]
+
+    def test_valid_exporter_config_entry_succeeds(self) -> None:
+        cfg = RuntimeTelemetryConfig(**self._telemetry_kwargs(exporter_configs=(ExporterConfig(name="console", options={}),)))
+        assert cfg.exporter_configs[0].name == "console"
+
+
+class TestRuntimeCheckpointConfigPostInit:
+    """elspeth-665fd96f28: bool fields validated on direct construction."""
+
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "enabled": True,
+            "frequency": 1,
+            "checkpoint_interval": None,
+            "aggregation_boundaries": True,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_rejects_non_bool_enabled(self) -> None:
+        with pytest.raises(TypeError, match="enabled must be bool"):
+            RuntimeCheckpointConfig(**self._kwargs(enabled=1))  # type: ignore[arg-type]
+
+    def test_rejects_non_bool_aggregation_boundaries(self) -> None:
+        with pytest.raises(TypeError, match="aggregation_boundaries must be bool"):
+            RuntimeCheckpointConfig(**self._kwargs(aggregation_boundaries="yes"))  # type: ignore[arg-type]
+
+    def test_valid_construction_succeeds(self) -> None:
+        cfg = RuntimeCheckpointConfig(**self._kwargs())
+        assert cfg.enabled is True
+
+
+class TestRuntimeRateLimitConfigPostInit:
+    """elspeth-665fd96f28: enabled bool + services value types validated."""
+
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "enabled": True,
+            "default_requests_per_minute": 60,
+            "persistence_path": None,
+            "services": {},
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_rejects_non_bool_enabled(self) -> None:
+        with pytest.raises(TypeError, match="enabled must be bool"):
+            RuntimeRateLimitConfig(**self._kwargs(enabled=0))  # type: ignore[arg-type]
+
+    def test_rejects_non_runtime_service_value(self) -> None:
+        with pytest.raises(TypeError, match=r"services.*must be RuntimeServiceRateLimit"):
+            RuntimeRateLimitConfig(**self._kwargs(services={"openai": {"requests_per_minute": 60}}))  # type: ignore[arg-type]
+
+    def test_valid_construction_succeeds(self) -> None:
+        cfg = RuntimeRateLimitConfig(**self._kwargs(services={"openai": RuntimeServiceRateLimit(requests_per_minute=60)}))
+        assert cfg.enabled is True
+        assert cfg.get_service_config("openai").requests_per_minute == 60
+
+
+class TestExporterConfigPostInit:
+    """elspeth-665fd96f28: exporter name must be a str, not merely truthy."""
+
+    def test_rejects_non_str_name(self) -> None:
+        with pytest.raises(TypeError, match="exporter name must be str"):
+            ExporterConfig(name=123, options={})  # type: ignore[arg-type]
+
+    def test_rejects_empty_name(self) -> None:
+        with pytest.raises(ValueError, match="exporter name cannot be empty"):
+            ExporterConfig(name="", options={})
+
+    def test_valid_construction_succeeds(self) -> None:
+        cfg = ExporterConfig(name="console", options={})
+        assert cfg.name == "console"
 
 
 class TestOutputValidationResultPostInit:

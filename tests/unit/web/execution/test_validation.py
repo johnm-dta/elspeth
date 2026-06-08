@@ -504,6 +504,49 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         assert result.readiness.blockers[0].component_type == "source"
         mock_yaml_gen.generate_yaml.assert_not_called()
 
+    def test_resolved_invented_source_drift_returns_source_readiness(self) -> None:
+        """elspeth-5a94855935: a RESOLVED invented_source whose
+        accepted_artifact_hash drifted from the current source content_hash is a
+        readiness blocker, NOT an uncaught ValueError that escapes
+        validate_pipeline as an HTTP 500."""
+        state = _make_state(
+            source_options={
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "b" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            }
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code == "interpretation_review_pending"
+        assert result.errors[0].component_id == "source"
+        assert result.errors[0].component_type == "source"
+        assert "invented_source" in result.errors[0].message
+        assert result.readiness.blockers[0].code == "interpretation_review_pending"
+        assert result.readiness.blockers[0].component_id == "source"
+        assert result.readiness.blockers[0].component_type == "source"
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
     def test_legacy_pending_interpretation_placeholder_returns_typed_readiness_by_default(self) -> None:
         state = _make_state(
             nodes=(

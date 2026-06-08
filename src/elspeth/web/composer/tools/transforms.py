@@ -23,6 +23,7 @@ from elspeth.web.composer.state import (
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
+    _validate_gate_route_parity,
 )
 from elspeth.web.composer.tools._common import (
     ToolContext,
@@ -456,6 +457,9 @@ def _execute_upsert_node(
         expr_error = _validate_gate_expression(condition)
         if expr_error is not None:
             return _failure_result(state, f"Node '{node_id}': {expr_error}")
+        parity_error = _validate_gate_route_parity(condition, validated.routes)
+        if parity_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {parity_error}")
     if node_type == "aggregation":
         trigger_error = _validate_aggregation_trigger(validated.trigger)
         if trigger_error is not None:

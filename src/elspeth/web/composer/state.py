@@ -739,6 +739,54 @@ def _validate_gate_expression(condition: str) -> str | None:
     return None
 
 
+def _validate_gate_route_parity(condition: str, routes: Mapping[str, str] | None) -> str | None:
+    """Validate gate route labels match the condition's static return type.
+
+    Composition-time mirror of the runtime contract
+    ``GateSettings.validate_boolean_routes`` (core/config.py): a boolean-typed
+    condition (comparison, and/or/not, literal ``True``/``False``) must use route
+    labels exactly ``{"true", "false"}``, and a provably-numeric condition can
+    never produce a route label. Without this, ``CompositionState.validate()``
+    would green-light a pipeline that runtime ``GateSettings`` construction later
+    rejects.
+
+    This is a deliberate second copy of the runtime predicate built on the same
+    shared ``ExpressionParser`` substrate that ``_validate_gate_expression``
+    already uses (durable unification is deferred to follow-up
+    elspeth-f584eb820c). It must mirror ``validate_boolean_routes`` faithfully:
+    same predicates, same ``boolean … elif non_routable`` precedence.
+
+    Returns an error message when the route labels are inconsistent with the
+    condition, or None when consistent (notably for string-returning conditions,
+    which are routable by any label). The caller must only invoke this after the
+    syntax/security check passed, so ``ExpressionParser(condition)`` does not
+    re-raise here.
+    """
+    from elspeth.core.expression_parser import ExpressionParser
+
+    parser = ExpressionParser(condition)
+    if parser.is_boolean_expression():
+        route_labels = set(routes or {})
+        expected_labels = {"true", "false"}
+        if route_labels != expected_labels:
+            missing = expected_labels - route_labels
+            extra = route_labels - expected_labels
+            msg_parts = [f"Gate has a boolean condition ({condition!r}) but route labels don't match."]
+            if extra:
+                msg_parts.append(f"Found labels {sorted(extra)!r} but boolean expressions evaluate to True/False, not these values.")
+            if missing:
+                msg_parts.append(f"Missing required labels: {sorted(missing)!r}.")
+            msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
+            return " ".join(msg_parts)
+    elif parser.is_provably_non_routable():
+        return (
+            f"Gate condition ({condition!r}) statically returns a numeric value, "
+            f"which can never be a route label. Gate conditions must evaluate to a boolean "
+            f'(routes "true"/"false") or to a string route label.'
+        )
+    return None
+
+
 # RFC 2606 / RFC 6761 reserved/special-use domain labels. Emails at these
 # domains are not deliverable to anyone; values at these domains in
 # `web_scrape.http.abuse_contact` are fabrications that ship as HTTP headers
@@ -1480,18 +1528,79 @@ def _check_schema_contracts(
         except ValueError as exc:
             return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
 
+    def _consumer_effective_required_set(node: NodeSpec) -> frozenset[str]:
+        """Return the consumer's EFFECTIVE required-input fields.
+
+        Unlike ``get_raw_node_required_fields`` (explicit ``required_fields``
+        only — what runtime Phase-1 name-requirement checking consumes), this
+        folds in a fixed/flexible schema's *implicitly* required declared
+        fields via ``SchemaConfig.get_effective_required_fields``. Runtime
+        marks those declared fields as required on the generated input Pydantic
+        model, so Phase-2 type validation rejects a typed producer that does
+        not guarantee one. This helper mirrors that, honouring the aggregation
+        contract-options alias the rest of the contract pipeline uses.
+        """
+        contract_options = node.options
+        contract_owner = f"node:{node.id}"
+        if node.node_type == "aggregation":
+            contract_options, contract_owner = get_aggregation_contract_options(node.options, owner=contract_owner)
+        schema_config = get_raw_schema_config(contract_options, owner=contract_owner)
+        if schema_config is None:
+            return frozenset()
+        return schema_config.get_effective_required_fields()
+
+    def _parse_consumer_effective_required(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _consumer_effective_required_set(node), None
+        except ValueError as exc:
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _producer_is_typed_source(producer: ProducerEntry) -> bool:
+        """Return whether the producer presents a TYPED (non-observed) schema.
+
+        Mirrors the runtime Phase-2 bypass (``graph.py:1392-1403``): type
+        validation fires only when the effective producer schema is a typed
+        Pydantic model. A fixed/flexible *source* carries such a typed model;
+        observed sources (including text-source auto-guarantee) and
+        transform/gate/coalesce producers resolve to a dynamic (None) effective
+        producer schema at runtime and are therefore skipped here. Gating on
+        producer MODE — not guarantee-emptiness — avoids false rejection of the
+        observed-source-with-auto-guaranteed-column case the runtime accepts.
+        """
+        if producer.producer_id != "source":
+            # transform/aggregation/gate/coalesce producers => dynamic effective
+            # producer schema at runtime; the consumer's implicit requirement is
+            # not statically enforced against them.
+            return False
+        schema_config = get_raw_schema_config(producer.options, owner=_producer_owner(producer))
+        return schema_config is not None and not schema_config.is_observed
+
     for node in nodes:
         consumer_required, consumer_required_error = _parse_node_required_fields(node)
         if consumer_required_error is not None:
             errors.append(consumer_required_error)
             continue
+        assert consumer_required is not None  # No error => resolved.
 
         consumer_locked_input, consumer_locked_error = _parse_consumer_locked_input(node)
         if consumer_locked_error is not None:
             errors.append(consumer_locked_error)
             continue
 
-        if not consumer_required and consumer_locked_input is None:
+        consumer_effective_required, consumer_effective_error = _parse_consumer_effective_required(node)
+        if consumer_effective_error is not None:
+            errors.append(consumer_effective_error)
+            continue
+        assert consumer_effective_required is not None  # No error => resolved.
+
+        # ``consumer_effective_required`` folds in a fixed/flexible consumer's
+        # *implicitly* required declared fields (which the explicit-only
+        # ``consumer_required`` misses), so a flexible consumer — whose input is
+        # NOT locked (``consumer_locked_input is None``) and whose explicit
+        # ``required_fields`` is empty — still reaches producer resolution.
+        if not consumer_required and consumer_locked_input is None and not consumer_effective_required:
             continue
 
         actual_producer = _walk_to_real_producer(
@@ -1528,6 +1637,29 @@ def _check_schema_contracts(
                         f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
                         f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
                         f"Missing fields: [{_format_fields(missing_fields)}].",
+                        "high",
+                    )
+                )
+
+        # Implicit-required parity: a fixed/flexible consumer schema implicitly
+        # requires its declared (non-optional) fields. Runtime Phase-2 type
+        # validation rejects a TYPED producer that does not guarantee one of
+        # them; authoring's explicit-only ``consumer_required`` above misses
+        # this. Mirror runtime by checking the consumer's *effective* required
+        # set, but only against a typed (non-observed) producer — exactly the
+        # producers runtime does NOT bypass (graph.py:1392-1403). Report only
+        # the increment beyond the explicit set already handled above, so a
+        # field is never double-reported.
+        if _producer_is_typed_source(actual_producer):
+            implicit_missing = consumer_effective_required - consumer_required - producer_guaranteed
+            if implicit_missing:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_effective_required)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                        f"Missing fields: [{_format_fields(implicit_missing)}].",
                         "high",
                     )
                 )
@@ -2058,6 +2190,13 @@ class CompositionState:
                     expr_error = _validate_gate_expression(node.condition)
                     if expr_error is not None:
                         errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {expr_error}", "high"))
+                    elif node.routes is not None:
+                        # Route-label / condition-return-type parity — mirror of
+                        # GateSettings.validate_boolean_routes so the composer does
+                        # not green-light a pipeline runtime config later rejects.
+                        parity_error = _validate_gate_route_parity(node.condition, node.routes)
+                        if parity_error is not None:
+                            errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {parity_error}", "high"))
                 if node.routes is None:
                     errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high"))
             elif node.node_type == "transform":

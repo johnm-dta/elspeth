@@ -297,6 +297,40 @@ class TestCsvInspection:
         f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
         assert any("binary_or_non_utf8_content" in w for w in f.warnings), f.warnings
 
+    def test_utf16le_bom_csv_decodes_and_warns_encoding(self) -> None:
+        """A UTF-16 LE BOM CSV is accepted as text/csv by the upload sniffer
+        (sniff._BOM_CODECS), so inspection must decode it with the matching
+        codec — not the BOM-blind UTF-8 path that corrupts the headers into
+        ``\\ufffd\\ufffdn\\x00a\\x00...`` garbage. It must ALSO warn that the
+        csv source plugin defaults to encoding=utf-8 and will not bind these
+        bytes, so the readable headers don't certify a run that fails."""
+        content = b"\xff\xfe" + "name,age,city\nAlice,30,London\n".encode("utf-16-le")
+        f = inspect_blob_content(content=content, filename="data.csv", mime_type="text/csv")
+        # Headers are readable, not BOM-corrupted garbage.
+        assert f.observed_headers == ("name", "age", "city"), f.observed_headers
+        # An encoding warning names the detected BOM encoding.
+        assert any("utf-16-le" in w and ("encoding" in w or "bom" in w.lower()) for w in f.warnings), f.warnings
+
+    def test_utf8_bom_csv_strips_bom_and_warns(self) -> None:
+        """A UTF-8 BOM CSV must have its BOM stripped from the first header
+        (not retained as ``\\ufeffname``) and must warn that the default
+        utf-8 csv source retains the U+FEFF prefix unless encoding=utf-8-sig."""
+        content = b"\xef\xbb\xbf" + b"name,age,city\nAlice,30,London\n"
+        f = inspect_blob_content(content=content, filename="data.csv", mime_type="text/csv")
+        assert f.observed_headers is not None
+        assert f.observed_headers[0] == "name", f.observed_headers
+        assert any(("encoding" in w or "bom" in w.lower()) for w in f.warnings), f.warnings
+
+    def test_utf32le_bom_csv_decodes_and_warns_encoding(self) -> None:
+        """UTF-32 LE BOM (``\\xff\\xfe\\x00\\x00``) shares its first two bytes
+        with the UTF-16 LE BOM (``\\xff\\xfe``); the 4-byte marker MUST be
+        matched first or the bytes misdecode as UTF-16 garbage. This locks the
+        longest-BOM-first ordering of the decode table."""
+        content = b"\xff\xfe\x00\x00" + "name,age,city\nAlice,30,London\n".encode("utf-32-le")
+        f = inspect_blob_content(content=content, filename="data.csv", mime_type="text/csv")
+        assert f.observed_headers == ("name", "age", "city"), f.observed_headers
+        assert any("utf-32-le" in w and ("encoding" in w or "bom" in w.lower()) for w in f.warnings), f.warnings
+
 
 # --------------------------------------------------------------------------
 # JSON / JSONL inspection

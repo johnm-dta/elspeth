@@ -70,7 +70,20 @@ export default defineConfig({
   // `**/*.test.ts` are vitest unit tests (e.g. harness/classify.test.ts) which
   // import `vitest` — that collides with Playwright's expect. Playwright owns
   // `*.spec.ts`; vitest owns `*.test.ts`.
-  testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**", "**/*.test.ts"],
+  //
+  // `**/*.staging.spec.ts` target a LIVE staging deployment with operator auth
+  // (tests/e2e/.auth/staging-user.json) and have no local webServer. The CI
+  // e2e lane boots an ephemeral local backend+frontend and has no staging
+  // artifact, so collecting them here fails with ENOENT on staging-user.json.
+  // They run only via `npm run test:e2e:staging`
+  // (playwright.staging.config.ts), never in the default/CI run.
+  testIgnore: [
+    "**/setup/**",
+    "**/page-objects/**",
+    "**/helpers/**",
+    "**/*.test.ts",
+    "**/*.staging.spec.ts",
+  ],
   // The suite uses one authenticated account and verifies account-scoped
   // composer preferences. Running specs in parallel lets tests race through the
   // same preference row and makes first-session mode assertions nondeterministic.

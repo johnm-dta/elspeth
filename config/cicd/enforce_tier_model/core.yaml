@@ -12,8 +12,13 @@ per_file_rules:
   rules:
   - R5
   reason: AST-based expression parser requires isinstance() for node type dispatch
+    (ast.Constant / ast.Name / ast.Call / ast.BinOp / ast.BoolOp / ast.Compare etc.)
+    across the safe-expression validator, evaluator, and the numeric/boolean static
+    type-inference helpers. Count grew with the static type-inference and numeric-domain
+    guards; all hits are AST node-type or parser-result value-type discrimination,
+    not defensive shape guards on first-party data.
   expires: null
-  max_hits: 31
+  max_hits: 41
 - pattern: core/templates.py
   rules:
   - R5

@@ -29,12 +29,16 @@ per_file_rules:
   reason: TransformProtocol dispatch on config.transforms
   expires: null
   max_hits: 1
-- pattern: engine/orchestrator/core.py
+- pattern: engine/orchestrator/run_core.py
   rules:
   - R5
-  reason: Protocol dispatch for batch-aware transforms and re-raise guards
+  reason: 'TransformProtocol dispatch for batch-aware aggregation lookup: isinstance(t,
+    TransformProtocol) on first-party @runtime_checkable plugin contract values from
+    config.transforms (run_core.py:491). Repointed from engine/orchestrator/core.py
+    after the orchestrator decomposition moved RunCore.build_run_context here; core.py
+    now carries zero R5 hits.'
   expires: null
-  max_hits: 2
+  max_hits: 1
 - pattern: engine/processor.py
   rules:
   - R5

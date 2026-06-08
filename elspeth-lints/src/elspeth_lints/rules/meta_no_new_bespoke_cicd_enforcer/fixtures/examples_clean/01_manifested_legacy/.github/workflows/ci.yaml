@@ -1,0 +1,4 @@
+jobs:
+  lint:
+    steps:
+      - run: python scripts/cicd/enforce_existing.py

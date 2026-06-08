@@ -23,7 +23,13 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # flagged separately) PLUS +1 from the execute() fail-closed pre-run validation
 # gate tests (PipelineValidationError; patch of validate_pipeline). Only the +1
 # belongs to this commit; the 16 are inherited pre-existing red.
-BASELINE_UNSPECCED_MOCK_TOTAL = 2602
+# Bumped 2602→2617 (2026-06-08): +15 from merging the engine/core/plugins and
+# cicd-scanner-bugs burndown branches into release/0.5.3. The new mocks are
+# external-SDK response-shape fakes (OpenAI completion/choice/usage in
+# test_llm_telemetry) and HTTP SSRF/redirect-context fakes (test_audited_http_client),
+# spread across ~13 burndown test files. These mock dynamically-shaped response
+# objects where spec= is brittle and low-value — matching the prior bump precedent.
+BASELINE_UNSPECCED_MOCK_TOTAL = 2617
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

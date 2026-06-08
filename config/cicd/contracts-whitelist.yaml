@@ -779,6 +779,16 @@ allowed_dict_patterns:
   # message shape ({role, content, ...}) which is inherently dynamic.
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_proof_repair:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_empty_state_uploaded_blob_repair:llm_messages (list)"
+  # Deterministic advisor checkpoints (elspeth-dac6602a2b): the early/preflight
+  # advisory passes append their guidance to the SAME OpenAI chat-completion
+  # ``llm_messages`` list ({role, content, ...}) shared across the compose loop,
+  # the same shape exemption the proof-repair entries above already carry.
+  # ``_build_checkpoint_arguments`` returns the checkpoint tool-call argument dict
+  # (heterogeneous {phase, state-derived scalars}), not reducible to a TypedDict —
+  # same rationale as ``_build_session_aware_kwargs:return`` below.
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_preflight_repair:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._maybe_run_early_checkpoint:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_checkpoint_arguments:return"
   # Phase 5b Task 5 follow-on: session-aware async tool dispatch. The
   # ``arguments`` dict is Tier-3 LLM-supplied JSON; the per-handler
   # Pydantic boundary inside the tool surface validates the shape. The

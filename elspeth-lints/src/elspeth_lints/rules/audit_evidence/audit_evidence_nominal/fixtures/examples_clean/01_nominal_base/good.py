@@ -1,5 +1,4 @@
-class AuditEvidenceBase:
-    pass
+from elspeth.contracts.audit_evidence import AuditEvidenceBase
 
 
 class Ok(AuditEvidenceBase, RuntimeError):

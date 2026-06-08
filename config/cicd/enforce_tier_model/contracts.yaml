@@ -64,9 +64,13 @@ per_file_rules:
 - pattern: contracts/config/runtime.py
   rules:
   - R5
-  reason: Pydantic config field type validation (Tier 3 YAML boundary)
+  reason: 'Pydantic config field type validation (Tier 3 YAML boundary): int/float/str
+    coerce-discrimination for numeric/string config fields, plus __post_init__ first-party
+    type guards (RuntimeServiceRateLimit / TelemetryGranularity / BackpressureMode
+    / ExporterConfig / str name). All hits are coerce-at-boundary or offensive type
+    guards, not defensive shape reads.'
   expires: null
-  max_hits: 9
+  max_hits: 11
 - pattern: contracts/events.py
   rules:
   - R5
@@ -76,9 +80,12 @@ per_file_rules:
 - pattern: contracts/freeze.py
   rules:
   - R5
-  reason: Recursive container type dispatch for deep_freeze/deep_thaw/require_int
+  reason: Recursive container type dispatch for deep_freeze (dict/list/MappingProxyType/tuple/set/frozenset/Mapping)
+    and deep_thaw (MappingProxyType/tuple/frozenset/dict/list), plus require_int bool-vs-int
+    offensive guards. All hits are structural container-type discrimination for the
+    freeze/thaw recursion or Tier-1 int-type guards, not defensive shape reads.
   expires: null
-  max_hits: 14
+  max_hits: 15
 - pattern: contracts/hashing.py
   rules:
   - R5

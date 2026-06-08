@@ -10,12 +10,17 @@ from pathlib import Path
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.composer.catch_order.metadata import LEGACY_RULE_ID, RULE_ID, RULE_METADATA, SUGGESTION
 
+# The composer crash subclasses all descend from ComposerServiceError, which
+# descends from Exception/BaseException — so a bare ``except Exception:`` (or
+# ``BaseException``) before the narrow handler shadows it just as the named
+# supertype does (elspeth-eb90341cdb).
+_BROAD_SUPERTYPES: frozenset[str] = frozenset({"Exception", "BaseException"})
 _SUBCLASS_TO_SUPERCLASSES: dict[str, frozenset[str]] = {
-    "ComposerPluginCrashError": frozenset({"ComposerServiceError"}),
-    "ComposerConvergenceError": frozenset({"ComposerServiceError"}),
-    "ComposerRuntimePreflightError": frozenset({"ComposerServiceError"}),
-    "_BadRequestLLMError": frozenset({"ComposerServiceError"}),
-    "_MalformedLLMResponseError": frozenset({"ComposerServiceError"}),
+    "ComposerPluginCrashError": frozenset({"ComposerServiceError"}) | _BROAD_SUPERTYPES,
+    "ComposerConvergenceError": frozenset({"ComposerServiceError"}) | _BROAD_SUPERTYPES,
+    "ComposerRuntimePreflightError": frozenset({"ComposerServiceError"}) | _BROAD_SUPERTYPES,
+    "_BadRequestLLMError": frozenset({"ComposerServiceError"}) | _BROAD_SUPERTYPES,
+    "_MalformedLLMResponseError": frozenset({"ComposerServiceError"}) | _BROAD_SUPERTYPES,
 }
 
 
@@ -34,15 +39,47 @@ class ComposerCatchOrderRule:
 
 def find_catch_order_findings(tree: ast.AST, file_path: str) -> list[Finding]:
     """Return CCO1 findings for one parsed file."""
+    aliases = _build_exception_aliases(tree)
     findings: list[Finding] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Try):
-            findings.extend(_scan_try(node, file_path))
+            findings.extend(_scan_try(node, file_path, aliases))
     return findings
 
 
-def _scan_try(try_node: ast.Try, file_path: str) -> list[Finding]:
-    handlers = [(handler, _handler_class_names(handler)) for handler in try_node.handlers]
+def _build_exception_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map local/import aliases of exception names back to the original name.
+
+    Covers ``from mod import ComposerServiceError as CSE`` and module-level
+    ``CSE = ComposerServiceError`` rebinds, so an aliased ``except CSE:`` resolves
+    to the real supertype (elspeth-c0c4f49981).
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Name)
+        ):
+            aliases[node.targets[0].id] = node.value.id
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _resolve_alias(name: str, aliases: dict[str, str]) -> str:
+    seen: set[str] = set()
+    while name in aliases and name not in seen:
+        seen.add(name)
+        name = aliases[name]
+    return name
+
+
+def _scan_try(try_node: ast.Try, file_path: str, aliases: dict[str, str]) -> list[Finding]:
+    handlers = [(handler, _handler_class_names(handler, aliases)) for handler in try_node.handlers]
     findings: list[Finding] = []
     for index, (handler_i, names_i) in enumerate(handlers):
         for handler_j, names_j in handlers[index + 1 :]:
@@ -60,7 +97,7 @@ def _scan_try(try_node: ast.Try, file_path: str) -> list[Finding]:
     return findings
 
 
-def _handler_class_names(handler: ast.ExceptHandler) -> list[str]:
+def _handler_class_names(handler: ast.ExceptHandler, aliases: dict[str, str]) -> list[str]:
     if handler.type is None:
         return []
     nodes: list[ast.expr]
@@ -70,10 +107,19 @@ def _handler_class_names(handler: ast.ExceptHandler) -> list[str]:
         nodes = [handler.type]
     names: list[str] = []
     for node in nodes:
+        name: str | None = None
         if isinstance(node, ast.Name):
-            names.append(node.id)
+            name = node.id
         elif isinstance(node, ast.Attribute):
-            names.append(node.attr)
+            name = node.attr
+        if name is None:
+            continue
+        # Emit BOTH the literal name and the alias-resolved name (when they
+        # differ) so an aliased handler matches without losing any literal match.
+        names.append(name)
+        resolved = _resolve_alias(name, aliases)
+        if resolved != name:
+            names.append(resolved)
     return names
 
 

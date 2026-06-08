@@ -23,6 +23,6 @@ RULE_METADATA = RuleMetadata(
     cwe=("CWE-693",),
     scope=RuleScope.WHOLE_REPO,
     path_filter=r"^src/elspeth/.*\.py$|^contracts/.*\.py$",
-    examples_violation_count=1,
-    examples_clean_count=1,
+    examples_violation_count=4,
+    examples_clean_count=2,
 )

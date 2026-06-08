@@ -14,6 +14,6 @@ RULE_METADATA = RuleMetadata(
     cwe=("CWE-471",),
     scope=RuleScope.WHOLE_REPO,
     path_filter=r".*\.py$",
-    examples_violation_count=3,
+    examples_violation_count=5,
     examples_clean_count=3,
 )

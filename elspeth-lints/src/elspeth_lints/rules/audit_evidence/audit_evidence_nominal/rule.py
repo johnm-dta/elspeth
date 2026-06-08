@@ -21,6 +21,15 @@ from elspeth_lints.rules.audit_evidence.audit_evidence_nominal.metadata import (
 )
 from elspeth_lints.rules.audit_evidence.shared import allowlist_path_for_root, display_path, iter_python_paths, load_class_allowlist
 
+# ADR-010 requires nominal inheritance from THIS class specifically; a base merely
+# named ``AuditEvidenceBase`` (a local or wrongly-imported class) does not satisfy it.
+_CANONICAL_AUDIT_EVIDENCE_MODULE = "elspeth.contracts.audit_evidence"
+_AUDIT_EVIDENCE_BASE_NAME = "AuditEvidenceBase"
+# The canonical module defines the base locally; a subclass there inherits it
+# without an import, and that local reference IS the real base (cannot be spoofed
+# — an attacker cannot make their file be the canonical module).
+_CANONICAL_MODULE_SUFFIX = "contracts/audit_evidence.py"
+
 
 @dataclass(frozen=True, slots=True)
 class AuditEvidenceNominalRule:
@@ -59,27 +68,69 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
 
 def scan_tree(tree: ast.AST, file_path: str) -> list[Finding]:
     """Return AEN1 findings for one parsed syntax tree."""
+    bindings = _audit_evidence_base_bindings(tree)
+    in_canonical_module = file_path.endswith(_CANONICAL_MODULE_SUFFIX)
     findings: list[Finding] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
         if not _class_defines_to_audit_dict(node):
             continue
-        if _bases_include_audit_evidence_base(node.bases):
+        if _bases_include_audit_evidence_base(node.bases, bindings, in_canonical_module=in_canonical_module):
             continue
         findings.append(_finding(file_path, node))
     return findings
+
+
+def _audit_evidence_base_bindings(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """Collect the local names / module aliases that resolve to the canonical base.
+
+    Returns ``(local_names, module_aliases)`` where local_names are bound by
+    ``from elspeth.contracts.audit_evidence import AuditEvidenceBase [as X]`` and
+    module_aliases by ``import elspeth.contracts.audit_evidence as M``.
+    """
+    local_names: set[str] = set()
+    module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == _CANONICAL_AUDIT_EVIDENCE_MODULE:
+            for alias in node.names:
+                if alias.name == _AUDIT_EVIDENCE_BASE_NAME:
+                    local_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == _CANONICAL_AUDIT_EVIDENCE_MODULE and alias.asname:
+                    module_aliases.add(alias.asname)
+    return frozenset(local_names), frozenset(module_aliases)
 
 
 def _scan_parsed(parsed: ParsedPythonFile, root: Path) -> list[Finding]:
     return scan_tree(parsed.tree, display_path(parsed.path, root))
 
 
-def _bases_include_audit_evidence_base(bases: list[ast.expr]) -> bool:
+def _bases_include_audit_evidence_base(
+    bases: list[ast.expr],
+    bindings: tuple[frozenset[str], frozenset[str]],
+    *,
+    in_canonical_module: bool,
+) -> bool:
+    """True only when a base resolves to the canonical AuditEvidenceBase.
+
+    A base merely named ``AuditEvidenceBase`` does NOT count unless it was
+    imported from the canonical module (or is the local definition inside the
+    canonical module itself). This closes the spoofing bypass where a local
+    ``class AuditEvidenceBase`` satisfied the nominal-inheritance gate.
+    """
+    local_names, module_aliases = bindings
     for base in bases:
-        if isinstance(base, ast.Name) and base.id == "AuditEvidenceBase":
-            return True
-        if isinstance(base, ast.Attribute) and base.attr == "AuditEvidenceBase":
+        if isinstance(base, ast.Name):
+            if base.id in local_names or (in_canonical_module and base.id == _AUDIT_EVIDENCE_BASE_NAME):
+                return True
+        elif (
+            isinstance(base, ast.Attribute)
+            and base.attr == _AUDIT_EVIDENCE_BASE_NAME
+            and isinstance(base.value, ast.Name)
+            and base.value.id in module_aliases
+        ):
             return True
     return False
 
@@ -92,6 +143,15 @@ def _class_defines_to_audit_dict(class_node: ast.ClassDef) -> bool:
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "to_audit_dict":
                     return True
+        # Annotated assignment WITH a value defines a real descriptor at runtime
+        # (`to_audit_dict: object = lambda ...`); a bare annotation defines nothing.
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "to_audit_dict"
+            and node.value is not None
+        ):
+            return True
     return False
 
 

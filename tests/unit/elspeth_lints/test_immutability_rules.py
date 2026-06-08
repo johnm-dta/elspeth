@@ -107,6 +107,131 @@ def test_freeze_guards_ignores_non_freeze_guard_isinstance_patterns(source: str)
     assert _analyze_freeze_guards(source) == []
 
 
+@pytest.mark.parametrize("guard", ["types.MappingProxyType", "collections.abc.Mapping", "list", "set"])
+def test_freeze_guards_reports_qualified_and_list_set_isinstance_guards(guard: str) -> None:
+    # elspeth-f2959957fc: qualified (Attribute) and list/set isinstance freeze
+    # guards are the same banned conditional-freeze shape and must be flagged.
+    findings = _analyze_freeze_guards(
+        f"""
+        class Example:
+            def __post_init__(self):
+                if isinstance(self.data, {guard}):
+                    pass
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG2"]
+
+
+def test_freeze_guards_reports_qualified_isinstance_in_tuple_form() -> None:
+    # elspeth-f2959957fc: the tuple form must match qualified members too.
+    findings = _analyze_freeze_guards(
+        """
+        class Example:
+            def __post_init__(self):
+                if isinstance(self.data, (types.MappingProxyType, dict)):
+                    pass
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG2"]
+    assert "MappingProxyType" in findings[0].message
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ["tuple[dict[str, object], ...]", "frozenset[Mapping[str, object]]", "tuple[list[str], ...] | None"],
+)
+def test_freeze_guards_reports_nested_mutable_in_immutable_carrier(annotation: str) -> None:
+    # elspeth-ec6749f8da: a mutable container nested inside tuple/frozenset still
+    # leaves reachable mutable objects and must be detected as a container field.
+    findings = _analyze_freeze_guards(
+        f"""
+        @dataclass(frozen=True)
+        class Example:
+            data: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG3"]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ["tuple[str, ...]", "Callable[[Mapping[str, Any]], Mapping[str, Any]]"],
+)
+def test_freeze_guards_ignores_immutable_or_callable_annotations(annotation: str) -> None:
+    # The nesting recursion must NOT over-match: a tuple of scalars and a Callable
+    # whose signature mentions Mapping store no mutable container.
+    findings = _analyze_freeze_guards(
+        f"""
+        @dataclass(frozen=True)
+        class Example:
+            data: {annotation}
+        """
+    )
+
+    assert findings == []
+
+
+def test_freeze_guards_reports_partial_freeze_fields_coverage() -> None:
+    # elspeth-b872929157: freezing only some container fields leaves the rest
+    # mutable; the uncovered field must be reported, the covered one must not.
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            data: dict
+            items: list
+            def __post_init__(self):
+                freeze_fields(self, "data")
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG3"]
+    assert "['items']" in findings[0].message
+
+
+def test_freeze_guards_accepts_object_setattr_freeze_coverage() -> None:
+    # A field frozen via object.__setattr__(self, "x", tuple(...)) is covered —
+    # all 4 real partial-by-freeze_fields cases in src/elspeth use this pattern.
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            data: dict
+            items: list
+            def __post_init__(self):
+                freeze_fields(self, "data")
+                object.__setattr__(self, "items", tuple(self.items))
+        """
+    )
+
+    assert findings == []
+
+
+def test_freeze_guards_accepts_dynamic_freeze_fields_splat() -> None:
+    # freeze_fields(self, *names) is statically unresolvable -> treated as
+    # covers-all, not a partial-coverage false positive (CoalesceMetadata pattern).
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            data: dict
+            items: list
+            def __post_init__(self):
+                names = []
+                if self.data is not None:
+                    names.append("data")
+                if self.items is not None:
+                    names.append("items")
+                freeze_fields(self, *names)
+        """
+    )
+
+    assert findings == []
+
+
 def test_freeze_guards_handles_post_init_scope_edges() -> None:
     nested_function = _analyze_freeze_guards(
         """
@@ -189,7 +314,8 @@ def test_freeze_guards_reports_post_init_without_freeze_call() -> None:
     )
 
     assert [finding.rule_id for finding in findings] == ["FG3"]
-    assert "lacks freeze_fields/deep_freeze" in findings[0].message
+    assert "data" in findings[0].message
+    assert "not frozen in __post_init__" in findings[0].message
 
 
 @pytest.mark.parametrize(
@@ -342,6 +468,75 @@ def test_frozen_annotations_reports_frozen_true_without_slots() -> None:
 def test_frozen_annotations_reports_mutable_annotation_variants(annotation: str) -> None:
     findings = _analyze_frozen_annotations(
         f"""
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        # elspeth-a586a7212e: capitalized typing aliases (subscripted + qualified)
+        "List[int]",
+        "Dict[str, int]",
+        "Set[str]",
+        "typing.List[int]",
+        "Optional[List[int]]",
+        # elspeth-fbfb9fd634: bare, unsubscripted builtins and typing aliases
+        "list",
+        "dict",
+        "set",
+        "List",
+        "Dict",
+    ],
+)
+def test_frozen_annotations_reports_typing_and_bare_mutable_forms(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import Dict, List, Optional, Set
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
+@pytest.mark.parametrize("annotation", ["FrozenSet[int]", "frozenset", "Sequence[tuple[int, ...]]"])
+def test_frozen_annotations_ignores_immutable_typing_forms(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import FrozenSet
+        from collections.abc import Sequence
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert findings == []
+
+
+@pytest.mark.parametrize("annotation", ["tuple[list[int], ...]", "Mapping[str, list]"])
+def test_frozen_annotations_still_flags_mutable_nested_in_immutable_wrapper(annotation: str) -> None:
+    """The fix only tightens: a mutable nested inside an immutable container was
+    flagged by the old ``list[``-substring regex and must remain flagged."""
+    findings = _analyze_frozen_annotations(
+        f"""
+        from collections.abc import Mapping
         from dataclasses import dataclass
 
         @dataclass(frozen=True)

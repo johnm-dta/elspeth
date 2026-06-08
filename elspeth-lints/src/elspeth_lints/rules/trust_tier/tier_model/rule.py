@@ -350,13 +350,21 @@ def _get_import_target_layer(module_name: str) -> int | None:
 
 
 def _find_type_checking_lines(tree: ast.Module) -> set[int]:
-    """Collect line numbers of import statements inside ``if TYPE_CHECKING:`` blocks."""
+    """Collect line numbers of import statements inside ``if TYPE_CHECKING:`` blocks.
+
+    Recurses into the block body so imports nested inside ``try``/``if``/``with``
+    under ``if TYPE_CHECKING:`` are still recognised as annotation-only (they would
+    otherwise be misclassified as runtime L1 violations). Only ``node.body`` is
+    walked, NOT ``node.orelse`` — the ``else:`` branch of ``if TYPE_CHECKING:`` is
+    the runtime fallback and its imports are genuinely runtime.
+    """
     lines: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
-            for child in node.body:
-                if isinstance(child, (ast.Import, ast.ImportFrom)):
-                    lines.add(child.lineno)
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if isinstance(child, (ast.Import, ast.ImportFrom)):
+                        lines.add(child.lineno)
     return lines
 
 
@@ -1721,11 +1729,30 @@ def scan_layer_imports_file(
     # a future reader mistaking these sites for a missed AST-subject one.
     module_scope_fingerprint = compute_scope_fingerprint(None, module=tree)
 
+    # Resolve `from elspeth import X` against the real package dir so a subpackage
+    # (X=plugins) is treated as a layer import while a plain attribute
+    # (X=__version__) is not. Root-robust: --root may be src/elspeth (paths like
+    # core/...) or src (paths like elspeth/core/...).
+    elspeth_pkg_root = root / "elspeth" if relative_path.split("/")[0] == "elspeth" else root
+
     for node in ast.walk(tree):
         # Collect (module_name, line, col) targets from import nodes
         targets: list[tuple[str, int, int]] = []
-        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            targets.append((node.module, node.lineno, node.col_offset))
+        if isinstance(node, ast.ImportFrom):
+            # Resolve relative imports (level>0) and absolute ones to the target
+            # module. The layer is keyed on the resolved module's top-level
+            # package, so only the bare-``elspeth`` package-root form needs
+            # per-alias resolution.
+            resolved = _resolve_relative_module(relative_path, node.level, node.module)
+            if resolved is None:
+                pass
+            elif resolved == "elspeth":
+                for alias in node.names:
+                    candidate = f"elspeth.{alias.name}"
+                    if _module_name_to_path(candidate, elspeth_pkg_root) is not None:
+                        targets.append((candidate, node.lineno, node.col_offset))
+            else:
+                targets.append((resolved, node.lineno, node.col_offset))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 targets.append((alias.name, node.lineno, node.col_offset))

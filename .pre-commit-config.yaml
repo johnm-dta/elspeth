@@ -61,6 +61,13 @@ repos:
         language: system
         types: [python]
         files: ^(src/elspeth/|elspeth-lints/src/).*\.py$
+        # Mirror pyproject's mypy exclude: deliberately-malformed lint-rule test
+        # fixtures are not real code. Type-checking them is meaningless and two
+        # fixtures sharing a filename (e.g. bad.py) collide as duplicate modules
+        # when staged together. pyproject excludes them on recursion, but a
+        # pre-commit hook passes changed files explicitly (bypassing that), so
+        # the exclusion must be repeated here.
+        exclude: ^elspeth-lints/src/elspeth_lints/rules/.*/fixtures/
 
       - id: elspeth-lints-no-new-bespoke-enforcers
         name: elspeth-lints forbids new bespoke CI enforcers

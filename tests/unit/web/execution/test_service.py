@@ -62,6 +62,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
+    RunRecord,
     SessionRunStatus,
 )
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
@@ -1003,7 +1004,7 @@ class TestInlineBlobRuntimePreflight:
         order: list[str] = []
         # The valid same-session path: run and blob share an owning session, so
         # the cross-session guard added for elspeth-195ecb1d58 passes through.
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
         blob_record.session_id = owner_session
@@ -1128,7 +1129,7 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
         blob_record.session_id = owner_session
@@ -1193,7 +1194,7 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         sha256 = hashlib.sha256(b"small prompt").hexdigest()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
         blob_record.session_id = owner_session
@@ -1262,7 +1263,7 @@ sinks:
         run_id = uuid4()
         owner_session = uuid4()
         hashes = [hashlib.sha256(f"blob-{index}".encode()).hexdigest() for index in range(5)]
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         records_by_id: dict[UUID, Any] = {}
         for blob_id, blob_hash in zip(blob_ids, hashes, strict=True):
@@ -1345,7 +1346,7 @@ sinks:
         blob_id = uuid4()
         run_id = uuid4()
         owner_session = uuid4()
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
         hash_counter = MagicMock(spec=["add"])
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
@@ -1437,7 +1438,7 @@ sinks:
         run_id = uuid4()
 
         # The run is owned by ``owner_session``.
-        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="running", session_id=owner_session))
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
         mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
 
         if case == "missing":

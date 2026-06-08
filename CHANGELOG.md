@@ -4,9 +4,18 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## [Unreleased]
+## [0.5.4] - Unreleased
 
-_No unreleased changes recorded._
+Maintenance line opened on top of RC-5.3, carrying correctness fixes that
+post-date the 0.5.3 cut.
+
+### Fixed
+
+- **`tier_1_decoration` lint no longer crashes on vendored trees** — the
+  repo-wide TDE2 pass and its candidate scan now walk the tree through the
+  shared `iter_python_files` excluded-dir filter instead of a raw
+  `rglob("*.py")`, so an unparseable third-party file under `.venv` / cache
+  directories can no longer hard-crash the gate.
 
 ---
 

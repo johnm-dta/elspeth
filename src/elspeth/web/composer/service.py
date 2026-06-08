@@ -1215,6 +1215,16 @@ class ComposerServiceImpl:
 
         if outcome.error_class is None:
             response = outcome.response
+            # ``response`` is the closed sum type ``ToolResult | Mapping | None``
+            # (see ``_ToolOutcome``). The ``None`` arm is the error path and is
+            # already excluded here by the enclosing ``error_class is None`` guard
+            # (handled by the final error-envelope return below). The two live arms
+            # come from distinct producers — a ``Mapping`` is the serialized
+            # ``request_advisor_hint`` envelope built outside ``execute_tool``; a
+            # ``ToolResult`` is every other path — so this ``isinstance`` is union
+            # dispatch between real producer variants, not a defensive shape-guard
+            # on a single guaranteed type, and the variants are not interchangeable
+            # (Mapping → deep_thaw, ToolResult → to_dict).
             if isinstance(response, Mapping):
                 response_payload = deep_thaw(response)
             else:

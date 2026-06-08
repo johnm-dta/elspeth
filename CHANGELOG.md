@@ -10,7 +10,7 @@ _No unreleased changes recorded._
 
 ---
 
-## [0.5.3] - 2026-06-05 (RC-5.3 — Correctness, Audit Integrity, and Release Gating)
+## [0.5.3] - 2026-06-08 (RC-5.3 — Correctness, Audit Integrity, and Release Gating)
 
 RC-5.3 is a correctness and hardening release on top of the RC-5.2 composer
 train. It carries one new composer capability (operator-set sampling), tightens
@@ -22,6 +22,16 @@ contracts reject sparse or malformed rows at the sink boundary rather than
 downstream, trust-tier error semantics raise typed faults instead of crashing
 or fabricating, and the web composer no longer renders stale responses after
 navigation. No schema migrations are introduced.
+
+A second body of work landed on the `release/0.5.3` branch after the initial
+RC-5.3 cut and is folded into this release. Two structural changes anchor it —
+the **orchestrator god-class decomposition** (the run/resume engine split into
+focused collaborators) and a new **tutorial-reliability e2e battery** — alongside
+the **composer advisor-authority redesign** (the advisor is now a mandatory,
+model-distinct reviewer with deterministic early/end checkpoints, replacing the
+old reactive self-trigger) and two systematic bug-fix burn-downs across the CI/CD
+enforcement scanners (`elspeth_lints`) and the engine/core/plugins trust-tier and
+audit-integrity paths.
 
 ### Added
 
@@ -42,6 +52,20 @@ navigation. No schema migrations are introduced.
 - **OpenRouter catalog source check** — Landscape database-compatibility guards
   now require an OpenRouter catalog source check before relying on catalog
   provenance.
+- **Composer advisor authority** — the web orchestrator now requires a
+  model-distinct advisor and runs deterministic checkpoints rather than relying
+  on the model to ask for review. A non-blocking **early advisory checkpoint**
+  fires once per session, and an **end gate acts as final authority** with a
+  fail-closed re-review loop on its own separate budget. Both reuse the existing
+  audited LLM call path so the review itself is captured in the trail.
+- **Prescriptive government URLs in the hello-world tutorial**, so the
+  first-run experience exercises the canonical "rate these gov pages" flow
+  against known-good sources.
+- **Tutorial-reliability e2e battery** — a new frontend Playwright harness
+  (`tests/e2e/`) drives the hello-world tutorial against a live staging backend
+  across N runs, scoring four dimensions (a/b/c/d) with per-run record types, a
+  batch aggregator, and a version-stamped trend log, so first-run reliability
+  regressions are caught before release.
 
 ### Changed
 
@@ -55,6 +79,24 @@ navigation. No schema migrations are introduced.
 - **Repo hygiene** — `AGENTS.md` and `CLAUDE.md` are no longer tracked; the
   session hook regenerates them on disk, so tracking them only produced
   perpetual churn.
+- **Advisor is now mandatory** — the reactive advisor self-trigger is retired
+  (proactive-security trigger retained) and the advisor-disabled code paths are
+  removed, so a composer session can no longer run un-reviewed. Composer-skill
+  critical rules were hoisted into high-attention zones, and the skill now
+  documents backend-run advisor checkpoints instead of the reactive framing.
+- **ReorderBuffer clamps negative `buffer_wait_ms`** on clock skew rather than
+  scheduling a negative wait.
+- **Orchestrator decomposition** — the run/resume engine (`core.py`, ~2,950 LOC)
+  was split into focused collaborators (`RunCeremony`, `SourceIterationDriver`,
+  `CheckpointCoordinator`, `RunExecutionCore`, `ResumeCoordinator`), reducing the
+  god-class to ~1,030 LOC with no behavioural change to the run path. The
+  decomposition surfaced several pre-existing audit-path defects that the
+  burn-downs below then fixed.
+- **Tutorial path is no longer special-cased on the backend** — the
+  tutorial-only state normalization that repaired the composed pipeline only on
+  the tutorial path was removed, so a tutorial run now exercises the same backend
+  code as any other run (composer correctness is fixed at the source rather than
+  papered over with a tutorial-only shim).
 
 ### Fixed
 
@@ -112,6 +154,83 @@ navigation. No schema migrations are introduced.
   scalar value type to green `check_contracts`, fixed staging web-unit safety
   flags, and aligned release-PDF distribution labels.
 
+#### Web composer and execution orchestrator
+
+- **Fail-closed pre-run validation gate in `execute()`** (Fix 1 of composer
+  reliability) — a composed pipeline that fails validation can no longer launch
+  a run.
+- **Preflight-repair gate** (Fix 2) and **advisor-blocked orphan surfacing** —
+  orphaned `{{interpretation:<term>}}` placeholders are surfaced at authoring
+  time instead of failing silently at run time.
+- **Guard against degenerate LLM-node output** in the composer.
+- **Advisor end gate now reaches LLM-prompt-template pipelines** — auto-
+  surfaceable prompt-template state is filtered out of the pre-check so the end
+  gate still engages; checkpoint errors now emit a diagnostic and the budget
+  docstring is honest about cost.
+- **Tutorial-reliability e2e harness** outcome classifier de-conflated so a
+  fired-normalization is no longer misread as a dimension-B fault.
+- **Boot-probe and authoring-guard robustness** — the composer boot probe no
+  longer requests `max_tokens` below the provider floor, and the authoring guard
+  skips a null nested `provider_config` path instead of dereferencing it.
+
+#### Trust-tier and audit integrity (engine / core / plugins)
+
+- **Typed `AuditIntegrityError` for malformed checkpoint shapes** — aggregation
+  and coalesce checkpoint restore now raise contract-grade errors below the
+  Tier-1 boundary instead of accepting malformed top-level shapes.
+- **Teardown no longer masks the primary failure** — `finally`-block teardown in
+  the engine/CLI, and `safe_flush_telemetry`, re-raise Tier-1 errors and stop
+  swallowing the run's primary exception.
+- **Retrieval boundaries shape-check results** — Azure Search and Chroma parse
+  paths convert malformed payloads (`AttributeError`, strict-`zip`
+  `ValueError`, `dict(metadata)` `TypeError`) into typed `RetrievalError`s so the
+  audit trail is preserved.
+- **Telemetry accounting integrity** — `ChromaSink.on_complete` telemetry is
+  best-effort (completion no longer fails after successful writes),
+  `AuditedLLMClient` emits ERROR telemetry on every malformed-response branch
+  (no more undercounting), and `chroma_sink` reads `TIER_1_ERRORS` live rather
+  than from an import snapshot.
+- **Replayable Chroma mixed-batch audit hash** and an **empty-safe `error_hash`
+  helper** so audit attributability survives empty inputs.
+- **Config-time validation hardening** — invalid `_plugin_component_type` is
+  rejected at class creation; runtime config dataclasses validate their own
+  bool/enum/value-type invariants instead of trusting Settings factories;
+  `RuntimeTelemetryConfig` validates `exporter_configs` element types;
+  provably-numeric gate conditions, duplicate `collection_probes`, and invalid
+  env-var names in `SecretsConfig` are rejected at config validation time.
+- **Sparse-row `field_mapping`** for the JSON, Dataverse, and Azure Blob sources
+  no longer quarantines or mis-maps rows with absent fields.
+- **Dataverse error audits** preserve request context on pagination-validation
+  errors and include fingerprinted `request_headers`.
+
+#### CI/CD enforcement scanners (`elspeth_lints`)
+
+- **Allowlist expiry parsers fail closed** on malformed dates rather than warning
+  and passing.
+- **`gve_attribution`** catches aliased `GraphValidationError` raises, treats
+  `component_id=None` as unattributed, and fails on `SyntaxError` in scanned
+  files.
+- **`frozen_annotations`** catches `typing.List/Dict/Set` and bare
+  `list/dict/set` mutable annotations.
+- **`freeze_guards`** catches qualified guards, nested mutables in
+  `tuple`/`frozenset`, and partial `freeze_fields` coverage.
+- **`component_type`** catches `DataPluginConfig` subclasses imported through
+  aliases and rejects arbitrary-string labels.
+- **`contract_manifest`** enforces real registration provenance (rejecting
+  shadowed `register_declaration_contract` / `implements_dispatch_site`), catches
+  duplicate contract-name registrations, and honours keyword-form dispatch
+  markers.
+- **`tier_1_decoration`** requires a non-empty reason and enforces TDE2
+  repo-wide; **`audit_evidence_nominal`** catches annotated `to_audit_dict` and
+  spoofed base names; **`tier_model` L1** catches relative / package-root upward
+  imports and nested `TYPE_CHECKING`; **composer `catch_order`** catches aliased
+  handlers and broad `Exception` shadowing.
+- **CI lanes fail closed** — the integration lane fails on real test failures,
+  the codex-audit runners fail on stale sidecars and partial scans, and the
+  build-push smoke test exercises the registry that was actually pushed.
+- **Lint-rule fixtures are excluded** from the ruff and mypy pre-commit hooks so
+  intentionally-broken fixtures stop producing spurious findings.
+
 ### Security
 
 - **Frontend dependency advisories patched** within existing semver ranges
@@ -121,6 +240,16 @@ navigation. No schema migrations are introduced.
   DoS and `classDef` CSS/HTML injection), and `uuid` <11.1.1 (buffer-bounds,
   transitive). `npm audit` reports zero remaining advisories; the frontend
   suite (1317 cases) and build remain green.
+- **SSRF Host header brackets literal IPv6 authorities** instead of emitting an
+  ambiguous, splittable host.
+- **Secret-echo closed** — the commencement gate no longer echoes an environment
+  secret in its failure reason, and `record_validation_error` no longer leaks row
+  content via `str(e)`.
+- **DSN audit sanitization no longer double-encodes `odbc_connect`**, and
+  rate-limit bucket-name sanitization is now injective (distinct buckets cannot
+  collide).
+- **Env-var-name regex anchored with `\A…\Z`** rather than `^…$`, closing a
+  multiline-injection gap.
 
 ### Dependencies
 

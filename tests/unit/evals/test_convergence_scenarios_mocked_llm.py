@@ -43,13 +43,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
 from evals.lib.composer_rgr_score import score
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.web.blobs.service import content_hash as _content_hash
 from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -371,23 +372,52 @@ class TestCsvClassifierScenario:
                 },
             ],
         )
-        # Turn 4: claim completion (clean)
+        # Turn 4: claim completion → the schema is fixed, but the LLM node's
+        # model (anthropic/claude-3.5-sonnet) is now an ORPHANED llm_model_choice
+        # interpretation site (no matching pending review event). The fail-closed
+        # orphan gate (commit 33f05f186) injects the second forced repair, naming
+        # the orphaned handoff and instructing request_interpretation_review.
         turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
+        # Turn 5 (surfacing repair): the model surfaces the llm_model_choice review
+        # via request_interpretation_review, creating a pending event. This turns
+        # the orphan into a RESOLVABLE pending handoff. (The sibling
+        # llm_prompt_template review is backend-auto-surfaced at finalization, so
+        # the model only has to surface the model_choice one here.)
+        turn_surface_model_choice = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_model_choice_review",
+                    "name": "request_interpretation_review",
+                    "arguments": {
+                        "affected_node_id": "classifier",
+                        "kind": "llm_model_choice",
+                        "user_term": "llm_model_choice:classifier",
+                        "llm_draft": "anthropic/claude-3.5-sonnet",
+                    },
+                },
+            ],
+        )
 
-        passing_preflight = _passing_preflight()
         empty = _empty_state()
-        with (
-            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
-            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
-        ):
-            # Turn 5 (completion): the LLM node carries an authored prompt_template,
-            # which now triggers a mandatory llm_prompt_template interpretation review
-            # ("surface every authored LLM decision through interpretation review").
-            # The compose loop re-prompts for that unresolved review (CALL3 and CALL5
-            # are the assumption-review re-prompts) on top of the schema-mode repair,
-            # so this scenario converges to a valid (GREEN) structural state in
-            # 5 LLM calls / 2 forced repair turns rather than the pre-review 4 / 1.
-            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn4]
+        # NOTE: _runtime_preflight is deliberately NOT patched. An always-pass
+        # patch would mask the truth that a model-bearing pipeline ends compose()
+        # at is_valid=false (reviews surfaced, pending out-of-loop resolution).
+        # The REAL preflight is what makes is_valid honest here.
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            # Six LLM calls / two forced repair turns (Branch B terminal state):
+            #   1. set_pipeline (fixed schema omitting four observed columns)
+            #   2. claim completion → REPAIR 1 (preflight: schema omits columns)
+            #   3. patch_source_options → schema=observed
+            #   4. claim completion → REPAIR 2 (orphan gate: llm_model_choice on
+            #      'classifier' has no pending review event)
+            #   5. request_interpretation_review (llm_model_choice) → pending event
+            #   6. claim completion → CLEAN finalize. Both interpretation reviews
+            #      (llm_prompt_template auto-surfaced + llm_model_choice surfaced)
+            #      are now RESOLVABLE pending handoffs, zero orphans. The terminal
+            #      preflight is invalid-but-pending, so the finalize path SKIPS the
+            #      "runtime preflight failed" suffix → clean message, is_valid=false.
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice, turn4]
             result = await service.compose(
                 "Classify these tickets",
                 [],
@@ -396,12 +426,33 @@ class TestCsvClassifierScenario:
                 user_id="test-user",
             )
 
-        # Convergence behaviour: two forced repair turns (schema-mode + the
-        # mandatory interpretation-review re-prompt for the authored prompt_template).
-        assert mock_llm.call_count == 5, f"expected 5 LLM calls, got {mock_llm.call_count}"
+        # Convergence behaviour: two forced repair turns (schema-mode repair +
+        # the orphan-gate repair that surfaces the llm_model_choice review).
+        assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
         assert result.repair_turns_used == 2, f"expected 2 repair turns, got {result.repair_turns_used}"
 
-        # Score against the scenario file.
+        # The terminal state is the honest Branch-B converged shape: a model-
+        # bearing pipeline whose mandatory reviews are SURFACED but not yet
+        # resolved (resolution is the out-of-loop resolve_interpretation_event
+        # API). is_valid is false (not-yet-runnable), the blocking errors are the
+        # resolvable interpretation_review_pending handoff (NOT the orphaned
+        # variant), and the terminal message carries no build-failure sentinel.
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert all(err.error_code == "interpretation_review_pending" for err in result.runtime_preflight.errors), (
+            f"expected only pending (not orphaned) handoffs; got {[e.error_code for e in result.runtime_preflight.errors]}"
+        )
+        assert "runtime preflight failed" not in (result.message or "").lower()
+        # Both required reviews were surfaced (zero orphans): the auto-surfaced
+        # prompt_template review and the model-surfaced model_choice review.
+        pending_events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+        pending_kinds = {event.kind for event in pending_events}
+        assert InterpretationKind.LLM_MODEL_CHOICE in pending_kinds
+        assert InterpretationKind.LLM_PROMPT_TEMPLATE in pending_kinds
+
+        # Score against the scenario file. GREEN now means: structurally correct,
+        # both reviews surfaced (zero orphans, guarded by the retained sentinel),
+        # within the repair budget — with is_valid reflecting pending-resolution.
         scenario = _load_scenario("csv-classifier")
         assistant_messages = [{"role": "assistant", "content": result.message or ""}]
         state_dict = _state_dict_for_scoring(result)

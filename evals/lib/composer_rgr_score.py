@@ -514,12 +514,28 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
     if sentinel_hits:
         red_reasons.append(f"build-failure sentinel(s) present in final message: {sentinel_hits}")
 
+    # Degenerate-state RED floor — UNCONDITIONAL, outside the ``must_be_valid``
+    # gate. A scenario may relax ``must_be_valid`` to false to accept a
+    # structurally-complete-but-not-yet-runnable terminal state (e.g. a
+    # model-bearing pipeline whose mandatory interpretation reviews are
+    # SURFACED but pending out-of-loop resolution — see the csv-classifier
+    # convergence scenario / Branch B). That relaxation must NOT also let an
+    # empty or null composition through as non-RED. An empty/null pipeline is a
+    # genuine build failure regardless of ``must_be_valid``. The empty-dict
+    # condition mirrors ``web/execution/validation.py``'s own empty-pipeline
+    # short-circuit (source is None and not nodes and not outputs) so this floor
+    # cannot drift from the engine's definition of "empty".
+    if state is None or state == "null":
+        red_reasons.append("final composition state is null (no committed pipeline)")
+    elif isinstance(state, dict) and state.get("source") is None and not state.get("nodes") and not state.get("outputs"):
+        red_reasons.append("composition state is structurally empty (no source, nodes, or outputs)")
+
     is_valid = bool(state.get("is_valid")) if isinstance(state, dict) else None
-    if red.get("must_be_valid", True):
-        if is_valid is False:
-            red_reasons.append("final composition state has is_valid=false")
-        elif state is None or state == "null":
-            red_reasons.append("final composition state is null (no committed pipeline)")
+    if red.get("must_be_valid", True) and is_valid is False:
+        # The null/empty case is already handled unconditionally by the
+        # degenerate-state floor above (and would otherwise double-append its
+        # red_reason here), so this gate only needs the is_valid=false branch.
+        red_reasons.append("final composition state has is_valid=false")
 
     phrase_hits = [p for p in red.get("passivity_phrases", []) if p in final_body]
     if phrase_hits:

@@ -412,25 +412,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[17]/body[20]/body[10]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:b4b316df230c540bdd23cd3b00bbc7c2cd1b5155a18edaffbab1be5baeab3710'
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=5e7b2d9d784b791f
-  owner: john
-  reason: |-
-    PluginContext.record_validation_error records the audit row for external source data that has ALREADY failed validation — by definition malformed Tier-3 input (the docstring notes it may be a non-dict like a JSON array of primitives). Line 401 (`except (ValueError, TypeError) as e`) wraps stable_hash(row), which raises on non-canonical content (NaN, Infinity, non-serializable types), and falls back to repr_hash to derive a row_id so the quarantined row is still recorded. This is the Tier-3 'record what we got even when malformed' rule: the catch is narrow, it preserves rather than loses the audit trail, and it logs only the error type (no row content), honoring the logging policy. Not silent error swallowing — it is boundary-correct degradation that keeps the audit complete.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:44:22.266656+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. The except at line 401 sits inside `record_validation_error`, whose contractual job is to record already-malformed Tier-3 source rows for audit; the `row` parameter is explicitly documented as possibly non-dict, non-serializable external data. The catch is narrow (`ValueError, TypeError` — exactly what `stable_hash` raises on NaN/Infinity/non-serializable content), not bare; it does not swallow but falls back to `repr_hash` so the quarantined row still gets a deterministic id and reaches the Landscape audit row recorded just below. A warning logs the exception type/message without leaking row content, consistent with the logging-policy. This is the Tier-3 'record what we got even when malformed' form, not silent suppression — losing the audit row instead would itself be the defect. Decorator nudge does not apply: R6 is outside the decorator's suppressible set ({R1, R5}).
-  judge_signature_version: 2
-  scope_fingerprint: f14807a26f9691fba20e774857bcc99b5677ececa3639e69e256339e3e4986fa
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[17]/body[21]/body[2]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:10fe4e3886a52064ef983b2683385c1b22e9accc63412aad6868a66b38bfa30a'
 - key: contracts/composer_interpretation.py:R5:_validate_enum_member:fp=ffdde8578491891c
   owner: john
   reason: |-
@@ -469,3 +450,22 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[17]/body[20]/body[10]/body[5]/body[1]/value'
   judge_metadata_signature: 'hmac-sha256:v2:a3418d11187e07e3768c67f86edd1e629dd0f6850864b85962f959784de5d3ee'
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=8b344263cdaa642f
+  owner: john
+  reason: |-
+    PRESCRIBED FORM. The except at line 401 sits inside `record_validation_error`, whose contractual job is to record already-malformed Tier-3 source rows for audit; the `row` parameter is explicitly documented as possibly non-dict, non-serializable external data. The catch is narrow (`ValueError, TypeError` — exactly what `stable_hash` raises on NaN/Infinity/non-serializable content), not bare; it does not swallow but falls back to `repr_hash` so the quarantined row still gets a deterministic id and reaches the Landscape audit row recorded just below. A warning logs the exception type/message without leaking row content, consistent with the logging-policy. This is the Tier-3 'record what we got even when malformed' form, not silent suppression — losing the audit row instead would itself be the defect. Decorator nudge does not apply: R6 is outside the decorator's suppressible set ({R1, R5}).
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-08T04:10:39.120785+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The except sits inside record_validation_error, whose job is recording already-malformed Tier-3 external rows for audit. The catch is narrow (ValueError, TypeError from stable_hash on NaN/Infinity/non-serializable content), does not swallow control flow — it falls back to repr_hash so the quarantined row still receives a deterministic id and proceeds to the Landscape audit write below. Logging only the exception type (not str(e)) respects the row-content-stays-in-Landscape rule. Losing the audit row by re-raising here would itself be the defect; this is the Tier-3 'record what we got' boundary form, not silent suppression.
+  judge_signature_version: 2
+  scope_fingerprint: dca71e98bc547f9546650be3ad9dcd5e0e71fd418d6d3dbce1870b7bf8437ac8
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[21]/body[2]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:e26d3ba6c24c13c163dc24409c05c41c927b25eb88a91b41c256a57993adfb18'

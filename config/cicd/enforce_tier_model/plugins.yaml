@@ -1170,82 +1170,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[19]/body[12]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:57cbbe1ef8c9dd35ed3ce3ae13c31409ce25c258921a65d0224169dd6e01e58a'
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=8501da8c0e5bf4c0
-  owner: john
-  reason: |-
-    In ChromaSink.write (chroma_sink.py:298), `except KeyError as exc` catches a missing required field (id_field or document_field) on a per-row basis and calls self._divert_row with a reason naming the missing field, then continues to the next row. A missing required field is a per-row Tier-2/3 data problem, not a plugin bug, so diverting (recording + routing per on_write_failure) the one bad row rather than aborting the whole ChromaDB batch is the prescribed per-row diversion pattern. The narrow KeyError catch is the EAFP signal for 'field absent'; it records the diversion, so there is no silent data loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:43:52.451564+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    PRESCRIBED FORM. The narrow `except KeyError` is the EAFP signal for an absent required field on per-row external data, and the handler calls `self._divert_row(...)` with a reason naming the missing field before `continue` — this is the recorded quarantine the policy prescribes for per-row Tier-2/3 data problems, not a silent swallow. R6's concern is exception handling that swallows without re-raise or explicit error result; the divert call IS the explicit quarantine result, so the rule's prescribed legitimate form holds. Type errors (wrong type rather than missing key) are intentionally not caught here and will still crash as upstream plugin bugs, which matches the comment and the Plugin Ownership rule.
-  judge_signature_version: 2
-  scope_fingerprint: 4f36105445ce675b9a019d4cee22bce50bcd8ef6abf9849f1bf1c83e57b76b48
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:53d8e52392688437fb2c8e5e74dad6d66f5c93205d14dd6a5ffbcd79927c91e0'
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=c52a6a2457cc3cdc
-  owner: john
-  reason: |-
-    In ChromaSink.write (chroma_sink.py:315), `except KeyError: continue` handles an optional metadata field that is configured in metadata_fields but absent from this particular row. Metadata is optional per-field across heterogeneous rows, so an absent field is honest absence — the field is simply not added to this row's metadata dict, not fabricated. This is not silent data loss or fabrication: nothing invents a value; the row proceeds with whatever metadata it actually has. The narrow KeyError catch is the EAFP signal for per-field absence at this Tier-2/3 boundary feeding the external ChromaDB API.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:44:00.098105+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The row data here is Tier-3 external row content (sink receives row dicts whose per-field presence is not guaranteed by any first-party contract — metadata_fields is operator-configured and rows are heterogeneous). The narrow KeyError catch on an OPTIONAL metadata field is the EAFP form of 'field absent → omit it', not fabrication: no value is invented, the field simply is not added to this row's metadata dict, and downstream code explicitly handles the empty-meta case. This is meaningfully distinct from the required-field path immediately above (which quarantines via _divert_row), and bad-type values are still routed to _divert_row. The except is narrow (KeyError only), scoped to one row[field] access, and the rationale ties directly to R6's concern.
-  judge_signature_version: 2
-  scope_fingerprint: 4f36105445ce675b9a019d4cee22bce50bcd8ef6abf9849f1bf1c83e57b76b48
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[1]/body[2]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:95cb47cb6539c85c3e682ad7576640ec00d6f12d4425d088af64f28b4e417ee8'
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=459fb5a3b1e6a043
-  owner: john
-  reason: |-
-    In ChromaSink.write (chroma_sink.py:318), `if value is not None and not isinstance(value, (str, int, float, bool))` checks that a metadata value is one of the types the external ChromaDB API accepts before handing it off. A wrong-typed metadata value (e.g. dict, datetime) is value-unsafe at this Tier-2-to-external boundary; the row is collected into bad_fields and diverted per-row (recorded + routed) rather than crashing the whole batch with an unattributable ChromaDB error. This is an external-boundary type check that drives per-row diversion with recording, not a defensive guard hiding an upstream bug.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:44:07.076281+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. Per Sink policy, ChromaDB metadata accepts only str|int|float|bool|None — this is an external-system (Tier-2→external) boundary where the sink must verify value types match the external API's contract before handing off. The isinstance check drives per-row diversion via _divert_row (recorded quarantine with reason), not silent coercion or fabrication; a wrong-typed value is recorded and routed, preserving auditability. The row dict values come from arbitrary source columns whose per-field type is not contractually pinned to ChromaDB's accepted set, so guarding at the external handoff is legitimate.
-  judge_signature_version: 2
-  scope_fingerprint: 4f36105445ce675b9a019d4cee22bce50bcd8ef6abf9849f1bf1c83e57b76b48
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[1]/body[2]/body[1]/test/values[1]/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:cd30dea90d45a2b90b399364c99a487980429b35f3c9dc3220fa55443ee4ae3a'
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=801f187823d20f74
-  owner: john
-  reason: |-
-    In ChromaSink.write (chroma_sink.py:320), `elif isinstance(value, float) and not math.isfinite(value)` narrows to float before calling math.isfinite to detect NaN/Infinity values that ChromaDB rejects. The type is correct (float) but the value is operation-unsafe at the external boundary — a classic Tier-2 type-valid/value-unsafe hazard. The non-finite row is collected into bad_fields and diverted per-row (recorded + routed) rather than aborting the batch. isinstance is used here only to gate the math.isfinite value check, not as a defensive shape guard; the bad value is recorded, not silently dropped.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-03'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-05T04:44:13.705924+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    RULE MISFIRES (boundary-egress shape gate). The sink is at the egress boundary to ChromaDB, an external system with its own value constraints (rejects non-finite floats). The isinstance(value, float) narrows the union member before calling math.isfinite — it is gating a value-level check, not re-asserting a first-party shape contract. The bad value is recorded into bad_fields and the row is diverted via _divert_row (quarantine), which matches the prescribed Tier-3 boundary handling: validate, record what we got, route the unit. Nothing is silently coerced or fabricated.
-  judge_signature_version: 2
-  scope_fingerprint: 4f36105445ce675b9a019d4cee22bce50bcd8ef6abf9849f1bf1c83e57b76b48
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[1]/body[2]/body[1]/orelse[0]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:47041f2ba3c00b75047b4b98ed8463b8e621df277dc9435d0157555da7ac5477'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=3028d9bc8224aaf3
   owner: john
   reason: |-
@@ -1360,3 +1284,79 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[11]/body[1]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:fa8e3b72692c1c3c04bbc7cb710f2c1285327df8f35f39e5faa5cd0b7fdf9dc3'
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=08cf5d777f87f68b
+  owner: john
+  reason: |-
+    PRESCRIBED FORM. The narrow `except KeyError` is the EAFP signal for an absent required field on per-row external data, and the handler calls `self._divert_row(...)` with a reason naming the missing field before `continue` — this is the recorded quarantine the policy prescribes for per-row Tier-2/3 data problems, not a silent swallow. R6's concern is exception handling that swallows without re-raise or explicit error result; the divert call IS the explicit quarantine result, so the rule's prescribed legitimate form holds. Type errors (wrong type rather than missing key) are intentionally not caught here and will still crash as upstream plugin bugs, which matches the comment and the Plugin Ownership rule.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-08T04:10:06.173931+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 forbids exception handling that swallows without re-raise or explicit error result; here the narrow `except KeyError` routes the row to `self._divert_row(...)` with a reason naming the missing field before `continue` — that is the explicit quarantine result the rule prescribes. The except is narrow to KeyError (missing field), so wrong-type upstream plugin bugs still crash as Plugin Ownership requires. Per-row external data with a recorded quarantine on absent required fields is exactly the legitimate form.
+  judge_signature_version: 2
+  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[11]/body[9]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:72a8e8f11fd1dbe52f7ee312b5b060882451a179dbb4a3593df85a9f0038cf1f'
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=425f61d7be233f63
+  owner: john
+  reason: |-
+    PRESCRIBED FORM. The row data here is Tier-3 external row content (sink receives row dicts whose per-field presence is not guaranteed by any first-party contract — metadata_fields is operator-configured and rows are heterogeneous). The narrow KeyError catch on an OPTIONAL metadata field is the EAFP form of 'field absent → omit it', not fabrication: no value is invented, the field simply is not added to this row's metadata dict, and downstream code explicitly handles the empty-meta case. This is meaningfully distinct from the required-field path immediately above (which quarantines via _divert_row), and bad-type values are still routed to _divert_row. The except is narrow (KeyError only), scoped to one row[field] access, and the rationale ties directly to R6's concern.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-08T04:10:12.496062+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The row content is Tier-3 external data (per-field presence not guaranteed by any first-party contract), and metadata fields are explicitly optional per-field. The narrow KeyError-on-row[field] catch implements 'field absent → omit' without fabricating a value (nothing is added to meta), which is meaning-preserving absence handling, not silent recovery. Required fields above use the same EAFP form but route to _divert_row; bad-type values here also route to _divert_row. The except is tightly scoped to one access and KeyError only, addressing R6's concern directly.
+  judge_signature_version: 2
+  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:ecadb73299ff47a086bf5dc267594121b120a6464e50e883e53fac54d01e7e2a'
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=38d7ff24365d137c
+  owner: john
+  reason: |-
+    RULE MISFIRES / PRESCRIBED FORM. Per Sink policy, ChromaDB metadata accepts only str|int|float|bool|None — this is an external-system (Tier-2→external) boundary where the sink must verify value types match the external API's contract before handing off. The isinstance check drives per-row diversion via _divert_row (recorded quarantine with reason), not silent coercion or fabrication; a wrong-typed value is recorded and routed, preserving auditability. The row dict values come from arbitrary source columns whose per-field type is not contractually pinned to ChromaDB's accepted set, so guarding at the external handoff is legitimate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-08T04:10:20.453670+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The row values come from arbitrary source columns whose per-field types are not pinned by any first-party contract to ChromaDB's accepted scalar set (str|int|float|bool|None) — this is a sink-side external-API boundary where the contract belongs to ChromaDB, not ELSPETH. The isinstance check routes wrong-typed values to _divert_row with a recorded reason (quarantine, not silent coercion or fabrication), which is the prescribed Tier-3-style boundary handling. The guard does not entrench an upward import, invoke legacy compatibility, or fabricate defaults; absence is skipped (metadata is optional per-field) and bad shape is recorded.
+  judge_signature_version: 2
+  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:1313e33a8591cb1028a7ee52ac651b22456794f0f075a8fe151a47a5663ad68f'
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=61907237f23e26c1
+  owner: john
+  reason: |-
+    RULE MISFIRES (boundary-egress shape gate). The sink is at the egress boundary to ChromaDB, an external system with its own value constraints (rejects non-finite floats). The isinstance(value, float) narrows the union member before calling math.isfinite — it is gating a value-level check, not re-asserting a first-party shape contract. The bad value is recorded into bad_fields and the row is diverted via _divert_row (quarantine), which matches the prescribed Tier-3 boundary handling: validate, record what we got, route the unit. Nothing is silently coerced or fabricated.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-06'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-08T04:10:32.553612+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The isinstance(value, float) is narrowing a union-typed value to perform a value-level check (math.isfinite) at the egress boundary to ChromaDB, which rejects non-finite floats. This is not a redundant first-party shape re-check: row values come from upstream data whose per-field types are Tier-2 shape-valid but value-unsafe (NaN/inf are type-valid floats), and ChromaDB has its own value constraints. The handling is the prescribed form — bad values are recorded in bad_fields and the row is quarantined via _divert_row; no coercion or fabrication occurs.
+  judge_signature_version: 2
+  scope_fingerprint: 3834c7baeaffb0ecd7f47607665e6f8b1e7b9b0f6bf91772a7e09df27d5a00d7
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[11]/body[9]/body[1]/body[2]/body[1]/orelse[0]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:65c2c1bf0bb024d2b4c2b4f2802f06a0abf563b715c1bd398bb91e3d313b0805'

@@ -4848,12 +4848,21 @@ def _interpolated_row_fields(prompt_template: str) -> list[str]:
     (a bespoke dot-only regex would mis-annotate a valid bracket-syntax prompt as
     having no fields, producing a false FLAG at the end gate). Scans the FULL
     prompt, never the truncated render, so the signal is length-independent.
-    Never raises: a malformed template yields no fields rather than crashing the
-    advisor summary.
+
+    Degrades a *malformed* Jinja2 template to no fields rather than crashing the
+    advisor summary. Only ``extract_jinja2_fields``'s documented parse error
+    (``jinja2.TemplateSyntaxError``) is caught; any other exception — a real bug
+    such as a non-str ``prompt_template`` (TypeError) or an engine refactor — is
+    allowed to surface rather than be silently swallowed into ``[]``.
     """
+    # Imported locally: a module-level jinja2 import would shift the module body
+    # indices and rotate the fingerprints of the signed allowlist entries below
+    # this function.
+    from jinja2 import TemplateSyntaxError
+
     try:
         return sorted(extract_jinja2_fields(prompt_template))
-    except Exception:  # advisor summary must never raise on a malformed prompt
+    except TemplateSyntaxError:
         return []
 
 

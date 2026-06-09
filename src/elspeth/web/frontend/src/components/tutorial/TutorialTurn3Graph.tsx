@@ -77,7 +77,7 @@ export function TutorialTurn3Graph({
       <p>
         This is the source to transform to sink shape from the welcome screen,
         with one extra transform because the pipeline fetches pages before it
-        asks the LLM to rate them.
+        asks the LLM about each one.
       </p>
       <div className="tutorial-actions">
         <button type="button" className="btn btn-primary" onClick={onContinue}>

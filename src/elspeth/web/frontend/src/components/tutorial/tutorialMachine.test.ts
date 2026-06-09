@@ -15,8 +15,9 @@ describe("tutorialMachine", () => {
         "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
         "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
         "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
-        "Read the HTML for each page, have an LLM identify the primary colours for " +
-        "each government agency. Remove the HTML and save the rest to a json file.",
+        "Read the HTML for each page, have an LLM return a single fact about each " +
+        "government agency based on the page HTML. Remove the HTML and save the " +
+        "rest to a json file.",
     );
   });
 

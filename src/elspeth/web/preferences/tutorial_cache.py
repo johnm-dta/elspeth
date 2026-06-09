@@ -44,12 +44,19 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+# Kept BYTE-IDENTICAL to the frontend constant ``CANONICAL_TUTORIAL_PROMPT`` in
+# ``src/elspeth/web/frontend/src/components/tutorial/tutorialMachine.ts``. The
+# frontend posts that constant on the Turn-4 run; the cache only engages when the
+# posted prompt equals this one. ``test_canonical_seed_matches_frontend_constant``
+# enforces the equality so the two can never silently drift again.
 CANONICAL_SEED_PROMPT = (
-    "Create a data source with URLs for five public government agency web pages "
-    "that you choose. Use abuse contact noreply@dta.gov.au and "
-    "scraping reason 'DTA technical demonstration'. Read the HTML for each "
-    "page, have an LLM identify the primary colours for each government agency. "
-    "Remove the HTML and save the rest to a json file."
+    "Create a data source from these five Australian government pages: "
+    "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, "
+    "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact "
+    "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. "
+    "Read the HTML for each page, have an LLM return a single fact about each "
+    "government agency based on the page HTML. Remove the HTML and save the "
+    "rest to a json file."
 )
 
 

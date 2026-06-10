@@ -13,13 +13,13 @@ def _readme_text() -> str:
     return README.read_text(encoding="utf-8")
 
 
-def test_readme_advertises_rc52_release_surface() -> None:
+def test_readme_advertises_rc53_release_surface() -> None:
     text = _readme_text()
 
-    assert "Status: RC-5.2" in text
-    assert "status-RC--5.2" in text
-    assert "- [RC-5.2 Updates](#rc-52-updates)" in text
-    assert "### RC-5.2 Updates" in text
+    assert "Status: RC-5.3" in text
+    assert "status-RC--5.3" in text
+    assert "- [RC-5.3 Updates](#rc-53-updates)" in text
+    assert "### RC-5.3 Updates" in text
     assert "[Progress Report: RC-1 to RC-5](docs/release/elspeth-progress-rc1-to-rc5.md)" in text
     assert "[Velocity Report: RC-1 to RC-5](docs/release/elspeth-velocity-rc1-to-rc5.md)" in text
     assert "[Audit and Lineage Guarantees](docs/release/guarantees.md)" in text

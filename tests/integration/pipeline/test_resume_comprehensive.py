@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, NodeType, ResumePoint, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
@@ -62,6 +62,199 @@ def _runtime_val_manifest_json() -> str:
     """Mirror the run-header manifest production begin_run() stores."""
     prepare_for_run()
     return canonical_json(build_runtime_val_manifest())
+
+
+def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
+    """Build a FIXED SchemaContract; return (audit_record_json, version_hash)."""
+    from elspeth.contracts.contract_records import ContractAuditRecord
+    from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+    field_contracts = tuple(
+        FieldContract(
+            normalized_name=name,
+            original_name=name,
+            python_type=py_type,
+            required=True,
+            source="declared",
+        )
+        for name, py_type in fields
+    )
+    contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
+    audit_record = ContractAuditRecord.from_contract(contract)
+    return audit_record.to_json(), contract.version_hash()
+
+
+def _build_two_source_failed_run(
+    db: LandscapeDB,
+    payload_store: Any,
+    checkpoint_mgr: Any,
+    *,
+    run_id: str,
+) -> tuple[ExecutionGraph, str, str, dict[str, Any]]:
+    """Insert a 2-source FAILED run wired for resume through the PUBLIC API.
+
+    The persisted shape mirrors what a real multi-source run leaves behind
+    after a crash: a FAILED run header, two source nodes with per-source
+    ``run_sources`` records (disjoint FIXED contracts + schemas), one row
+    per source with full provenance (source_node_id, source_row_index,
+    ingest_sequence), payloads in the payload store, and a checkpoint.
+
+    The orders payload stores ``order_id`` as the STRING "101" while the
+    orders schema declares it integer — type restoration through the
+    orders source schema is therefore observable in sink output (101, not
+    "101"). The contracts are disjoint FIXED contracts, so validating a
+    row under the wrong source's contract cannot succeed silently.
+
+    Returns:
+        (graph, orders_contract_hash, refunds_contract_hash, row_payloads)
+    """
+    now = datetime.now(UTC)
+    orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
+    refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
+    orders_contract_json, orders_contract_hash = _make_fixed_contract([("order_id", int)])
+    refunds_contract_json, refunds_contract_hash = _make_fixed_contract([("refund_id", str)])
+
+    graph = ExecutionGraph()
+    graph.add_node(
+        "source-orders",
+        node_type=NodeType.SOURCE,
+        plugin_name="null",
+        config={"source_name": "orders"},
+    )
+    graph.add_node(
+        "source-refunds",
+        node_type=NodeType.SOURCE,
+        plugin_name="null",
+        config={"source_name": "refunds"},
+    )
+    graph.add_node(
+        "sink",
+        node_type=NodeType.SINK,
+        plugin_name="json",
+        config={"schema": {"mode": "observed"}},
+    )
+    graph.add_edge("source-orders", "sink", label="continue")
+    graph.add_edge("source-refunds", "sink", label="continue")
+    graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+    graph.set_transform_id_map({})
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="test",
+                settings_json="{}",
+                canonical_version="v1",
+                status=RunStatus.FAILED,
+                source_schema_json=json.dumps({"properties": {}, "required": []}),
+                runtime_val_manifest_json=_runtime_val_manifest_json(),
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        )
+        for node_id, plugin_name, node_type in [
+            ("source-orders", "null", NodeType.SOURCE),
+            ("source-refunds", "null", NodeType.SOURCE),
+            ("sink", "json", NodeType.SINK),
+        ]:
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id=node_id,
+                    run_id=run_id,
+                    plugin_name=plugin_name,
+                    node_type=node_type,
+                    plugin_version="1.0.0",
+                    determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                    config_hash="test",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+        for source_node_id, source_name, schema_json, contract_json, contract_hash in [
+            ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
+            ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
+        ]:
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    source_name=source_name,
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    recorded_at=now,
+                )
+            )
+        for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id=edge_id,
+                    run_id=run_id,
+                    from_node_id=from_node,
+                    to_node_id="sink",
+                    label="continue",
+                    default_mode=RoutingMode.MOVE,
+                    created_at=now,
+                )
+            )
+        row_payloads: dict[str, Any] = {}
+        for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
+            ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
+            ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
+        ]:
+            ref = payload_store.store(json.dumps(row_data).encode())
+            row_payloads[row_id] = row_data
+            conn.execute(
+                rows_table.insert().values(
+                    row_id=row_id,
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    row_index=row_index,
+                    source_row_index=source_row_index,
+                    ingest_sequence=ingest_sequence,
+                    source_data_hash=f"h-{row_id}",
+                    source_data_ref=ref,
+                    created_at=now,
+                )
+            )
+        conn.execute(
+            tokens_table.insert().values(
+                token_id="tok-multi-source",
+                row_id="row-orders",
+                run_id=run_id,
+                created_at=now,
+            )
+        )
+
+    checkpoint_mgr.create_checkpoint(
+        run_id=run_id,
+        token_id="tok-multi-source",
+        node_id="sink",
+        sequence_number=1,
+        graph=graph,
+    )
+    return graph, orders_contract_hash, refunds_contract_hash, row_payloads
+
+
+def _two_source_resume_pipeline(tmp_path: Any, name: str) -> tuple[PipelineConfig, Any]:
+    """PipelineConfig matching _build_two_source_failed_run's graph shape.
+
+    Two NullSources keyed by the graph's source_name values ("orders",
+    "refunds") and a JSONL sink so heterogeneous per-source rows can be
+    asserted with type fidelity (JSON distinguishes 101 from "101").
+    """
+    output_path = tmp_path / f"{name}.jsonl"
+    sink = JSONSink({"path": str(output_path), "schema": {"mode": "observed"}, "format": "jsonl"})
+    config = PipelineConfig(
+        sources={"orders": _null_source("default"), "refunds": _null_source("default")},
+        transforms=[],
+        sinks={"default": inject_write_failure(sink)},
+    )
+    return config, output_path
 
 
 class TestResumeComprehensive:
@@ -471,158 +664,57 @@ class TestResumeComprehensive:
             )
         assert work_statuses == ["terminal"]
 
-    def test_reconstruct_resume_state_restores_multi_source_rows_with_source_scoped_schemas(
+    def test_resume_restores_multi_source_rows_with_source_scoped_schemas(
         self,
         resume_test_env: dict[str, Any],
     ) -> None:
-        """Production resume reconstruction uses run_sources schema/contract per row source."""
+        """Public resume restores each row's types via its ORIGIN source's schema.
+
+        Invariant proven: ``Orchestrator.resume`` (the production path —
+        no private reconstruction seam) restores every recovered row
+        through the ``run_sources`` schema recorded for that row's
+        ``source_node_id``. The orders payload persisted ``order_id`` as
+        the STRING "101"; only the orders schema (order_id: integer) can
+        coerce it back to ``101``. The refunds schema would reject the
+        orders row outright (missing required ``refund_id``), so typed
+        sink output for BOTH rows is end-to-end proof of source-scoped
+        schema dispatch.
+        """
         db = resume_test_env["db"]
         checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
         payload_store = resume_test_env["payload_store"]
         checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
         run_id = "resume-multi-source-schema-test"
-        now = datetime.now(UTC)
-        orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
-        refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
-        orders_contract_json, orders_contract_hash = self._create_schema_contract([("order_id", int)])
-        refunds_contract_json, refunds_contract_hash = self._create_schema_contract([("refund_id", str)])
+        graph, _orders_hash, _refunds_hash, _payloads = _build_two_source_failed_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+        config, output_path = _two_source_resume_pipeline(tmp_path, "multi_source_schema_output")
 
-        graph = ExecutionGraph()
-        graph.add_node("source-orders", node_type=NodeType.SOURCE, plugin_name="null", config={"source_name": "orders"})
-        graph.add_node("source-refunds", node_type=NodeType.SOURCE, plugin_name="null", config={"source_name": "refunds"})
-        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config={"schema": {"mode": "observed"}})
-        graph.add_edge("source-orders", "sink", label="continue")
-        graph.add_edge("source-refunds", "sink", label="continue")
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
 
-        with db.engine.begin() as conn:
-            conn.execute(
-                runs_table.insert().values(
-                    run_id=run_id,
-                    started_at=now,
-                    config_hash="test",
-                    settings_json="{}",
-                    canonical_version="v1",
-                    status=RunStatus.FAILED,
-                    source_schema_json=json.dumps({"properties": {}, "required": []}),
-                    runtime_val_manifest_json=_runtime_val_manifest_json(),
-                    openrouter_catalog_sha256="0" * 64,
-                    openrouter_catalog_source="bundled",
-                )
-            )
-            for node_id, plugin_name, node_type in [
-                ("source-orders", "null", NodeType.SOURCE),
-                ("source-refunds", "null", NodeType.SOURCE),
-                ("sink", "json", NodeType.SINK),
-            ]:
-                conn.execute(
-                    nodes_table.insert().values(
-                        node_id=node_id,
-                        run_id=run_id,
-                        plugin_name=plugin_name,
-                        node_type=node_type,
-                        plugin_version="1.0.0",
-                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
-                        config_hash="test",
-                        config_json="{}",
-                        registered_at=now,
-                    )
-                )
-            for source_node_id, source_name, schema_json, contract_json, contract_hash in [
-                ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
-                ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
-            ]:
-                conn.execute(
-                    run_sources_table.insert().values(
-                        run_id=run_id,
-                        source_node_id=source_node_id,
-                        source_name=source_name,
-                        plugin_name="null",
-                        lifecycle_state="loaded",
-                        config_hash="test",
-                        schema_json=schema_json,
-                        schema_contract_json=contract_json,
-                        schema_contract_hash=contract_hash,
-                        recorded_at=now,
-                    )
-                )
-            for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
-                conn.execute(
-                    edges_table.insert().values(
-                        edge_id=edge_id,
-                        run_id=run_id,
-                        from_node_id=from_node,
-                        to_node_id="sink",
-                        label="continue",
-                        default_mode=RoutingMode.MOVE,
-                        created_at=now,
-                    )
-                )
-            for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
-                ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
-                ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
-            ]:
-                ref = payload_store.store(json.dumps(row_data).encode())
-                conn.execute(
-                    rows_table.insert().values(
-                        row_id=row_id,
-                        run_id=run_id,
-                        source_node_id=source_node_id,
-                        row_index=row_index,
-                        source_row_index=source_row_index,
-                        ingest_sequence=ingest_sequence,
-                        source_data_hash=f"h-{row_id}",
-                        source_data_ref=ref,
-                        created_at=now,
-                    )
-                )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-multi-source",
-                    row_id="row-orders",
-                    run_id=run_id,
-                    created_at=now,
-                )
-            )
-
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            token_id="tok-multi-source",
-            node_id="sink",
-            sequence_number=1,
-            graph=graph,
-        )
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
         orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
-
-        state = orchestrator._reconstruct_resume_state(
-            ResumePoint(
-                checkpoint=checkpoint,
-                token_id=checkpoint.token_id,
-                node_id=checkpoint.node_id,
-                sequence_number=checkpoint.sequence_number,
-            ),
-            payload_store,
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
         )
 
-        from elspeth.contracts import ResumedRow
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
 
-        assert state.unprocessed_rows == (
-            ResumedRow(
-                row_id="row-orders",
-                row_index=0,
-                source_node_id=NodeID("source-orders"),
-                row_data={"order_id": 101},
-            ),
-            ResumedRow(
-                row_id="row-refunds",
-                row_index=1,
-                source_node_id=NodeID("source-refunds"),
-                row_data={"refund_id": "r-7"},
-            ),
-        )
-        assert state.schema_contracts_by_source[NodeID("source-orders")].version_hash() == orders_contract_hash
-        assert state.schema_contracts_by_source[NodeID("source-refunds")].version_hash() == refunds_contract_hash
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert len(written) == 2
+        by_key = {next(iter(row)): row for row in written}
+        # Orders row restored through the orders schema: "101" -> 101 (int).
+        assert by_key["order_id"]["order_id"] == 101
+        assert isinstance(by_key["order_id"]["order_id"], int)
+        # Refunds row restored through the refunds schema: stays a string.
+        assert by_key["refund_id"]["refund_id"] == "r-7"
 
     def test_resume_early_exit_path_no_remaining_rows(
         self,
@@ -2218,8 +2310,8 @@ class TestMultiSourceResumeContractDispatch:
     test plan in the consolidated G2-companion ticket
     elspeth-d5f0194fc8.
 
-    Before ADR-025, ``_reconstruct_resume_state`` collapsed the
-    per-source contract map by calling
+    Before ADR-025, resume reconstruction collapsed the per-source
+    contract map by calling
     ``next(iter(schema_contracts_by_source.values()))`` and dropping
     the result on ``ResumeState.schema_contract``. Two sources whose
     schemas legitimately differ (e.g., a fan-in pipeline merging
@@ -2227,10 +2319,13 @@ class TestMultiSourceResumeContractDispatch:
     contract happened to be returned first by the SQL query — a
     Tier-1 audit-integrity violation per CLAUDE.md.
 
-    These tests pin the post-ADR-025 behaviour:
+    These tests pin the post-ADR-025 behaviour through the PUBLIC
+    resume path (``RecoveryManager.get_resume_point`` +
+    ``Orchestrator.resume``; private coordinator seams are
+    deliberately not touched):
 
-    1. Each row's schema contract is recovered via the row's
-       ``source_node_id``, not an arbitrary pick.
+    1. Each row is validated under the contract recovered via the
+       row's ``source_node_id``, not an arbitrary pick.
     2. A row whose ``source_node_id`` is not present in
        ``schema_contracts_by_source`` crashes with
        ``OrchestrationInvariantError`` rather than silently picking
@@ -2246,225 +2341,104 @@ class TestMultiSourceResumeContractDispatch:
     @staticmethod
     def _create_schema_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
         """Build a fixed SchemaContract for test setup (identity helper)."""
-        from elspeth.contracts.contract_records import ContractAuditRecord
-        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-
-        field_contracts = tuple(
-            FieldContract(
-                normalized_name=name,
-                original_name=name,
-                python_type=py_type,
-                required=True,
-                source="declared",
-            )
-            for name, py_type in fields
-        )
-        contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
-        audit_record = ContractAuditRecord.from_contract(contract)
-        return audit_record.to_json(), contract.version_hash()
-
-    def _build_two_source_run(
-        self,
-        db: LandscapeDB,
-        payload_store: Any,
-        checkpoint_mgr: Any,
-        *,
-        run_id: str,
-    ) -> tuple[ExecutionGraph, str, str, dict[str, Any]]:
-        """Insert a 2-source FAILED run wired for resume reconstruction.
-
-        Returns:
-            (graph, orders_contract_hash, refunds_contract_hash, row_payloads)
-            so callers can correlate observed contracts to their
-            originating source on the per-row validation path.
-        """
-        now = datetime.now(UTC)
-        orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
-        refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
-        orders_contract_json, orders_contract_hash = self._create_schema_contract([("order_id", int)])
-        refunds_contract_json, refunds_contract_hash = self._create_schema_contract([("refund_id", str)])
-
-        graph = ExecutionGraph()
-        graph.add_node(
-            "source-orders",
-            node_type=NodeType.SOURCE,
-            plugin_name="null",
-            config={"source_name": "orders"},
-        )
-        graph.add_node(
-            "source-refunds",
-            node_type=NodeType.SOURCE,
-            plugin_name="null",
-            config={"source_name": "refunds"},
-        )
-        graph.add_node(
-            "sink",
-            node_type=NodeType.SINK,
-            plugin_name="json",
-            config={"schema": {"mode": "observed"}},
-        )
-        graph.add_edge("source-orders", "sink", label="continue")
-        graph.add_edge("source-refunds", "sink", label="continue")
-
-        with db.engine.begin() as conn:
-            conn.execute(
-                runs_table.insert().values(
-                    run_id=run_id,
-                    started_at=now,
-                    config_hash="test",
-                    settings_json="{}",
-                    canonical_version="v1",
-                    status=RunStatus.FAILED,
-                    source_schema_json=json.dumps({"properties": {}, "required": []}),
-                    runtime_val_manifest_json=_runtime_val_manifest_json(),
-                    openrouter_catalog_sha256="0" * 64,
-                    openrouter_catalog_source="bundled",
-                )
-            )
-            for node_id, plugin_name, node_type in [
-                ("source-orders", "null", NodeType.SOURCE),
-                ("source-refunds", "null", NodeType.SOURCE),
-                ("sink", "json", NodeType.SINK),
-            ]:
-                conn.execute(
-                    nodes_table.insert().values(
-                        node_id=node_id,
-                        run_id=run_id,
-                        plugin_name=plugin_name,
-                        node_type=node_type,
-                        plugin_version="1.0.0",
-                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
-                        config_hash="test",
-                        config_json="{}",
-                        registered_at=now,
-                    )
-                )
-            for source_node_id, source_name, schema_json, contract_json, contract_hash in [
-                ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
-                ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
-            ]:
-                conn.execute(
-                    run_sources_table.insert().values(
-                        run_id=run_id,
-                        source_node_id=source_node_id,
-                        source_name=source_name,
-                        plugin_name="null",
-                        lifecycle_state="loaded",
-                        config_hash="test",
-                        schema_json=schema_json,
-                        schema_contract_json=contract_json,
-                        schema_contract_hash=contract_hash,
-                        recorded_at=now,
-                    )
-                )
-            for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
-                conn.execute(
-                    edges_table.insert().values(
-                        edge_id=edge_id,
-                        run_id=run_id,
-                        from_node_id=from_node,
-                        to_node_id="sink",
-                        label="continue",
-                        default_mode=RoutingMode.MOVE,
-                        created_at=now,
-                    )
-                )
-            row_payloads: dict[str, Any] = {}
-            for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
-                ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
-                ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
-            ]:
-                ref = payload_store.store(json.dumps(row_data).encode())
-                row_payloads[row_id] = row_data
-                conn.execute(
-                    rows_table.insert().values(
-                        row_id=row_id,
-                        run_id=run_id,
-                        source_node_id=source_node_id,
-                        row_index=row_index,
-                        source_row_index=source_row_index,
-                        ingest_sequence=ingest_sequence,
-                        source_data_hash=f"h-{row_id}",
-                        source_data_ref=ref,
-                        created_at=now,
-                    )
-                )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-multi-source",
-                    row_id="row-orders",
-                    run_id=run_id,
-                    created_at=now,
-                )
-            )
-
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            token_id="tok-multi-source",
-            node_id="sink",
-            sequence_number=1,
-            graph=graph,
-        )
-        return graph, orders_contract_hash, refunds_contract_hash, row_payloads
+        return _make_fixed_contract(fields)
 
     def test_resume_picks_correct_contract_per_source(
         self,
         resume_test_env: dict[str, Any],
     ) -> None:
-        """Multi-source resume looks up each row's contract via source_node_id.
+        """Public multi-source resume dispatches each row's ORIGIN contract.
 
-        Distinct version_hash() values on the per-source contracts make
-        an arbitrary-pick failure observable: if the orchestrator picked
-        one contract for both rows, one of the per-row contract lookups
-        would carry the wrong hash. ADR-025 §3 requires per-source
-        dispatch; this test pins the dispatch.
+        Invariant proven: ``Orchestrator.resume`` validates every
+        recovered row under the contract recorded in ``run_sources``
+        for that row's ``source_node_id`` (ADR-025 §3 G2). The two
+        FIXED contracts are disjoint (order_id: int vs refund_id: str)
+        with distinct version hashes, so an arbitrary-pick regression
+        cannot complete: whichever row lost the pick would fail FIXED
+        validation instead of reaching the sink. Also pins:
+
+        - combined sink output respects ingest_sequence order
+          (orders row, ingest_sequence 0, before refunds row, 1);
+        - per-row source attribution survives the roundtrip — every
+          original row keeps its source_node_id and every token minted
+          by the resumed run joins back to a source-attributed row
+          (elspeth-e51eaed773 leg b);
+        - both rows reach SUCCESS terminal outcomes in token_outcomes.
         """
+        from elspeth.core.landscape.schema import token_outcomes_table
+
         db = resume_test_env["db"]
         checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
         payload_store = resume_test_env["payload_store"]
         checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
 
         run_id = "resume-multi-source-per-row-contract"
-        _graph, orders_hash, refunds_hash, _payloads = self._build_two_source_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+        graph, orders_hash, refunds_hash, _payloads = _build_two_source_failed_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+        assert orders_hash != refunds_hash, "test setup error: contracts must differ"
+        config, output_path = _two_source_resume_pipeline(tmp_path, "per_row_contract_output")
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
 
         orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-
-        state = orchestrator._reconstruct_resume_state(
-            ResumePoint(
-                checkpoint=checkpoint,
-                token_id=checkpoint.token_id,
-                node_id=checkpoint.node_id,
-                sequence_number=checkpoint.sequence_number,
-            ),
-            payload_store,
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
         )
 
-        # Distinct contracts are preserved per source (no arbitrary pick).
-        assert state.schema_contracts_by_source[NodeID("source-orders")].version_hash() == orders_hash
-        assert state.schema_contracts_by_source[NodeID("source-refunds")].version_hash() == refunds_hash
-        assert orders_hash != refunds_hash, "test setup error: contracts must differ"
+        # The resumed run completes with both rows succeeding — possible
+        # only if each row validated under its own source's contract.
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
+        assert result.rows_failed == 0
+        assert result.rows_quarantined == 0
 
-        # Every recovered row carries the source_node_id needed to dispatch
-        # the per-row contract — this is the load-bearing carrier ADR-025
-        # makes mandatory.
-        orders_rows = [r for r in state.unprocessed_rows if r.source_node_id == NodeID("source-orders")]
-        refunds_rows = [r for r in state.unprocessed_rows if r.source_node_id == NodeID("source-refunds")]
-        assert len(orders_rows) == 1
-        assert len(refunds_rows) == 1
+        # Combined output respects ingest_sequence: orders (0) then refunds (1).
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert written == [{"order_id": 101}, {"refund_id": "r-7"}]
 
-        # Verify per-row dispatch directly: the contract recovered for
-        # each row by its source_node_id matches the source's contract
-        # version_hash. An arbitrary-pick implementation would fail one
-        # of these assertions on whichever source's contract did not
-        # "win" the pick.
-        for row in state.unprocessed_rows:
-            recovered_contract = state.schema_contracts_by_source[row.source_node_id]
-            if row.source_node_id == NodeID("source-orders"):
-                assert recovered_contract.version_hash() == orders_hash
-            else:
-                assert recovered_contract.version_hash() == refunds_hash
+        # Audit-trail cross-check: original rows keep their origin
+        # source_node_id, and the resumed run's SUCCESS outcomes attribute
+        # (via token -> row) one row to EACH source.
+        with db.engine.connect() as conn:
+            row_sources = dict(
+                conn.execute(select(rows_table.c.row_id, rows_table.c.source_node_id).where(rows_table.c.run_id == run_id)).all()
+            )
+            outcome_rows = conn.execute(
+                select(
+                    tokens_table.c.row_id,
+                    token_outcomes_table.c.outcome,
+                    token_outcomes_table.c.sink_name,
+                )
+                .join(tokens_table, token_outcomes_table.c.token_id == tokens_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+            ).fetchall()
+            persisted_contract_hashes = dict(
+                conn.execute(
+                    select(run_sources_table.c.source_node_id, run_sources_table.c.schema_contract_hash).where(
+                        run_sources_table.c.run_id == run_id
+                    )
+                ).all()
+            )
+        assert row_sources == {"row-orders": "source-orders", "row-refunds": "source-refunds"}
+        success_rows = {row.row_id for row in outcome_rows if row.outcome == TerminalOutcome.SUCCESS.value}
+        assert success_rows == {"row-orders", "row-refunds"}
+        assert all(row.sink_name == "default" for row in outcome_rows)
+        success_sources = {row_sources[row_id] for row_id in success_rows}
+        assert success_sources == {"source-orders", "source-refunds"}
+
+        # The per-source contracts the rows were validated under remain
+        # durably distinct in run_sources — no arbitrary-pick collapse.
+        assert persisted_contract_hashes == {
+            "source-orders": orders_hash,
+            "source-refunds": refunds_hash,
+        }
 
     def test_resume_rejects_missing_contract(
         self,
@@ -2546,15 +2520,19 @@ class TestMultiSourceResumeContractDispatch:
 
         Regression guard: ADR-025 §3 Decision 5 (G6) deletes the run-level
         singleton contract columns; schema contracts now live exclusively
-        in ``run_sources``. A legitimate single-source pipeline writes
-        exactly one ``run_sources`` row and the resume reconstruction must
-        return a single-entry ``schema_contracts_by_source`` keyed by the
-        source NodeID observed on the recovered rows.
+        in ``run_sources``. Invariant proven through the public path: a
+        legitimate single-source FAILED run (one ``run_sources`` row, one
+        recovered row) resumes to COMPLETED with the row validated under
+        its source's contract (``"42"`` coerced to ``42`` per the
+        ``id: int`` schema/contract), its source attribution intact, and
+        checkpoints deleted on completion.
         """
         db = resume_test_env["db"]
         checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
         payload_store = resume_test_env["payload_store"]
         checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
 
         run_id = "resume-single-source-round-trip"
         contract_json, contract_hash = self._create_schema_contract([("id", int)])
@@ -2575,6 +2553,8 @@ class TestMultiSourceResumeContractDispatch:
             config={"schema": {"mode": "observed"}},
         )
         graph.add_edge("source-only", "sink", label="continue")
+        graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        graph.set_transform_id_map({})
 
         source_schema_json = json.dumps({"properties": {"id": {"type": "integer"}}, "required": ["id"]})
 
@@ -2666,26 +2646,47 @@ class TestMultiSourceResumeContractDispatch:
             sequence_number=1,
             graph=graph,
         )
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
 
-        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
-        state = orchestrator._reconstruct_resume_state(
-            ResumePoint(
-                checkpoint=checkpoint,
-                token_id=checkpoint.token_id,
-                node_id=checkpoint.node_id,
-                sequence_number=checkpoint.sequence_number,
-            ),
-            payload_store,
+        output_path = tmp_path / "single_source_round_trip.jsonl"
+        config = PipelineConfig(
+            sources={"source": _null_source("default")},
+            transforms=[],
+            sinks={
+                "default": inject_write_failure(JSONSink({"path": str(output_path), "schema": {"mode": "observed"}, "format": "jsonl"}))
+            },
         )
 
-        # The per-source resume path returns a single-entry map keyed by
-        # the only source NodeID observed in the recovered rows.
-        assert set(state.schema_contracts_by_source) == {source_node_id}
-        assert state.schema_contracts_by_source[source_node_id].version_hash() == contract_hash
-        assert len(state.unprocessed_rows) == 1
-        assert state.unprocessed_rows[0].source_node_id == source_node_id
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+
+        # Row validated under the single run_sources contract: "42" -> 42.
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert written == [{"id": 42}]
+
+        # Source attribution + per-source contract survived the roundtrip;
+        # checkpoints are deleted on successful completion.
+        with db.engine.connect() as conn:
+            row_source = conn.execute(select(rows_table.c.source_node_id).where(rows_table.c.run_id == run_id)).scalar_one()
+            persisted_hash = conn.execute(
+                select(run_sources_table.c.schema_contract_hash).where(run_sources_table.c.run_id == run_id)
+            ).scalar_one()
+            checkpoints_after = conn.execute(select(checkpoints_table).where(checkpoints_table.c.run_id == run_id)).fetchall()
+        assert row_source == source_node_id
+        assert persisted_hash == contract_hash
+        assert checkpoints_after == []
 
     def test_resume_state_has_no_singular_schema_contract_field(self) -> None:
         """``ResumeState.schema_contract`` is deleted by ADR-025 §3.

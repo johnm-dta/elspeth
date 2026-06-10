@@ -19,14 +19,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from elspeth.core.canonical import canonical_json
+from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
+from tests.fixtures.landscape import make_landscape_db
 from tests.strategies.json import json_primitives
 
 # =============================================================================
@@ -90,9 +91,16 @@ class TestSignRecordDeterminism:
     )
     @settings(max_examples=100)
     def test_different_keys_different_signatures(self, key1: bytes, key2: bytes, record: dict[str, Any]) -> None:
-        """Property: Different signing keys produce different signatures."""
-        if key1 == key2:
-            return  # Skip when keys happen to be identical
+        """Property: HMAC-inequivalent signing keys produce different signatures.
+
+        HMAC (RFC 2104) zero-pads keys shorter than the hash block size, so
+        keys that differ only by trailing zero bytes are the SAME effective
+        key and legitimately produce identical signatures. Skip those.
+        """
+        # SHA-256 block size is 64 bytes; generated keys are <= 64 bytes,
+        # so the HMAC-effective key is the zero-padded 64-byte form.
+        if key1.ljust(64, b"\x00") == key2.ljust(64, b"\x00"):
+            return  # Skip when keys are HMAC-equivalent
 
         exporter1 = _make_exporter(signing_key=key1)
         exporter2 = _make_exporter(signing_key=key2)
@@ -237,10 +245,26 @@ class TestManifestMetadata:
 # =============================================================================
 
 
+_SHARED_DB: LandscapeDB | None = None
+
+
+def _shared_landscape_db() -> LandscapeDB:
+    """Return a real (in-memory, schema-initialized) LandscapeDB, built once.
+
+    The exporter's repository wiring enforces Tier-1 engine discipline (PRAGMA
+    foreign_keys / journal_mode) at construction, so a mock DB is rejected.
+    These tests never write through the DB; one shared read-only instance keeps
+    the Hypothesis examples fast.
+    """
+    global _SHARED_DB
+    if _SHARED_DB is None:
+        _SHARED_DB = make_landscape_db()
+    return _SHARED_DB
+
+
 def _make_exporter(signing_key: bytes | None = None) -> LandscapeExporter:
-    """Create an exporter with a mocked DB (for _sign_record tests only)."""
-    mock_db = MagicMock()
-    return LandscapeExporter(mock_db, signing_key=signing_key)
+    """Create an exporter over a real empty DB (for _sign_record tests only)."""
+    return LandscapeExporter(_shared_landscape_db(), signing_key=signing_key)
 
 
 def _make_exporter_with_data(
@@ -249,12 +273,12 @@ def _make_exporter_with_data(
 ) -> LandscapeExporter:
     """Create an exporter that yields deterministic test records.
 
-    Patches _iter_records to yield simple test records without a real DB.
+    Patches _iter_records to yield simple test records; the signing/manifest
+    pipeline under test is independent of how records are sourced.
     """
     test_records = [{"record_type": f"test_{i}", "data": f"value_{i}", "index": i} for i in range(num_records)]
 
-    mock_db = MagicMock()
-    exporter = LandscapeExporter(mock_db, signing_key=signing_key)
+    exporter = LandscapeExporter(_shared_landscape_db(), signing_key=signing_key)
 
     # Patch _iter_records to return our test data
     def _mock_iter(run_id: str):

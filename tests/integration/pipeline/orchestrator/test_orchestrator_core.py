@@ -239,7 +239,7 @@ def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeyp
         return AggregationFlushResult()
 
     monkeypatch.setattr(
-        "elspeth.engine.orchestrator.core.check_aggregation_timeouts",
+        "elspeth.engine.orchestrator.source_iteration.check_aggregation_timeouts",
         fake_check_aggregation_timeouts,
     )
     config = PipelineConfig(
@@ -258,7 +258,7 @@ def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeyp
         coalesce_node_map={},
     )
 
-    row = orchestrator._next_source_item_with_idle_timeout_flushes(
+    row = orchestrator._source_driver._next_source_item_with_idle_timeout_flushes(
         iter(source_rows()),
         loop_ctx,
         agg_transform_lookup={},

@@ -3441,11 +3441,13 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         output_options: dict[str, Any],
     ) -> ExecutionGraph:
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="t1",
-                options={**source_options, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="t1",
+                    options={**source_options, "on_validation_failure": "discard"},
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="t1",
@@ -3466,8 +3468,8 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         )
         plugins = instantiate_plugins_from_config(config)
         return ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3646,16 +3648,18 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         assert composer_result.is_valid, [e.message for e in composer_result.errors]
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="text",
-                on_success="t1",
-                options={
-                    "path": str(text_path),
-                    "column": "color",
-                    "schema": {"mode": "observed"},
-                    "on_validation_failure": "discard",
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="text",
+                    on_success="t1",
+                    options={
+                        "path": str(text_path),
+                        "column": "color",
+                        "schema": {"mode": "observed"},
+                        "on_validation_failure": "discard",
+                    },
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="t1",
@@ -3683,8 +3687,8 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         plugins = instantiate_plugins_from_config(config)
         # Runtime construction (which validates edges) must not raise.
         ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,

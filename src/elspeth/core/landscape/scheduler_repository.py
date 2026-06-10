@@ -673,8 +673,19 @@ class TokenSchedulerRepository:
 
     @staticmethod
     def serialize_row_payload(row: PipelineRow) -> str:
-        """Serialize the current token row and its contract for durable resume."""
-        return canonical_json(
+        """Serialize the current token row and its contract for durable resume.
+
+        Uses the type-preserving checkpoint serializer (NOT canonical_json):
+        journal row payloads are re-driven as live PipelineRows on resume
+        (PENDING_SINK re-drive, F1 barrier-buffer rebuild), so typed values
+        (datetime, Decimal, date, time, bytes, UUID) must round-trip with
+        full fidelity — canonical_json flattens them to bare strings.
+        """
+        # Deferred import: module-level would cycle —
+        # core.checkpoint.__init__ → recovery → core.landscape.factory → this module.
+        from elspeth.core.checkpoint.serialization import checkpoint_dumps
+
+        return checkpoint_dumps(
             {
                 "row": row.to_checkpoint_format(),
                 "contract": row.contract.to_checkpoint_format(),
@@ -684,8 +695,11 @@ class TokenSchedulerRepository:
     @staticmethod
     def deserialize_row_payload(row_payload_json: str) -> PipelineRow:
         """Restore a scheduler row payload written by ``serialize_row_payload``."""
+        # Deferred import: see serialize_row_payload.
+        from elspeth.core.checkpoint.serialization import checkpoint_loads
+
         try:
-            payload = json.loads(row_payload_json)
+            payload = checkpoint_loads(row_payload_json)
         except json.JSONDecodeError as exc:
             raise AuditIntegrityError(f"Corrupt scheduler row payload JSON: {exc}") from exc
         if type(payload) is not dict:

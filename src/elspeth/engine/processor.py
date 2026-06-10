@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeIs, cast
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
@@ -805,17 +806,15 @@ class RowProcessor:
         """
         return self._aggregation_executor.get_buffer_count(node_id)
 
-    def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
-        """Get checkpoint state for all aggregation buffers.
+    def get_aggregation_barrier_scalars(self) -> dict[NodeID, AggregationNodeScalars]:
+        """Get the underivable trigger-latch scalars for the checkpoint row.
 
-        Returns complete state of all aggregation nodes (buffers + triggers)
-        for persistence during checkpointing. This enables crash recovery
-        without losing buffered rows.
-
-        Returns:
-            Typed checkpoint state suitable for passing to create_checkpoint().
+        F1 design D3: the checkpoint persists only scalar barrier metadata —
+        buffered tokens live in journal BLOCKED rows; counters derive from
+        audit tables at restore. Only nodes with a latched trigger fire
+        offset are emitted (see AggregationExecutor.get_barrier_scalars).
         """
-        return self._aggregation_executor.get_checkpoint_state()
+        return self._aggregation_executor.get_barrier_scalars()
 
     def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
         """Get checkpoint state for pending coalesces."""

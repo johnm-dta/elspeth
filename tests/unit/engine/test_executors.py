@@ -52,6 +52,8 @@ Invariant: Token outcomes only recorded after sink durability (crash recovery sa
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -63,18 +65,13 @@ from elspeth.contracts import (
     TokenInfo,
     TransformResult,
 )
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars
 from elspeth.contracts.data import PluginSchema as _PermissiveSchema
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import (
     BatchStatus,
     NodeStateStatus,
-    NodeType,
     RoutingKind,
     RoutingMode,
     TerminalOutcome,
@@ -98,12 +95,14 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.results import ArtifactDescriptor, GateResult
 from elspeth.contracts.routing import RouteDestination, RoutingAction
+from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
 from elspeth.core.config import AggregationSettings, GateSettings, TriggerConfig
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.engine.clock import MockClock
 from elspeth.engine.executors import (
-    AGGREGATION_CHECKPOINT_VERSION,
     AggregationExecutor,
     GateExecutor,
     GateOutcome,
@@ -177,6 +176,59 @@ def _make_token(
         contract = _make_contract()
     row_data = make_row(data, contract=contract)
     return TokenInfo(row_id=row_id, token_id=token_id, row_data=row_data)
+
+
+# Reference instant for journal-restore tests (tz-aware, like barrier_blocked_at).
+_JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+
+
+def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
+    """Build a REAL journal row payload via the serializer mark_blocked rows carry.
+
+    Round-trip fidelity through serialize_row_payload/deserialize_row_payload is
+    the property restore_from_journal depends on — fixtures must not shortcut it.
+    """
+    if contract is None:
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+    return TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, contract))
+
+
+def _blocked_item(
+    *,
+    token_id: str,
+    row_id: str,
+    payload: str,
+    blocked_at: datetime | None,
+    node_id: str = "agg_1",
+    ingest_sequence: int = 0,
+    attempt: int = 0,
+    branch_name: str | None = None,
+    fork_group_id: str | None = None,
+    join_group_id: str | None = None,
+    expand_group_id: str | None = None,
+) -> TokenWorkItem:
+    """Build a BLOCKED journal row as list_blocked_barrier_items returns them."""
+    return TokenWorkItem(
+        work_item_id=f"wi-{token_id}",
+        run_id="test-run",
+        token_id=token_id,
+        row_id=row_id,
+        node_id=node_id,
+        step_index=0,
+        ingest_sequence=ingest_sequence,
+        row_payload_json=payload,
+        status=TokenWorkStatus.BLOCKED,
+        attempt=attempt,
+        available_at=_JOURNAL_T0,
+        created_at=_JOURNAL_T0,
+        updated_at=_JOURNAL_T0,
+        barrier_key=f"aggregation:{node_id}",
+        branch_name=branch_name,
+        fork_group_id=fork_group_id,
+        join_group_id=join_group_id,
+        expand_group_id=expand_group_id,
+        barrier_blocked_at=blocked_at,
+    )
 
 
 def _make_factory() -> MagicMock:
@@ -2186,6 +2238,7 @@ class TestAggregationExecutor:
         factory: MagicMock | None = None,
         node_id: str = "agg_1",
         count: int = 3,
+        clock: MockClock | None = None,
     ) -> tuple[AggregationExecutor, MagicMock, NodeID]:
         """Create an AggregationExecutor with a single configured node."""
         if factory is None:
@@ -2205,6 +2258,7 @@ class TestAggregationExecutor:
             _make_step_resolver(),
             run_id="test-run",
             aggregation_settings={nid: settings},
+            clock=clock,
         )
         return executor, factory, nid
 
@@ -2606,18 +2660,19 @@ class TestAggregationExecutor:
 
         assert ctx.aggregation_batch is None
 
-    def test_aggregation_batch_context_resumes_pagination_after_checkpoint_restore(self) -> None:
+    def test_aggregation_batch_context_resumes_pagination_after_journal_restore(self) -> None:
         """After restore, the next flush emits flush_index = M+1 and rows_seen_total = N + new_rows.
 
         Headline guarantee of the durable-counter design: pagination metadata
-        derived from AggregationExecutor counters must survive a checkpoint
-        round-trip. This exercises checkpoint→restore→flush end-to-end:
+        derived from AggregationExecutor counters must survive resume. Post-F1
+        the counters derive from audit tables (Task 3.1) and arrive via
+        restore_from_journal. This exercises flush→counter-only-restore→flush:
 
         1. Executor A flushes a batch of 3 rows successfully (accepted_count_total=3,
            completed_flush_count=1, buffer empty).
-        2. get_checkpoint_state() emits a counter-only node (no buffered tokens).
-        3. Fresh executor B restores from that state.
-        4. Buffer 2 new rows and flush. AggregationBatchContext seen by the
+        2. Fresh executor B restores the audit-derived counters via
+           restore_from_journal with no journal items (counter-only node).
+        3. Buffer 2 new rows and flush. AggregationBatchContext seen by the
            transform must report flush_index=2, rows_seen_total=5, row_start=4,
            row_end=5, batch_size=2.
         """
@@ -2640,17 +2695,7 @@ class TestAggregationExecutor:
         )
         executor_a.execute_flush(nid, transform_a, ctx, TriggerType.COUNT)
 
-        # === Phase 2: Checkpoint includes counter-only node ===
-        state = executor_a.get_checkpoint_state()
-        assert isinstance(state, AggregationCheckpointState)
-        assert str(nid) in state.nodes, "Counter-only node must be included in checkpoint"
-        node_ckpt = state.nodes[str(nid)]
-        assert node_ckpt.tokens == ()
-        assert node_ckpt.batch_id is None
-        assert node_ckpt.accepted_count_total == 3
-        assert node_ckpt.completed_flush_count == 1
-
-        # === Phase 3: Fresh executor B restores from checkpoint ===
+        # === Phase 2: Fresh executor B restores audit-derived counters (no journal items) ===
         executor_b = AggregationExecutor(
             factory.execution,
             _make_span_factory(),
@@ -2666,7 +2711,18 @@ class TestAggregationExecutor:
                 )
             },
         )
-        executor_b.restore_from_checkpoint(state)
+        executor_b.restore_from_journal(
+            node_id=nid,
+            items=[],
+            member_order=[],
+            batch_id=None,
+            accepted_count_total=3,
+            completed_flush_count=1,
+            scalars=AggregationNodeScalars(None, None),
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
         assert executor_b.get_buffer_count(nid) == 0  # No buffered tokens restored
 
         # === Phase 4: Buffer 2 new rows on B, flush, capture ctx.aggregation_batch ===
@@ -2762,21 +2818,18 @@ class TestAggregationExecutor:
         with pytest.raises(OrchestrationInvariantError, match="not_configured"):
             executor.get_batch_id(unknown)
         with pytest.raises(OrchestrationInvariantError, match="not_configured"):
-            executor.get_restored_state(unknown)
-        with pytest.raises(OrchestrationInvariantError, match="not_configured"):
-            executor.restore_state(unknown, AggregationCheckpointState(version=AGGREGATION_CHECKPOINT_VERSION, nodes={}))
-
-    # --- restore_state / get_restored_state ---
-
-    def test_restore_state_and_get(self) -> None:
-        executor, _, nid = self._make_agg_executor()
-        state = AggregationCheckpointState(version=AGGREGATION_CHECKPOINT_VERSION, nodes={})
-        executor.restore_state(nid, state)
-        assert executor.get_restored_state(nid) == state
-
-    def test_get_restored_state_returns_none_if_not_set(self) -> None:
-        executor, _, nid = self._make_agg_executor()
-        assert executor.get_restored_state(nid) is None
+            executor.restore_from_journal(
+                node_id=unknown,
+                items=[],
+                member_order=[],
+                batch_id=None,
+                accepted_count_total=0,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
 
     # --- PipelineRow handling (merged from test_executor_pipeline_row.py) ---
 
@@ -2822,217 +2875,292 @@ class TestAggregationExecutor:
         assert isinstance(buffered_tokens[0].row_data, PipelineRow)
         assert buffered_tokens[0].row_data.contract is contract
 
-    def test_checkpoint_contains_dicts_not_pipeline_row(self) -> None:
-        """get_checkpoint_state() should return typed DTO with JSON-serializable to_dict()."""
-        import json
+    # --- restore_from_journal (F1: buffers rebuild from BLOCKED journal rows) ---
 
-        executor, _, nid = self._make_agg_executor(count=10)
-        contract = _make_contract()
-        token = _make_token(data={"value": "test"}, contract=contract)
+    def test_restore_from_journal_rebuilds_buffer_and_attempt_offset(self) -> None:
+        """Journal items rebuild tokens/buffers in member_order with typed-value fidelity.
 
-        executor.buffer_row(nid, token)
-
-        checkpoint = executor.get_checkpoint_state()
-        assert isinstance(checkpoint, AggregationCheckpointState)
-
-        # Verify to_dict() output is JSON-serializable
-        checkpoint_dict = checkpoint.to_dict()
-        try:
-            serialized = json.dumps(checkpoint_dict)
-            assert len(serialized) > 0
-        except (TypeError, ValueError) as e:
-            pytest.fail(f"Checkpoint to_dict() should be JSON-serializable but got error: {e}")
-
-        # Verify row_data is stored as a mapping (not PipelineRow) in checkpoint token
-        node_checkpoint = checkpoint.nodes[str(nid)]
-        token_ckpt = node_checkpoint.tokens[0]
-        assert isinstance(token_ckpt.row_data, Mapping)
-        assert dict(token_ckpt.row_data) == {"value": "test"}
-
-    def test_checkpoint_state_construction_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AggregationExecutor should build a DTO and leave serialization to CheckpointManager."""
-        import elspeth.engine.executors.aggregation as aggregation_module
-
-        def fail_if_called(_obj: object) -> str:
-            raise AssertionError("AggregationExecutor.get_checkpoint_state must not serialize")
-
-        monkeypatch.setattr(aggregation_module, "checkpoint_dumps", fail_if_called, raising=False)
-
-        executor, _, nid = self._make_agg_executor(count=10)
-        token = _make_token(data={"value": "test"}, contract=_make_contract())
-        executor.buffer_row(nid, token)
-
-        checkpoint = executor.get_checkpoint_state()
-
-        assert isinstance(checkpoint, AggregationCheckpointState)
-        assert checkpoint.nodes[str(nid)].tokens
-
-    def test_checkpoint_includes_contract_for_restore(self) -> None:
-        """Checkpoint should include contract info to enable PipelineRow restoration."""
-        executor, _, nid = self._make_agg_executor(count=10)
-        contract = _make_contract()
-        token = _make_token(data={"value": "test"}, contract=contract)
-
-        executor.buffer_row(nid, token)
-
-        checkpoint = executor.get_checkpoint_state()
-        assert isinstance(checkpoint, AggregationCheckpointState)
-        node_checkpoint = checkpoint.nodes[str(nid)]
-        assert all(t.contract for t in node_checkpoint.tokens), "Checkpoint must include contract info for PipelineRow restoration"
-        assert all(t.contract_version for t in node_checkpoint.tokens), (
-            "Checkpoint must include contract_version for integrity verification"
-        )
-
-    def test_restore_from_checkpoint_creates_pipeline_row(self) -> None:
-        """restore_from_checkpoint should reconstruct TokenInfo with PipelineRow."""
-        executor, factory, nid = self._make_agg_executor(count=10)
-        contract = _make_contract()
-        token = _make_token(data={"value": "test"}, contract=contract)
-
-        executor.buffer_row(nid, token)
-        checkpoint = executor.get_checkpoint_state()
-
-        # Create new executor and restore from checkpoint
-        new_executor = AggregationExecutor(
-            factory.execution,
-            _make_span_factory(),
-            _make_step_resolver(),
-            run_id="test-run",
-            aggregation_settings={
-                nid: AggregationSettings(
-                    name="test_agg",
-                    plugin="batch_stats",
-                    input="default",
-                    on_error="discard",
-                    trigger=TriggerConfig(count=10),
-                )
-            },
-        )
-        new_executor.restore_from_checkpoint(checkpoint)
-
-        restored_tokens = new_executor.get_buffered_tokens(nid)
-        assert len(restored_tokens) == 1
-        assert isinstance(restored_tokens[0].row_data, PipelineRow)
-        assert restored_tokens[0].row_data["value"] == "test"
-        assert restored_tokens[0].row_data.contract is not None
-        assert restored_tokens[0].row_data.contract.mode == "FLEXIBLE"
-
-    def test_restore_from_checkpoint_buffer_has_dicts(self) -> None:
-        """After restore, _buffers should contain dicts (not PipelineRow)."""
-        executor, factory, nid = self._make_agg_executor(count=10)
-        contract = _make_contract()
-        token = _make_token(data={"value": "test"}, contract=contract)
-
-        executor.buffer_row(nid, token)
-        checkpoint = executor.get_checkpoint_state()
-
-        # Create new executor and restore from checkpoint
-        new_executor = AggregationExecutor(
-            factory.execution,
-            _make_span_factory(),
-            _make_step_resolver(),
-            run_id="test-run",
-            aggregation_settings={
-                nid: AggregationSettings(
-                    name="test_agg",
-                    plugin="batch_stats",
-                    input="default",
-                    on_error="discard",
-                    trigger=TriggerConfig(count=10),
-                )
-            },
-        )
-        new_executor.restore_from_checkpoint(checkpoint)
-
-        restored_rows = new_executor.get_buffered_rows(nid)
-        assert len(restored_rows) == 1
-        assert isinstance(restored_rows[0], dict)
-        assert type(restored_rows[0]) is not PipelineRow  # type: ignore[comparison-overlap, unreachable]
-        assert restored_rows[0] == {"value": "test"}
-
-    def test_restore_from_checkpoint_rejects_batch_members_beyond_checkpoint(self) -> None:
-        """Resume must fail early when persisted batch membership advanced past the checkpoint.
-
-        Crash window:
-        1. Batch member 0 is checkpointed.
-        2. Batch member 1 is persisted to audit but crash happens before next checkpoint.
-        3. Resume must not restore member_count=1 and continue the existing batch.
+        Payloads carry datetime AND Decimal values — proves the journal payload
+        round-trip (serialize_row_payload → deserialize_row_payload) preserves
+        type fidelity into the restored buffer.
         """
-        setup = make_recorder_with_run()
-        agg_node_id = register_test_node(
-            setup.data_flow,
-            setup.run_id,
-            "agg_1",
-            node_type=NodeType.AGGREGATION,
-            plugin_name="batch_stats",
-        )
-        contract = _make_contract()
+        clock = MockClock(start=100.0)
+        executor, _, nid = self._make_agg_executor(node_id="agg-1", count=10, clock=clock)
+        t0 = _JOURNAL_T0
+        items = [
+            _blocked_item(
+                token_id="t1",
+                row_id="r1",
+                node_id="agg-1",
+                payload=_journal_payload({"v": 1, "at": datetime(2026, 6, 1, tzinfo=UTC), "amount": Decimal("1.10")}),
+                blocked_at=t0,
+            ),
+            _blocked_item(
+                token_id="t2",
+                row_id="r2",
+                node_id="agg-1",
+                payload=_journal_payload({"v": 2, "at": datetime(2026, 6, 2, tzinfo=UTC), "amount": Decimal("2.25")}),
+                blocked_at=t0 + timedelta(seconds=5),
+                ingest_sequence=1,
+            ),
+        ]
 
-        persisted_tokens = []
-        for row_index, value in enumerate(("first", "second")):
-            row = setup.data_flow.create_row(
-                run_id=setup.run_id,
-                source_node_id=setup.source_node_id,
-                row_index=row_index,
-                data={"value": value},
-                source_row_index=row_index,
-                ingest_sequence=row_index,
+        executor.restore_from_journal(
+            node_id=nid,
+            items=items,
+            member_order=["t2", "t1"],  # batch_members.ordinal order (Task 3.1 derives)
+            batch_id="batch-9",
+            accepted_count_total=2,
+            completed_flush_count=0,
+            scalars=AggregationNodeScalars(None, None),
+            attempt_offsets={"t1": 1, "t2": 1},  # max_attempt+1 discipline
+            resume_checkpoint_id="cp-0",
+            now=t0 + timedelta(seconds=60),
+        )
+
+        tokens = executor.get_buffered_tokens(nid)
+        rows = executor.get_buffered_rows(nid)
+        # Buffer order comes from member_order (authoritative accept order), not item order
+        assert [t.token_id for t in tokens] == ["t2", "t1"]
+        assert rows[0]["at"] == datetime(2026, 6, 2, tzinfo=UTC)
+        assert isinstance(rows[0]["at"], datetime)
+        assert rows[0]["amount"] == Decimal("2.25")
+        assert isinstance(rows[0]["amount"], Decimal)
+        assert rows[1]["at"] == datetime(2026, 6, 1, tzinfo=UTC)
+        assert all(isinstance(t.row_data, PipelineRow) for t in tokens)
+        assert executor.get_batch_id(nid) == "batch-9"
+        node = executor._nodes[nid]
+        assert node.accepted_count_total == 2
+        assert node.completed_flush_count == 0
+        assert node.member_count == 2
+        assert all(t.resume_attempt_offset == 1 and t.resume_checkpoint_id == "cp-0" for t in tokens)
+        # Trigger age restored from absolute blocked_at (oldest item), not an offset blob
+        assert node.trigger.get_age_seconds() == pytest.approx(60.0)
+
+    def test_restore_from_journal_counter_only_node(self) -> None:
+        """Empty journal restores only the audit-derived counters (post-flush node)."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1", clock=MockClock(start=10.0))
+
+        executor.restore_from_journal(
+            node_id=nid,
+            items=[],
+            member_order=[],
+            batch_id=None,
+            accepted_count_total=5,
+            completed_flush_count=2,
+            scalars=AggregationNodeScalars(None, None),
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        node = executor._nodes[nid]
+        assert node.completed_flush_count == 2
+        assert node.accepted_count_total == 5
+        assert node.batch_id is None
+        assert node.tokens == []
+        assert node.buffers == []
+        assert node.member_count == 0
+        assert node.trigger.get_age_seconds() == 0.0
+
+    def test_restore_from_journal_null_blocked_at_is_corruption(self) -> None:
+        """Post-epoch-20 every BLOCKED row was stamped; NULL barrier_blocked_at = corruption."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+
+        with pytest.raises(AuditIntegrityError, match="barrier_blocked_at"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=[
+                    _blocked_item(
+                        token_id="t1",
+                        row_id="r1",
+                        node_id="agg-1",
+                        payload=_journal_payload({"v": 1}),
+                        blocked_at=None,
+                    )
+                ],
+                member_order=["t1"],
+                batch_id="b",
+                accepted_count_total=1,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
             )
-            token = setup.data_flow.create_token(row_id=row.row_id)
-            persisted_tokens.append((row, token, value))
 
-        batch = setup.execution.create_batch(
-            run_id=setup.run_id,
-            aggregation_node_id=agg_node_id,
+    def test_restore_from_journal_membership_mismatch_is_corruption(self) -> None:
+        """Journal items and batch_members (member_order) must agree as SETS.
+
+        Order is sourced FROM batch_members, so ordered comparison would be
+        circular — but a token present in one and missing from the other means
+        journal and audit disagree about batch membership: corruption.
+        """
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+        items = [
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+        ]
+
+        # member_order references a token with no BLOCKED journal row
+        with pytest.raises(AuditIntegrityError, match="batch membership"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=["t1", "t-ghost"],
+                batch_id="b",
+                accepted_count_total=2,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1, "t-ghost": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+        # Journal row not present in batch_members
+        with pytest.raises(AuditIntegrityError, match="batch membership"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=[],
+                batch_id="b",
+                accepted_count_total=1,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_missing_attempt_offset_is_corruption(self) -> None:
+        """Every journal item must have an audit-derived attempt offset."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+
+        with pytest.raises(AuditIntegrityError, match="attempt_offsets"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=[
+                    _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+                ],
+                member_order=["t1"],
+                batch_id="b",
+                accepted_count_total=1,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_batch_id_items_consistency(self) -> None:
+        """Items without batch_id (or batch_id without items) is corruption."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+        items = [
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match="batch_id"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=["t1"],
+                batch_id=None,
+                accepted_count_total=1,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+        with pytest.raises(AuditIntegrityError, match="batch_id"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=[],
+                member_order=[],
+                batch_id="batch-orphan",
+                accepted_count_total=1,
+                completed_flush_count=1,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_impossible_counters_are_corruption(self) -> None:
+        """accepted_count_total must cover every buffered row; counters non-negative."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+        items = [
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t2", row_id="r2", node_id="agg-1", payload=_journal_payload({"v": 2}), blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match="impossible"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=["t1", "t2"],
+                batch_id="b",
+                accepted_count_total=1,  # < 2 buffered rows — impossible
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1, "t2": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_restores_trigger_fire_offsets(self) -> None:
+        """Scalar trigger latches pass through to the TriggerEvaluator and read back."""
+        clock = MockClock(start=50.0)
+        executor, _, nid = self._make_agg_executor(node_id="agg-1", count=10, clock=clock)
+
+        executor.restore_from_journal(
+            node_id=nid,
+            items=[
+                _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+            ],
+            member_order=["t1"],
+            batch_id="b",
+            accepted_count_total=1,
+            completed_flush_count=0,
+            scalars=AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=None),
+            attempt_offsets={"t1": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0 + timedelta(seconds=60),
         )
-        for ordinal, (_row, token, _value) in enumerate(persisted_tokens):
-            setup.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=ordinal)
 
-        stale_checkpoint = AggregationCheckpointState(
-            version=AGGREGATION_CHECKPOINT_VERSION,
-            nodes={
-                agg_node_id: AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id=persisted_tokens[0][1].token_id,
-                            row_id=persisted_tokens[0][0].row_id,
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"value": persisted_tokens[0][2]},
-                            contract_version=contract.version_hash(),
-                            contract=contract.to_checkpoint_format(),
-                        ),
-                    ),
-                    batch_id=batch.batch_id,
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=1,
-                    completed_flush_count=0,
-                )
-            },
-        )
+        node = executor._nodes[nid]
+        assert node.trigger.get_count_fire_offset() == pytest.approx(1.5)
+        assert node.trigger.get_condition_fire_offset() is None
 
-        executor = AggregationExecutor(
-            setup.execution,
-            _make_span_factory(),
-            _make_step_resolver(),
-            run_id=setup.run_id,
-            aggregation_settings={
-                NodeID(agg_node_id): AggregationSettings(
-                    name="test_agg",
-                    plugin="batch_stats",
-                    input="default",
-                    on_error="discard",
-                    trigger=TriggerConfig(count=10),
-                )
-            },
-        )
+    # --- get_barrier_scalars (F1: checkpoint row carries only trigger latches) ---
 
-        with pytest.raises(AuditIntegrityError, match="advanced beyond the latest checkpoint"):
-            executor.restore_from_checkpoint(stale_checkpoint)
+    def test_get_barrier_scalars_skips_unlatched_nodes(self) -> None:
+        """Nodes whose triggers have not fired contribute no scalars.
+
+        Emission choice (Task 2.1): only nodes with at least one non-None fire
+        offset are emitted — the checkpoint writer serializes None when nothing
+        latched, and restore treats a missing entry as (None, None). This keeps
+        checkpoints minimal and matches the Task 1.2 transitional projection.
+        """
+        executor, _, nid = self._make_agg_executor(count=10)
+        assert executor.get_barrier_scalars() == {}
+        executor.buffer_row(nid, _make_token(token_id="t1"))
+        assert executor.get_barrier_scalars() == {}
+
+    def test_get_barrier_scalars_reads_live_trigger_latches(self) -> None:
+        """A latched count trigger surfaces as AggregationNodeScalars for its node."""
+        clock = MockClock(start=0.0)
+        executor, _, nid = self._make_agg_executor(count=2, clock=clock)
+        executor.buffer_row(nid, _make_token(token_id="t1"))
+        clock.advance(1.5)
+        executor.buffer_row(nid, _make_token(token_id="t2"))
+        # should_flush() evaluates triggers, latching the count fire time
+        assert executor.should_flush(nid) is True
+
+        scalars = executor.get_barrier_scalars()
+        assert set(scalars) == {nid}
+        assert scalars[nid].count_fire_offset == pytest.approx(1.5)
+        assert scalars[nid].condition_fire_offset is None
 
 
 # =============================================================================
@@ -4154,47 +4282,22 @@ class TestSinkExecutor:
 
 
 # =============================================================================
-# AggregationExecutor checkpoint version tests
+# AggregationCheckpointState DTO structural tests
 # =============================================================================
 
 
-class TestAggregationCheckpointVersion:
-    """Tests for aggregation checkpoint version compatibility."""
+class TestAggregationCheckpointStateDTO:
+    """Structural tests for the AggregationCheckpointState contract DTO.
 
-    def test_old_checkpoint_version_rejected(self) -> None:
-        """Old checkpoint version (2.1) is rejected — prevents silent state corruption.
-
-        Error message must include operator recovery guidance ("delete the
-        audit" database / "fresh run") consistent with the project DB
-        migration policy. Future drift that drops the recovery instruction
-        will fail this assertion.
-        """
-        executor, _factory, _nid = TestAggregationExecutor._make_agg_executor(TestAggregationExecutor())
-
-        # Construct typed DTO with wrong version — restore_from_checkpoint checks value
-        old_checkpoint = AggregationCheckpointState(version="2.1", nodes={})
-
-        with pytest.raises(AuditIntegrityError, match="Incompatible aggregation checkpoint version") as exc_info:
-            executor.restore_from_checkpoint(old_checkpoint)
-
-        message = str(exc_info.value)
-        assert "delete the audit" in message
-        assert "fresh run" in message
-
-    def test_current_version_accepted(self) -> None:
-        """Current checkpoint version is accepted without error."""
-        executor, _factory, _nid = TestAggregationExecutor._make_agg_executor(TestAggregationExecutor())
-
-        # Minimal valid v3.0 checkpoint with no buffered tokens
-        checkpoint = AggregationCheckpointState(version=AGGREGATION_CHECKPOINT_VERSION, nodes={})
-
-        # Should not raise
-        executor.restore_from_checkpoint(checkpoint)
+    The executor-side blob restore was deleted in F1 Task 2.1 (buffers rebuild
+    from journal BLOCKED rows via restore_from_journal); the DTO remains in
+    production only on the processor restore path until Task 3.1 retires it.
+    """
 
     def test_missing_version_rejected(self) -> None:
         """Checkpoint without _version key is rejected as corrupt by from_dict()."""
-        # Validation now happens in AggregationCheckpointState.from_dict(),
-        # not in restore_from_checkpoint() — the DTO enforces structure.
+        from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
+
         with pytest.raises(AuditIntegrityError, match="Corrupted aggregation checkpoint: missing '_version' key"):
             AggregationCheckpointState.from_dict({"agg_1": {"tokens": []}})
 

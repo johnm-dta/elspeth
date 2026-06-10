@@ -1,37 +1,29 @@
 # tests/unit/engine/orchestrator/test_rc6_checkpoint_interrupted_edge.py
-"""Shutdown-checkpoint behavior when aggregation buffers are flush-emptied.
-
-``AggregationExecutor.get_checkpoint_state()`` includes counter-only nodes
-(empty ``tokens``, non-zero ``accepted_count_total``/``completed_flush_count``)
-so pagination metadata survives resume even immediately after a successful
-flush.
+"""Shutdown-checkpoint behavior for the scalar barrier projection.
 
 History: the original RC6 edge here was the token-anchor selection chain
 (commit f487d7b13 fixed a ``tokens[-1]`` IndexError on counter-only nodes).
 The anchor itself was deleted as vestigial (F2, 2026-06-10) — the entire
 fallback chain is gone, so the crash surface no longer exists. F1 Task 1.2
-then retired the blob persistence itself: the checkpoint carries only scalar
-barrier metadata (BarrierScalars), counters derive from audit tables at
-restore (design D3), and buffered tokens live in journal BLOCKED rows. What
-survives, and what these tests pin:
+then retired the blob persistence (checkpoint carries only BarrierScalars;
+counters derive from audit tables at restore, design D3), and Task 2.1
+retired the executor blob state entirely: the processor now surfaces live
+trigger-latch scalars via ``get_aggregation_barrier_scalars()`` — only nodes
+with at least one latched fire offset are emitted. What these tests pin:
 
-- counter-only nodes contribute NO persisted scalars (their counters are
-  derivable; their fire offsets are structurally None);
-- buffered nodes contribute per-node trigger-latch scalars;
-- a shutdown with no buffered tokens anywhere still writes a recovery
-  checkpoint (the former no-anchor skip arm is gone).
+- unlatched / counter-only aggregation nodes contribute NO persisted scalars
+  (their counters are derivable; their fire offsets are None);
+- latched nodes contribute per-node trigger-latch scalars;
+- a shutdown with no latched barriers anywhere still writes a recovery
+  checkpoint (the former no-anchor skip arm is gone) with barrier_scalars=None.
 """
 
 from __future__ import annotations
 
 from unittest.mock import Mock
 
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
-from elspeth.contracts.barrier_scalars import BarrierScalars
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 
 
@@ -43,49 +35,13 @@ def _make_coordinator() -> CheckpointCoordinator:
     return coordinator
 
 
-def _counter_only_node(*, accepted: int = 5, flushes: int = 1) -> AggregationNodeCheckpoint:
-    """Post-flush snapshot: empty buffer, durable counters only."""
-    return AggregationNodeCheckpoint(
-        tokens=(),
-        batch_id=None,
-        elapsed_age_seconds=0.0,
-        count_fire_offset=None,
-        condition_fire_offset=None,
-        accepted_count_total=accepted,
-        completed_flush_count=flushes,
-    )
-
-
-def _buffered_node(token_id: str) -> AggregationNodeCheckpoint:
-    token = AggregationTokenCheckpoint(
-        token_id=token_id,
-        row_id=f"row-{token_id}",
-        branch_name=None,
-        fork_group_id=None,
-        join_group_id=None,
-        expand_group_id=None,
-        row_data={"value": 1},
-        contract_version="cv-1",
-        contract={"fields": {}},
-    )
-    return AggregationNodeCheckpoint(
-        tokens=(token,),
-        batch_id="batch-1",
-        elapsed_age_seconds=0.5,
-        count_fire_offset=None,
-        condition_fire_offset=None,
-        accepted_count_total=1,
-        completed_flush_count=0,
-    )
-
-
 def _loop_ctx(
-    aggregation_state: AggregationCheckpointState,
+    aggregation_scalars: dict[NodeID, AggregationNodeScalars],
     *,
     pending_tokens: dict[str, list] | None = None,
 ) -> Mock:
     processor = Mock()
-    processor.get_aggregation_checkpoint_state.return_value = aggregation_state
+    processor.get_aggregation_barrier_scalars.return_value = aggregation_scalars
     processor.get_coalesce_checkpoint_state.return_value = None
 
     loop_ctx = Mock()
@@ -95,19 +51,18 @@ def _loop_ctx(
 
 
 class TestFlushEmptiedAggregationCheckpoints:
-    """checkpoint_interrupted_progress with counter-only aggregation nodes."""
+    """checkpoint_interrupted_progress with unlatched/counter-only aggregation nodes."""
 
-    def test_counter_only_node_contributes_no_scalars(self) -> None:
-        """A flush-emptied aggregation node must not crash the shutdown checkpoint.
+    def test_unlatched_nodes_contribute_no_scalars(self) -> None:
+        """A flush-emptied or unlatched aggregation node must not crash the shutdown checkpoint.
 
         F1 design D3: durable counters (flush_index / rows_seen_total
-        provenance) derive from audit tables at restore, so a counter-only
-        node contributes no persisted barrier scalars — the checkpoint is
-        still written, with barrier_scalars=None.
+        provenance) derive from audit tables at restore, and unlatched
+        triggers have no fire offsets — the executor emits no entry for such
+        nodes, so the checkpoint is still written with barrier_scalars=None.
         """
         coordinator = _make_coordinator()
-        state = AggregationCheckpointState(version="5.0", nodes={"agg_emptied": _counter_only_node()})
-        loop_ctx = _loop_ctx(state)
+        loop_ctx = _loop_ctx({})  # executor emitted nothing — no latched nodes
 
         coordinator.checkpoint_interrupted_progress(
             run_id="run-counter-only",
@@ -118,18 +73,16 @@ class TestFlushEmptiedAggregationCheckpoints:
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
         assert kwargs["barrier_scalars"] is None
 
-    def test_mixed_counter_only_and_buffered_nodes_persist_buffered_scalars(self) -> None:
-        """With multiple aggregation nodes (some flush-emptied, some buffered),
-        only the buffered nodes contribute scalar barrier metadata."""
+    def test_latched_nodes_persist_their_scalars(self) -> None:
+        """Latched aggregation nodes surface as per-node BarrierScalars entries.
+
+        The executor's get_barrier_scalars() already filters to latched nodes;
+        the projection must carry them through verbatim.
+        """
         coordinator = _make_coordinator()
-        state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg_emptied": _counter_only_node(),
-                "agg_buffered": _buffered_node("tok-buffered"),
-            },
+        loop_ctx = _loop_ctx(
+            {NodeID("agg_latched"): AggregationNodeScalars(count_fire_offset=0.25, condition_fire_offset=None)},
         )
-        loop_ctx = _loop_ctx(state)
 
         coordinator.checkpoint_interrupted_progress(
             run_id="run-mixed-agg",
@@ -140,16 +93,15 @@ class TestFlushEmptiedAggregationCheckpoints:
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
         scalars = kwargs["barrier_scalars"]
         assert isinstance(scalars, BarrierScalars)
-        assert set(scalars.aggregation) == {"agg_buffered"}
+        assert set(scalars.aggregation) == {"agg_latched"}
+        assert scalars.aggregation["agg_latched"].count_fire_offset == 0.25
         assert scalars.coalesce == {}
 
     def test_no_buffered_tokens_anywhere_still_checkpoints(self) -> None:
-        """No buffered tokens and no pending sink tokens: the shutdown
-        checkpoint is still written (the former no-anchor skip arm is gone),
-        and never IndexErrors on the counter-only node."""
+        """No latched barriers and no pending sink tokens: the shutdown
+        checkpoint is still written (the former no-anchor skip arm is gone)."""
         coordinator = _make_coordinator()
-        state = AggregationCheckpointState(version="5.0", nodes={"agg_emptied": _counter_only_node()})
-        loop_ctx = _loop_ctx(state)
+        loop_ctx = _loop_ctx({})
 
         coordinator.checkpoint_interrupted_progress(
             run_id="run-no-anchor",

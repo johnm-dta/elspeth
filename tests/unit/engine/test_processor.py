@@ -6142,22 +6142,22 @@ class TestAggregationFacades:
 
         assert count == 5
 
-    def test_get_aggregation_checkpoint_state_delegates(self) -> None:
-        """get_aggregation_checkpoint_state delegates to aggregation_executor."""
+    def test_get_aggregation_barrier_scalars_delegates(self) -> None:
+        """get_aggregation_barrier_scalars delegates to aggregation_executor (F1 Task 2.1)."""
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars
+
         _, factory = _make_factory()
         processor = _make_processor(factory)
 
-        checkpoint: dict[str, Any] = {"agg-1": {"buffer": [], "trigger_state": {}}}
+        scalars = {NodeID("agg-1"): AggregationNodeScalars(count_fire_offset=0.5, condition_fire_offset=None)}
         with patch.object(
             processor._aggregation_executor,
-            "get_checkpoint_state",
-            return_value=checkpoint,
+            "get_barrier_scalars",
+            return_value=scalars,
         ):
-            result = processor.get_aggregation_checkpoint_state()
+            result = processor.get_aggregation_barrier_scalars()
 
-        # Mock returns raw dict; runtime return type is AggregationCheckpointState.
-        # Comparing across types is intentional — verifying pass-through delegation.
-        assert result == checkpoint  # type: ignore[comparison-overlap]
+        assert result == scalars
 
 
 # =============================================================================

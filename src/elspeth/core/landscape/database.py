@@ -215,6 +215,11 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "recorded_at"),
     ("scheduler_events", "caller_owner"),
     ("scheduler_events", "context_json"),
+    # Epoch 20: F1 durability unification.
+    # barrier_blocked_at records when a work item was blocked at a barrier (Task 1.3).
+    ("token_work_items", "barrier_blocked_at"),
+    # barrier_scalars_json carries shrunken checkpoint barrier metadata (Task 1.2).
+    ("checkpoints", "barrier_scalars_json"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

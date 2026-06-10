@@ -95,7 +95,11 @@ metadata = MetaData()
 #        scheduler_events CHECK constraints; checkpoints lose the token_id/
 #        node_id anchor columns and checkpoint_node_config_hash (full-topology
 #        hash subsumes per-node compatibility validation).
-SQLITE_SCHEMA_EPOCH = 19
+#   20 → F1 durability unification: token_work_items.barrier_blocked_at added;
+#        checkpoints aggregation_state_json/coalesce_state_json replaced by
+#        barrier_scalars_json; restore_blocked event type removed from
+#        scheduler_events CHECK.
+SQLITE_SCHEMA_EPOCH = 20
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -423,6 +427,7 @@ token_work_items_table = Table(
     Column("lease_owner", String(128)),
     Column("lease_expires_at", DateTime(timezone=True)),
     Column("available_at", DateTime(timezone=True), nullable=False),
+    Column("barrier_blocked_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
@@ -919,6 +924,9 @@ checkpoints_table = Table(
     # Version 3: Phase 2 traversal refactor checkpoint break
     # Version 4: Pending coalesce state persisted in checkpoints
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
+    # Epoch 20: F1 durability unification — barrier scalar metadata replaces
+    # the aggregation_state_json/coalesce_state_json blobs (blob DROP deferred to Task 4.1).
+    Column("barrier_scalars_json", Text, nullable=True),
 )
 
 Index("ix_checkpoints_run", checkpoints_table.c.run_id)

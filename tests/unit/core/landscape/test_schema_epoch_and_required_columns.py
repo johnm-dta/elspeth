@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 19)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 20)."""
 
 from __future__ import annotations
 
@@ -11,13 +11,22 @@ from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
     checkpoints_table,
     node_states_table,
+    token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_nineteen() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 19
+def test_epoch_is_twenty() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 20
+
+
+def test_token_work_items_has_barrier_blocked_at() -> None:
+    assert "barrier_blocked_at" in token_work_items_table.c
+
+
+def test_checkpoints_have_barrier_scalars_column() -> None:
+    assert "barrier_scalars_json" in checkpoints_table.c
 
 
 def test_tokens_has_token_data_ref_column() -> None:

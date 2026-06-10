@@ -64,8 +64,9 @@ def test_empty_state_is_falsy_and_serializes_minimal() -> None:
 def test_coalesce_key_with_hostile_characters_round_trips() -> None:
     """Coalesce names and row_ids with special chars must survive to_dict/from_dict.
 
-    coalesce names have no charset constraint (core/config.py:717) and row_id is
-    operator-influenced — keys must survive arbitrary strings.
+    coalesce names have no charset constraint (CoalesceSettings.name in
+    core/config.py) and row_id is operator-influenced — keys must survive
+    arbitrary strings.
     """
     s = BarrierScalars(aggregation={}, coalesce={("we::ird", 'row"7'): CoalescePendingScalars(lost_branches={})})
     assert BarrierScalars.from_dict(s.to_dict()) == s
@@ -145,6 +146,36 @@ class TestAggregationNodeScalarsValidation:
         with pytest.raises(AuditIntegrityError, match="count_fire_offset"):
             AggregationNodeScalars.from_dict(d)
 
+    @pytest.mark.parametrize("field", ["count_fire_offset", "condition_fire_offset"])
+    def test_from_dict_rejects_string_offset(self, field: str) -> None:
+        """A string offset arriving via from_dict is corruption, not a ValueError."""
+        d = _agg().to_dict()
+        d[field] = "1.5"
+        with pytest.raises(AuditIntegrityError, match=field):
+            AggregationNodeScalars.from_dict(d)
+
+    @pytest.mark.parametrize("field", ["count_fire_offset", "condition_fire_offset"])
+    def test_from_dict_rejects_bool_offset(self, field: str) -> None:
+        """bool is an int subclass and math.isfinite(True) passes — must be excluded."""
+        d = _agg().to_dict()
+        d[field] = True
+        with pytest.raises(AuditIntegrityError, match=field):
+            AggregationNodeScalars.from_dict(d)
+
+    @pytest.mark.parametrize("field", ["count_fire_offset", "condition_fire_offset"])
+    def test_from_dict_rejects_negative_offset(self, field: str) -> None:
+        """A negative offset arriving via from_dict raises AuditIntegrityError (not ValueError)."""
+        d = _agg().to_dict()
+        d[field] = -0.5
+        with pytest.raises(AuditIntegrityError, match=field):
+            AggregationNodeScalars.from_dict(d)
+
+    def test_from_dict_rejects_nan_offset(self) -> None:
+        d = _agg().to_dict()
+        d["count_fire_offset"] = float("nan")
+        with pytest.raises(AuditIntegrityError, match="count_fire_offset"):
+            AggregationNodeScalars.from_dict(d)
+
 
 # ---------------------------------------------------------------------------
 # CoalescePendingScalars validation
@@ -194,6 +225,27 @@ class TestCoalescePendingScalarsValidation:
 
         s = CoalescePendingScalars(lost_branches={"k": "v"})
         assert isinstance(s.lost_branches, MappingProxyType)
+
+    def test_from_dict_rejects_int_lost_branches_value(self) -> None:
+        d: dict[str, Any] = {"_version": "1.0", "lost_branches": {"b1": 42}}
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            CoalescePendingScalars.from_dict(d)
+
+    def test_from_dict_rejects_none_lost_branches_value(self) -> None:
+        d: dict[str, Any] = {"_version": "1.0", "lost_branches": {"b1": None}}
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            CoalescePendingScalars.from_dict(d)
+
+    def test_from_dict_rejects_nested_dict_lost_branches_value(self) -> None:
+        """A nested dict would silently re-serialize and propagate — must crash."""
+        d: dict[str, Any] = {"_version": "1.0", "lost_branches": {"b1": {"reason": "deep"}}}
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            CoalescePendingScalars.from_dict(d)
+
+    def test_from_dict_rejects_non_str_lost_branches_key(self) -> None:
+        d: dict[str, Any] = {"_version": "1.0", "lost_branches": {7: "reason"}}
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            CoalescePendingScalars.from_dict(d)
 
 
 # ---------------------------------------------------------------------------
@@ -287,4 +339,17 @@ class TestBarrierScalarsFromDictErrors:
             "coalesce": [[[1, "r"], {"_version": "1.0", "lost_branches": {}}]],
         }
         with pytest.raises(AuditIntegrityError):
+            BarrierScalars.from_dict(d)
+
+    def test_rejects_duplicate_coalesce_key(self) -> None:
+        """to_dict can never emit a duplicate key — a duplicate is corruption, not last-wins."""
+        d: dict[str, Any] = {
+            "_version": "1.0",
+            "aggregation": {},
+            "coalesce": [
+                [["merge", "row-1"], {"_version": "1.0", "lost_branches": {}}],
+                [["merge", "row-1"], {"_version": "1.0", "lost_branches": {"b": "lost"}}],
+            ],
+        }
+        with pytest.raises(AuditIntegrityError, match="duplicate"):
             BarrierScalars.from_dict(d)

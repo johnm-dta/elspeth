@@ -34,8 +34,8 @@ Wire format (JSON column ``checkpoints.barrier_scalars_json``, epoch 20+)::
 The ``coalesce`` dict serializes as a **list of [key, value] pairs** rather than
 a JSON object because JSON object keys must be strings and the coalesce key is a
 two-element ``[name, row_id]`` array.  Both ``name`` and ``row_id`` have no
-charset constraint (see ``core/config.py:717``), so a delimiter-joined string
-approach would require escaping and is fragile.
+charset constraint (see ``CoalesceSettings.name`` in ``core/config.py``), so a
+delimiter-joined string approach would require escaping and is fragile.
 
 Trust-tier notes
 ----------------
@@ -55,6 +55,33 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
 
 BARRIER_SCALARS_VERSION = "1.0"
+
+
+def _validate_envelope(data: object, expected_keys: frozenset[str], type_name: str) -> dict[str, Any]:
+    """Validate the shared ``from_dict`` envelope: dict shape, exact key set, ``_version``.
+
+    Every barrier-scalars ``from_dict`` uses the same envelope discipline —
+    reject non-dicts, unknown keys, missing keys, and version mismatches with
+    consistent messages.  ``expected_keys`` must include ``"_version"``.
+
+    Returns:
+        ``data`` narrowed to ``dict`` so callers can index it.
+
+    Raises:
+        AuditIntegrityError: On any envelope violation.
+    """
+    if not isinstance(data, dict):
+        raise AuditIntegrityError(f"Corrupted {type_name}: top-level value must be a dict, got {type(data).__name__}.")
+    unknown = set(data.keys()) - expected_keys
+    if unknown:
+        raise AuditIntegrityError(f"Corrupted {type_name}: unknown keys {sorted(unknown)}. Expected: {sorted(expected_keys)}.")
+    missing = expected_keys - set(data.keys())
+    if missing:
+        raise AuditIntegrityError(f"Corrupted {type_name}: missing required fields {sorted(missing)}. Found: {sorted(data.keys())}.")
+    version = data["_version"]
+    if version != BARRIER_SCALARS_VERSION:
+        raise AuditIntegrityError(f"Corrupted {type_name}: unsupported version {version!r}. Expected {BARRIER_SCALARS_VERSION!r}.")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -106,26 +133,27 @@ class AggregationNodeScalars:
 
         Raises:
             AuditIntegrityError: If required keys are missing, unknown keys
-                present, or ``_version`` does not match.
+                present, ``_version`` does not match, or an offset value has
+                the wrong type / is negative / is non-finite.
         """
-        if not isinstance(data, dict):
-            raise AuditIntegrityError(f"Corrupted AggregationNodeScalars: top-level value must be a dict, got {type(data).__name__}.")
-        expected_keys = {"_version", "count_fire_offset", "condition_fire_offset"}
-        unknown = set(data.keys()) - expected_keys
-        if unknown:
-            raise AuditIntegrityError(
-                f"Corrupted AggregationNodeScalars: unknown keys {sorted(unknown)}. Expected: {sorted(expected_keys)}."
-            )
-        missing = expected_keys - set(data.keys())
-        if missing:
-            raise AuditIntegrityError(
-                f"Corrupted AggregationNodeScalars: missing required fields {sorted(missing)}. Found: {sorted(data.keys())}."
-            )
-        version = data["_version"]
-        if version != BARRIER_SCALARS_VERSION:
-            raise AuditIntegrityError(
-                f"Corrupted AggregationNodeScalars: unsupported version {version!r}. Expected {BARRIER_SCALARS_VERSION!r}."
-            )
+        data = _validate_envelope(data, frozenset({"_version", "count_fire_offset", "condition_fire_offset"}), "AggregationNodeScalars")
+        # Tier 1 value-type guards — corrupted JSON arriving via from_dict is an
+        # audit-integrity fault, not a programming error (ValueError stays for
+        # direct construction).  bool is an int subclass in Python and
+        # math.isfinite(True) passes, so it must be excluded explicitly
+        # (cf. require_int doctrine in contracts/freeze.py).
+        for field_name in ("count_fire_offset", "condition_fire_offset"):
+            value = data[field_name]
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise AuditIntegrityError(
+                    f"Corrupted AggregationNodeScalars: '{field_name}' must be a number or None, got {type(value).__name__}: {value!r}."
+                )
+            if not math.isfinite(value) or value < 0:
+                raise AuditIntegrityError(
+                    f"Corrupted AggregationNodeScalars: '{field_name}' must be non-negative and finite, got {value!r}."
+                )
         return cls(
             count_fire_offset=data["count_fire_offset"],
             condition_fire_offset=data["condition_fire_offset"],
@@ -173,31 +201,27 @@ class CoalescePendingScalars:
 
         Raises:
             AuditIntegrityError: If required keys are missing, unknown keys
-                present, or ``_version`` does not match.
+                present, ``_version`` does not match, or any lost_branches
+                entry is not str → str.
         """
-        if not isinstance(data, dict):
-            raise AuditIntegrityError(f"Corrupted CoalescePendingScalars: top-level value must be a dict, got {type(data).__name__}.")
-        expected_keys = {"_version", "lost_branches"}
-        unknown = set(data.keys()) - expected_keys
-        if unknown:
-            raise AuditIntegrityError(
-                f"Corrupted CoalescePendingScalars: unknown keys {sorted(unknown)}. Expected: {sorted(expected_keys)}."
-            )
-        missing = expected_keys - set(data.keys())
-        if missing:
-            raise AuditIntegrityError(
-                f"Corrupted CoalescePendingScalars: missing required fields {sorted(missing)}. Found: {sorted(data.keys())}."
-            )
-        version = data["_version"]
-        if version != BARRIER_SCALARS_VERSION:
-            raise AuditIntegrityError(
-                f"Corrupted CoalescePendingScalars: unsupported version {version!r}. Expected {BARRIER_SCALARS_VERSION!r}."
-            )
+        data = _validate_envelope(data, frozenset({"_version", "lost_branches"}), "CoalescePendingScalars")
         lost_branches = data["lost_branches"]
         if not isinstance(lost_branches, dict):
             raise AuditIntegrityError(
                 f"Corrupted CoalescePendingScalars: 'lost_branches' must be a dict, got {type(lost_branches).__name__}."
             )
+        # Tier 1 value-type guards — every entry must be str → str. Anything else
+        # (int, None, nested dict) is corruption; without this guard a nested dict
+        # would re-serialize silently and propagate through future checkpoints.
+        for lb_key, lb_val in lost_branches.items():
+            if not isinstance(lb_key, str):
+                raise AuditIntegrityError(
+                    f"Corrupted CoalescePendingScalars: lost_branches key must be a str, got {type(lb_key).__name__}: {lb_key!r}."
+                )
+            if not isinstance(lb_val, str):
+                raise AuditIntegrityError(
+                    f"Corrupted CoalescePendingScalars: lost_branches[{lb_key!r}] must be a str, got {type(lb_val).__name__}: {lb_val!r}."
+                )
         return cls(lost_branches=lost_branches)
 
 
@@ -272,20 +296,9 @@ class BarrierScalars:
 
         Raises:
             AuditIntegrityError: On structural corruption (missing/unknown keys,
-                wrong version, bad coalesce-key shape, etc.).
+                wrong version, bad coalesce-key shape, duplicate coalesce keys, etc.).
         """
-        if not isinstance(data, dict):
-            raise AuditIntegrityError(f"Corrupted BarrierScalars: top-level value must be a dict, got {type(data).__name__}.")
-        expected_keys = {"_version", "aggregation", "coalesce"}
-        unknown = set(data.keys()) - expected_keys
-        if unknown:
-            raise AuditIntegrityError(f"Corrupted BarrierScalars: unknown keys {sorted(unknown)}. Expected: {sorted(expected_keys)}.")
-        missing = expected_keys - set(data.keys())
-        if missing:
-            raise AuditIntegrityError(f"Corrupted BarrierScalars: missing required fields {sorted(missing)}. Found: {sorted(data.keys())}.")
-        version = data["_version"]
-        if version != BARRIER_SCALARS_VERSION:
-            raise AuditIntegrityError(f"Corrupted BarrierScalars: unsupported version {version!r}. Expected {BARRIER_SCALARS_VERSION!r}.")
+        data = _validate_envelope(data, frozenset({"_version", "aggregation", "coalesce"}), "BarrierScalars")
 
         # Aggregation dict
         raw_agg = data["aggregation"]
@@ -322,6 +335,12 @@ class BarrierScalars:
                 )
             coalesce_name: str = raw_key[0]
             coalesce_row_id: str = raw_key[1]
-            coalesce[(coalesce_name, coalesce_row_id)] = CoalescePendingScalars.from_dict(raw_scalars)
+            coalesce_key = (coalesce_name, coalesce_row_id)
+            # to_dict can never emit a duplicate key (it iterates a dict), so a
+            # duplicate in the list-of-pairs is by-definition corruption — reject
+            # rather than silently last-wins.
+            if coalesce_key in coalesce:
+                raise AuditIntegrityError(f"Corrupted BarrierScalars: duplicate coalesce key {coalesce_key!r} at coalesce[{i}].")
+            coalesce[coalesce_key] = CoalescePendingScalars.from_dict(raw_scalars)
 
         return cls(aggregation=aggregation, coalesce=coalesce)

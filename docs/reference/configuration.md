@@ -10,6 +10,7 @@ Complete reference for ELSPETH pipeline configuration.
 - [Top-Level Settings](#top-level-settings)
 - [Secrets Settings](#secrets-settings)
 - [Source Settings](#source-settings)
+- [Queue Settings](#queue-settings)
 - [Sink Settings](#sink-settings)
 - [Transform Settings](#transform-settings)
 - [Gate Settings](#gate-settings)
@@ -56,8 +57,9 @@ Nested environment variables use double underscore: `ELSPETH_LANDSCAPE__URL`.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `source` | object | **Yes** | - | Source plugin configuration (exactly one per run) |
+| `sources` | object | **Yes** | - | Named source plugin configurations (one or more per run; map of source name → source config) |
 | `sinks` | object | **Yes** | - | Named sink configurations (at least one required) |
+| `queues` | object | No | `{}` | Named pass-through queue nodes for explicit fan-in (required when multiple producers feed one processing node) |
 | `run_mode` | string | No | `"live"` | Execution mode: `live`, `replay`, `verify` |
 | `replay_from` | string | No | - | Run ID to replay/verify against (required for replay/verify modes) |
 | `transforms` | list | No | `[]` | Ordered transforms to apply |
@@ -149,27 +151,42 @@ secrets:
 
 ## Source Settings
 
-Configures the single data source for the pipeline.
+Configures the pipeline's data sources. Every pipeline declares one or more
+named sources under the `sources:` key; each entry maps a source name to a
+source plugin configuration.
 
 ```yaml
-source:
-  plugin: csv
-  on_success: source_out    # Explicit output connection name
-  options:
-    path: data/input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "id: int"
-        - "amount: int"
-    on_validation_failure: quarantine
+sources:
+  transactions:
+    plugin: csv
+    on_success: source_out    # Explicit output connection name
+    options:
+      path: data/input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "id: int"
+          - "amount: int"
+      on_validation_failure: quarantine
 ```
+
+Per-source fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `text`, `azure_blob`, `dataverse`, `null` |
 | `on_success` | string | **Yes** | Connection name for source output (transforms reference this via `input`) |
 | `options` | object | No | Plugin-specific configuration |
+
+Source names are durable, audit-visible identifiers: they become DAG node IDs
+and appear in audit records (`run_sources`, `source_node_id`). Names must be
+lowercase, unique across all node names (transforms, gates, aggregations,
+coalesce nodes, queues, sinks), must not start with `__`, and must not use
+reserved edge labels.
+
+The legacy singular `source:` key is deleted, not deprecated (ADR-025).
+A configuration that supplies `source:` fails validation with an error
+directing the operator to rewrite it as `sources: { <name>: { ... } }`.
 
 ### Available Source Plugins
 
@@ -181,6 +198,63 @@ source:
 | `azure_blob` | Load from Azure Blob Storage |
 | `dataverse` | Load from Microsoft Dataverse via OData v4 REST API |
 | `null` | Empty source (for testing) |
+
+### Multi-Source Pipelines
+
+A run may declare multiple named sources. Cross-source ingest is sequential
+by design: the engine iterates sources one at a time in YAML declaration
+order. Declaration order is the determinism anchor — source iteration is not
+concurrent, and a later source's rows are not admitted until the previous
+source is exhausted. Every row carries durable per-source provenance:
+
+- `source_node_id` — which source node the row entered from
+- `source_row_index` — the row's position within its own source (restarts at 0 per source)
+- `ingest_sequence` — the row's global admission position across all sources
+
+Each source's schema is validated independently under its own contract;
+contracts do not bleed between sources, and the per-source contract is
+persisted in the `run_sources` audit table.
+
+When two or more producers (for example, two sources) feed the same ordinary
+processing node, the fan-in must be made explicit with a queue node (see
+[Queue Settings](#queue-settings)); graph validation rejects implicit fan-in.
+Sinks and coalesce nodes accept fan-in directly.
+
+```yaml
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: input/orders.csv
+      schema:
+        mode: observed
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: input/refunds.csv
+      schema:
+        mode: observed
+
+queues:
+  inbound: {}    # Both sources publish to 'inbound'; the queue makes the fan-in explicit
+
+transforms:
+  - name: normalize_rows
+    plugin: passthrough
+    input: inbound
+    on_success: combined
+    on_error: discard
+    options:
+      schema:
+        mode: observed
+```
+
+Working examples: `examples/multi_source_queue/` (two sources fanning into a
+shared transform path) and `examples/multi_flow/` (independent per-source
+flows). Design rationale: ADR-025 (multi-source ingestion) and ADR-026
+(durable token scheduler).
 
 ### Schema Options
 
@@ -222,6 +296,30 @@ schema:
 | `required_fields` | Fields the consumer requires in input (for observed schemas) |
 
 The DAG validates at construction time that upstream `guaranteed_fields` satisfy downstream `required_fields`. For explicit schemas (`mode: fixed` or `flexible`), declared fields are implicitly guaranteed.
+
+---
+
+## Queue Settings
+
+Named pass-through scheduling queues, declared as DAG fan-in nodes. A queue is
+required when multiple producers feed the same ordinary processing node;
+without one, graph validation fails. Queues are coordination points only:
+they do not merge row data, join source schemas, or alter token identity.
+
+```yaml
+queues:
+  inbound:
+    description: Fan-in point for orders and refunds   # optional
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `description` | string | No | Operator-facing description of the queue |
+
+The queue's name is both its DAG node name and the connection name producers
+publish to (`on_success: inbound`) and the consumer reads from
+(`input: inbound`). Queue names follow the same rules as source names
+(lowercase, globally unique, no reserved labels, no leading `__`).
 
 ---
 
@@ -840,13 +938,14 @@ Rate limits apply per-service across all uses in a pipeline. For example, if you
 ### Example: Azure LLM Pipeline with Rate Limits
 
 ```yaml
-source:
-  plugin: csv
-  on_success: classify_in
-  options:
-    path: data/prompts.csv
-    schema:
-      mode: observed
+sources:
+  prompts:
+    plugin: csv
+    on_success: classify_in
+    options:
+      path: data/prompts.csv
+      schema:
+        mode: observed
 
 transforms:
   # First LLM transform
@@ -1293,12 +1392,14 @@ Gate conditions and aggregation triggers use a restricted expression language.
 Type coercion functions like `int()` are not needed in expressions. The source schema handles type conversion at the boundary — by the time data reaches a gate or trigger, fields already have the types declared in the schema:
 
 ```yaml
-source:
-  plugin: csv
-  options:
-    schema:
-      fields:
-        - "amount: int"  # CSV strings are coerced to int at load time
+sources:
+  transactions:
+    plugin: csv
+    on_success: raw_data
+    options:
+      schema:
+        fields:
+          - "amount: int"  # CSV strings are coerced to int at load time
 
 gates:
   - name: threshold
@@ -1310,19 +1411,20 @@ gates:
 ## Complete Example
 
 ```yaml
-# Source - where data comes from
-source:
-  plugin: csv
-  on_success: raw_data
-  options:
-    path: data/transactions.csv
-    schema:
-      mode: fixed
-      fields:
-        - "id: int"
-        - "amount: int"
-        - "customer_id: str"
-    on_validation_failure: quarantine
+# Sources - where data comes from (one or more named sources)
+sources:
+  transactions:
+    plugin: csv
+    on_success: raw_data
+    options:
+      path: data/transactions.csv
+      schema:
+        mode: fixed
+        fields:
+          - "id: int"
+          - "amount: int"
+          - "customer_id: str"
+      on_validation_failure: quarantine
 
 # Sinks - where data goes
 sinks:

@@ -78,11 +78,11 @@ discharges that obligation.
 - **Table:** `token_work_items` (declared in
   `core/landscape/schema.py` as `token_work_items_table`).
 - **Repository:** `TokenSchedulerRepository` at
-  `src/elspeth/core/landscape/scheduler_repository.py` (1002 LOC).
+  `src/elspeth/core/landscape/scheduler_repository.py` (2163 LOC).
   Persistence boundary; takes a SQLAlchemy `Engine`; every method is
   CAS-aware.
 - **Worker loop:** `_drain_scheduler_claims` in `engine/processor.py`
-  around lines 2540-2657. Per CLAUDE.md tier discipline, this is L2
+  around lines 2820-3015. Per CLAUDE.md tier discipline, this is L2
   engine code consuming an L1 repository.
 - **Contracts:** `TokenWorkItem` (frozen dataclass) and
   `TokenWorkStatus` (StrEnum) at `src/elspeth/contracts/scheduler.py`.
@@ -113,7 +113,7 @@ READY → LEASED → (WAITING | BLOCKED | PENDING_SINK) → TERMINAL | FAILED
   continuation always hashes to the same key, so `INSERT … ON
   CONFLICT DO NOTHING`-style idempotency works across crash boundaries.
   See `TokenSchedulerRepository._work_item_id`
-  (`scheduler_repository.py:955-958`).
+  (`scheduler_repository.py:2116-2119`).
 - **`ingest_sequence`** — global ordering primitive across all sources
   (NEW on this branch; replaces `row_index` as the resume sort key).
   The orchestrator assigns it monotonically while iterating sources in
@@ -125,10 +125,14 @@ READY → LEASED → (WAITING | BLOCKED | PENDING_SINK) → TERMINAL | FAILED
   runtime defaulting path.
 - **`step_index`** — secondary ordering for tie-breaking within a
   single token's lifetime.
-- **Claim order:** `ORDER BY ingest_sequence, step_index, created_at`
-  (see `claim_ready`, `scheduler_repository.py:433-437`, and the
-  identical order in `claim_pending_sink`). This is the
-  determinism-of-claim contract.
+- **Claim order:** `ORDER BY ingest_sequence, step_index, created_at,
+  work_item_id` (see `claim_ready`, `scheduler_repository.py:724-733`,
+  and the identical order in `claim_pending_sink`). The fourth key is
+  a stable last-resort tiebreaker for cross-source same-tick
+  collisions where the first three keys are not jointly
+  disambiguating (filigree elspeth-6cb89db535, G3
+  determinism-reviewer M1). This is the determinism-of-claim
+  contract: no two work items can ever tie.
 
 ### CAS discipline (post-fix)
 
@@ -159,7 +163,7 @@ it.
    list is a cache of `READY` rows the worker plans to claim next; if
    `pending_items` is non-empty when the drain loop finds no
    `READY`/`PENDING_SINK` work, that is a *SCREAM* invariant violation
-   (`processor.py` drain loop around line 2580): in-memory state
+   (`processor.py` drain loop around line 2893): in-memory state
    must be backed by a durable row.
 
 2. **`work_item_id` is deterministic.** The SHA-256 of
@@ -191,13 +195,13 @@ it.
    `recover_expired_leases` reaps an expired lease that was *not* in
    `PENDING_SINK`, the row's `attempt` is incremented and
    `work_item_id` is recomputed
-   (`scheduler_repository.py:584-608`). The downstream effect is
+   (`scheduler_repository.py:979-1008`). The downstream effect is
    that `(token_id, node_id, attempt)` audit identity is fresh on
    retry; the prior attempt's node_state rows remain in the audit
    trail under their original attempt, not overwritten. The
    institutional-memory comment is in
    `recover_expired_leases`'s docstring (`scheduler_repository.py:
-   552-573`).
+   915-935`).
 
 6. **`PENDING_SINK` recovers to `PENDING_SINK`, not to `READY`.** A
    sink-bound token whose transform work is durably recorded does
@@ -206,12 +210,12 @@ it.
    fix, recorded below. The contract: `PENDING_SINK` means the
    audit-prior work is durable and only the terminal sink handoff
    is outstanding. Recovery preserves `attempt` and `work_item_id`
-   in that case (`scheduler_repository.py:585-592`).
+   in that case (`scheduler_repository.py:980-988`).
 
 7. **Barrier reconciliation is offensive.** `mark_blocked_barrier_
    terminal` refuses to terminalize a barrier unless the supplied
    live `token_ids` exactly match the durable BLOCKED token set
-   (`scheduler_repository.py:759-829`). Missing live tokens,
+   (`scheduler_repository.py:1729-1833`). Missing live tokens,
    duplicate live tokens, and mismatched rowcount are all
    `AuditIntegrityError` paths. The barrier is the only join/
    coalesce primitive that survives crash, so its terminalization
@@ -295,8 +299,9 @@ it.
   `tokens`, `run_sources`) is the legal record and never purges.
   An auditor's question is answered against the audit trail, not
   the scheduler. G29 (scheduler state transitions absent from
-  audit) is the next durability gap to close (see *Tickets*
-  below).
+  audit) is closed as of 2026-06: every scheduler transition writes
+  an immutable `scheduler_events` row (schema epochs 16–17; see
+  *Revision history*).
 - **Not an in-memory queue.** The `_drain_in_memory_work_queue`
   function on the present branch survives only for tests and is
   marked for deletion (G7 / elspeth-b680e81bce). The production
@@ -352,18 +357,20 @@ it.
   (purge of terminalized scheduler rows) is RC6 follow-up;
   today they remain forever (payloads purged, rows present).
 - **Scheduler state transitions emit no Landscape audit rows
-  today.** A reviewer asking "when did this row's lease
-  expire?" can read the final state of `token_work_items`
-  but cannot reconstruct the timeline. This is G29 /
-  elspeth-2b608abbd3, recorded below as a P1 audit-primacy
-  gap. The intended remediation is a `scheduler_events`
-  table (or equivalent) that the scheduler writes on every
-  transition; the ADR commits to that as the answer, with
-  schema design downstream.
+  today.** *Resolved 2026-06 (G29 / elspeth-2b608abbd3).* As
+  originally accepted, a reviewer asking "when did this row's
+  lease expire?" could read the final state of
+  `token_work_items` but not reconstruct the timeline. The
+  committed remediation — a `scheduler_events` table written
+  on every transition — has since landed (schema epochs
+  16–17): enqueue, claim, recovery, lease-loss, and
+  terminalization transitions are immutable, exportable
+  facts, including from/to `lease_expires_at` evidence for
+  lease recovery and heartbeat loss.
 - **`recover_expired_leases` requires a unique `caller_owner`
   per process.** Each `RowProcessor` generates a
   `row-processor:<run_id>:<uuid>` identity (docstring at
-  `scheduler_repository.py:559-572`); operators cannot reuse
+  `scheduler_repository.py:921-935`); operators cannot reuse
   owner strings across processes. G27.x (elspeth-34d83daedc)
   makes the contract type-mechanical.
 - **PRAGMA discipline is load-bearing — more so under
@@ -455,13 +462,16 @@ this list.
    process; at N>1 across processes too.
 
 6. **Scheduler state transitions in Landscape audit (G29 /
-   elspeth-2b608abbd3). Required.** Audit-primacy gap at
-   any N. The auditor's question "when did this row's
-   lease expire?" reads `token_work_items` final state,
-   not a timeline. Remediation: a `scheduler_events`
-   table (or equivalent) written on every transition.
-   Schema design is *blocked on Precondition #9* below
-   (worker identity column shape).
+   elspeth-2b608abbd3). Implemented (2026-06).** Audit-primacy
+   gap at any N, now closed: the `scheduler_events` table
+   (schema epochs 16–17) records every transition — enqueue,
+   claim, recovery, lease-loss, terminalization — with from/to
+   status, attempt, lease owner, and `lease_expires_at`
+   evidence. The landed schema records worker identity as the
+   opaque `lease_owner` / `caller_owner` strings
+   (`row-processor:<run_id>:<uuid>`); if Precondition #9
+   settles a richer worker-identity shape for N>1, the column
+   semantics extend rather than change.
 
 7. **Runbook for lease recovery (G19 /
    elspeth-559bce3459). Required for publish.** First-
@@ -503,9 +513,12 @@ correctness from multi-worker capability.
    depend on it being settled:
 
     - **G29's `scheduler_events` schema** (Precondition
-      #6 above) needs to know whether the audited
-      identity is `(host, pid, uuid)` or
-      `(worker_id, run_id)` or some other shape.
+      #6 above) originally needed to know whether the
+      audited identity is `(host, pid, uuid)` or
+      `(worker_id, run_id)` or some other shape. The
+      table has since landed carrying the opaque owner
+      strings; an N>1 identity decision here extends
+      those semantics rather than reshaping the table.
     - **G19's runbook** (Precondition #7) cannot describe
       "is this worker dead or just slow?" without
       knowing how a worker is spawned and supervised.
@@ -689,8 +702,9 @@ the §A / §B split in *RC6 Preconditions* above.
   type-enforce elspeth-34d83daedc). Uniformity required
   within-process at N=1, cross-process at N>1.
 - **G29 / elspeth-2b608abbd3** — scheduler state transitions
-  into Landscape audit trail. Audit-primacy gap at any N.
-  Schema column shape blocked on Precondition #9.
+  into Landscape audit trail. **Implemented (2026-06)** as the
+  `scheduler_events` table, schema epochs 16–17; see
+  Precondition #6.
 - **G19 / elspeth-559bce3459** — runbook for lease recovery.
   Required at N=1; incident surface broadens at N>1.
   Authoring blocked on Precondition #9. (Also listed under
@@ -766,13 +780,12 @@ been promoted to *RC6 Preconditions §B item 9 —
 Deployment-shape decision* above. See *Revision history*
 for the move.
 
-- **Scheduler-event audit table schema shape.** G29's
-  remediation is required (Precondition #6); the
-  *schema* (event table vs append-only column journal
-  vs `node_states` extension) is intentionally not
-  committed here. The audited-identity columns within
-  that schema are blocked on Precondition #9; the
-  table-shape choice is independently deferrable.
+- **Scheduler-event audit table schema shape.** *Resolved
+  2026-06:* the dedicated `scheduler_events` table shape
+  shipped (schema epochs 16–17) with worker identity as
+  opaque owner strings. The only residue rides with
+  Precondition #9: an N>1 worker-identity decision extends
+  the owner-string semantics.
 - **Still-active prior-worker lease semantics — comment
   audit.** The G3 fix's `processor.py` comment documents
   a "stranded prior worker lease" case framed for
@@ -857,6 +870,31 @@ for the move.
   Status line that honestly states the precondition surface;
   and a *Decision* §10 that records the post-review framing
   rather than asserting retrofitted scope as original intent.
+- **2026-06-10** — Reconciliation against the merged RC6.0 line
+  (post release/0.5.5 merge and orchestrator decomposition),
+  following the Phase 1 verification verdict
+  (`notes/rc6-phase1-verdict-2026-06-10.md`). Three changes:
+    - *Claim order* updated from the three-key
+      `ingest_sequence, step_index, created_at` to the four-key
+      order ending in the `work_item_id` last-resort tiebreaker
+      (filigree elspeth-6cb89db535) — the fix had landed in
+      `claim_ready` / `claim_pending_sink` /
+      `recover_expired_leases` but the ADR text was one
+      tiebreaker stale.
+    - *G29 marked implemented:* the `scheduler_events` table
+      shipped (schema epochs 16–17). Precondition #6, the
+      *Negative Consequences* entry, the §A ticket entry, and
+      the *Open questions* schema-shape entry updated from
+      "gap/required" to "implemented", recording that the landed
+      worker identity is the opaque `lease_owner`/`caller_owner`
+      string and that a future N>1 identity decision
+      (Precondition #9, still open) extends rather than reshapes
+      it.
+    - *Code citations refreshed* to the post-decomposition tree:
+      `scheduler_repository.py` spans, the `processor.py` drain
+      loop, the PRAGMA listener, and the resume entry point
+      (now `ResumeCoordinator.reconstruct_resume_state`,
+      `orchestrator/resume.py`).
 
 ## Related Decisions
 
@@ -869,8 +907,8 @@ for the move.
   ownership and claim ordering. ADR-001's determinism
   contract carried the implicit "one worker per run"
   assumption; the multi-worker contract is "claim order is
-  `ingest_sequence, step_index, created_at` regardless of
-  which worker wins the CAS." The orthogonal source-iteration
+  `ingest_sequence, step_index, created_at, work_item_id`
+  regardless of which worker wins the CAS." The orthogonal source-iteration
   axis of ADR-001 (orchestrator pulls from one source at a
   time within a run) is not amended here and is preserved
   by ADR-025. That preserved model is sequential multi-source
@@ -880,7 +918,7 @@ for the move.
 - **ADR-010** (declaration-trust framework) — preserved. The
   scheduler row carries no declaration-trust state; resume
   precondition (runtime VAL manifest match) is enforced at
-  `orchestrator/core.py:3482-3491` before any scheduler
+  `orchestrator/resume.py:521-530` before any scheduler
   rows are consulted.
 - **ADR-019** (two-axis terminal model) — preserved. The
   durable terminal-axis distinction (`TERMINAL` vs
@@ -914,21 +952,25 @@ for the move.
 - `src/elspeth/core/landscape/scheduler_repository.py` —
   `TokenSchedulerRepository` (full method index in
   *Decision* citations above; key spans: `claim_ready`
-  416-483, `claim_pending_sink` 485-550,
-  `recover_expired_leases` 552-609,
-  `mark_blocked_barrier_terminal` 759-829, `_transition`
-  909-952, `_work_item_id` 954-958).
+  708-822, `claim_pending_sink` 824-912,
+  `recover_expired_leases` 914-1031,
+  `mark_blocked_barrier_terminal` 1729-1833, `_transition`
+  2024-2113, `_work_item_id` 2116-2119).
 - `src/elspeth/core/landscape/schema.py` —
-  `token_work_items_table`.
-- `src/elspeth/core/landscape/database.py:320-329` —
+  `token_work_items_table`, `scheduler_events_table`
+  (G29 surface, schema epochs 16–17).
+- `src/elspeth/core/landscape/database.py:438-455` —
   PRAGMA `connect` listener (G28 surface).
-- `src/elspeth/engine/processor.py` ~2540-2657 —
+- `src/elspeth/engine/processor.py` ~2820-3015 —
   `_drain_scheduler_claims`, the stranded-`pending_items`
   SCREAM invariant, `MAX_WORK_QUEUE_ITERATIONS` bound.
-- `src/elspeth/engine/orchestrator/core.py:3427-3555` —
-  `_reconstruct_resume_state` (scheduler-resume entry
-  point; preserved after the ADR-025 structural fix).
-- `src/elspeth/core/dag/graph.py:283-353` — graph
+- `src/elspeth/engine/orchestrator/resume.py:475` —
+  `ResumeCoordinator.reconstruct_resume_state`
+  (scheduler-resume entry point; relocated from the
+  pre-decomposition `orchestrator/core.py`
+  `_reconstruct_resume_state` and preserved after the
+  ADR-025 structural fix).
+- `src/elspeth/core/dag/graph.py:283-358` — graph
   validation including the QUEUE fan-in requirement.
 
 ### Commits

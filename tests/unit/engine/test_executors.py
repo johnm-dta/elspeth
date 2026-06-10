@@ -2963,6 +2963,50 @@ class TestAggregationExecutor:
         assert node.member_count == 0
         assert node.trigger.get_age_seconds() == 0.0
 
+    def test_restore_from_journal_empty_items_drops_stale_scalars(self) -> None:
+        """Latched scalars with an empty buffer are STALE — dropped, never restored.
+
+        Trigger latches are batch-scoped; zero buffered items means no current
+        batch. The window is real (crash after a flush terminalized the BLOCKED
+        rows but before the next checkpoint), so the stale latches must be
+        ignored rather than rejected. Restoring them at batch_count=0 would
+        plant a phantom first-accept anchor at restore time (record_accept only
+        sets first_accept_time when None) → wrong timeout age + pre-fired
+        count latch in the NEXT genuine batch.
+        """
+        clock = MockClock(start=0.0)
+        executor, _, nid = self._make_agg_executor(node_id="agg-1", count=2, clock=clock)
+
+        executor.restore_from_journal(
+            node_id=nid,
+            items=[],
+            member_order=[],
+            batch_id=None,
+            accepted_count_total=3,
+            completed_flush_count=1,
+            scalars=AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=2.5),
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        node = executor._nodes[nid]
+        # Trigger is fully unlatched — no phantom anchor, no pre-fired latches
+        assert node.trigger.get_count_fire_offset() is None
+        assert node.trigger.get_condition_fire_offset() is None
+        assert node.trigger.get_age_seconds() == 0.0
+        assert executor.get_barrier_scalars() == {}
+        # Counters still restored
+        assert node.accepted_count_total == 3
+        assert node.completed_flush_count == 1
+
+        # Time passes before the next genuine batch starts — age must anchor
+        # to the first accept, NOT the restore instant.
+        clock.advance(30.0)
+        executor.buffer_row(nid, _make_token(token_id="t9"))
+        assert node.trigger.get_age_seconds() == 0.0
+        assert executor.should_flush(nid) is False  # count=2, one row, no stale latch
+
     def test_restore_from_journal_null_blocked_at_is_corruption(self) -> None:
         """Post-epoch-20 every BLOCKED row was stamped; NULL barrier_blocked_at = corruption."""
         executor, _, nid = self._make_agg_executor(node_id="agg-1")
@@ -3024,6 +3068,49 @@ class TestAggregationExecutor:
                 member_order=[],
                 batch_id="b",
                 accepted_count_total=1,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_duplicate_journal_rows_are_corruption(self) -> None:
+        """Two BLOCKED journal rows for the same token at one barrier = corruption."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+        items = [
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match="Duplicate BLOCKED journal rows"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=["t1"],
+                batch_id="b",
+                accepted_count_total=2,
+                completed_flush_count=0,
+                scalars=AggregationNodeScalars(None, None),
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_duplicate_member_order_is_corruption(self) -> None:
+        """A duplicated token id in batch_members order = audit trail corruption."""
+        executor, _, nid = self._make_agg_executor(node_id="agg-1")
+        items = [
+            _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", payload=_journal_payload({"v": 1}), blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match=r"Duplicate token ids in batch_members.*\['t1'\]"):
+            executor.restore_from_journal(
+                node_id=nid,
+                items=items,
+                member_order=["t1", "t1"],
+                batch_id="b",
+                accepted_count_total=2,
                 completed_flush_count=0,
                 scalars=AggregationNodeScalars(None, None),
                 attempt_offsets={"t1": 1},

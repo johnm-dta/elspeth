@@ -1,6 +1,7 @@
 """AggregationExecutor - manages batch lifecycle with audit recording."""
 
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -661,6 +662,11 @@ class AggregationExecutor:
             accepted_count_total: Audit-derived cumulative accept counter.
             completed_flush_count: Audit-derived completed-flush counter.
             scalars: Trigger fire-time latches from the checkpoint row.
+                IGNORED when ``items`` is empty: latches are batch-scoped and
+                zero buffered rows means there is no current batch — non-None
+                latches here are stale (checkpoint older than the journal, a
+                legitimate window under D3's staleness model), so they are
+                dropped with a log line rather than rejected.
             attempt_offsets: Per-token resume attempt offset (max_attempt + 1).
             resume_checkpoint_id: Checkpoint id stamped on restored tokens
                 (resume provenance).
@@ -670,7 +676,8 @@ class AggregationExecutor:
         Raises:
             AuditIntegrityError: On any journal/audit disagreement — NULL
                 barrier_blocked_at, duplicate journal rows, membership
-                mismatch, missing attempt offset, batch_id/items inconsistency.
+                mismatch, duplicate member_order entries, missing attempt
+                offset, batch_id/items inconsistency, impossible counters.
             OrchestrationInvariantError: If node_id is not a configured aggregation.
         """
         node = self._get_node(node_id, "restore_from_journal")
@@ -682,19 +689,23 @@ class AggregationExecutor:
                 # Every post-epoch-20 BLOCKED row is stamped by mark_blocked.
                 raise AuditIntegrityError(
                     f"BLOCKED journal row for token {item.token_id!r} at aggregation node "
-                    f"{node_id!r} has NULL barrier_blocked_at — journal corruption "
-                    "(every BLOCKED row is stamped at mark_blocked time)."
+                    f"{node_id!r} (run {self._run_id!r}, resume checkpoint "
+                    f"{resume_checkpoint_id!r}) has NULL barrier_blocked_at — journal "
+                    "corruption (every BLOCKED row is stamped at mark_blocked time)."
                 )
             if item.token_id in tokens_by_id:
                 raise AuditIntegrityError(
-                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at aggregation node {node_id!r} — journal corruption."
+                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
+                    f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
                 )
             attempt_offset = attempt_offsets.get(item.token_id)
             if attempt_offset is None:
                 raise AuditIntegrityError(
                     f"No entry in attempt_offsets for journal token {item.token_id!r} at "
-                    f"aggregation node {node_id!r} — audit-derived offsets must cover "
-                    "every BLOCKED journal row."
+                    f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
+                    "cover every BLOCKED journal row."
                 )
 
             row_data = TokenSchedulerRepository.deserialize_row_payload(item.row_payload_json)
@@ -723,12 +734,14 @@ class AggregationExecutor:
         # advanced past the journal (or vice versa) — corruption either way.
         if items and batch_id is None:
             raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} has {len(items)} BLOCKED journal rows but no "
+                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
+                f"{resume_checkpoint_id!r}) has {len(items)} BLOCKED journal rows but no "
                 "batch_id — buffered tokens always belong to an in-progress batch."
             )
         if not items and batch_id is not None:
             raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} has batch_id {batch_id!r} but no BLOCKED "
+                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
+                f"{resume_checkpoint_id!r}) has batch_id {batch_id!r} but no BLOCKED "
                 "journal rows — an in-progress batch must have blocked members."
             )
 
@@ -738,7 +751,8 @@ class AggregationExecutor:
         # row_start <= 0 in the next flush's pagination metadata.
         if completed_flush_count < 0 or accepted_count_total < len(items):
             raise AuditIntegrityError(
-                f"Aggregation node {node_id!r}: audit-derived counters are impossible "
+                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
+                f"{resume_checkpoint_id!r}): audit-derived counters are impossible "
                 f"(accepted_count_total={accepted_count_total}, "
                 f"completed_flush_count={completed_flush_count}, buffered={len(items)}). "
                 "accepted_count_total must cover every buffered row and counters must "
@@ -756,18 +770,38 @@ class AggregationExecutor:
 
         # Trigger age derives from the absolute blocked-at stamp of the OLDEST
         # buffered row (first accept of the in-progress batch), clamped at 0
-        # against clock skew. Counter-only nodes restore an empty trigger with
-        # the scalars passed through (mirrors the old counters-only arm).
+        # against clock skew.
         if oldest_blocked_at is not None:
             elapsed_age_seconds = max(0.0, (now - oldest_blocked_at).total_seconds())
+            node.trigger.restore_from_checkpoint(
+                batch_count=len(ordered_tokens),
+                elapsed_age_seconds=elapsed_age_seconds,
+                count_fire_offset=scalars.count_fire_offset,
+                condition_fire_offset=scalars.condition_fire_offset,
+            )
         else:
+            # Counter-only node: no in-progress batch, and trigger latches are
+            # batch-scoped — so any non-None scalars are STALE (the checkpoint
+            # predates the journal: crash after a flush terminalized the
+            # BLOCKED rows but before the next checkpoint — a legitimate
+            # window under D3's staleness model, so rejecting would refuse
+            # valid resumes). Drop them (logged) and leave the trigger fully
+            # unlatched via reset(): calling restore_from_checkpoint here
+            # would plant a phantom first-accept anchor at restore time that
+            # survives into the NEXT genuine batch (record_accept only sets
+            # first_accept_time when it is None) → wrong timeout age and, with
+            # latched offsets, a pre-fired count/condition latch.
             elapsed_age_seconds = 0.0
-        node.trigger.restore_from_checkpoint(
-            batch_count=len(ordered_tokens),
-            elapsed_age_seconds=elapsed_age_seconds,
-            count_fire_offset=scalars.count_fire_offset,
-            condition_fire_offset=scalars.condition_fire_offset,
-        )
+            if scalars.count_fire_offset is not None or scalars.condition_fire_offset is not None:
+                slog.info(
+                    "aggregation_journal_restore_dropped_stale_scalars",
+                    node_id=str(node_id),
+                    run_id=self._run_id,
+                    resume_checkpoint_id=resume_checkpoint_id,
+                    count_fire_offset=scalars.count_fire_offset,
+                    condition_fire_offset=scalars.condition_fire_offset,
+                )
+            node.trigger.reset()
 
         slog.info(
             "aggregation_journal_restored",
@@ -779,8 +813,8 @@ class AggregationExecutor:
             elapsed_age_seconds=elapsed_age_seconds,
         )
 
-    @staticmethod
     def _reconcile_journal_batch_members(
+        self,
         *,
         node_id: NodeID,
         journal_token_ids: Iterable[str],
@@ -799,16 +833,17 @@ class AggregationExecutor:
         journal_set = set(journal_token_ids)
         member_set = set(member_order)
         if len(member_set) != len(member_order):
+            duplicated = sorted(token_id for token_id, count in Counter(member_order).items() if count > 1)
             raise AuditIntegrityError(
-                f"Duplicate token ids in batch_members order for aggregation node {node_id!r}: "
-                f"{list(member_order)!r} — audit trail corruption."
+                f"Duplicate token ids in batch_members order for aggregation node "
+                f"{node_id!r} (run {self._run_id!r}): {duplicated!r} — audit trail corruption."
             )
         if journal_set != member_set:
             missing_from_journal = sorted(member_set - journal_set)
             missing_from_members = sorted(journal_set - member_set)
             raise AuditIntegrityError(
-                f"Aggregation node {node_id!r}: journal BLOCKED rows and persisted "
-                f"batch_members disagree about batch membership. "
+                f"Aggregation node {node_id!r} (run {self._run_id!r}): journal BLOCKED "
+                f"rows and persisted batch_members disagree about batch membership. "
                 f"In batch_members but not journal: {missing_from_journal!r}; "
                 f"in journal but not batch_members: {missing_from_members!r}. "
                 "Cannot safely resume this batch."

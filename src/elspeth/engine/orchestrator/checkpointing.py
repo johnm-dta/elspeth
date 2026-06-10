@@ -161,7 +161,7 @@ class CheckpointCoordinator:
                 coordinator.maybe_checkpoint(
                     run_id=run_id,
                     aggregation_scalars=agg_scalars,
-                    coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
+                    coalesce_state=coalesce_state,
                 )
                 if self._terminalize_scheduler:
                     self._pending_terminal_tokens.append(token.token_id)
@@ -204,10 +204,7 @@ class CheckpointCoordinator:
             raise OrchestrationInvariantError("Cannot create shutdown checkpoint: execution graph not available")
 
         aggregation_scalars = loop_ctx.processor.get_aggregation_barrier_scalars()
-        raw_coalesce = loop_ctx.processor.get_coalesce_checkpoint_state()
-        # Persist coalesce scalars when the state has pending barriers or
-        # completed keys needed for late-arrival detection on resume.
-        coalesce_state = raw_coalesce if raw_coalesce is not None and raw_coalesce.has_resumable_state else None
+        coalesce_state = loop_ctx.processor.get_coalesce_checkpoint_state()
 
         self._sequence_number += 1
         self._checkpoint_manager.create_checkpoint(

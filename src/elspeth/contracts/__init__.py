@@ -56,6 +56,11 @@ from elspeth.contracts.audit import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.barrier_scalars import (
+    AggregationNodeScalars,
+    BarrierScalars,
+    CoalescePendingScalars,
+)
 from elspeth.contracts.batch_runtime import BatchTransformRuntimeProtocol
 from elspeth.contracts.call_data import (
     CallPayload,
@@ -422,6 +427,10 @@ __all__ = [  # Grouped by category for readability
     "SchedulerEventType",
     "TokenWorkItem",
     "TokenWorkStatus",
+    # barrier scalars (post-F1 checkpoint column)
+    "AggregationNodeScalars",
+    "BarrierScalars",
+    "CoalescePendingScalars",
     # checkpoint
     "AggregationCheckpointState",
     "AggregationNodeCheckpoint",

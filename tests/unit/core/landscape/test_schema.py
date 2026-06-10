@@ -73,8 +73,8 @@ class TestPhase5CheckpointSchema:
         )
         assert checkpoint.sequence_number == 42
 
-    def test_checkpoint_model_with_aggregation_state(self) -> None:
-        """Verify Checkpoint model supports aggregation state."""
+    def test_checkpoint_model_with_barrier_scalars(self) -> None:
+        """Verify Checkpoint model carries barrier scalar metadata (F1)."""
         from elspeth.contracts import Checkpoint
 
         checkpoint = Checkpoint(
@@ -83,9 +83,9 @@ class TestPhase5CheckpointSchema:
             sequence_number=100,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            aggregation_state_json='{"buffer": [1, 2, 3]}',
+            barrier_scalars_json='{"aggregation": {}, "coalesce": []}',
         )
-        assert checkpoint.aggregation_state_json == '{"buffer": [1, 2, 3]}'
+        assert checkpoint.barrier_scalars_json == '{"aggregation": {}, "coalesce": []}'
 
 
 class TestBatchStatusType:

@@ -121,6 +121,9 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("checkpoints", "coalesce_state_json"),
     # Checkpoint compatibility gate - runtime always stamps the checkpoint format version
     ("checkpoints", "format_version"),
+    # Epoch 20: F1 durability unification.
+    # barrier_scalars_json carries shrunken checkpoint barrier metadata (Task 1.2).
+    ("checkpoints", "barrier_scalars_json"),
     # Mechanical change detection — hash of plugin source file at registration
     ("nodes", "source_file_hash"),
     # ADR-010 §Decision 3 M3: runtime VAL manifest — set of
@@ -198,6 +201,9 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("token_work_items", "lease_expires_at"),
     ("token_work_items", "created_at"),
     ("token_work_items", "updated_at"),
+    # Epoch 20: F1 durability unification.
+    # barrier_blocked_at records when a work item was blocked at a barrier (Task 1.3).
+    ("token_work_items", "barrier_blocked_at"),
     ("scheduler_events", "event_id"),
     ("scheduler_events", "run_id"),
     ("scheduler_events", "token_id"),
@@ -215,11 +221,6 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "recorded_at"),
     ("scheduler_events", "caller_owner"),
     ("scheduler_events", "context_json"),
-    # Epoch 20: F1 durability unification.
-    # barrier_blocked_at records when a work item was blocked at a barrier (Task 1.3).
-    ("token_work_items", "barrier_blocked_at"),
-    # barrier_scalars_json carries shrunken checkpoint barrier metadata (Task 1.2).
-    ("checkpoints", "barrier_scalars_json"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

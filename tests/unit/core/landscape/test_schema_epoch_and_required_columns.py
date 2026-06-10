@@ -45,6 +45,9 @@ def test_required_columns_include_new_columns_and_openrouter() -> None:
     # added to the Postgres staleness backstop.
     assert ("runs", "openrouter_catalog_sha256") in required
     assert ("runs", "openrouter_catalog_source") in required
+    # Epoch 20: F1 durability unification (additive half).
+    assert ("token_work_items", "barrier_blocked_at") in required
+    assert ("checkpoints", "barrier_scalars_json") in required
 
 
 def test_begin_node_state_writes_resume_checkpoint_id() -> None:
@@ -126,3 +129,76 @@ def test_begin_node_state_resume_checkpoint_id_defaults_to_none() -> None:
 
     assert row_back is not None
     assert row_back.resume_checkpoint_id is None
+
+
+def test_token_work_items_barrier_blocked_at_defaults_to_none() -> None:
+    """A freshly created token_work_items row has barrier_blocked_at IS NULL.
+
+    Epoch 20 (additive half): nothing writes the column yet — Task 1.3 adds the
+    repo verb that stamps it when a token blocks at a barrier. NULL = the work
+    item never blocked at a barrier.
+    """
+    setup = make_recorder_with_run(run_id="barrier-run", source_node_id="src-node")
+    db = setup.db
+    factory = setup.factory
+
+    # Satisfy the (token_id, run_id) / (row_id, run_id) FK chain
+    row = factory.data_flow.create_row(
+        "barrier-run", "src-node", row_index=0, data={"x": 1}, row_id="bar-row-1", source_row_index=0, ingest_sequence=0
+    )
+    token = factory.data_flow.create_token(row.row_id, token_id="bar-tok-1")
+
+    # Insert a minimal work item directly — existing call-site shape, no barrier_blocked_at
+    now = datetime.now(UTC)
+    with db.engine.begin() as conn:
+        conn.execute(
+            token_work_items_table.insert().values(
+                work_item_id="bar-wi-1",
+                run_id="barrier-run",
+                token_id=token.token_id,
+                row_id=row.row_id,
+                step_index=0,
+                ingest_sequence=0,
+                row_payload_json="{}",
+                status="ready",
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with db.engine.connect() as conn:
+        row_back = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == "bar-wi-1")).fetchone()
+
+    assert row_back is not None
+    assert row_back.barrier_blocked_at is None
+
+
+def test_checkpoints_barrier_scalars_json_defaults_to_none() -> None:
+    """A freshly created checkpoint row has barrier_scalars_json IS NULL.
+
+    Epoch 20 (additive half): nothing writes the column yet — Task 1.2 shrinks
+    the checkpoint row to carry scalar barrier metadata here.
+    """
+    setup = make_recorder_with_run(run_id="ck-null-run", source_node_id="src-node")
+    db = setup.db
+
+    ck_id = "ck-null-1"
+    with db.engine.begin() as conn:
+        conn.execute(
+            checkpoints_table.insert().values(
+                checkpoint_id=ck_id,
+                run_id="ck-null-run",
+                sequence_number=1,
+                created_at=datetime.now(UTC),
+                upstream_topology_hash="a" * 64,
+                format_version=4,
+            )
+        )
+
+    with db.engine.connect() as conn:
+        row_back = conn.execute(select(checkpoints_table).where(checkpoints_table.c.checkpoint_id == ck_id)).fetchone()
+
+    assert row_back is not None
+    assert row_back.barrier_scalars_json is None

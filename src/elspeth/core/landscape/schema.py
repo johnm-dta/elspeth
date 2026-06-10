@@ -925,7 +925,8 @@ checkpoints_table = Table(
     # Version 4: Pending coalesce state persisted in checkpoints
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
     # Epoch 20: F1 durability unification — barrier scalar metadata replaces
-    # the aggregation_state_json/coalesce_state_json blobs (blob DROP deferred to Task 4.1).
+    # the aggregation_state_json/coalesce_state_json blobs (columns dropped
+    # later in this epoch — Task 4.1).
     Column("barrier_scalars_json", Text, nullable=True),
 )
 

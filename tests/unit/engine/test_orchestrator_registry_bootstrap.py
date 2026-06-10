@@ -454,7 +454,27 @@ def test_resume_calls_prepare_for_run() -> None:
             sequence_number=checkpoint.sequence_number,
         )
 
-        orchestrator = Orchestrator(make_landscape_db())
+        db = make_landscape_db()
+        # The resume() entry guard (elspeth-2f23292372) re-checks the run's
+        # status in the audit DB before any recovery work, so the run under
+        # resume must exist as FAILED for the bootstrap ordering to be reached.
+        from elspeth.contracts import RunStatus
+        from elspeth.core.landscape.schema import runs_table
+
+        with db.connection() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id="run-resume-bootstrap",
+                    started_at=datetime.now(UTC),
+                    config_hash="cfg",
+                    settings_json="{}",
+                    canonical_version="sha256-rfc8785-v1",
+                    status=RunStatus.FAILED,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+        orchestrator = Orchestrator(db)
 
         with pytest.raises(ReconstructReached):
             orchestrator.resume(

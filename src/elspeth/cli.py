@@ -30,6 +30,7 @@ from elspeth.contracts.errors import (
     IncompleteSourceResumeError,
 )
 from elspeth.contracts.types import AggregationName
+from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.dependency_config import PreflightResult
@@ -1771,8 +1772,10 @@ def _build_resume_graphs(
     return validation_graph, execution_graph
 
 
-def _emit_not_resumable_event(error: EmptyResumeStateError | IncompleteSourceResumeError, output_format: str) -> None:
-    """Emit the operator-facing ``not_resumable`` event for an empty-state resume.
+def _emit_not_resumable_event(
+    error: EmptyResumeStateError | IncompleteSourceResumeError | NonResumableRunError, output_format: str
+) -> None:
+    """Emit the operator-facing ``not_resumable`` event for a refused resume.
 
     Shared by the ``resume`` command's outer and inner exception handlers so
     the operator surface is identical regardless of where the clean refuse
@@ -1786,8 +1789,26 @@ def _emit_not_resumable_event(error: EmptyResumeStateError | IncompleteSourceRes
     :class:`EmptyResumeStateError` is a subclass of
     ``OrchestrationInvariantError`` and would otherwise be swallowed by
     the fatal-traceback path.
+
+    :class:`NonResumableRunError` is the ``resume()`` entry guard's
+    precondition refusal (run status not resumable — e.g. RUNNING). The
+    CLI's ``can_resume`` pre-flight catches the common case with a clean
+    exit 1; the guard raise is only reachable in the race window where the
+    run's status changes between pre-flight and ``--execute``, and it must
+    land on this same operator surface rather than the exit-4
+    framework-bug traceback path.
     """
-    reason = "source_not_exhausted" if type(error) is IncompleteSourceResumeError else "no_recorded_work"
+    if isinstance(error, NonResumableRunError):
+        reason = "run_status_not_resumable"
+        # str(error) already carries the "Cannot resume run ..." prefix;
+        # use the bare reason so neither output path doubles it up.
+        message = error.reason
+    elif type(error) is IncompleteSourceResumeError:
+        reason = "source_not_exhausted"
+        message = str(error)
+    else:
+        reason = "no_recorded_work"
+        message = str(error)
     if output_format == "json":
         typer.echo(
             json.dumps(
@@ -1795,13 +1816,13 @@ def _emit_not_resumable_event(error: EmptyResumeStateError | IncompleteSourceRes
                     "event": "not_resumable",
                     "run_id": error.run_id,
                     "reason": reason,
-                    "message": str(error),
+                    "message": message,
                 }
             ),
             err=True,
         )
     else:
-        typer.echo(f"\nCannot resume run {error.run_id}: {error}", err=True)
+        typer.echo(f"\nCannot resume run {error.run_id}: {message}", err=True)
 
 
 @app.command()
@@ -2165,11 +2186,13 @@ def resume(
                 typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
-        except (EmptyResumeStateError, IncompleteSourceResumeError) as e:
+        except (EmptyResumeStateError, IncompleteSourceResumeError, NonResumableRunError) as e:
             # ADR-025 §3: this catch MUST precede the TIER_1_ERRORS
             # handler because EmptyResumeStateError is a subclass of
             # OrchestrationInvariantError. See _emit_not_resumable_event
-            # for the operator-facing contract.
+            # for the operator-facing contract. NonResumableRunError is
+            # the resume() entry guard's race-window refusal (status
+            # changed between the can_resume pre-flight and --execute).
             _emit_not_resumable_event(e, output_format)
             raise typer.Exit(1) from e
         except contract_errors.TIER_1_ERRORS as e:
@@ -2241,7 +2264,7 @@ def resume(
             typer.echo(f"  Rows failed: {result.rows_failed}")
             typer.echo(f"  Status: {result.status.value}")
 
-    except (EmptyResumeStateError, IncompleteSourceResumeError) as e:
+    except (EmptyResumeStateError, IncompleteSourceResumeError, NonResumableRunError) as e:
         # ADR-025 §3: catches the empty-state raise from recovery's
         # ``verify_contract_integrity()`` (reached via ``can_resume``
         # at line 1780 — dry-run and pre-execute paths). The inner

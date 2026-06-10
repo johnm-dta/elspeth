@@ -55,6 +55,31 @@ def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
     return Orchestrator(db)
 
 
+def _insert_failed_run(db: LandscapeDB, run_id: str) -> None:
+    """Insert the FAILED ``runs`` row the resume-under-test claims to resume.
+
+    The resume() entry guard (elspeth-2f23292372) re-checks the run's status
+    in the real audit DB before any mutation, so these mock-heavy resume
+    tests must persist the run they resume — a missing or non-resumable run
+    is now refused at entry with NonResumableRunError.
+    """
+    from elspeth.core.landscape.schema import runs_table
+
+    with db.connection() as conn:
+        conn.execute(
+            runs_table.insert().values(
+                run_id=run_id,
+                started_at=datetime.now(UTC),
+                config_hash="cfg",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status=RunStatus.FAILED,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        )
+
+
 # Protocol-specced plugin doubles. ``SourceProtocol``/``SinkProtocol``/
 # ``TransformProtocol`` declare ``name``/``on_success``/``config`` only by
 # annotation, so they are absent from ``dir()`` and a bare ``MagicMock(spec=...)``
@@ -149,6 +174,7 @@ class TestResumeFinalizesAsFailed:
         """When _process_resumed_rows raises, run status becomes FAILED."""
         db = make_landscape_db()
         orch = _make_orchestrator(db)
+        _insert_failed_run(db, "test-run-123")
 
         # Mock the checkpoint manager requirement
         orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
@@ -907,6 +933,7 @@ class TestResumeFinalizesAsFailed:
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         run_id = "run-empty-coalesce-state"
+        _insert_failed_run(db, run_id)
         empty_coalesce_state = CoalesceCheckpointState(version="4.0", pending=(), completed_keys=())
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=object)
@@ -966,6 +993,7 @@ class TestResumeFinalizesAsFailed:
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         run_id = "run-structural-counter-resume"
+        _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
         mock_factory.run_lifecycle.finalize_run = MagicMock()
@@ -1088,6 +1116,7 @@ class TestResumeFinalizesAsFailed:
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         run_id = "run-exhausted-source-engine-work"
+        _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
 

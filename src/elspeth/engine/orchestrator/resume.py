@@ -46,7 +46,14 @@ from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.types import NodeID
 from elspeth.core.canonical import canonical_json
+from elspeth.core.checkpoint.recovery import NonResumableRunError, check_run_status_resumable
 from elspeth.core.landscape.factory import RecorderFactory
+
+# The immutable-success family (COMPLETED / COMPLETED_WITH_FAILURES / EMPTY)
+# is deliberately imported from its single source of truth rather than
+# duplicated: the resume() entry guard defers these statuses to the durable
+# run-immutability guard in RunLifecycleRepository.update_run_status().
+from elspeth.core.landscape.run_lifecycle_repository import _IMMUTABLE_SUCCESS_RUN_STATUSES
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.aggregation import (
@@ -638,6 +645,37 @@ class ResumeCoordinator:
 
         if payload_store is None:
             raise OrchestrationInvariantError("payload_store is required for resume - row data must be retrieved from stored payloads")
+
+        # ---- resume() entry guard (elspeth-2f23292372, operator option b) ----
+        # resume() historically trusted callers to honor the ADVISORY
+        # RecoveryManager.can_resume() and never re-checked run status itself,
+        # so a competing resume against a RUNNING run was ADMITTED. Re-check
+        # here via the SAME shared implementation can_resume() uses, BEFORE
+        # the first mutation (rebase_sequence below, then
+        # reconstruct_resume_state's batch + run-header writes).
+        #
+        # The immutable-success family (COMPLETED / COMPLETED_WITH_FAILURES /
+        # EMPTY) is deliberately NOT intercepted here: the run-immutability
+        # guard in RunLifecycleRepository.update_run_status() already refuses
+        # those durably with AuditIntegrityError ("Successful terminal runs
+        # are immutable"), and that refusal is the pinned loser-after-winner
+        # contract (tests/e2e/recovery/test_concurrent_resume.py). This guard
+        # closes the caller-convention gap for everything else — RUNNING
+        # above all, plus runs that do not exist.
+        #
+        # KNOWN RESIDUAL (TOCTOU): two resumes can BOTH observe FAILED here
+        # before either flips the run to RUNNING in reconstruct_resume_state;
+        # closing that check-then-act window requires cross-process
+        # coordination (operator option c — a separate post-F1 effort,
+        # deliberately not attempted here). The immutability guard remains
+        # the durable backstop for the completed half of that window.
+        guarded_run_id = resume_point.checkpoint.run_id
+        run_status, status_check = check_run_status_resumable(self._db, guarded_run_id)
+        if not status_check.can_resume and run_status not in _IMMUTABLE_SUCCESS_RUN_STATUSES:
+            raise NonResumableRunError(
+                guarded_run_id,
+                status_check.reason or f"Run status {run_status!r} precludes resume",
+            )
 
         # ADR-010 §Decision 3: freeze both registries at bootstrap, mirroring
         # run(). Recovery happens in a new process — the module import chain

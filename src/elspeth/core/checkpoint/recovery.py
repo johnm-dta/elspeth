@@ -60,10 +60,82 @@ _CheckpointStateCacheKey = tuple[str, str | None, str | None]
 
 __all__ = [
     "IncompleteTokenSpec",
+    "NonResumableRunError",
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
+    "check_run_status_resumable",
 ]
+
+
+# TIER-2: Operator-interpretable refuse signal — the audit DB is intact and
+# truthful; the run's CURRENT status (e.g. RUNNING: another worker holds the
+# run mid-flight) means resuming now would be incorrect. Same register as
+# elspeth.contracts.errors.IncompleteSourceResumeError: an operator-facing
+# precondition failure carrying run_id + reason, NOT audit corruption
+# (contrast the run-immutability guard's AuditIntegrityError in
+# RunLifecycleRepository.update_run_status).
+class NonResumableRunError(Exception):
+    """Raised by ``ResumeCoordinator.resume()`` when run status precludes resume.
+
+    ``RecoveryManager.can_resume()`` is ADVISORY — callers may skip it — so
+    ``resume()`` re-checks the run status at entry via the same shared
+    implementation (:func:`check_run_status_resumable`) and raises this
+    error before any mutation (elspeth-2f23292372, operator option b).
+
+    Carries ``run_id`` and the human-readable ``reason`` from the shared
+    check so CLI/API callers can surface a precise "not resumable" outcome
+    without parsing the exception text.
+    """
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        self.run_id = run_id
+        self.reason = reason
+        super().__init__(f"Cannot resume run {run_id!r}: {reason}")
+
+
+def _fetch_run(db: LandscapeDB, run_id: str) -> Row[Any] | None:
+    """Fetch the ``runs`` row for ``run_id``, or None if absent."""
+    with db.engine.connect() as conn:
+        return conn.execute(select(runs_table).where(runs_table.c.run_id == run_id)).fetchone()
+
+
+def check_run_status_resumable(db: LandscapeDB, run_id: str) -> tuple[RunStatus | None, ResumeCheck]:
+    """Existence + run-status portion of :meth:`RecoveryManager.can_resume`.
+
+    SINGLE shared implementation for the advisory ``can_resume`` surface and
+    the enforcing entry guard in ``ResumeCoordinator.resume()`` — the two
+    must never drift (elspeth-2f23292372).
+
+    Returns:
+        ``(run_status, check)``: ``run_status`` is ``None`` when the run does
+        not exist. ``check`` carries ``can_resume=True`` when the status alone
+        does not preclude resume; checkpoint existence, topology, and contract
+        integrity remain ``can_resume``'s remit, not this function's.
+
+    Raises:
+        CheckpointCorruptionError: If the persisted status is not a valid
+            ``RunStatus`` — audit corruption, never a clean refuse.
+    """
+    run = _fetch_run(db, run_id)
+    if run is None:
+        return None, ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
+
+    try:
+        run_status = RunStatus(run.status)
+    except ValueError as exc:
+        raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
+
+    if run_status == RunStatus.COMPLETED:
+        return run_status, ResumeCheck(can_resume=False, reason="Run already completed successfully")
+
+    if run_status == RunStatus.RUNNING:
+        return run_status, ResumeCheck(can_resume=False, reason="Run is still in progress")
+
+    if run_status not in _RESUMABLE_RUN_STATUSES:
+        return run_status, ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
+
+    return run_status, ResumeCheck(can_resume=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,23 +231,12 @@ class RecoveryManager:
             CheckpointCorruptionError: If schema contract integrity check fails.
                 This is a Tier 1 failure - corruption cannot be silently ignored.
         """
-        run = self._get_run(run_id)
-        if run is None:
-            return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
-
-        try:
-            run_status = RunStatus(run.status)
-        except ValueError as exc:
-            raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
-
-        if run_status == RunStatus.COMPLETED:
-            return ResumeCheck(can_resume=False, reason="Run already completed successfully")
-
-        if run_status == RunStatus.RUNNING:
-            return ResumeCheck(can_resume=False, reason="Run is still in progress")
-
-        if run_status not in _RESUMABLE_RUN_STATUSES:
-            return ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
+        # Existence + status checks live in check_run_status_resumable so
+        # this advisory surface and the enforcing entry guard in
+        # ResumeCoordinator.resume() share ONE implementation.
+        _run_status, status_check = check_run_status_resumable(self._db, run_id)
+        if not status_check.can_resume:
+            return status_check
 
         try:
             checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
@@ -791,10 +852,7 @@ class RecoveryManager:
         Returns:
             Row result with run data, or None if not found
         """
-        with self._db.engine.connect() as conn:
-            result = conn.execute(select(runs_table).where(runs_table.c.run_id == run_id)).fetchone()
-
-        return result
+        return _fetch_run(self._db, run_id)
 
     def verify_contract_integrity(self, run_id: str) -> SchemaContract:
         """Verify schema contract integrity for a run.

@@ -14,10 +14,14 @@ coverage for the three gaps that ticket names:
    reclaims everything once all leases age out, with per-item attempt
    offsets visible in both the journal ``attempt`` column and the
    ``node_states`` attempt identity.
-3. **Two resume() calls racing on the same run_id** — CHARACTERIZATION
-   ONLY. Cross-process resume mutual exclusion is an OPEN operator
-   decision; these tests record what the engine does today and must not
-   be read as a policy endorsement.
+3. **Two resume() calls racing on the same run_id** — two interleavings,
+   two registers. The loser-after-winner interleaving is CHARACTERIZATION
+   (the run-immutability guard refuses it; full cross-process mutual
+   exclusion remains an OPEN operator decision — option c). The mid-flight
+   interleaving is now an ENFORCED CONTRACT: ``ResumeCoordinator.resume()``'s
+   entry guard (elspeth-2f23292372, operator option b) re-checks run status
+   via the same shared implementation ``can_resume`` uses and refuses a
+   RUNNING run with ``NonResumableRunError`` before any mutation.
 
 Durability-unification (F1) survival contract: every ASSERTION below reads
 PUBLIC, durable surfaces only — the ``token_work_items`` journal columns
@@ -73,6 +77,7 @@ from elspeth.contracts.results import SourceRow
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import CheckpointSettings, QueueSettings, SourceSettings, TransformSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.dag.models import WiredTransform
@@ -669,13 +674,18 @@ class TestExpiredLeaseReclaimUnderContention:
 
 
 @pytest.mark.timeout(120)
-class TestCharacterizationTwoResumesSameRunId:
-    """Ticket item 3 — CHARACTERIZATION ONLY (open operator decision).
+class TestTwoResumesSameRunId:
+    """Ticket item 3 — the two deterministic interleavings of a resume race.
 
-    Cross-process resume mutual exclusion has NO designed policy today.
-    These tests record the engine's observed behavior for the two
-    deterministic interleavings of "two operators resume the same run_id",
-    as direct input to that decision. They pin what IS, not what SHOULD be.
+    Full cross-process resume mutual exclusion has NO designed policy today
+    (operator option c, post-F1). The two interleavings are pinned in
+    different registers:
+
+    - loser-after-winner: CHARACTERIZATION of the run-immutability guard
+      (``update_run_status`` raises AuditIntegrityError from COMPLETED) —
+      what IS, recorded as input to the open operator decision;
+    - loser-while-RUNNING: ENFORCED CONTRACT — the resume() entry guard
+      (elspeth-2f23292372, option b) refuses before any mutation.
     """
 
     def test_characterization_two_resumes_same_run_id_loser_after_winner(self, tmp_path: Path) -> None:
@@ -744,7 +754,7 @@ class TestCharacterizationTwoResumesSameRunId:
         assert items_after_winner[crashed_token]["attempt"] == 2
         crashed.db.close()
 
-    def test_characterization_resume_admitted_while_run_status_running(self, tmp_path: Path) -> None:
+    def test_entry_guard_refuses_resume_while_run_status_running(self, tmp_path: Path) -> None:
         """The loser arrives while the winner is mid-flight (status=RUNNING).
 
         The winner's FIRST durable write on the resume path is
@@ -754,26 +764,24 @@ class TestCharacterizationTwoResumesSameRunId:
         fetched before the winner started — the deterministic image of the
         mid-flight race window.
 
-        Observed behavior today (the characterization — NOT an endorsement):
-        - ``can_resume`` (the advisory API) says NO: "Run is still in
-          progress".
-        - But ``resume()`` itself NEVER re-checks can_resume: the competing
-          resume is ADMITTED (RUNNING -> RUNNING is not blocked by the
-          immutability guard), it drains the crashed worker's expired lease,
-          and it finalizes the run COMPLETED out from under the notional
-          winner.
-        - The ONLY mechanical mutual exclusion on this path is the live
-          peer-lease guard in drain_scheduled_work, which protects nothing
-          once the peer's lease has expired (or between the peer's claims).
+        ENFORCED CONTRACT (elspeth-2f23292372, operator option b — this was
+        formerly a characterization of ADMISSION): ``resume()`` re-checks the
+        run status at entry through the same shared implementation
+        ``can_resume`` uses (``check_run_status_resumable``) and REFUSES the
+        RUNNING run with ``NonResumableRunError`` — carrying the run_id and
+        the advisory check's reason — BEFORE any mutation.
 
-        Cross-process mutual exclusion for resume is therefore ABSENT beyond
-        those two narrow guards — the open operator decision this
-        characterization feeds. In this single-loser construction audit
-        integrity still held (exactly-once outcomes, distinct node_states
-        identities); what CANNOT be proven here is what the suspended winner
-        would do when it wakes (its continuation cannot be driven
-        deterministically in-process), which is precisely the unprotected
-        window the operator decision must close or accept.
+        KNOWN RESIDUAL (deliberately NOT closed here — operator option c,
+        cross-process coordination, post-F1): a TOCTOU window remains. Two
+        resumes can BOTH observe FAILED at the guard before either flips the
+        run to RUNNING; this guard closes the caller-convention gap only.
+
+        Durable surfaces pinned — the refused loser changed NOTHING:
+        - the crashed worker's LEASED journal row is untouched
+          (status/attempt/lease_owner intact), no recovery events appended;
+        - no new token outcomes, no new node_states identities;
+        - the runs row still says RUNNING (the notional winner's state);
+        - the loser's sink receives nothing.
         """
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
@@ -796,24 +804,31 @@ class TestCharacterizationTwoResumesSameRunId:
         assert not check.can_resume
         assert check.reason == "Run is still in progress"
 
-        # ...but the public resume() is admitted and completes the run.
+        # Snapshot every durable surface the refused loser must not touch.
+        items_before = _work_items_by_token(crashed.db, crashed.run_id)
+        outcomes_before = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        identities_before = sorted(_node_state_identities(crashed.db, crashed.run_id))
+
+        # ...and the public resume() now refuses with the SAME reason,
+        # raised at entry before any mutation.
         config_l, graph_l, sink_l, _source_l = _build_pipeline(_SOURCE_ROWS)
-        result_loser = crashed.resume_orchestrator().resume(resume_point_loser, config_l, graph_l, payload_store=crashed.payload_store)
+        with pytest.raises(NonResumableRunError, match=r"Run is still in progress") as exc_info:
+            crashed.resume_orchestrator().resume(resume_point_loser, config_l, graph_l, payload_store=crashed.payload_store)
+        assert exc_info.value.run_id == crashed.run_id
+        assert exc_info.value.reason == "Run is still in progress"
 
-        assert result_loser.status == RunStatus.COMPLETED
-        assert result_loser.rows_processed == 4
-        assert sink_l.results == [{"id": 3, "value": 30}]
-
-        items = _work_items_by_token(crashed.db, crashed.run_id)
-        assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in items.values())
-        assert items[crashed_token]["attempt"] == 2
-
-        # The loser's own writes kept the audit trail consistent.
+        # The refused loser changed NOTHING durable.
+        assert sink_l.results == []
+        items_after = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items_after == items_before
+        assert items_after[crashed_token]["status"] == TokenWorkStatus.LEASED.value
+        assert items_after[crashed_token]["attempt"] == 1
+        assert items_after[crashed_token]["lease_owner"] == "crashed-worker-1"
+        assert _recovery_events(crashed.db, crashed.run_id) == []
+        assert _completed_outcome_tokens(crashed.db, crashed.run_id) == outcomes_before
         assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
-        assert len(_completed_outcome_tokens(crashed.db, crashed.run_id)) == 4
-        identities = _node_state_identities(crashed.db, crashed.run_id)
-        assert len(identities) == len(set(identities))
+        assert sorted(_node_state_identities(crashed.db, crashed.run_id)) == identities_before
         with crashed.db.engine.connect() as conn:
             status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
-        assert status == RunStatus.COMPLETED.value
+        assert status == RunStatus.RUNNING.value
         crashed.db.close()

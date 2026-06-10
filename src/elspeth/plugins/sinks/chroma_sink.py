@@ -18,6 +18,7 @@ import chromadb.errors
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import CallStatus, CallType
@@ -175,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bb0aa7295b1f55e8"
+    source_file_hash: str | None = "sha256:28377799dbf12e83"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -249,7 +250,7 @@ class ChromaSink(BaseSink):
     def _compute_payload_hash(
         ids: list[str],
         documents: list[str],
-        metadatas: list[dict[str, Any]] | None,
+        metadatas: list[dict[str, Any] | None] | None,
     ) -> tuple[str, int]:
         """Compute canonical hash and size for the actual payload being sent."""
         payload = canonical_json({"ids": ids, "documents": documents, "metadatas": metadatas})
@@ -405,13 +406,32 @@ class ChromaSink(BaseSink):
         # These will be updated for skip/error mode to reflect actual payload sent.
         all_write_ids: list[str] = []
         all_write_documents: list[str] = []
-        all_write_metadatas: list[dict[str, Any]] = []
+        # Aligned 1:1 with all_write_ids — no-metadata rows hold None so the audit
+        # hash covers a length-consistent, replayable payload (elspeth-b19ee26dc2).
+        all_write_metadatas: list[dict[str, Any] | None] = []
         total_rows_written = 0
         total_rows_skipped = 0
         all_skipped_ids: list[str] = []
 
         start_time = time.perf_counter()
         try:
+            if self._config.on_duplicate == "error":
+                # Preflight the FULL logical batch for duplicates before ANY
+                # external add. A mixed batch splits into a metadata sub-batch
+                # and a no-metadata sub-batch; checking per sub-batch inside the
+                # loop below would add the first sub-batch to ChromaDB and only
+                # then raise on a later sub-batch's duplicate, leaving a partial
+                # external write with no success audit (elspeth-f56603c31a).
+                preflight_ids = [id_ for sub_ids, _docs, _metas in sub_batches for id_ in sub_ids]
+                existing = collection.get(ids=preflight_ids)
+                existing_ids = set(existing["ids"])
+                duplicates = [id_ for id_ in preflight_ids if id_ in existing_ids]
+                if duplicates:
+                    raise DuplicateDocumentError(
+                        collection=self._config.collection,
+                        duplicate_ids=duplicates,
+                    )
+
             for batch_ids, batch_docs, batch_metadatas in sub_batches:
                 write_ids = batch_ids
                 write_documents = batch_docs
@@ -455,14 +475,8 @@ class ChromaSink(BaseSink):
                         write_metadatas = None
                         rows_written = 0
                 elif self._config.on_duplicate == "error":
-                    existing = collection.get(ids=batch_ids)
-                    existing_ids = set(existing["ids"])
-                    duplicates = [id_ for id_ in batch_ids if id_ in existing_ids]
-                    if duplicates:
-                        raise DuplicateDocumentError(
-                            collection=self._config.collection,
-                            duplicate_ids=duplicates,
-                        )
+                    # Duplicates were already rejected by the full-batch preflight
+                    # above, so every sub-batch here is known-new — add directly.
                     try:
                         collection.add(
                             ids=batch_ids,
@@ -474,8 +488,14 @@ class ChromaSink(BaseSink):
 
                 all_write_ids.extend(write_ids)
                 all_write_documents.extend(write_documents)
+                # Keep metadatas aligned 1:1 with ids: the no-metadata sub-batch
+                # (write_metadatas is None) contributes a None per written row so the
+                # aggregate length matches and the hash reflects which rows carried
+                # metadata, instead of silently dropping to a shorter array.
                 if write_metadatas is not None:
                     all_write_metadatas.extend(write_metadatas)
+                else:
+                    all_write_metadatas.extend([None] * len(write_ids))
                 total_rows_written += rows_written
 
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -506,9 +526,13 @@ class ChromaSink(BaseSink):
             raise
 
         # Hash the actual payload sent, not the full batch (critical for skip mode).
-        # When some rows had metadata and some didn't, the hash covers the metadatas
-        # that were actually sent (or None if none were).
-        hash_metadatas: list[dict[str, Any]] | None = all_write_metadatas if all_write_metadatas else None
+        # all_write_metadatas is aligned 1:1 with all_write_ids (None for rows that
+        # carried no metadata). Collapse to None only when NO row had metadata, so
+        # an all-no-metadata batch hashes metadatas=None (a single metadatas=None
+        # call) while a mixed batch keeps the aligned [meta, ..., None, ...] array.
+        hash_metadatas: list[dict[str, Any] | None] | None = (
+            all_write_metadatas if any(m is not None for m in all_write_metadatas) else None
+        )
         content_hash, payload_size = self._compute_payload_hash(all_write_ids, all_write_documents, hash_metadatas)
 
         diversions = self._get_diversions()
@@ -562,7 +586,14 @@ class ChromaSink(BaseSink):
 
     def on_complete(self, ctx: LifecycleContext) -> None:
         super().on_complete(ctx)
-        if self._telemetry_emit is not None:
+        if self._telemetry_emit is None:
+            return
+        # Telemetry is best-effort operational visibility emitted AFTER the writes
+        # and their audit record have completed; an emit failure must not fail
+        # completion (elspeth-ee69831e4c). Tier-1/audit-integrity errors still
+        # propagate (audit corruption outranks) — same guard shape as
+        # plugins/sinks/dataverse.py's post-audit telemetry emission.
+        try:
             self._telemetry_emit(
                 {
                     "event": "chroma_sink_complete",
@@ -570,6 +601,17 @@ class ChromaSink(BaseSink):
                     "total_written": self._total_written,
                     "total_bytes": self._total_bytes,
                 }
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as tel_err:
+            slog.warning(
+                "telemetry_emit_failed",
+                sink="chroma",
+                collection=self._config.collection,
+                error=str(tel_err),
+                error_type=type(tel_err).__name__,
+                exc_info=True,
             )
 
     def close(self) -> None:

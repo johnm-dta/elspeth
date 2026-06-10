@@ -118,7 +118,6 @@ def build_dag_traversal_context(
     return DAGTraversalContext(
         node_step_map=node_step_map,
         node_to_plugin=node_to_plugin,
-        first_transform_node_id=graph.get_first_transform_node(),
         node_to_next=node_to_next,
         coalesce_node_map=graph.get_coalesce_id_map(),
         branch_first_node=graph.get_branch_first_nodes(),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 from types import TracebackType
@@ -9,21 +10,39 @@ from typing import TYPE_CHECKING
 
 from elspeth.core.rate_limit.limiter import RateLimiter
 
+# Mirror of RateLimiter's accepted-name grammar (limiter.py _VALID_NAME_PATTERN):
+# a name matching this is already a valid bucket key and is returned unchanged.
+_VALID_LIMITER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
 
 def _sanitize_limiter_name(service_name: str) -> str:
-    """Convert an arbitrary service name to a valid RateLimiter bucket name.
+    """Convert an arbitrary service name to a valid, INJECTIVE RateLimiter bucket name.
 
-    RateLimiter requires names matching ^[A-Za-z][A-Za-z0-9_]*$.
-    This converts hostname-style names (api.example.com) and other
-    non-identifier strings to safe bucket names while preserving
-    uniqueness.
+    RateLimiter requires names matching ^[A-Za-z][A-Za-z0-9_]*$ and uses the name as
+    its persistent SQLite bucket/table key (``ratelimit_<name>``). The previous
+    sanitizer replaced every non-alphanumeric with ``_`` with no discriminator, so
+    distinct services like ``api.example`` and ``api_example`` both became
+    ``api_example`` and silently shared one persistent quota bucket (elspeth-2af4e98ee2).
+
+    This is now injective AND edge-only:
+    - A name that ALREADY matches the grammar is returned byte-identical, so the
+      common case keeps its existing bucket (no migration).
+    - A name that must be rewritten gets a short hash discriminator derived from the
+      ORIGINAL name appended, so two raw names cannot sanitize to the same bucket.
+      The only buckets whose persisted name changes are exactly the special-char
+      names that were sharing the buggy collided bucket.
     """
-    # Replace any non-alphanumeric character with underscore
+    if _VALID_LIMITER_NAME.match(service_name):
+        return service_name
+
+    # Rewrite: replace non-alphanumerics, ensure a leading letter, then append a
+    # discriminator from the ORIGINAL name to restore injectivity within the
+    # limiter-name charset. Hex keeps the suffix in-grammar.
     sanitized = re.sub(r"[^a-zA-Z0-9]", "_", service_name)
-    # Ensure starts with a letter
     if not sanitized or not sanitized[0].isalpha():
         sanitized = "svc_" + sanitized
-    return sanitized
+    suffix = hashlib.sha256(service_name.encode()).hexdigest()[:8]
+    return f"{sanitized}_{suffix}"
 
 
 if TYPE_CHECKING:

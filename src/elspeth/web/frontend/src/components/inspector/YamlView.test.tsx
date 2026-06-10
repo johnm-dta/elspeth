@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { YamlView } from "./YamlView";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -48,6 +48,17 @@ function makeProposal(
     updated_at: "2026-05-14T00:00:00Z",
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, resolve, reject };
 }
 
 describe("YamlView", () => {
@@ -112,6 +123,49 @@ describe("YamlView", () => {
     expect(
       screen.queryByText("YAML will appear here once your pipeline has components."),
     ).not.toBeInTheDocument();
+  });
+
+  it("clears stale YAML controls while refetching after a composition version change", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    const secondFetch = deferred<{ yaml: string }>();
+    vi.mocked(fetchYaml)
+      .mockResolvedValueOnce({
+        yaml: "source:\n  plugin: old_text\n",
+      })
+      .mockReturnValueOnce(secondFetch.promise);
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<YamlView />);
+
+    expect(await screen.findByText("old_text")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy YAML to clipboard" }),
+    ).toBeEnabled();
+
+    act(() => {
+      useSessionStore.setState({
+        compositionState: makeState(2),
+      });
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading YAML...");
+    expect(screen.queryByText("old_text")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Copy YAML to clipboard" }),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      secondFetch.resolve({
+        yaml: "source:\n  plugin: new_text\n",
+      });
+      await secondFetch.promise;
+    });
+
+    expect(await screen.findByText("new_text")).toBeInTheDocument();
   });
 
   it("exposes copied state as a data attribute for forced-colors CSS", async () => {

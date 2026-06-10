@@ -108,7 +108,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ce4f03e670540e8a"
+    source_file_hash: str | None = "sha256:7b35aa9be26c361e"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -507,6 +507,27 @@ class DatabaseSink(BaseSink):
             )
 
         # Ensure table exists (infer from first row)
+        # Enforce the existing-target contract BEFORE binding/creating the table.
+        # validate_output_target() detects fixed/flexible-mode mismatches against
+        # an existing table (e.g. a fixed ['id','name'] sink pointed at an
+        # existing output(id, name, extra) table). Without enforcing it here, an
+        # append write silently inserts into the drifted target, leaving the
+        # extra column NULL and violating the fixed-mode field contract — unless
+        # an external caller happened to run and honor validate_output_target()
+        # first. Runs once: on the first write self._table is None; afterwards
+        # the table is bound and the row-key check below covers subsequent writes
+        # (elspeth-bed11173bf). Replace mode drops the target, so it is exempt.
+        if self._table is None and self._if_exists == "append" and not self._schema_config.is_observed:
+            validation = self.validate_output_target()
+            if not validation.valid:
+                raise ValueError(
+                    f"DatabaseSink target table {self._table_name!r} is incompatible with the "
+                    f"configured schema and cannot be appended to: {validation.error_message} "
+                    f"(missing_fields={validation.missing_fields}, extra_fields={validation.extra_fields}). "
+                    f"Use if_exists='replace', align the schema to the existing table, or point at a "
+                    f"different table."
+                )
+
         self._ensure_table(rows[0], ctx)
 
         # Validate rows against table columns before INSERT.

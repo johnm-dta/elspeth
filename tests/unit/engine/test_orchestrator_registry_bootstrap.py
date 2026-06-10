@@ -418,6 +418,7 @@ def test_resume_calls_prepare_for_run() -> None:
     import elspeth.engine.orchestrator.core as orchestrator_core
     from elspeth.contracts import Checkpoint, ResumePoint
     from elspeth.engine.orchestrator.core import Orchestrator
+    from elspeth.engine.orchestrator.resume import ResumeCoordinator
     from tests.fixtures.landscape import make_landscape_db
     from tests.fixtures.stores import MockPayloadStore
 
@@ -438,7 +439,7 @@ def test_resume_calls_prepare_for_run() -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(orchestrator_core, "prepare_for_run", fake_prepare_for_run)
-    monkeypatch.setattr(Orchestrator, "_reconstruct_resume_state", fake_reconstruct_resume_state)
+    monkeypatch.setattr(ResumeCoordinator, "reconstruct_resume_state", fake_reconstruct_resume_state)
     try:
         checkpoint = Checkpoint(
             checkpoint_id="cp-resume-bootstrap",

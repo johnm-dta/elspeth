@@ -802,6 +802,40 @@ class TestAzureBlobSourceSchemaValidation:
         assert rows[0].contract is not None
         assert rows[0].contract.locked is True
 
+    @pytest.mark.parametrize(
+        ("source_format", "blob_bytes"),
+        [
+            ("json", json.dumps([{"a": 1}, {"a": 2, "b": "new"}]).encode()),
+            ("jsonl", b'{"a": 1}\n{"a": 2, "b": "new"}\n'),
+        ],
+    )
+    def test_sparse_json_keys_are_added_to_emitted_row_contract(
+        self,
+        source_format: str,
+        blob_bytes: bytes,
+        ctx: PluginContext,
+    ) -> None:
+        """Later sparse JSON/JSONL keys must stay under schema-contract custody."""
+        source = _make_source(_base_config(format=source_format, schema=DYNAMIC_SCHEMA))
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert rows[0].is_quarantined is False
+        assert rows[1].is_quarantined is False
+        assert rows[1].row == {"a": 2, "b": "new"}
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        assert mapping == {"a": "a", "b": "b"}
+
+        second_contract = rows[1].contract
+        assert second_contract is not None
+        assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
+        assert second_contract.get_field("b").original_name == "b"
+
 
 # ---------------------------------------------------------------------------
 # Task 4: Audit Trail and Error Handling
@@ -932,3 +966,35 @@ class TestAzureBlobSourceAuditAndErrors:
         assert result is not None
         resolution_map, _version = result
         assert resolution_map == {"Customer Name": "customer_name"}
+
+
+class TestAzureBlobSparseFieldMapping:
+    """elspeth-bdcdce6f58: sparse JSON blob rows + field_mapping order-independence.
+
+    The CSV path keeps the strict missing-mapped-column check (regression trap);
+    only the JSON _normalize_row_keys path is relaxed for sparse records.
+    """
+
+    def test_sparse_json_field_mapping_is_order_independent(self) -> None:
+        def make() -> Any:
+            return _make_source(
+                _base_config(
+                    format="json",
+                    blob_path="data/input.json",
+                    field_mapping={"customer_name": "client_name"},
+                )
+            )
+
+        # Sparse row first; mapped 'Customer Name' appears only in the later row.
+        src = make()
+        r1 = src._normalize_row_keys({"id": 1})
+        r2 = src._normalize_row_keys({"id": 2, "Customer Name": "Alice"})
+        assert dict(r1) == {"id": 1}
+        assert dict(r2) == {"id": 2, "client_name": "Alice"}
+
+        # Reversed order must produce identical normalized output.
+        src2 = make()
+        r1b = src2._normalize_row_keys({"id": 2, "Customer Name": "Alice"})
+        r2b = src2._normalize_row_keys({"id": 1})
+        assert dict(r1b) == {"id": 2, "client_name": "Alice"}
+        assert dict(r2b) == {"id": 1}

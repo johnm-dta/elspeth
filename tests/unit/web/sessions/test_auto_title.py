@@ -37,6 +37,8 @@ async def test_auto_title_timeout_records_telemetry_and_returns(monkeypatch) -> 
         session_id=uuid4(),
         user_message="Build a CSV pipeline",
         model="openai/test",
+        temperature=None,
+        seed=None,
     )
 
     assert service.updates == []
@@ -59,6 +61,8 @@ async def test_auto_title_programmer_error_propagates(monkeypatch) -> None:
             session_id=uuid4(),
             user_message="Build a CSV pipeline",
             model="openai/test",
+            temperature=None,
+            seed=None,
         )
 
     assert counter.calls == []
@@ -84,6 +88,8 @@ async def test_auto_title_title_write_failure_propagates(monkeypatch) -> None:
             session_id=uuid4(),
             user_message="Build a CSV pipeline",
             model="openai/test",
+            temperature=None,
+            seed=None,
         )
 
     assert counter.calls == []

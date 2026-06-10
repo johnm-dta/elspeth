@@ -23,6 +23,7 @@ from elspeth.web.composer.state import (
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
+    _validate_gate_route_parity,
 )
 from elspeth.web.composer.tools._common import (
     ToolContext,
@@ -38,6 +39,7 @@ from elspeth.web.composer.tools._common import (
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
     _validate_plugin_name,
+    _validate_transform_provider_config_path,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
@@ -443,6 +445,11 @@ def _execute_upsert_node(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
+        # S2: confine nested provider_config persist_directory (RAG retrieval).
+        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir)
+        if provider_path_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
+
     # Validate gate condition expression at composition time.
     # Gives the LLM immediate feedback on syntax/security errors.
     condition = validated.condition
@@ -450,6 +457,9 @@ def _execute_upsert_node(
         expr_error = _validate_gate_expression(condition)
         if expr_error is not None:
             return _failure_result(state, f"Node '{node_id}': {expr_error}")
+        parity_error = _validate_gate_route_parity(condition, validated.routes)
+        if parity_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {parity_error}")
     if node_type == "aggregation":
         trigger_error = _validate_aggregation_trigger(validated.trigger)
         if trigger_error is not None:
@@ -685,7 +695,6 @@ def _execute_patch_node_options(
     it runs AFTER Pydantic validation — same discipline as
     ``set_pipeline``'s blob_id/inline_blob mutual-exclusion check.
     """
-    del context  # unused; signature uniformity with the other handlers.
     try:
         validated = PatchNodeOptionsArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -721,6 +730,12 @@ def _execute_patch_node_options(
         prevalidation_error = _prevalidate_transform(current.plugin, new_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
+
+        # S2: confine nested provider_config persist_directory (RAG retrieval).
+        # A merge-patch can introduce an escaping path just as upsert_node can.
+        provider_path_error = _validate_transform_provider_config_path(new_options, context.data_dir)
+        if provider_path_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
 
     new_node = replace(current, options=new_options)
     new_state = state.with_node(new_node)

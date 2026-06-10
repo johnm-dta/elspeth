@@ -129,6 +129,11 @@ class _TerminateOutcome:
     action: Literal["continue", "return"]
     result: ComposerResult | None = None
     repair_turns_delta: int = 0  # 0 or 1; nonzero only for continue path
+    # END-gate advisor budget — SEPARATE from repair_turns_delta (D-8). A
+    # flagged advisor repair-continue (or a fail-closed end-gate return)
+    # increments this, never the repair counter; the driver folds it into
+    # ``advisor_checkpoint_passes_used``.
+    advisor_passes_delta: int = 0  # 0 or 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,3 +235,7 @@ class _ClassifyOutcome:
     result: ComposerResult | None = None
     composition_turns_delta: int = 0  # 0 or 1
     discovery_turns_delta: int = 0  # 0 or 1
+    # END-gate advisor budget (the P5 last-chance gate). Folded into the
+    # driver's ``advisor_checkpoint_passes_used`` after P5, mirroring the
+    # P2 ``_TerminateOutcome.advisor_passes_delta`` field.
+    advisor_passes_delta: int = 0  # 0 or 1

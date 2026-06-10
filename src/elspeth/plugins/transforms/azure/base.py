@@ -474,7 +474,10 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         text = response.text
         if type(text) is not str:
             raise MalformedResponseError(f"{label} body must be text, got {type(text).__name__}")
-        data, parse_error = parse_json_strict(text)
+        try:
+            data, parse_error = parse_json_strict(text)
+        except RecursionError as exc:
+            raise MalformedResponseError(f"Invalid JSON in {label}: {exc}") from exc
         if parse_error is not None:
             raise MalformedResponseError(f"Invalid JSON in {label}: {parse_error}")
         return data

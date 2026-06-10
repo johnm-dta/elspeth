@@ -23,6 +23,7 @@ from elspeth.web.composer.state import CompositionState, PipelineMetadata, Valid
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+from tests.unit.web.composer._helpers import _stub_advisor_end_gate_clean  # noqa: F401  (autouse end-gate CLEAN stub)
 
 
 @dataclass
@@ -262,14 +263,7 @@ async def test_malformed_provider_cost_is_recorded_as_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seed_omission_for_unsupported_provider_is_reflected_in_audit(monkeypatch: pytest.MonkeyPatch) -> None:
-    import litellm
-
-    monkeypatch.setattr(
-        litellm,
-        "get_supported_openai_params",
-        lambda model: ["temperature", "tools"],
-    )
+async def test_unset_sampling_is_omitted_and_reflected_in_audit() -> None:
     service = ComposerServiceImpl(
         catalog=_mock_catalog(),
         settings=_make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022"),
@@ -281,9 +275,9 @@ async def test_seed_omission_for_unsupported_provider_is_reflected_in_audit(monk
         result = await service.compose("Build a CSV pipeline", [], state)
 
     request_kwargs = mock_acomp.call_args.kwargs
-    assert request_kwargs["temperature"] == 0.0
+    assert "temperature" not in request_kwargs
     assert "seed" not in request_kwargs
-    assert result.llm_calls[0].temperature == 0.0
+    assert result.llm_calls[0].temperature is None
     assert result.llm_calls[0].seed is None
 
 

@@ -64,7 +64,7 @@ export const TURN_7_LEARNING_BULLETS = [
   {
     title: "What you built is AI-generated.",
     body:
-      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The source list it invented, the prompt it wrote for itself, and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them. You can come back to it from the Audit page at any time.",
+      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The prompt it wrote for itself and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them — alongside the source pages you named. You can come back to it from the Audit page at any time.",
   },
   {
     title: "Read before you run.",

@@ -1,7 +1,7 @@
 # ELSPETH Composer Guide
 
-**Document date:** 20 May 2026
-**Release covered:** RC-5.2
+**Document date:** 5 June 2026
+**Release covered:** RC-5.3
 **Audience:** Evaluators, programme teams, operators, and technical reviewers
 **Register:** Public-facing / lightly technical
 **Status:** Current capability guide

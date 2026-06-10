@@ -131,6 +131,7 @@ class CallExportRecord(TypedDict):
     status: str
     request_hash: str | None
     response_hash: str | None
+    resolved_prompt_template_hash: str | None
     latency_ms: float | None
     request_ref: str | None
     response_ref: str | None

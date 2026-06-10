@@ -1229,3 +1229,108 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
     assert serialized.count(_CANARY_ROUTES) == 1
     assert serialized.count(_CANARY_TRIGGER) == 1
     assert serialized.count(_CANARY_OUTPUT_OPT) == 1
+
+
+# ---------------------------------------------------------------------------
+# TSV-delimiter parity on the inline_blob bind path (bug elspeth-da09ed23d4)
+# ---------------------------------------------------------------------------
+
+
+class TestSetPipelineInlineBlobTsvDelimiter:
+    """The inline_blob bind branch must derive a tab delimiter for a ``.tsv``
+    inline blob, mirroring ``set_source_from_blob`` and ``inspect_blob_content``.
+
+    ``_MIME_TO_SOURCE`` is mime-keyed only, so without the filename-derived
+    delimiter a tab-separated inline blob binds the csv plugin with the comma
+    default and parses as one column at runtime.
+    """
+
+    def _set_pipeline_with_inline_csv_blob(
+        self,
+        *,
+        filename: str,
+        content: str,
+        tmp_path: Path,
+        extra_source_options: dict[str, Any] | None = None,
+    ) -> Any:
+        # Embed the blob content verbatim in the user message so the inline
+        # blob is classified VERBATIM (operator-supplied), avoiding the
+        # LLM-authored provenance requirement for this delimiter-path test.
+        user_message_content = f"Use this tabular file:\n{content}"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        catalog = _mock_catalog()
+        source_options: dict[str, Any] = {"schema": {"mode": "observed"}}
+        if extra_source_options:
+            source_options.update(extra_source_options)
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": source_options,
+                "inline_blob": {
+                    "filename": filename,
+                    "mime_type": "text/csv",
+                    "content": content,
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "sink_name": "rows",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(tmp_path / "outputs" / "out.csv"),
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        return _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(
+                catalog=catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+            ),
+        )
+
+    def test_tsv_inline_blob_binds_csv_source_with_tab_delimiter(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.tsv",
+            content="a\tb\tc\n1\t2\t3\n",
+            tmp_path=tmp_path,
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options.get("delimiter") == "\t"
+
+    def test_caller_supplied_delimiter_preserved_on_inline_path(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.tsv",
+            content="a;b;c\n1;2;3\n",
+            tmp_path=tmp_path,
+            extra_source_options={"delimiter": ";"},
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.options.get("delimiter") == ";"
+
+    def test_csv_inline_blob_does_not_inject_delimiter(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.csv",
+            content="a,b,c\n1,2,3\n",
+            tmp_path=tmp_path,
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.options.get("delimiter") is None

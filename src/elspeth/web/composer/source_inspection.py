@@ -51,6 +51,20 @@ _BOOL_LITERALS: Final[frozenset[str]] = frozenset({"true", "false", "yes", "no"}
 _REDACTED_URL_PART: Final[str] = "<redacted>"
 
 
+def delimiter_for_filename(filename: str) -> str | None:
+    """Return the csv delimiter implied by a blob filename, or ``None``.
+
+    A ``.tsv`` filename means tab-delimited; every other csv-shaped name
+    falls back to the plugin default (comma), expressed here as ``None`` so
+    callers can choose whether to inject an explicit delimiter or let
+    ``CSVSourceConfig`` apply its comma default. This is the single
+    authoritative ``.tsv`` → tab rule shared by inspection (which renders
+    ``None`` as ``","``) and source binding (which injects only the tab),
+    so the two can never drift.
+    """
+    return "\t" if filename.lower().endswith(".tsv") else None
+
+
 @dataclass(frozen=True, slots=True)
 class SourceInspectionFacts:
     """Bounded inspection of a blob-backed source.
@@ -116,7 +130,7 @@ def inspect_blob_content(
         # Use a tab delimiter for TSV so the row structure parses correctly;
         # otherwise default to comma. The chosen delimiter is recorded as a
         # warning so the operator/composer LLM can see it in the audit trail.
-        delimiter = "\t" if filename.lower().endswith(".tsv") else ","
+        delimiter = delimiter_for_filename(filename) or ","
         return _inspect_csv(inspected, redacted_identity, byte_range, delimiter=delimiter)
     if kind == "jsonl":
         return _inspect_jsonl(inspected, redacted_identity, byte_range)
@@ -213,6 +227,43 @@ def _safe_decode(content: bytes) -> str:
     return content.decode("utf-8", errors="replace")
 
 
+# Ordered longest-BOM-first, mirroring ``elspeth.web.blobs.sniff._BOM_CODECS``
+# (the upload sniffer that decides whether a blob is accepted as text/csv).
+# The 4-byte UTF-32 markers must precede the 2-byte UTF-16 ones because
+# ``\xff\xfe\x00\x00`` (UTF-32 LE) shares its first two bytes with
+# ``\xff\xfe`` (UTF-16 LE). Kept as a local copy (not imported) to avoid a
+# web.blobs -> web.composer import edge; sniff._BOM_CODECS is the source of
+# truth — keep the two in sync.
+_BOM_CODECS: Final[tuple[tuple[bytes, str], ...]] = (
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xfe\xff", "utf-16-be"),
+    (b"\xff\xfe", "utf-16-le"),
+)
+
+
+def _decode_csv_sample(sample: bytes) -> tuple[str, str | None]:
+    """Decode CSV sample bytes, honouring a leading byte-order mark.
+
+    The upload sniffer accepts UTF-16/UTF-32/UTF-8-BOM CSV as text/csv via
+    its BOM dispatch table; inspection must decode with the same codec so the
+    observed headers are readable rather than corrupted by the BOM-blind UTF-8
+    path. Returns ``(text, detected_encoding)`` where ``detected_encoding`` is
+    the BOM-declared codec name, or ``None`` when no BOM is present (plain
+    UTF-8 path, unchanged). ``errors="replace"`` preserves the never-raise
+    contract even on a sample truncated mid-codepoint at the 8 KiB boundary.
+    """
+    for bom, codec in _BOM_CODECS:
+        if sample.startswith(bom):
+            # ``utf-8-sig`` consumes its own BOM; the multi-byte codecs do not
+            # see the BOM at all because we strip it off the slice.
+            if codec == "utf-8-sig":
+                return sample.decode("utf-8-sig", errors="replace"), codec
+            return sample[len(bom) :].decode(codec, errors="replace"), codec
+    return _safe_decode(sample), None
+
+
 def _redact_url_candidate(raw_url: str) -> str:
     """Keep URL routing structure while removing query/fragment values."""
     parts = urlsplit(raw_url)
@@ -292,7 +343,7 @@ def _inspect_csv(
 ) -> SourceInspectionFacts:
     if skip_rows < 0:
         raise ValueError(f"skip_rows must be non-negative for CSV inspection; got {skip_rows}")
-    text = _safe_decode(sample)
+    text, bom_encoding = _decode_csv_sample(sample)
     decode_replacements = _count_replacement_chars(text)
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     rows: list[list[str]] = []
@@ -372,6 +423,21 @@ def _inspect_csv(
         delimiter_label = "tab" if delimiter == "\t" else repr(delimiter)
         warnings.append(
             f"csv_non_default_delimiter: parsed with {delimiter_label} delimiter (source_kind reported as 'csv'); confirm downstream csv source plugin uses the same delimiter"
+        )
+
+    if bom_encoding is not None:
+        # The upload sniffer accepted this blob as text/csv by decoding its
+        # BOM (sniff._BOM_CODECS); we decoded with the same codec so the
+        # headers above are readable. But the csv source plugin defaults to
+        # encoding=utf-8, which will NOT decode UTF-16/UTF-32 bytes and will
+        # retain a U+FEFF prefix on the first field for a UTF-8 BOM. Surface
+        # the mismatch so the readable headers don't certify a run that fails
+        # — the operator must set the encoding explicitly on the source.
+        warnings.append(
+            f"csv_encoding_bom_detected: {bom_encoding} byte-order mark detected; "
+            "the csv source plugin defaults to encoding=utf-8 (which will fail to "
+            "decode these bytes or retain a U+FEFF prefix) — set encoding "
+            f"explicitly on the source (e.g. encoding: {bom_encoding})"
         )
 
     if decode_replacements:

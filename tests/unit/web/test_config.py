@@ -172,6 +172,47 @@ class TestWebSettingsValidation:
 
         assert settings.composer_model == "gpt-5.5"
 
+    def test_composer_sampling_defaults_to_none_and_probe_enabled(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.composer_temperature is None
+        assert settings.composer_seed is None
+        assert settings.composer_boot_probe_enabled is True
+
+    def test_composer_temperature_accepts_in_range_and_rejects_out_of_range(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_temperature=0.0).composer_temperature == 0.0
+        assert WebSettings(**base, composer_temperature=1.5).composer_temperature == 1.5
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=2.5)
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_temperature=-0.1)
+
+    def test_composer_seed_accepts_int_and_none(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        assert WebSettings(**base, composer_seed=42).composer_seed == 42
+        assert WebSettings(**base, composer_seed=None).composer_seed is None
+
     def test_max_upload_bytes_zero_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(
@@ -976,3 +1017,43 @@ class TestJWKSFailureRetryFloor:
         """Negative values are schema-illegal."""
         with pytest.raises(ValidationError):
             WebSettings(jwks_failure_retry_seconds=-1, **self._COMPOSER_DEFAULTS)
+
+
+def _settings(**overrides: Any) -> WebSettings:
+    """Construct WebSettings with required no-default fields + overrides.
+
+    Mirrors the per-test construction boilerplate elsewhere in this module
+    (the existing tests inline the same required-field set); collapsed here
+    into a module-level helper for the advisor-config tests.
+    """
+    base: dict[str, Any] = {
+        "composer_max_composition_turns": 20,
+        "composer_max_discovery_turns": 20,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 30,
+        "shareable_link_signing_key": b"x" * 32,
+    }
+    base.update(overrides)
+    return WebSettings(**base)
+
+
+def test_advisor_must_differ_from_primary_exact() -> None:
+    with pytest.raises(ValidationError, match="composer_advisor_model must differ from composer_model"):
+        _settings(composer_model="gpt-5.5", composer_advisor_model="gpt-5.5")
+
+
+def test_advisor_distinct_normalizes_provider_prefix() -> None:
+    # openrouter/openai/gpt-5.5 and gpt-5.5 denote the same model -> reject.
+    with pytest.raises(ValidationError, match="must differ"):
+        _settings(composer_model="openrouter/openai/gpt-5.5", composer_advisor_model="gpt-5.5")
+
+
+def test_advisor_distinct_accepts_different_models() -> None:
+    s = _settings(composer_model="claude-sonnet-4-6", composer_advisor_model="claude-opus-4-7")
+    assert s.composer_advisor_model == "claude-opus-4-7"
+
+
+def test_advisor_checkpoint_budget_default_and_floor() -> None:
+    assert _settings().composer_advisor_checkpoint_max_passes == 2
+    with pytest.raises(ValidationError):
+        _settings(composer_advisor_checkpoint_max_passes=0)

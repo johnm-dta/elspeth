@@ -2645,6 +2645,54 @@ def test_scheduler_barrier_completion_only_terminalizes_consumed_tokens() -> Non
     ]
 
 
+def test_scheduler_unresolved_work_excludes_durable_sink_handoffs() -> None:
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_tier1_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+
+    assert repo.count_unresolved_work(run_id="run-1") == 1
+    assert repo.summarize_unresolved_work(run_id="run-1") == ("status=ready, queue=None, barrier=None, count=1",)
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert claimed is not None
+    assert repo.count_unresolved_work(run_id="run-1") == 1
+
+    repo.mark_pending_sink(
+        work_item_id=item.work_item_id,
+        row_payload_json=payload,
+        sink_name="sink-a",
+        outcome="success",
+        path="completed",
+        error_hash=None,
+        error_message=None,
+        now=now + timedelta(seconds=1),
+        expected_lease_owner="worker-a",
+    )
+    assert repo.count_unresolved_work(run_id="run-1") == 0
+    assert repo.summarize_unresolved_work(run_id="run-1") == ()
+    assert repo.count_active_work(run_id="run-1") == 1
+
+    reclaimed = repo.claim_pending_sink(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=2))
+    assert reclaimed is not None
+    assert reclaimed.pending_sink_name == "sink-a"
+    assert repo.count_unresolved_work(run_id="run-1") == 0
+
+    terminalized = repo.mark_pending_sink_terminal(
+        run_id="run-1",
+        token_id="token-1",
+        now=now + timedelta(seconds=3),
+        expected_lease_owner="worker-b",
+    )
+    assert terminalized == 1
+    assert repo.count_unresolved_work(run_id="run-1") == 0
+    assert repo.count_active_work(run_id="run-1") == 0
+
+
 def test_scheduler_mark_blocked_rejects_missing_release_keys() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository

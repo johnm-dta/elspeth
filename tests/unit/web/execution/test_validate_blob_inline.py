@@ -175,7 +175,9 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 ) -> None:
     session_id = uuid4()
 
-    def load_settings(yaml_text: str) -> SimpleNamespace:
+    def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> SimpleNamespace:
+        # Web preflight must not expand host ${VAR} placeholders.
+        assert expand_env_vars is False
         doc = yaml.safe_load(yaml_text)
         prompt_template = doc["transforms"][0]["options"]["prompt_template"]
         assert type(prompt_template) is str
@@ -188,7 +190,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
     # patched, so the bundle and graph are threaded through opaquely — a plain
     # SimpleNamespace is honest and keeps the unspecced-mock debt from growing.
     mock_bundle = SimpleNamespace(
-        source=SimpleNamespace(),
+        sources={"source": SimpleNamespace()},
         transforms=(),
         sinks={"results": SimpleNamespace()},
         aggregations={},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,12 +46,39 @@ def cache(cache_dir: Path) -> TutorialCache:
 def test_canonical_seed_prompt_constant_is_exact() -> None:
     """The seed prompt must match the tutorial canonical prompt verbatim."""
     assert CANONICAL_SEED_PROMPT == (
-        "Create a data source with URLs for five public government agency web pages "
-        "that you choose. Use abuse contact noreply@dta.gov.au and "
-        "scraping reason 'DTA technical demonstration'. Read the HTML for each "
-        "page, have an LLM identify the primary colours for each government agency. "
-        "Remove the HTML and save the rest to a json file."
+        "Create a data source from these five Australian government pages: "
+        "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, "
+        "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact "
+        "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. "
+        "Read the HTML for each page, have an LLM return a single fact about each "
+        "government agency based on the page HTML. Remove the HTML and save the "
+        "rest to a json file."
     )
+
+
+def test_canonical_seed_matches_frontend_constant() -> None:
+    """``CANONICAL_SEED_PROMPT`` (backend cache key) and
+    ``CANONICAL_TUTORIAL_PROMPT`` (frontend, what Turn 4 actually posts) MUST be
+    byte-identical, or the tutorial cache silently never engages — the backend
+    only takes the cache path when ``effective_prompt == CANONICAL_SEED_PROMPT``.
+    The two constants drifted once (frontend pinned URLs while the backend said
+    "pages that you choose"), which dead-lettered the cache for every live run.
+    This test parses the TS source and reconstructs the string so the two can
+    never diverge again without failing CI.
+    """
+    repo_root = Path(__file__).resolve().parents[4]
+    ts_path = repo_root / "src/elspeth/web/frontend/src/components/tutorial/tutorialMachine.ts"
+    source = ts_path.read_text(encoding="utf-8")
+    match = re.search(
+        r"export const CANONICAL_TUTORIAL_PROMPT\s*=\s*(.*?);",
+        source,
+        re.DOTALL,
+    )
+    assert match is not None, "CANONICAL_TUTORIAL_PROMPT not found in tutorialMachine.ts"
+    # Concatenate the double-quoted string literals that make up the constant.
+    segments = re.findall(r'"((?:[^"\\]|\\.)*)"', match.group(1))
+    frontend_prompt = "".join(seg.encode("utf-8").decode("unicode_escape") for seg in segments)
+    assert frontend_prompt == CANONICAL_SEED_PROMPT
 
 
 def test_lookup_returns_none_on_miss(cache: TutorialCache) -> None:

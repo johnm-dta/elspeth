@@ -47,24 +47,6 @@ def test_abandon_route_increments_counter(monkeypatch) -> None:
     assert counter.calls == [(1, {})]
 
 
-def test_record_tutorial_runtime_normalization_increments_counter(monkeypatch) -> None:
-    counter = _RecordingCounter()
-    monkeypatch.setattr(tutorial_telemetry_module, "_TUTORIAL_RUNTIME_NORMALIZATION_COUNTER", counter)
-
-    tutorial_telemetry_module.record_tutorial_runtime_normalization("bare_required_field_templates")
-
-    assert counter.calls == [(1, {"kind": "bare_required_field_templates"})]
-
-
-def test_record_tutorial_runtime_normalization_rejects_unknown_kind() -> None:
-    try:
-        tutorial_telemetry_module.record_tutorial_runtime_normalization("rogue_kind")  # type: ignore[arg-type]
-    except ValueError as exc:
-        assert "kind" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")
-
-
 # I6 — silent-failure-hunter remediation. The tutorial cache-store path
 # silently early-returned on any partial failure (a single quarantined
 # row, a routed row, an unfinished status) with no counter. A

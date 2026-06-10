@@ -748,11 +748,11 @@ class TestResumeCheckpointCleanup:
         assert len(checkpoints_before) == 1
         assert checkpoints_before[0].checkpoint_id == checkpoint.checkpoint_id
 
-        # Call _delete_checkpoints() (this is what Bug #8 fix added to early-exit path)
+        # Call delete_checkpoints() via _checkpoints coordinator (this is what Bug #8 fix added to early-exit path)
         from elspeth.engine.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(db=db, checkpoint_manager=checkpoint_mgr)
-        orchestrator._delete_checkpoints(run.run_id)
+        orchestrator._checkpoints.delete_checkpoints(run.run_id)
 
         # Verify checkpoints are deleted
         with db.engine.connect() as conn:

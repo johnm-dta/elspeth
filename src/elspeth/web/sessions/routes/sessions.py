@@ -48,7 +48,7 @@ def _copied_blob_for_inline_marker(
 ) -> BlobRecord:
     old_ref = marker["blob_ref"]
     if type(old_ref) is not str:
-        raise TypeError(
+        raise AuditIntegrityError(
             f"Tier 1 audit anomaly: composition_state {composition_state_id} "
             f"has inline_content blob_ref type {type(old_ref).__name__} at "
             f"{field_path} (expected UUID string). Fork aborted to prevent "
@@ -72,7 +72,7 @@ def _copied_blob_for_inline_marker(
     copied_blob = blob_map[old_uuid]
     marker_hash = marker["sha256"]
     if type(marker_hash) is not str:
-        raise TypeError(
+        raise AuditIntegrityError(
             f"Tier 1 audit anomaly: composition_state {composition_state_id} "
             f"has inline_content marker at {field_path} without string sha256."
         )

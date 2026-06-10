@@ -1770,3 +1770,100 @@ class TestDelegationSignatureAlignment:
         assert factory_params == repo_params, (
             f"Signature mismatch for {method_name}:\n  Factory:  {factory_params}\n  Repo:     {repo_params}"
         )
+
+
+class TestResolvedPromptTemplateHashAnchor:
+    """A bad resolved_prompt_template_hash must leave zero `calls` rows.
+
+    Regression for elspeth-a94e626a36: the hash anchor was inserted into `calls`
+    before Call.__post_init__ validated it, so a non-LLM or malformed hash
+    committed an audit row and only then raised — a Tier-1 violation. The
+    invariant is now validated BEFORE any insert at both write sites.
+    """
+
+    @staticmethod
+    def _calls_row_count(db: LandscapeDB) -> int:
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import calls_table
+
+        with db.connection() as conn:
+            return int(conn.execute(select(func.count()).select_from(calls_table)).scalar_one())
+
+    def test_state_call_non_llm_hash_leaves_no_row(self) -> None:
+        db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        idx = repo.allocate_call_index(state.state_id)
+
+        # Non-LLM call carrying a (well-formed) hash violates the LLM-only rule.
+        with pytest.raises(ValueError, match="only for CallType"):
+            repo.record_call(
+                state.state_id,
+                idx,
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                RawCallPayload({"prompt": "hello"}),
+                resolved_prompt_template_hash="a" * 64,
+            )
+        assert self._calls_row_count(db) == 0
+
+    def test_state_call_malformed_hash_leaves_no_row(self) -> None:
+        db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        idx = repo.allocate_call_index(state.state_id)
+
+        with pytest.raises(ValueError, match="64-character lowercase hex"):
+            repo.record_call(
+                state.state_id,
+                idx,
+                CallType.LLM,
+                CallStatus.SUCCESS,
+                RawCallPayload({"prompt": "hello"}),
+                resolved_prompt_template_hash="not-a-valid-sha256",
+            )
+        assert self._calls_row_count(db) == 0
+
+    def test_operation_call_non_llm_hash_leaves_no_row(self) -> None:
+        db, repo, _fac, _tok = _make_repo_with_token()
+        op = repo.begin_operation("run-1", "source-0", "source_load")
+
+        with pytest.raises(ValueError, match="only for CallType"):
+            repo.record_operation_call(
+                op.operation_id,
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                RawCallPayload({"prompt": "hello"}),
+                resolved_prompt_template_hash="a" * 64,
+            )
+        assert self._calls_row_count(db) == 0
+
+    def test_operation_call_malformed_hash_leaves_no_row(self) -> None:
+        db, repo, _fac, _tok = _make_repo_with_token()
+        op = repo.begin_operation("run-1", "source-0", "source_load")
+
+        with pytest.raises(ValueError, match="64-character lowercase hex"):
+            repo.record_operation_call(
+                op.operation_id,
+                CallType.LLM,
+                CallStatus.SUCCESS,
+                RawCallPayload({"prompt": "hello"}),
+                resolved_prompt_template_hash="ABC",
+            )
+        assert self._calls_row_count(db) == 0
+
+    def test_valid_llm_hash_still_records(self) -> None:
+        """A well-formed LLM hash records exactly one row (fix must not over-reject)."""
+        db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        idx = repo.allocate_call_index(state.state_id)
+
+        call = repo.record_call(
+            state.state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            RawCallPayload({"prompt": "hello"}),
+            resolved_prompt_template_hash="a" * 64,
+        )
+        assert call.resolved_prompt_template_hash == "a" * 64
+        assert self._calls_row_count(db) == 1

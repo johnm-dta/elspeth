@@ -113,9 +113,8 @@ def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill:
     """Construct the guided→freeform transition prompt: freeform skill + transition message.
 
     The ``freeform_skill`` parameter must be supplied by the caller — typically via
-    ``build_system_prompt(data_dir, advisor_enabled=advisor_enabled)`` in
-    ``composer/prompts.py``.  This keeps the deployment overlay (``data_dir``) and
-    advisor-strip (``advisor_enabled=False``) correctly threaded into the transition
+    ``build_system_prompt(data_dir)`` in ``composer/prompts.py``.  This keeps the
+    deployment overlay (``data_dir``) correctly threaded into the transition
     prompt, and avoids a circular import: if this module called ``build_system_prompt``
     directly it would create a guided/prompts ↔ composer/prompts import cycle.
 
@@ -123,8 +122,8 @@ def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill:
         terminal_reason: String reason token from the completed guided session
             (e.g. ``"completed_pipeline"``, ``"user_pressed_exit"``).
         freeform_skill: Fully processed freeform composer skill string — core skill
-            with deployment overlay appended and advisor content stripped if needed.
-            Produced by ``build_system_prompt(data_dir, advisor_enabled=...)``.
+            with deployment overlay appended.
+            Produced by ``build_system_prompt(data_dir)``.
 
     Returns:
         Layered prompt string: freeform skill \\n\\n transition header.

@@ -29,7 +29,7 @@ from elspeth.web.sessions.protocol import (
     SessionRecord,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
-from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.service import QuarantineCleanupError, SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
@@ -211,8 +211,8 @@ class TestSessionCRUD:
 
         The session delete has already committed by the time the filesystem purge
         runs. If purge fails, the staged directory remains a recoverable
-        quarantine path and the OSError propagates instead of being silently
-        swallowed.
+        quarantine path and a named audit exception states that the session
+        delete committed before cleanup failed.
         """
         data_dir = tmp_path / "data"
         data_dir.mkdir()
@@ -238,8 +238,10 @@ class TestSessionCRUD:
 
         monkeypatch.setattr("elspeth.web.sessions.service.shutil.rmtree", fail_rmtree)
 
-        with pytest.raises(OSError, match="permission denied removing staged blob directory"):
+        with pytest.raises(QuarantineCleanupError, match=r"delete committed.*quarantine cleanup failed") as exc_info:
             await service_with_dir.archive_session(session.id)
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert "permission denied removing staged blob directory" in str(exc_info.value.__cause__)
 
         with pytest.raises(ValueError):
             await service_with_dir.get_session(session.id)

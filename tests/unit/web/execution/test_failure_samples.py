@@ -107,6 +107,8 @@ def _record_messageless_error(
         source_node_id="source_test",
         row_index=row_index,
         data={"url": f"row-{row_index}"},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     with db.connection() as conn:
         conn.execute(

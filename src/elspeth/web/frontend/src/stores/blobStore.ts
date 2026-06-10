@@ -22,15 +22,24 @@ const initialState = {
   error: null as string | null,
 };
 
+let blobLoadRequestSeq = 0;
+
 export const useBlobStore = create<BlobState>((set) => ({
   ...initialState,
 
   async loadBlobs(sessionId: string) {
+    const requestSeq = ++blobLoadRequestSeq;
     set({ isLoading: true, error: null });
     try {
       const blobs = await api.listBlobs(sessionId);
+      if (requestSeq !== blobLoadRequestSeq) {
+        return;
+      }
       set({ blobs, isLoading: false });
     } catch {
+      if (requestSeq !== blobLoadRequestSeq) {
+        return;
+      }
       set({ error: "Failed to load files.", isLoading: false });
     }
   },
@@ -89,10 +98,12 @@ export const useBlobStore = create<BlobState>((set) => ({
   },
 
   clearBlobs() {
+    blobLoadRequestSeq++;
     set({ blobs: [], error: null });
   },
 
   reset() {
+    blobLoadRequestSeq++;
     set(initialState);
   },
 }));

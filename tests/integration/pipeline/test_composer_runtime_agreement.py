@@ -77,6 +77,20 @@ where the architectural fix landed:
   closed before settings/plugin construction; successful runtime resolution
   records the hash in ``blob_inline_resolutions`` before the resolved bytes
   enter plugin settings.
+* Shape 10 — fixed-mode consumer *implicit*-required-field parity
+  (``elspeth-8f3b3f650d``). A ``{mode: fixed, fields: [...]}`` consumer
+  implicitly requires its declared (non-optional) fields; runtime Phase-2 type
+  validation rejects an edge from a TYPED producer that does not guarantee one
+  (``EdgeContractError: ... Missing fields: teal_pairing_rating``). Authoring
+  computed consumer requirements from the explicit-only
+  ``get_raw_node_required_fields`` and so green-lit the build (validate green /
+  runtime red). Fixed in ``web/composer/state.py::_check_schema_contracts`` by
+  adding a sibling check over the consumer's *effective* required set, gated
+  strictly on producer schema MODE (a fixed/flexible SOURCE producer is typed;
+  observed sources and transform/gate/coalesce producers resolve to a dynamic
+  effective producer schema and are skipped), mirroring the runtime
+  observed/dynamic bypass at ``graph.py:1392-1403``. Pinned by
+  ``TestComposerRuntimeFixedModeImplicitRequiredAgreement``.
 
 Adding a new shape: file the eval-finding issue, land the structural fix,
 then extend this docstring with the shape's number, the originating eval
@@ -109,6 +123,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.contracts import Determinism
@@ -3192,7 +3207,12 @@ sinks:
 
         session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions"])
         session_service.update_run_status = AsyncMock()
-        session_service.get_run = AsyncMock(return_value=MagicMock(spec=object, status="running"))
+        # ``_run_pipeline`` resolves the run's owning session (get_run().session_id)
+        # to scope inline-blob access before any metadata enforcement
+        # (IDOR contract, elspeth-195ecb1d58). Tests below set their owned
+        # blob_record.session_id to this value so ownership passes and they
+        # exercise the hash/audit-ordering assertions they actually target.
+        session_service.get_run = AsyncMock(return_value=MagicMock(spec=object, status="running", session_id=uuid4()))
         session_service.record_blob_inline_resolutions = AsyncMock()
 
         service = ExecutionServiceImpl(
@@ -3249,6 +3269,7 @@ sinks:
         blob_record.size_bytes = len(content)
         blob_record.content_hash = hashlib.sha256(content).hexdigest()
         blob_record.status = "ready"
+        blob_record.session_id = _session_service.get_run.return_value.session_id
         blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
@@ -3288,6 +3309,7 @@ sinks:
         blob_record.size_bytes = len(content)
         blob_record.content_hash = sha256
         blob_record.status = "ready"
+        blob_record.session_id = session_service.get_run.return_value.session_id
         blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
@@ -3300,8 +3322,10 @@ sinks:
 
         session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
-        def stop_after_audit(yaml_text: str) -> None:
+        def stop_after_audit(yaml_text: str, *, expand_env_vars: bool = True) -> None:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
+            # Web-authored YAML must never expand host ${VAR} placeholders.
+            assert expand_env_vars is False
             assert "You are an audited prompt." in yaml_text
             raise RuntimeError("stop after inline audit")
 
@@ -3318,3 +3342,551 @@ sinks:
         assert len(resolutions) == 1
         assert resolutions[0].field_path == "node:classify.options.prompt_template"
         assert resolutions[0].content_hash == sha256
+
+
+class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
+    """Shape 10 — fixed-mode consumer implicit-required-field parity (elspeth-8f3b3f650d).
+
+    A consumer whose schema is ``{mode: fixed, fields: [...]}`` *implicitly*
+    requires every declared (non-optional) field — the runtime builds a typed
+    input Pydantic model and rejects an edge from a TYPED producer that does
+    not guarantee one of those declared fields. Authoring-time
+    ``CompositionState.validate`` previously computed consumer requirements via
+    ``get_raw_node_required_fields`` (EXPLICIT ``required_fields`` only), so a
+    fixed-mode declared requirement that exceeds the producer's guarantees was
+    green-lit at authoring time and only rejected at runtime — the exact
+    "validate green / runtime red" divergence this suite registers.
+
+    The fix gates strictly on producer schema MODE (a fixed/flexible SOURCE
+    producer is TYPED; observed sources and transform/gate/coalesce producers
+    resolve to a dynamic effective producer schema and are skipped), mirroring
+    the runtime Phase-2 observed/dynamic bypass at ``graph.py:1392-1403``.
+
+    Bug verification protocol (mandatory, per the module docstring): revert the
+    new sibling block in ``state.py::_check_schema_contracts`` — the
+    ``consumer_effective_required`` missing-field append guarded by
+    ``producer_is_typed_source`` — and confirm
+    ``test_reject_fixed_consumer_implicit_required_over_typed_source`` fails at
+    the ``assert not composer_result.is_valid`` line (authoring returns
+    ``is_valid=True`` pre-fix). Then restore. Verified 2026-06-09.
+    """
+
+    def _empty_state(self) -> CompositionState:
+        return CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def _state(
+        self,
+        *,
+        source_options: dict[str, Any],
+        consumer_options: dict[str, Any],
+        output_options: dict[str, Any],
+    ) -> CompositionState:
+        state = self._empty_state()
+        state = state.with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="t1",
+                options=source_options,
+                on_validation_failure="quarantine",
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="t1",
+                node_type="transform",
+                plugin="value_transform",
+                input="t1",
+                on_success="main",
+                on_error="discard",
+                options=consumer_options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options=output_options,
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(
+            EdgeSpec(
+                id="e1",
+                from_node="source",
+                to_node="t1",
+                edge_type="on_success",
+                label=None,
+            )
+        )
+        return state
+
+    def _build_runtime_graph(
+        self,
+        *,
+        source_options: dict[str, Any],
+        consumer_options: dict[str, Any],
+        output_options: dict[str, Any],
+    ) -> ExecutionGraph:
+        config = ElspethSettings(
+            source=SourceSettings(
+                plugin="csv",
+                on_success="t1",
+                options={**source_options, "on_validation_failure": "discard"},
+            ),
+            transforms=[
+                TransformSettings(
+                    name="t1",
+                    plugin="value_transform",
+                    input="t1",
+                    on_success="main",
+                    on_error="discard",
+                    options=consumer_options,
+                )
+            ],
+            sinks={
+                "main": SinkSettings(
+                    plugin="csv",
+                    on_write_failure="discard",
+                    options=output_options,
+                )
+            },
+        )
+        plugins = instantiate_plugins_from_config(config)
+        return ExecutionGraph.from_plugin_instances(
+            source=plugins.source,
+            source_settings=plugins.source_settings,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=list(config.gates),
+            coalesce_settings=None,
+        )
+
+    def test_reject_fixed_consumer_implicit_required_over_typed_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(A) Typed (fixed) source guarantees {color}; fixed consumer implicitly
+        requires {color, teal_pairing_rating}. Both validators MUST reject.
+
+        Pre-fix the authoring validator returned ``is_valid=True`` because the
+        fixed-mode implicit requirement ``teal_pairing_rating`` was invisible to
+        the explicit-only ``get_raw_node_required_fields`` path — the defect.
+        """
+        csv_path = tmp_path / "in.csv"
+        csv_path.write_text("color\nred\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        source_options = {
+            "path": str(csv_path),
+            "schema": {"mode": "fixed", "fields": ["color: str"]},
+        }
+        consumer_options = {
+            "operations": [{"target": "out", "expression": "row['color']"}],
+            "schema": {
+                "mode": "fixed",
+                "fields": ["color: str", "teal_pairing_rating: str"],
+            },
+        }
+        output_options = {"path": str(output_path), "schema": {"mode": "observed"}}
+
+        state = self._state(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+        composer_result = state.validate()
+        assert not composer_result.is_valid, (
+            "Composer should reject: fixed consumer implicitly requires 'teal_pairing_rating' which the typed source does not guarantee."
+        )
+        assert any(
+            "schema contract violation" in entry.message.lower() and "teal_pairing_rating" in entry.message
+            for entry in composer_result.errors
+        ), [e.message for e in composer_result.errors]
+
+        with pytest.raises(GraphValidationError) as exc_info:
+            self._build_runtime_graph(
+                source_options=source_options,
+                consumer_options=consumer_options,
+                output_options=output_options,
+            )
+        assert "teal_pairing_rating" in str(exc_info.value)
+
+    def test_reject_flexible_consumer_implicit_required_over_typed_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(A2) A FLEXIBLE consumer also implicitly requires its declared
+        (non-optional) fields, but its input is NOT locked (extras allowed) and
+        its explicit ``required_fields`` is empty — so the per-node skip guard
+        would short-circuit it unless the effective-required set is folded in.
+        Runtime rejects (flexible builds a typed model with non-empty
+        ``model_fields``); authoring MUST reject too.
+        """
+        csv_path = tmp_path / "in.csv"
+        csv_path.write_text("color\nred\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        source_options = {
+            "path": str(csv_path),
+            "schema": {"mode": "fixed", "fields": ["color: str"]},
+        }
+        consumer_options = {
+            "operations": [{"target": "out", "expression": "row['color']"}],
+            "schema": {
+                "mode": "flexible",
+                "fields": ["color: str", "teal_pairing_rating: str"],
+            },
+        }
+        output_options = {"path": str(output_path), "schema": {"mode": "observed"}}
+
+        state = self._state(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+        composer_result = state.validate()
+        assert not composer_result.is_valid, (
+            "Composer should reject: flexible consumer implicitly requires 'teal_pairing_rating' which the typed source does not guarantee."
+        )
+        assert any(
+            "schema contract violation" in entry.message.lower() and "teal_pairing_rating" in entry.message
+            for entry in composer_result.errors
+        ), [e.message for e in composer_result.errors]
+
+        with pytest.raises(GraphValidationError) as exc_info:
+            self._build_runtime_graph(
+                source_options=source_options,
+                consumer_options=consumer_options,
+                output_options=output_options,
+            )
+        assert "teal_pairing_rating" in str(exc_info.value)
+
+    def test_accept_observed_source_auto_guarantee_over_fixed_consumer(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(B) Overshoot tripwire: an OBSERVED source has non-empty guarantees
+        (the auto-guaranteed column) yet runtime bypasses Phase-2 type
+        validation because the producer schema is observed. Authoring MUST also
+        accept — proving the gate is on producer MODE, not guarantee-emptiness.
+        """
+        text_path = tmp_path / "in.txt"
+        text_path.write_text("hello\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        state = self._empty_state()
+        state = state.with_source(
+            SourceSpec(
+                plugin="text",
+                on_success="t1",
+                options={
+                    "path": str(text_path),
+                    "column": "color",
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="t1",
+                node_type="transform",
+                plugin="value_transform",
+                input="t1",
+                on_success="main",
+                on_error="discard",
+                options={
+                    "operations": [{"target": "out", "expression": "row['color']"}],
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["color: str", "teal_pairing_rating: str"],
+                    },
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options={"path": str(output_path), "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(
+            EdgeSpec(
+                id="e1",
+                from_node="source",
+                to_node="t1",
+                edge_type="on_success",
+                label=None,
+            )
+        )
+
+        composer_result = state.validate()
+        assert composer_result.is_valid, [e.message for e in composer_result.errors]
+
+        config = ElspethSettings(
+            source=SourceSettings(
+                plugin="text",
+                on_success="t1",
+                options={
+                    "path": str(text_path),
+                    "column": "color",
+                    "schema": {"mode": "observed"},
+                    "on_validation_failure": "discard",
+                },
+            ),
+            transforms=[
+                TransformSettings(
+                    name="t1",
+                    plugin="value_transform",
+                    input="t1",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "operations": [{"target": "out", "expression": "row['color']"}],
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["color: str", "teal_pairing_rating: str"],
+                        },
+                    },
+                )
+            ],
+            sinks={
+                "main": SinkSettings(
+                    plugin="csv",
+                    on_write_failure="discard",
+                    options={"path": str(output_path), "schema": {"mode": "observed"}},
+                )
+            },
+        )
+        plugins = instantiate_plugins_from_config(config)
+        # Runtime construction (which validates edges) must not raise.
+        ExecutionGraph.from_plugin_instances(
+            source=plugins.source,
+            source_settings=plugins.source_settings,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=[],
+            coalesce_settings=None,
+        )
+
+    def test_accept_optional_declared_field_over_typed_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(C) An OPTIONAL declared field (``teal_pairing_rating: str?``) is not
+        implicitly required; both validators MUST accept over a {color} source.
+        """
+        csv_path = tmp_path / "in.csv"
+        csv_path.write_text("color\nred\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        source_options = {
+            "path": str(csv_path),
+            "schema": {"mode": "fixed", "fields": ["color: str"]},
+        }
+        consumer_options = {
+            "operations": [{"target": "out", "expression": "row['color']"}],
+            "schema": {
+                "mode": "fixed",
+                "fields": ["color: str", "teal_pairing_rating: str?"],
+            },
+        }
+        output_options = {"path": str(output_path), "schema": {"mode": "observed"}}
+
+        state = self._state(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+        composer_result = state.validate()
+        assert composer_result.is_valid, [e.message for e in composer_result.errors]
+
+        # Runtime construction must not raise.
+        self._build_runtime_graph(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+
+    def test_accept_plain_observed_consumer_over_typed_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(D) A plain OBSERVED consumer imposes no implicit requirements; both
+        validators MUST accept over a typed (fixed) source.
+        """
+        csv_path = tmp_path / "in.csv"
+        csv_path.write_text("color\nred\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        source_options = {
+            "path": str(csv_path),
+            "schema": {"mode": "fixed", "fields": ["color: str"]},
+        }
+        consumer_options = {
+            "operations": [{"target": "out", "expression": "row['color']"}],
+            "schema": {"mode": "observed"},
+        }
+        output_options = {"path": str(output_path), "schema": {"mode": "observed"}}
+
+        state = self._state(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+        composer_result = state.validate()
+        assert composer_result.is_valid, [e.message for e in composer_result.errors]
+
+        self._build_runtime_graph(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+        )
+
+
+class TestComposerRuntimeGateRouteParityAgreement:
+    """Biconditional agreement for gate route-label / condition-return-type parity.
+
+    Mirror of GateSettings.validate_boolean_routes (core/config.py). The composer's
+    CompositionState.validate() must agree with GateSettings construction on whether
+    a gate's route labels are consistent with the static return type of its condition:
+    composer is_valid  <=>  GateSettings accepts. Regression for elspeth-08e17b9253,
+    where the composer green-lit boolean/numeric conditions with mismatched labels
+    that runtime config later rejected.
+    """
+
+    def _gate_state(self, *, condition: str, routes: dict[str, str]) -> CompositionState:
+        """A minimal valid pipeline whose only interesting feature is a gate."""
+        state = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        state = state.with_source(
+            SourceSpec(
+                plugin="text",
+                on_success="g1",
+                options={"path": "/tmp/in.txt", "column": "line", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="g1",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition=condition,
+                routes=routes,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options={"path": "/tmp/out.csv", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(EdgeSpec(id="e0", from_node="source", to_node="g1", edge_type="on_success", label=None))
+        return state
+
+    def test_boolean_gate_with_custom_route_labels_rejected_by_both(self) -> None:
+        """Boolean condition + non-true/false labels: composer is_valid=False AND GateSettings raises."""
+        state = self._gate_state(condition='row["x"] > 0', routes={"high": "main", "low": "main"})
+
+        composer_result = state.validate()
+        assert composer_result.is_valid is False
+        assert any("boolean condition" in e.message for e in composer_result.errors), [e.message for e in composer_result.errors]
+
+        with pytest.raises(ValidationError, match="boolean condition"):
+            GateSettings(
+                name="g1",
+                input="g1",
+                condition='row["x"] > 0',
+                routes={"high": "main", "low": "main"},
+            )
+
+    def test_numeric_gate_condition_rejected_by_both(self) -> None:
+        """Provably-numeric condition: composer is_valid=False AND GateSettings raises."""
+        state = self._gate_state(condition='row["x"] + 1', routes={"a": "main"})
+
+        composer_result = state.validate()
+        assert composer_result.is_valid is False
+        assert any("numeric value" in e.message for e in composer_result.errors), [e.message for e in composer_result.errors]
+
+        with pytest.raises(ValidationError, match="numeric value"):
+            GateSettings(
+                name="g1",
+                input="g1",
+                condition='row["x"] + 1',
+                routes={"a": "main"},
+            )
+
+    def test_string_route_gate_accepted_by_both(self) -> None:
+        """POSITIVE CONTROL: string-returning condition + matching custom labels stays valid in both."""
+        state = self._gate_state(
+            condition='"high" if row["x"] > 0 else "low"',
+            routes={"high": "main", "low": "main"},
+        )
+
+        composer_result = state.validate()
+        assert composer_result.is_valid is True, [e.message for e in composer_result.errors]
+
+        # Must construct cleanly — legal runtime config, must NOT be over-rejected.
+        GateSettings(
+            name="g1",
+            input="g1",
+            condition='"high" if row["x"] > 0 else "low"',
+            routes={"high": "main", "low": "main"},
+        )
+
+    def test_boolean_gate_with_true_false_labels_accepted_by_both(self) -> None:
+        """Boolean condition + exactly {true,false} labels stays valid in both."""
+        state = self._gate_state(
+            condition='row["x"] > 0',
+            routes={"true": "main", "false": "main"},
+        )
+
+        composer_result = state.validate()
+        assert composer_result.is_valid is True, [e.message for e in composer_result.errors]
+
+        GateSettings(
+            name="g1",
+            input="g1",
+            condition='row["x"] > 0',
+            routes={"true": "main", "false": "main"},
+        )

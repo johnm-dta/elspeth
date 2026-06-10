@@ -76,6 +76,10 @@ class TestBatchDistributionProfile:
         assert result.row["p25"] == 1.75
         assert result.row["p75"] == 3.25
         assert result.row["stdev"] == pytest.approx(1.2909944487358056)
+        assert result.row["summary"] == (
+            "Distribution profile for score: 4 rows, 4 finite values, 0 missing, "
+            "0 non-finite, mean 2.500, median 2.500, range 1.000 to 4.000."
+        )
 
     def test_missing_values_are_skipped_and_reported(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
@@ -182,9 +186,17 @@ class TestBatchDistributionProfile:
         assert profiles["A"]["count"] == 2
         assert profiles["A"]["mean"] == 2.0
         assert profiles["A"]["median"] == 2.0
+        assert profiles["A"]["summary"] == (
+            "Distribution profile for score grouped by variant=A: 2 rows, 2 finite values, "
+            "0 missing, 0 non-finite, mean 2.000, median 2.000, range 1.000 to 3.000."
+        )
         assert profiles["B"]["count"] == 2
         assert profiles["B"]["mean"] == 20.0
         assert profiles["B"]["median"] == 20.0
+        assert profiles["B"]["summary"] == (
+            "Distribution profile for score grouped by variant=B: 2 rows, 2 finite values, "
+            "0 missing, 0 non-finite, mean 20.000, median 20.000, range 10.000 to 30.000."
+        )
 
     def test_group_by_preserves_bool_and_int_buckets(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
@@ -316,6 +328,7 @@ class TestBatchDistributionProfileConfig:
                 "p25",
                 "p75",
                 "stdev",
+                "summary",
                 "variant",
             }
         )

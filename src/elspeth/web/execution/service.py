@@ -70,6 +70,7 @@ from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     MalformedBlobRefError,
     PathAllowlistViolationError,
+    PipelineValidationError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -525,11 +526,11 @@ class ExecutionServiceImpl:
         # authenticated user could skip validation and execute a state that
         # reads files outside the allowed directories.
         if composition_state.sources:
-            from elspeth.web.paths import allowed_source_directories, resolve_data_path
+            from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
             allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
             for source_name, source in composition_state.sources.items():
-                for key in ("path", "file"):
+                for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
                     value = source.options.get(key)
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))
@@ -542,11 +543,11 @@ class ExecutionServiceImpl:
         # Without this, a client can set sink options.path to any absolute or
         # ../ path and /execute will write there.
         if composition_state.outputs:
-            from elspeth.web.paths import allowed_sink_directories, resolve_data_path
+            from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
 
             allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
             for output in composition_state.outputs:
-                for key in ("path", "file"):
+                for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     value = output.options.get(key)
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))
@@ -554,6 +555,58 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        # Nested transform provider_config path allowlist — RAG retrieval
+        # transforms carry a local Chroma persist_directory under
+        # options.provider_config. It is a read/write target like a sink, so it
+        # is confined to the allowed SINK directories.
+        if composition_state.nodes:
+            from elspeth.web.paths import (
+                NESTED_LOCAL_PATH_OPTION_KEYS,
+                allowed_sink_directories,
+                resolve_data_path,
+            )
+
+            allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir))
+            for node in composition_state.nodes:
+                if node.node_type != "transform":
+                    continue
+                provider_config = node.options.get("provider_config")
+                if not isinstance(provider_config, Mapping):
+                    continue
+                for key in NESTED_LOCAL_PATH_OPTION_KEYS:
+                    value = provider_config.get(key)
+                    if value is not None:
+                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
+                            raise PathAllowlistViolationError(
+                                f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
+                            )
+
+        # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
+        # Previously execute() created a run and let an invalid pipeline fail OPAQUELY
+        # at run-init (status=failed, rows_processed=0, error="Pipeline execution failed
+        # (GraphValidationError)"); the tutorial path bypassed validation entirely. Run
+        # the SAME dry-run validate_pipeline the /validate endpoint uses, BEFORE create_run,
+        # and reject with a structured PipelineValidationError when invalid. This catches
+        # the Mechanism-A classes (Graph/ValueSource/generic plugin-config) at the server
+        # boundary and closes the tutorial bypass; SchemaConfigModeViolation (post-emission
+        # row check) and the Chroma-SSRF plugin check (deferred network I/O) remain
+        # runtime-only by design. Local import mirrors the /validate path (W18 load-order).
+        from elspeth.web.execution.validation import validate_pipeline
+
+        preflight_result = validate_pipeline(
+            composition_state,
+            self._settings,
+            self._yaml_generator,
+            secret_service=self._secret_service,
+            user_id=user_id,
+        )
+        if not preflight_result.is_valid:
+            raise PipelineValidationError(
+                errors=tuple(preflight_result.errors),
+                readiness=preflight_result.readiness,
+            )
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 
@@ -1054,9 +1107,29 @@ class ExecutionServiceImpl:
                         )
 
                     try:
+                        # IDOR contract (mirrors the source blob_ref path at
+                        # lines 645-647 and the /validate _blob_get_metadata
+                        # path at 862-871): inline-content markers carry a
+                        # caller-supplied blob_id, so the cross-session and the
+                        # genuinely-missing cases MUST be indistinguishable.
+                        # ``get_blob`` is global (not session-scoped), so we
+                        # resolve the run's owning session once and treat any
+                        # blob owned by another session exactly as missing —
+                        # raising ``BlobNotFoundError`` BEFORE any status / hash
+                        # / size comparison in ``_enforce_blob_content_ref_metadata``
+                        # or any ``link_blob_to_run`` / ``read_blob_content``
+                        # access, so no metadata of another session's blob is
+                        # ever observable.
+                        owning_session_id = self._call_async(self._session_service.get_run(run_uuid)).session_id
+
+                        async def _get_blob_scoped(blob_id: UUID) -> BlobRecord:
+                            record = await blob_service.get_blob(blob_id)
+                            if record.session_id != owning_session_id:
+                                raise BlobNotFoundError(str(blob_id))
+                            return record
 
                         async def _gather_inline_blob_metadata() -> list[Any]:
-                            return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+                            return await asyncio.gather(*(_get_blob_scoped(blob_id) for blob_id in unique_blob_ids))
 
                         metadata_records = self._call_async(_gather_inline_blob_metadata())
                         records_by_blob_id: dict[UUID, BlobRecord] = {
@@ -1096,8 +1169,13 @@ class ExecutionServiceImpl:
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,
-            # bypassing Dynaconf file I/O.
-            settings = load_settings_from_yaml_string(resolved_yaml)
+            # bypassing Dynaconf file I/O. Web-authored pipeline YAML must
+            # never expand host ${VAR} placeholders: known secret inventory
+            # names are resolved above via the audited resolve_secret_refs
+            # path, and any remaining ${VAR} is user-authored data, not a
+            # licence to read the host environment. (Operator ${VAR} expansion
+            # remains available on the CLI loader, load_settings().)
+            settings = load_settings_from_yaml_string(resolved_yaml, expand_env_vars=False)
             runtime_graph = build_validated_runtime_graph(settings)
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph

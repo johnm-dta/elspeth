@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:aa46d014d45d66d6"
+    source_file_hash: str | None = "sha256:827dba0357093536"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -436,6 +436,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
         headers = self._field_resolution.final_headers

@@ -6,7 +6,13 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-from elspeth_lints.core.ast_walker import PythonFileReadError, PythonSyntaxError, parse_python_file
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    iter_python_files,
+    parse_python_file,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.shared import (
     allowlist_path_for_root,
@@ -49,29 +55,51 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
     )
     allowlist = load_class_allowlist(allowlist_dir)
     candidates = _scan_candidates(root)
+    candidate_set = {path.resolve() for path in candidates}
     findings: list[Finding] = []
+    # TDE1 (class decoration) is scoped to the canonical errors.py target — the
+    # codebase intentionally decorates only that central module. TDE2 (the
+    # caller_module spoofing guard) applies to EVERY tier_1_error call site
+    # repo-wide (elspeth-f8650893f1): scan the candidates fully, then make a
+    # TDE2-only pass over all other files.
     for path in candidates:
-        parsed = parse_python_file(path)
-        if isinstance(parsed, PythonSyntaxError):
-            raise SyntaxError(f"{parsed.path}:{parsed.line}:{parsed.column}: {parsed.message}")
-        if isinstance(parsed, PythonFileReadError):
-            # This scanner enumerates candidates via :func:`_scan_candidates`
-            # (which already walked the filesystem to find them), so a
-            # read error here means the file became unreadable between
-            # enumeration and parse — a race that should be loud rather
-            # than silently skipped, matching the existing syntax-error
-            # behaviour above.
-            raise OSError(f"{parsed.path}: {parsed.message}")
+        parsed = _parse_or_raise(path)
         display = repo_relative_display_path(path, root) if path.name == "errors.py" else display_path(path, root)
         findings.extend(scan_tree(parsed.tree, display, parsed.source.splitlines()))
+    # iter_python_files applies the shared excluded-dir filter (.venv, .uv-cache,
+    # .git, build, dist, node_modules, __pycache__, ...). A raw rglob here would
+    # descend into a vendored tree and let _parse_or_raise turn one third-party
+    # file (BOM prefix, py2 syntax) into a hard crash of the whole gate.
+    for path in iter_python_files(root):
+        if path.resolve() in candidate_set:
+            continue
+        parsed = _parse_or_raise(path)
+        findings.extend(scan_tree(parsed.tree, display_path(path, root), parsed.source.splitlines(), emit_tde1=False))
     return [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]
 
 
-def scan_tree(tree: ast.AST, file_path: str, source_lines: list[str]) -> list[Finding]:
-    """Return TDE1/TDE2 findings for one parsed syntax tree."""
+def _parse_or_raise(path: Path) -> ParsedPythonFile:
+    parsed = parse_python_file(path)
+    if isinstance(parsed, PythonSyntaxError):
+        raise SyntaxError(f"{parsed.path}:{parsed.line}:{parsed.column}: {parsed.message}")
+    if isinstance(parsed, PythonFileReadError):
+        # A read error after enumeration indicates a race between filesystem
+        # walk and parse — be loud rather than silently skip, matching the
+        # syntax-error policy.
+        raise OSError(f"{parsed.path}: {parsed.message}")
+    return parsed
+
+
+def scan_tree(tree: ast.AST, file_path: str, source_lines: list[str], *, emit_tde1: bool = True) -> list[Finding]:
+    """Return TDE1/TDE2 findings for one parsed syntax tree.
+
+    ``emit_tde1=False`` restricts the scan to TDE2 (the caller_module spoofing
+    guard), used for files outside the canonical errors.py target where the
+    class-decoration requirement (TDE1) does not apply.
+    """
     findings: list[Finding] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
+        if emit_tde1 and isinstance(node, ast.ClassDef):
             finding = _tde1_finding(file_path, node, source_lines)
             if finding is not None:
                 findings.append(finding)
@@ -90,7 +118,9 @@ def _scan_candidates(root: Path) -> list[Path]:
     source_target = root / "contracts" / "errors.py"
     if source_target.exists():
         return [source_target]
-    return sorted(root.rglob("*.py"))
+    # Same excluded-dir discipline as the TDE2 pass: never raw-rglob a tree that
+    # may contain a vendored / cache subdir whose files do not parse.
+    return list(iter_python_files(root))
 
 
 def _tde1_finding(file_path: str, node: ast.ClassDef, source_lines: list[str]) -> Finding | None:
@@ -128,7 +158,30 @@ def _tde2_finding(file_path: str, node: ast.Call, detail: str) -> Finding:
 
 
 def _has_tier_1_error_decorator(class_node: ast.ClassDef) -> bool:
-    return any(isinstance(decorator, ast.Call) and tier_1_error_call(decorator) for decorator in class_node.decorator_list)
+    return any(
+        isinstance(decorator, ast.Call) and tier_1_error_call(decorator) and _has_nonempty_reason(decorator)
+        for decorator in class_node.decorator_list
+    )
+
+
+def _has_nonempty_reason(call: ast.Call) -> bool:
+    """True when the tier_1_error call carries a non-empty ``reason``.
+
+    ``reason`` is a required keyword on the runtime decorator; a missing or
+    empty ``reason`` is rejected at runtime, so a decorator without one does not
+    satisfy the Tier-1 decoration requirement (elspeth-08b0336287). A non-literal
+    reason cannot be proven empty statically and is treated as present.
+    """
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            # **kwargs splat — cannot prove reason is missing/empty.
+            return True
+        if keyword.arg == "reason":
+            value = keyword.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return bool(value.value.strip())
+            return True
+    return False
 
 
 def _has_tier_2_comment(class_node: ast.ClassDef, source_lines: list[str]) -> bool:

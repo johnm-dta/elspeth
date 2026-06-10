@@ -43,7 +43,14 @@ from elspeth.core.landscape.lineage import explain
 from elspeth.core.landscape.schema import nodes_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
-from elspeth.mcp.analyzers.queries import explain_token, list_operations, list_rows, list_runs
+from elspeth.mcp.analyzers.queries import (
+    explain_token,
+    get_calls,
+    get_operation_calls,
+    list_operations,
+    list_rows,
+    list_runs,
+)
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
 from elspeth.mcp.types import ErrorResult
 from tests.fixtures.landscape import (
@@ -1915,3 +1922,62 @@ class TestListCollisions:
         assert len(result_token_ids) == 5, f"Expected 5 results, got {len(result_token_ids)}"
         assert len(set(result_token_ids)) == 5, f"Expected 5 unique token_ids, got duplicates: {result_token_ids}"
         assert set(result_token_ids) == set(token_ids), f"Missing or extra token_ids: expected {token_ids}, got {result_token_ids}"
+
+
+class TestResolvedPromptTemplateHashAcrossReadSurfaces:
+    """elspeth-543ee35ed3: a recorded LLM-call resolved_prompt_template_hash must
+    survive every audit read/export surface — the CallLoader, MCP get_calls,
+    MCP get_operation_calls, and the JSONL export — for both state-parented and
+    operation-parented calls. Otherwise audit tooling cannot join runtime LLM
+    calls back to session interpretation_events.
+    """
+
+    HASH = "a" * 64
+
+    def test_hash_preserved_across_loader_mcp_and_export(self) -> None:
+        from elspeth.core.landscape.exporter import LandscapeExporter
+
+        p = _build_linear_pipeline()
+        db = p["db"]
+        factory = p["factory"]
+        run_id = p["run_id"]
+        state_id = p["node_state"].state_id
+
+        # State-parented LLM call carrying the cross-DB hash anchor.
+        idx = factory.execution.allocate_call_index(state_id)
+        factory.execution.record_call(
+            state_id,
+            idx,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            RawCallPayload({"prompt": "p"}),
+            RawCallPayload({"response": "r"}),
+            resolved_prompt_template_hash=self.HASH,
+        )
+
+        # Operation-parented LLM call carrying the hash anchor.
+        op = factory.execution.begin_operation(run_id, "source-1", "source_load")
+        factory.execution.record_operation_call(
+            op.operation_id,
+            CallType.LLM,
+            CallStatus.SUCCESS,
+            RawCallPayload({"prompt": "p2"}),
+            resolved_prompt_template_hash=self.HASH,
+        )
+
+        # 1. Loader — repository getters reconstruct Call via CallLoader.
+        state_calls = factory.query.get_calls(state_id)
+        assert state_calls[0].resolved_prompt_template_hash == self.HASH
+        loaded_op_calls = factory.execution.get_operation_calls(op.operation_id)
+        assert loaded_op_calls[0].resolved_prompt_template_hash == self.HASH
+
+        # 2. MCP get_calls (state) and get_operation_calls (operation).
+        mcp_state = get_calls(db, factory, state_id)
+        assert mcp_state[0]["resolved_prompt_template_hash"] == self.HASH
+        mcp_op = get_operation_calls(db, factory, op.operation_id)
+        assert mcp_op[0]["resolved_prompt_template_hash"] == self.HASH
+
+        # 3. Export records — both the state call and the operation call.
+        call_records = [r for r in LandscapeExporter(db).export_run(run_id) if r.get("record_type") == "call"]
+        exported_hashes = [r.get("resolved_prompt_template_hash") for r in call_records]
+        assert exported_hashes.count(self.HASH) == 2

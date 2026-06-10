@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "bad.py",
+    "fingerprint": "873a72b571c4fbd1",
+    "line": 4,
+    "message": "AliasMissing inherits from DataPluginConfig but does not set _plugin_component_type to 'source', 'sink', or 'transform'",
+    "rule_id": "CT1",
+    "severity": "error",
+    "suggestion": "Set _plugin_component_type: ClassVar[str | None] = 'source' | 'sink' | 'transform' on the class, or inherit from SourceDataConfig / SinkPathConfig / TransformDataConfig."
+  }
+]

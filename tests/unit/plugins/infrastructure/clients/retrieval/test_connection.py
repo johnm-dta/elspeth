@@ -80,6 +80,44 @@ class TestChromaConnectionConfig:
         )
         assert config.host == "::1"
 
+    def test_client_mode_blocks_link_local_metadata_host(self) -> None:
+        """An internal/metadata target (cloud metadata IP) is rejected by the SSRF policy."""
+        with pytest.raises(ValidationError, match=r"(?i)ssrf"):
+            ChromaConnectionConfig(
+                collection="test",
+                mode="client",
+                host="169.254.169.254",
+                ssl=True,
+            )
+
+    def test_client_mode_blocks_private_rfc1918_host(self) -> None:
+        """A private-range target is rejected by the SSRF policy (no DNS needed for an IP)."""
+        with pytest.raises(ValidationError, match=r"(?i)ssrf"):
+            ChromaConnectionConfig(
+                collection="test",
+                mode="client",
+                host="10.0.0.5",
+                ssl=True,
+            )
+
+    def test_ssrf_check_is_deferred_in_preflight_mode(self) -> None:
+        """SSRF resolves DNS, so it must not run during no-network preflight.
+
+        Preflight validates config purely; the SSRF block is enforced at real
+        runtime, before the Chroma SDK connects. An internal host therefore
+        constructs cleanly under preflight and is only rejected at runtime.
+        """
+        from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
+
+        with plugin_preflight_mode(True):
+            config = ChromaConnectionConfig(
+                collection="test",
+                mode="client",
+                host="169.254.169.254",
+                ssl=True,
+            )
+        assert config.host == "169.254.169.254"
+
     def test_persistent_mode_valid(self) -> None:
         config = ChromaConnectionConfig(
             collection="science-facts",

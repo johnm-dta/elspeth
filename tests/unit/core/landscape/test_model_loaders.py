@@ -579,6 +579,7 @@ class TestCallLoader:
             "response_ref": None,
             "error_json": None,
             "latency_ms": None,
+            "resolved_prompt_template_hash": None,
         }
         defaults.update(overrides)
         return _make_sa_row(**defaults)
@@ -593,6 +594,13 @@ class TestCallLoader:
         assert result.status == CallStatus.SUCCESS
         assert result.state_id == "state-1"
         assert result.operation_id is None
+
+    def test_maps_resolved_prompt_template_hash(self) -> None:
+        """CallLoader must carry the cross-DB prompt-hash anchor (elspeth-543ee35ed3)."""
+        digest = "a" * 64
+        sa_row = self._make_call_row(call_type="llm", resolved_prompt_template_hash=digest)
+        result = CallLoader().load(sa_row)
+        assert result.resolved_prompt_template_hash == digest
 
     def test_valid_load_operation_parented(self) -> None:
         sa_row = self._make_call_row(

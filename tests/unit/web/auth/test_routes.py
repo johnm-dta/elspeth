@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 
+from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH, _bounded_principal
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import auth_events_table
 from elspeth.web.auth.audit import AuthAuditRecorder
@@ -79,6 +80,19 @@ def _enable_auth_audit(app: FastAPI) -> None:
 def _read_auth_event_rows(audit_url: str):
     with LandscapeDB.from_url(audit_url) as db, db.read_only_connection() as conn:
         return conn.execute(select(auth_events_table).order_by(auth_events_table.c.occurred_at)).fetchall()
+
+
+def test_bounded_principal_truncates_oversized_passes_normal_and_preserves_none() -> None:
+    """Defence-in-depth bound for principals reaching the repository from
+    signed-claim paths (OIDC sub/email) that have no request-boundary check."""
+    assert _bounded_principal(None) is None
+    assert _bounded_principal("alice") == "alice"
+    exact = "a" * AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
+    assert _bounded_principal(exact) == exact
+    oversized = "a" * (AUTH_AUDIT_PRINCIPAL_MAX_LENGTH + 10)
+    bounded = _bounded_principal(oversized)
+    assert bounded == oversized[:AUTH_AUDIT_PRINCIPAL_MAX_LENGTH]
+    assert len(bounded) == AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 
 
 def _only_auth_event(rows, event_type: str, *, issuance_path: str | None = None):
@@ -240,6 +254,25 @@ class TestLoginEndpoint:
         assert "wrong-password" not in serialized
         assert "password123" not in serialized
         assert "eyJ" not in serialized
+
+    async def test_login_oversized_username_rejected_at_boundary(self, tmp_path) -> None:
+        """An over-length username is rejected at the request boundary (422) and
+        never reaches the audit write — the unauthenticated amplification vector."""
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+        oversized_username = "a" * (AUTH_AUDIT_PRINCIPAL_MAX_LENGTH + 1)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": oversized_username, "password": "wrong-password"},
+                headers={"x-request-id": "login-failure-oversized"},
+            )
+
+        assert response.status_code == 422
+        assert _read_auth_event_rows(audit_url) == []
 
     async def test_login_not_available_for_oidc(self, tmp_path) -> None:
         provider = AsyncMock()
@@ -911,6 +944,32 @@ class TestRegisterRequestValidation:
 @pytest.mark.asyncio
 class TestAuthRateLimiting:
     """Tests that auth endpoints are rate-limited by client IP."""
+
+    async def test_me_unauthenticated_rate_limit_bounds_durable_auth_failure_rows(self, tmp_path) -> None:
+        """Protected route auth failures stop writing audit rows after per-IP limit."""
+        from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+        app.state.auth_rate_limiter = ComposerRateLimiter(limit=1)
+
+        async with _client_for(app) as client:
+            first_response = await client.get("/api/auth/me")
+            second_response = await client.get("/api/auth/me")
+
+        rows = _read_auth_event_rows(audit_url)
+        auth_failure_rows = [row for row in rows if row.event_type == "auth_failure"]
+
+        assert first_response.status_code == 401
+        assert second_response.status_code == 429
+        assert len(auth_failure_rows) == 1
+
+        event = auth_failure_rows[0]
+        metadata = json.loads(event.metadata_json)
+        assert event.failure_category == "missing_authorization_header"
+        assert metadata["failure_stage"] == "authorization_header"
 
     async def test_login_returns_429_when_rate_limited(self, tmp_path) -> None:
         """Login returns 429 after exceeding per-IP rate limit."""

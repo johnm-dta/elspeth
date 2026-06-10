@@ -129,6 +129,18 @@ def _raw_tool_call_llm(*, name: str, raw_arguments: str) -> _FakeComposeLLM:
 
 
 @pytest.mark.asyncio
+async def test_advisor_tool_always_present(
+    fake_composer_service: ComposerServiceImpl,
+) -> None:
+    """The ``request_advisor_hint`` tool is ALWAYS exposed to the composer
+    LLM. There is no enable flag any more — advisor is mandatory, so the
+    tool is unconditionally part of ``_get_litellm_tools()``."""
+    tools = fake_composer_service._get_litellm_tools()
+    names = {t["function"]["name"] for t in tools}
+    assert "request_advisor_hint" in names
+
+
+@pytest.mark.asyncio
 async def test_arm_json_decode_failure_records_arg_error(
     fake_composer_service: ComposerServiceImpl,
     result_session_id: str,
@@ -340,76 +352,6 @@ _VALID_ADVISOR_ARGS: dict[str, object] = {
 
 
 @pytest.mark.asyncio
-async def test_arm_advisor_disabled_records_success_with_error_payload(
-    fake_composer_service: ComposerServiceImpl,
-    result_session_id: str,
-) -> None:
-    """Arm #7: advisor disabled (defense-in-depth) → SUCCESS with error dict.
-
-    tool_batch.py advisor-disabled arm.  When ``composer_advisor_enabled`` is
-    False (the default) and the LLM calls ``request_advisor_hint`` anyway (e.g. via
-    replayed transcript, stale state, or prompt injection), the loop bypasses
-    any outbound call and records ``finish_success`` with an error-keyed
-    payload rather than ARG_ERROR.  The audit trail gets a SUCCESS row because
-    the decision to refuse is a policy outcome, not a malformed argument.
-
-    ``fake_composer_service`` uses ``_make_settings`` defaults, which have
-    ``composer_advisor_enabled=False``.  This test explicitly asserts that
-    is true so a settings-default change would surface here first.
-
-    Empirically observed: ``.response`` is a ``mappingproxy`` (the frozen form
-    of the payload dict) carrying ``"error"``.  The Mapping protocol supports
-    ``in`` and ``[]`` so the assertion uses ``"error" in outcome.response``.
-
-    Pinning:
-    - exactly 1 invocation
-    - status == SUCCESS (not ARG_ERROR — policy refusal is recorded as success)
-    - outcome response contains key ``"error"``
-    """
-    assert not fake_composer_service._settings.composer_advisor_enabled, (
-        "This test requires the default settings to have composer_advisor_enabled=False.  "
-        "If the default changed, update this assertion and verify arm #7 is still reachable."
-    )
-    first_response = _FakeLLMResponse(
-        choices=[
-            _FakeChoice(
-                message=_FakeMessage(
-                    content=None,
-                    tool_calls=[
-                        _FakeToolCall(
-                            id="call_adv_disabled",
-                            function=_FakeFunction(
-                                name="request_advisor_hint",
-                                arguments=json.dumps(_VALID_ADVISOR_ARGS),
-                            ),
-                        )
-                    ],
-                )
-            )
-        ]
-    )
-    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
-    result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
-
-    assert len(result.tool_invocations) == 1, (
-        f"Expected exactly 1 invocation (one advisor-disabled call), got {len(result.tool_invocations)}"
-    )
-    statuses = [inv.status for inv in result.tool_invocations]
-    assert ComposerToolStatus.SUCCESS in statuses, (
-        f"SUCCESS not in recorded statuses {statuses!r}; the advisor-disabled arm records "
-        "finish_success (not finish_arg_error) — inspect tool_batch.py (advisor disabled arm)."
-    )
-    assert len(result.tool_outcomes) == 1
-    outcome = result.tool_outcomes[0]
-    assert outcome.response is not None, "Outcome response must not be None for advisor-disabled arm"
-    assert "error" in outcome.response, (
-        f"Outcome response does not contain key 'error'; got {dict(outcome.response)!r}. "
-        "The advisor-disabled payload must carry an 'error' key so the LLM receives "
-        "a diagnostic message — inspect tool_batch.py (advisor disabled arm)."
-    )
-
-
-@pytest.mark.asyncio
 async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhausted_status(
     tmp_path: Path,
 ) -> None:
@@ -436,7 +378,7 @@ async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhauste
     - status == SUCCESS
     - outcome response ``status == "BUDGET_EXHAUSTED"``
     """
-    settings = _make_settings(tmp_path, composer_advisor_enabled=True, composer_advisor_max_calls_per_compose=0)
+    settings = _make_settings(tmp_path, composer_advisor_max_calls_per_compose=0)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
     svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 
@@ -523,7 +465,7 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
     - status == ARG_ERROR
     - error_class == "TypeError"
     """
-    settings = _make_settings(tmp_path, composer_advisor_enabled=True)
+    settings = _make_settings(tmp_path)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
     svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 

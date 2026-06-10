@@ -192,6 +192,55 @@ class TestCallReplayer:
         assert exc_info.value.request_data == request_data
         assert exc_info.value.request_hash == stable_hash(request_data)
 
+    def test_failed_miss_does_not_advance_sequence(self) -> None:
+        """A replay miss must not consume the sequence number (elspeth-55dbfec615).
+
+        replay() previously incremented the sequence counter before the DB
+        lookup, so a miss still advanced it. A retry then asked for the NEXT
+        recorded occurrence instead of re-attempting the same call. The counter
+        must advance only after a concrete result — mirroring CallVerifier,
+        which advances solely through _record_result().
+        """
+        recorder = self._create_mock_recorder()
+        recorder.find_call_by_request_hash.return_value = None  # miss
+        replayer = CallReplayer(recorder, source_run_id="run_abc123")
+        request_data = {"model": "gpt-4", "messages": []}
+
+        with pytest.raises(ReplayMissError):
+            replayer.replay(call_type=CallType.LLM, request_data=request_data)
+        # Retry the SAME call: must re-query the same occurrence, not skip ahead.
+        with pytest.raises(ReplayMissError):
+            replayer.replay(call_type=CallType.LLM, request_data=request_data)
+
+        assert recorder.find_call_by_request_hash.call_count == 2
+        for call in recorder.find_call_by_request_hash.call_args_list:
+            assert call.kwargs["sequence_index"] == 0
+
+    def test_payload_missing_does_not_advance_sequence(self) -> None:
+        """A payload-missing failure must not consume the sequence number.
+
+        When the call is found but its payload is HASH_ONLY/PURGED/etc.,
+        replay() raises ReplayPayloadMissingError. That failure must not advance
+        the sequence counter, so a retry re-attempts the same occurrence rather
+        than skipping to the next recorded call (elspeth-55dbfec615).
+        """
+        recorder = self._create_mock_recorder()
+        request_data = {"model": "gpt-4", "messages": []}
+        request_hash = stable_hash(request_data)
+        mock_call = self._create_mock_call(request_hash=request_hash)
+        recorder.find_call_by_request_hash.return_value = mock_call
+        recorder.get_call_response_data.return_value = CallDataResult(state=CallDataState.HASH_ONLY, data=None)
+        replayer = CallReplayer(recorder, source_run_id="run_abc123")
+
+        with pytest.raises(ReplayPayloadMissingError):
+            replayer.replay(call_type=CallType.LLM, request_data=request_data)
+        with pytest.raises(ReplayPayloadMissingError):
+            replayer.replay(call_type=CallType.LLM, request_data=request_data)
+
+        assert recorder.find_call_by_request_hash.call_count == 2
+        for call in recorder.find_call_by_request_hash.call_args_list:
+            assert call.kwargs["sequence_index"] == 0
+
     def test_replay_caches_results_per_sequence_index(self) -> None:
         """Cache stores results keyed by (call_type, request_hash, sequence_index).
 

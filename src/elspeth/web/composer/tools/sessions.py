@@ -42,6 +42,7 @@ from elspeth.web.composer.state import (
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
+    _validate_gate_route_parity,
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
@@ -68,6 +69,7 @@ from elspeth.web.composer.tools._common import (
     _validate_plugin_name,
     _validate_sink_path,
     _validate_source_path,
+    _validate_transform_provider_config_path,
     _vf_destination_note,
     validate_composer_file_sink_collision_policy,
 )
@@ -84,6 +86,7 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
+    _delimiter_extra_for_csv_blob,
     _header_only_inline_csv_conflict,
     _options_with_source_blob_review,
     _reject_manual_source_authoring,
@@ -113,17 +116,22 @@ _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pip
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 
 
-ADVISOR_TRIGGER_REACTIVE: Final[str] = "reactive_validation_loop"
-
 ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
 
 ADVISOR_TRIGGER_PROACTIVE_RED_LISTED: Final[str] = "proactive_red_listed_plugin"
 
 ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
-    ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_PROACTIVE_SECURITY,
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
+
+# Backend-synthesized triggers for the deterministic advisor checkpoints
+# (early/end). Deliberately NOT in ADVISOR_TRIGGER_VALUES: those are the
+# LLM-selectable set validated against Tier-3 input; these are produced by the
+# trusted compose loop itself and bypass the Tier-3 trigger allowlist.
+ADVISOR_TRIGGER_DETERMINISTIC_EARLY: Final[str] = "deterministic_early_checkpoint"
+
+ADVISOR_TRIGGER_DETERMINISTIC_END: Final[str] = "deterministic_end_checkpoint"
 
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
@@ -400,9 +408,19 @@ def _execute_set_pipeline(
             # condition.
             inferred_plugin, inferred_options = _MIME_TO_SOURCE[prepared_inline_blob.mime_type]
             mime_options: dict[str, str] = inferred_options if inferred_plugin == src_plugin else {}
+            # A ``.tsv`` inline blob (uploaded as text/csv) must bind a tab
+            # delimiter; ``_MIME_TO_SOURCE`` is mime-keyed and cannot express it.
+            # Derive it from the filename like ``inspect_blob_content`` does, gated
+            # on the plugin actually being bound and not clobbering a caller value.
+            delimiter_options = _delimiter_extra_for_csv_blob(
+                src_plugin,
+                prepared_inline_blob.filename,
+                legacy_src_options,
+            )
             legacy_src_options = {
                 **legacy_src_options,
                 **mime_options,
+                **delimiter_options,
                 "path": str(prepared_inline_blob.storage_path),
                 "blob_ref": prepared_inline_blob.blob_id,
                 **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
@@ -457,11 +475,22 @@ def _execute_set_pipeline(
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
+            # S2: confine nested provider_config persist_directory (RAG
+            # retrieval). Parity with the per-output sink-path check below so
+            # a bulk set_pipeline cannot wave through an escaping transform
+            # path while rejecting an escaping sink path.
+            provider_path_error = _validate_transform_provider_config_path(node_options, data_dir)
+            if provider_path_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
+
         # Validate gate condition expression at composition time.
         if node_type == "gate" and node.condition is not None:
             expr_error = _validate_gate_expression(node.condition)
             if expr_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {expr_error}")
+            parity_error = _validate_gate_route_parity(node.condition, node.routes)
+            if parity_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {parity_error}")
 
     # 3. Validate output plugins and options
     #
@@ -1664,6 +1693,18 @@ async def _handle_request_interpretation_review(
             "request_interpretation_review arguments",
         ),
     )
+    # Backend owns prompt-template surfacing (elspeth-e51216d305 Case B). The
+    # ``llm_prompt_template`` review is auto-staged on every LLM node and the
+    # BACKEND surfaces its EVENT against the FINAL frozen skeleton at turn
+    # finalization, so it can never go stale against a later skeleton mutation.
+    # The LLM must NOT surface it mid-build via this tool; reject the kind at
+    # the Tier-3 boundary immediately after the parse, before any service call.
+    if parsed.kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+        raise ToolArgumentError(
+            argument="kind",
+            expected="vague_term, invented_source, pipeline_decision, or llm_model_choice",
+            actual_type=("llm_prompt_template — surfaced automatically by the backend at turn finalization; do not request it"),
+        )
     # F-34 credential prefilter: Tier-3 boundary check before any DB write.
     # ``_reject_credential_shaped_content`` raises ``ValueError``; we wrap
     # as ToolArgumentError so the compose loop's ARG_ERROR routing catches

@@ -182,8 +182,27 @@ class ChromaSearchProvider:
         state_id: str,
         token_id: str | None,
     ) -> list[RetrievalChunk]:
+        count_start = time.monotonic()
         collection_count = self._collection.count()
         if collection_count == 0:
+            # The corpus is empty: no query() is issued and zero chunks are
+            # returned. This is still an auditable retrieval decision — the
+            # external count() call ran and its outcome shaped the pipeline
+            # result. Recording it (rather than exiting silently) lets an
+            # auditor distinguish "retrieval ran against an empty corpus" from
+            # "retrieval never ran"; collection_count=0 further distinguishes
+            # it from a populated query that simply matched nothing.
+            empty_elapsed_ms = (time.monotonic() - count_start) * 1000
+            call_index = self._execution.allocate_call_index(state_id)
+            self._execution.record_call(
+                state_id=state_id,
+                call_index=call_index,
+                call_type=CallType.VECTOR,
+                status=CallStatus.SUCCESS,
+                request_data=RawCallPayload({"query": query, "top_k": 0, "collection": self._config.collection}),
+                response_data=RawCallPayload({"result_count": 0, "skipped_count": 0, "top_score": None, "collection_count": 0}),
+                latency_ms=round(empty_elapsed_ms),
+            )
             return []
         effective_top_k = min(top_k, collection_count)
 
@@ -274,6 +293,20 @@ class ChromaSearchProvider:
             distances = raw_distances[0]
             metadatas = raw_metadatas[0]
             ids = results["ids"][0]
+            # Tier 3 boundary: the four parallel arrays must agree in length.
+            # zip(..., strict=True) below would raise a bare ValueError on a
+            # mismatch — after the external query returned — bypassing the
+            # RetrievalError-only post-query audit handler in search(). Check
+            # here (inside the guard) so a non-sized value also surfaces as a
+            # TypeError → RetrievalError rather than escaping len().
+            if not (len(documents) == len(distances) == len(metadatas) == len(ids)):
+                raise RetrievalError(
+                    f"Chroma query for collection {self._config.collection!r} returned "
+                    f"mismatched result array lengths (documents={len(documents)}, "
+                    f"distances={len(distances)}, metadatas={len(metadatas)}, ids={len(ids)}). "
+                    f"This indicates a malformed SDK response or index corruption.",
+                    retryable=False,
+                )
         except (KeyError, TypeError, IndexError) as exc:
             raise RetrievalError(
                 f"Chroma query returned unexpected result structure: {exc}",
@@ -304,14 +337,30 @@ class ChromaSearchProvider:
             if score < min_score:
                 continue
 
-            chunks.append(
-                RetrievalChunk(
-                    content=doc,
-                    score=score,
-                    source_id=doc_id,
-                    metadata=dict(metadata) if metadata else {},
+            # RetrievalChunk validates score range and metadata JSON-serializability
+            # at construction, raising ValueError. `dict(metadata)` additionally
+            # raises TypeError for a truthy non-mapping metadata (e.g. an int or a
+            # list of non-pairs) from a corrupt index. Both originate in the
+            # post-query parse path, so both must become a RetrievalError for
+            # search()'s audit handler to record it — mirrors the wrap in
+            # AzureSearchProvider._parse_response. (The only TypeError source in
+            # this block is the Tier-3 dict(metadata) coercion; RetrievalChunk's
+            # kwargs are static and its __post_init__ raises only ValueError, so
+            # this does not mask an our-code bug.)
+            try:
+                chunks.append(
+                    RetrievalChunk(
+                        content=doc,
+                        score=score,
+                        source_id=doc_id,
+                        metadata=dict(metadata) if metadata else {},
+                    )
                 )
-            )
+            except (ValueError, TypeError) as exc:
+                raise RetrievalError(
+                    f"Chroma provider produced invalid chunk data for document {doc_id!r}: {exc}",
+                    retryable=False,
+                ) from exc
 
         return chunks, skipped
 

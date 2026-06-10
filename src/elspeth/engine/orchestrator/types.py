@@ -104,6 +104,14 @@ class RowProcessorHandle(Protocol):
         """Return grouped active scheduler work for invariant diagnostics."""
         ...
 
+    def has_unresolved_scheduler_work(self) -> bool:
+        """Return whether scheduler work remains short of a durable sink handoff."""
+        ...
+
+    def summarize_unresolved_scheduler_work(self) -> tuple[str, ...]:
+        """Return grouped unresolved scheduler work for invariant diagnostics."""
+        ...
+
     def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
         """Mark durable scheduler work consumed by a barrier as terminal."""
         ...

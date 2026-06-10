@@ -10,21 +10,28 @@ WorkingDirectory=/home/john/elspeth
 RuntimeDirectory=elspeth
 
 # --- Application configuration ---
-# SECRET_KEY: generate with `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
+# ELSPETH_WEB__SECRET_KEY: generate with `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`
 # Env vars in EnvironmentFile — systemd Environment= mangles JSON quoting.
 EnvironmentFile=/home/john/elspeth/deploy/elspeth-web.env
+# Uvicorn ignores TCP host when --uds is used, but WebSettings.host is the
+# production-secret guard signal. Mark this reverse-proxy deployment non-local
+# so startup fails unless ELSPETH_WEB__SECRET_KEY is explicitly configured.
+Environment=ELSPETH_WEB__HOST=0.0.0.0
 # Pin imports to the served checkout. The venv editable-install .pth has drifted
 # to stale worktrees before, which let /api stay healthy while the SPA root 404ed.
 Environment=PYTHONPATH=/home/john/elspeth/src
 
+# Uvicorn expects IP CIDRs or '*' here, not Unix socket paths. For this UDS
+# deployment, trust is established by filesystem permissions on the socket.
+# Do not combine --limit-max-requests with Restart=on-failure: uvicorn exits 0
+# after request recycling, which systemd treats as a clean stop.
 ExecStart=/home/john/elspeth/.venv/bin/uvicorn elspeth.web.app:create_app \
     --factory \
     --uds /run/elspeth/uvicorn.sock \
     --proxy-headers \
-    --forwarded-allow-ips=/run/elspeth/uvicorn.sock \
+    --forwarded-allow-ips='*' \
     --no-server-header \
-    --limit-concurrency 100 \
-    --limit-max-requests 10000
+    --limit-concurrency 100
 
 Restart=on-failure
 RestartSec=2

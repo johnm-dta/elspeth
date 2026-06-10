@@ -91,7 +91,7 @@ class TestFinalizeSourceIterationContext:
         orchestrator = _make_orchestrator()
         loop_ctx = _make_loop_ctx(ctx)
 
-        orchestrator._finalize_source_iteration(
+        orchestrator._source_driver.finalize_source_iteration(
             loop_ctx,
             factory=MagicMock(),
             run_id="test-run",
@@ -126,7 +126,7 @@ class TestFinalizeSourceIterationContext:
         orchestrator = _make_orchestrator()
         loop_ctx = _make_loop_ctx(ctx)
 
-        orchestrator._finalize_source_iteration(
+        orchestrator._source_driver.finalize_source_iteration(
             loop_ctx,
             factory=MagicMock(),
             run_id="test-run",
@@ -156,8 +156,8 @@ class TestFinalizeSourceIterationContext:
         coalesce_executor = MagicMock()
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
-        with patch("elspeth.engine.orchestrator.core.flush_coalesce_pending") as flush_coalesce:
-            orchestrator._finalize_source_iteration(
+        with patch("elspeth.engine.orchestrator.source_iteration.flush_coalesce_pending") as flush_coalesce:
+            orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
                 run_id="test-run",
@@ -186,8 +186,8 @@ class TestFinalizeSourceIterationContext:
         coalesce_executor = MagicMock()
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
-        with patch("elspeth.engine.orchestrator.core.flush_coalesce_pending") as flush_coalesce:
-            orchestrator._finalize_source_iteration(
+        with patch("elspeth.engine.orchestrator.source_iteration.flush_coalesce_pending") as flush_coalesce:
+            orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
                 run_id="test-run",
@@ -216,8 +216,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx)
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
 
-        with patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers") as flush_aggregation:
-            orchestrator._finalize_source_iteration(
+        with patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers") as flush_aggregation:
+            orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
                 run_id="test-run",
@@ -246,8 +246,8 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx)
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
 
-        with patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers") as flush_aggregation:
-            orchestrator._finalize_source_iteration(
+        with patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers") as flush_aggregation:
+            orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
                 run_id="test-run",

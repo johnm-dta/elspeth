@@ -1,37 +1,46 @@
 {
   "mcpServers": {
-    "elspeth-landscape": {
-      "type": "stdio",
-      "command": "/home/john/elspeth/.venv/bin/elspeth-mcp",
-      "args": [
-        "--database",
-        "sqlite:////home/john/elspeth/data/runs/audit.db"
-      ]
-    },
     "elspeth-composer": {
-      "type": "stdio",
-      "command": "/home/john/elspeth/.venv/bin/elspeth-composer",
       "args": [
         "--scratch-dir",
         ".scratch"
-      ]
+      ],
+      "command": "/home/john/elspeth/.venv/bin/elspeth-composer",
+      "type": "stdio"
+    },
+    "elspeth-landscape": {
+      "args": [
+        "--database",
+        "sqlite:////home/john/elspeth/data/runs/audit.db"
+      ],
+      "command": "/home/john/elspeth/.venv/bin/elspeth-mcp",
+      "type": "stdio"
     },
     "filigree": {
       "type": "stdio",
       "command": "/home/john/.local/bin/filigree-mcp",
       "args": []
     },
-    "clarion-elspeth": {
-      "type": "stdio",
-      "command": "/home/john/clarion/target/release/clarion",
+    "loomweave": {
       "args": [
-        "serve",
-        "--path",
-        "/home/john/elspeth"
+        "serve"
       ],
-      "env": {
-        "PATH": "/home/john/clarion/plugins/python/.venv/bin:/home/john/.local/bin:/home/john/elspeth/.venv/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/john/.cargo/bin:/home/john/.nvm/versions/node/v20.19.3/bin:/home/john/miniconda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      }
+      "command": "/home/john/.local/share/uv/tools/loomweave/bin/loomweave",
+      "env": {},
+      "type": "stdio"
+    },
+    "wardline": {
+      "args": [
+        "mcp",
+        "--root",
+        ".",
+        "--loomweave-url",
+        "http://127.0.0.1:10251",
+        "--filigree-url",
+        "http://127.0.0.1:9229/api/weft/scan-results"
+      ],
+      "command": "/home/john/.local/bin/wardline",
+      "type": "stdio"
     }
   }
 }

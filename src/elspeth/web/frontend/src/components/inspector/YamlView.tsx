@@ -89,6 +89,7 @@ export function YamlView() {
 
     let cancelled = false;
     setIsLoading(true);
+    setYaml(null);
     setYamlError(null);
 
     api

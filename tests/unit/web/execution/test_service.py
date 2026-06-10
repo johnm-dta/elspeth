@@ -42,6 +42,7 @@ from elspeth.core.config import (
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from elspeth.web.blobs.protocol import BlobFinalizationResult
+from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -49,6 +50,10 @@ from elspeth.web.execution.schemas import (
     RunAccountingRouting,
     RunAccountingSource,
     RunAccountingTokens,
+    ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
+    ValidationResult,
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
@@ -57,6 +62,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
+    RunRecord,
     SessionRunStatus,
 )
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
@@ -293,7 +299,25 @@ def service(
             return None
 
     cast(Any, svc)._call_async = _mock_call_async
-    yield svc
+    # The fail-closed pre-run validation gate (execute() -> validate_pipeline, added
+    # 2026-06-08) runs on every execute. These tests exercise execute MECHANICS (run
+    # creation, blob/path gates, cancel) with a minimal mock state that is NOT a
+    # runnable pipeline, so stub validate_pipeline to VALID to reach the mechanics.
+    # Gate-behavior tests (TestExecutionFlow::*_pipeline_*) override this with their
+    # own patch; validate_pipeline's own correctness is covered in test_validation.py.
+    _gate_valid = ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(
+            authoring_valid=True,
+            execution_ready=True,
+            completion_ready=True,
+            blockers=[],
+        ),
+    )
+    with patch("elspeth.web.execution.validation.validate_pipeline", return_value=_gate_valid):
+        yield svc
     _real_loop.close()
 
 
@@ -329,6 +353,78 @@ class TestExecutionFlow:
         create_call = mock_session_service.create_run.call_args
         assert "session_id" in create_call[1] or len(create_call[0]) >= 1
         assert "pipeline_yaml" in create_call[1] or len(create_call[0]) >= 2
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_invalid_pipeline_before_run_creation(
+        self, service: ExecutionServiceImpl, mock_session_service: MagicMock
+    ) -> None:
+        """Fix 1 (notes/composer-advisor-surface-map-2026-06-08.md): execute() must
+        fail CLOSED on a pipeline that fails validate_pipeline — raising a structured
+        PipelineValidationError BEFORE create_run — instead of launching an opaque
+        ``status=failed`` run. This closes the tutorial bypass (tutorial_service calls
+        execute() directly with no pre-run validation) and the advisory-gate gap.
+        """
+        invalid = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="rate",
+                    component_type="transform",
+                    message="Graph validation failed: 'rate' requires field 'content' not emitted upstream",
+                    suggestion=None,
+                    error_code=None,
+                )
+            ],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="graph_structure",
+                        component_id="rate",
+                        component_type="transform",
+                        detail="Graph validation failed.",
+                    )
+                ],
+            ),
+        )
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", return_value=invalid),
+            pytest.raises(PipelineValidationError) as exc_info,
+        ):
+            await service.execute(session_id=uuid4())
+
+        # No opaque failed-run: the gate refuses BEFORE create_run.
+        assert mock_session_service.create_run.await_count == 0
+        # Carries the structured errors for the route to surface as a 422.
+        assert exc_info.value.errors
+        assert exc_info.value.errors[0].component_id == "rate"
+
+    @pytest.mark.asyncio
+    async def test_execute_allows_valid_pipeline_through_the_gate(
+        self, service: ExecutionServiceImpl, mock_session_service: MagicMock
+    ) -> None:
+        """Fix 1: a valid pipeline passes the new pre-run gate and still creates a run."""
+        valid = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=True,
+                completion_ready=True,
+                blockers=[],
+            ),
+        )
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", return_value=valid),
+            patch.object(service, "_run_pipeline"),
+        ):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+        mock_session_service.create_run.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_status_returns_run_status(self, service: ExecutionServiceImpl, mock_session_service: MagicMock) -> None:
@@ -971,14 +1067,24 @@ class TestInlineBlobRuntimePreflight:
         mock_orch_cls: MagicMock,
         service: ExecutionServiceImpl,
         mock_session_service: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        content = b"You are an audited prompt."
+        # Blob bytes are attacker-controllable. A ${VAR} smuggled inside them is
+        # invisible to preflight (the blob is an opaque ref at validation time),
+        # so it must NOT be expanded against the host environment at execution.
+        monkeypatch.setenv("ELSPETH_INLINE_BLOB_SECRET", "server-secret-value")
+        content = b"You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}."
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
         order: list[str] = []
+        # The valid same-session path: run and blob share an owning session, so
+        # the cross-session guard added for elspeth-195ecb1d58 passes through.
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1006,9 +1112,13 @@ class TestInlineBlobRuntimePreflight:
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
-        def load_settings(yaml_text: str) -> MagicMock:
+        def load_settings(yaml_text: str, *, expand_env_vars: bool = True) -> MagicMock:
             assert "record" in order, "audit row must be recorded before settings/plugin construction"
-            assert "You are an audited prompt." in yaml_text
+            # Inline blobs were substituted -> env expansion must be disabled so
+            # the smuggled ${VAR} stays literal and the host secret never resolves.
+            assert expand_env_vars is False
+            assert "You are an audited prompt with literal ${ELSPETH_INLINE_BLOB_SECRET}." in yaml_text
+            assert "server-secret-value" not in yaml_text
             assert "blob_ref" not in yaml_text
             assert "inline_content" not in yaml_text
             order.append("load")
@@ -1095,9 +1205,12 @@ sinks:
         content = b"You are an audited prompt."
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1157,9 +1270,12 @@ sinks:
         del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
         sha256 = hashlib.sha256(b"small prompt").hexdigest()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
@@ -1223,11 +1339,14 @@ sinks:
         del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
         blob_ids = [uuid4() for _ in range(5)]
         run_id = uuid4()
+        owner_session = uuid4()
         hashes = [hashlib.sha256(f"blob-{index}".encode()).hexdigest() for index in range(5)]
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
 
         records_by_id: dict[UUID, Any] = {}
         for blob_id, blob_hash in zip(blob_ids, hashes, strict=True):
             record = MagicMock(spec=object)
+            record.session_id = owner_session
             record.status = "ready"
             record.content_hash = blob_hash
             record.mime_type = "text/plain"
@@ -1294,6 +1413,7 @@ sinks:
         mock_runtime_graph: MagicMock,
         mock_orch_cls: MagicMock,
         service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from elspeth.web.blobs.protocol import BlobIntegrityError
@@ -1303,10 +1423,13 @@ sinks:
         content = b"actual prompt bytes"
         blob_id = uuid4()
         run_id = uuid4()
+        owner_session = uuid4()
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
         hash_counter = MagicMock(spec=["add"])
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
         blob_record = MagicMock(spec=object)
+        blob_record.session_id = owner_session
         blob_record.status = "ready"
         blob_record.content_hash = hashlib.sha256(content).hexdigest()
         blob_record.mime_type = "text/plain"
@@ -1346,6 +1469,107 @@ sinks:
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "case",
+        ["missing", "cross_session_ready_hash_match", "cross_session_ready_hash_mismatch"],
+    )
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_run_pipeline_rejects_cross_session_inline_blob_uniformly(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        case: str,
+    ) -> None:
+        """IDOR/metadata-oracle regression (elspeth-195ecb1d58).
+
+        A crafted inline_content marker naming another session's blob must be
+        rejected uniformly as ``BlobNotFoundError`` — byte-identical *type* to a
+        genuinely-missing blob — BEFORE any status/hash/size comparison and
+        before ``link_blob_to_run`` / ``read_blob_content`` are reached, so the
+        metadata (status/hash/size) of another session's blob is never an oracle.
+
+        Pre-fix, the three cases surface differently: ``missing`` raises
+        ``BlobNotFoundError`` (control); ``cross_session_ready_hash_match`` sails
+        through (link/read awaited, run proceeds); ``cross_session_ready_hash_mismatch``
+        raises ``BlobIntegrityError``. The cross-session cases therefore do NOT
+        match the missing control pre-fix. Post-fix all three collapse to
+        ``BlobNotFoundError`` with link/read never awaited.
+        """
+        from elspeth.web.blobs.protocol import BlobNotFoundError
+
+        del mock_payload_cls, mock_landscape_cls, mock_load, mock_runtime_graph, mock_orch_cls
+
+        owner_session = uuid4()
+        other_session = uuid4()
+        content = b"another session's secret prompt"
+        marker_sha = hashlib.sha256(content).hexdigest()
+        blob_id = uuid4()
+        run_id = uuid4()
+
+        # The run is owned by ``owner_session``.
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(spec=RunRecord, status="running", session_id=owner_session))
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+
+        if case == "missing":
+            # get_blob raises for a genuinely-missing blob (the control surface).
+            async def get_blob(_blob_id: UUID) -> Any:
+                raise BlobNotFoundError(str(_blob_id))
+
+            blob_service = MagicMock(spec=object)
+            blob_service.get_blob = AsyncMock(side_effect=get_blob)
+        else:
+            blob_record = MagicMock(spec=object)
+            blob_record.session_id = other_session  # owned by a DIFFERENT session
+            blob_record.status = "ready"
+            blob_record.mime_type = "text/plain"
+            blob_record.size_bytes = len(content)
+            blob_record.content_hash = marker_sha if case == "cross_session_ready_hash_match" else "b" * 64
+            blob_service = MagicMock(spec=object)
+            blob_service.get_blob = AsyncMock(return_value=blob_record)
+
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=BlobFinalizationResult(finalized=(), errors=()))
+        cast(Any, service)._blob_service = blob_service
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {marker_sha}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(BlobNotFoundError):
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        # No metadata of the cross-session blob is ever consumed: the run never
+        # links or reads it, and never records an inline resolution.
+        blob_service.link_blob_to_run.assert_not_awaited()
+        blob_service.read_blob_content.assert_not_awaited()
+        mock_session_service.record_blob_inline_resolutions.assert_not_called()
+
 
 class TestWebRuntimeConfigLoading:
     """Web execution rejects file-backed config options before runtime graph construction."""
@@ -1362,10 +1586,11 @@ class TestWebRuntimeConfigLoading:
     ) -> None:
         del mock_payload_cls, mock_landscape_cls
         pipeline_yaml = """
-source:
-  plugin: csv
-  on_success: transform_in
-  options: {}
+sources:
+  source:
+    plugin: csv
+    on_success: transform_in
+    options: {}
 transforms:
   - name: classify
     plugin: llm
@@ -4153,6 +4378,144 @@ class TestSinkPathRestriction:
         assert isinstance(run_id, UUID)
 
 
+class TestTransformProviderConfigPathRestriction:
+    """Nested transform provider_config persist_directory must be confined to
+    the allowed output directories.
+
+    RAG retrieval transforms carry a local Chroma persist_directory under
+    options.provider_config. Without this, a client can set it to an arbitrary
+    absolute or ../ path and /execute will read/write Chroma files there —
+    escaping the data_dir sandbox.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with provider_config.persist_directory outside data_dir/outputs must be rejected."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/etc/cron.d/backdoor"},
+                },
+            }
+        ]
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_traversal_rejected(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with ../ traversal in provider_config.persist_directory must be rejected."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/../../etc/secret"},
+                },
+            }
+        ]
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_transform_persist_directory_under_outputs_accepted(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform with provider_config.persist_directory under data_dir/outputs is allowed."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "chroma",
+                    "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/chroma"},
+                },
+            }
+        ]
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+
+    @pytest.mark.asyncio
+    async def test_non_rag_transform_without_provider_config_passes(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Transform without provider_config (non-RAG) skips the nested check cleanly."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "vt",
+                "node_type": "transform",
+                "plugin": "value_transform",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {"some_field": "value"},
+            }
+        ]
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+
+
 # ── Transform Framing Restriction ─────────────────────────────────────
 
 
@@ -4497,6 +4860,131 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
             await service.execute(session_id=uuid4())
 
         assert excinfo.value.placeholders == (("rate_node", "cool"),)
+        mock_session_service.create_run.assert_not_awaited()
+
+    @staticmethod
+    def _set_drifted_invented_source_state(
+        mock_session_service: MagicMock,
+        *,
+        node_id: str = "rate_node",
+    ) -> None:
+        """LLM-authored source whose content_hash drifted after its review.
+
+        The invented_source requirement is RESOLVED, but the accepted artifact
+        hash no longer matches the current source content_hash. This is a
+        readiness blocker — it must surface as a structured interpretation
+        review (UnresolvedInterpretationPlaceholderError -> HTTP 422), NOT as a
+        bare ValueError that the route layer mis-maps to a 404. The transform
+        node carries no pending interpretation so the source drift is the only
+        site (elspeth-5a94855935).
+        """
+        from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "json",
+            "on_success": "rate_in",
+            "on_validation_failure": "discard",
+            "options": {
+                "path": "blobs/rows.json",
+                "format": "json",
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "b" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        }
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rate_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "prompt_template": "Rate the rows.",
+                    "model": "test-model",
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        # Both node-level reviews are pre-resolved so the source
+                        # drift is the ONLY pending site. Pre-fix this means
+                        # materialize reaches _materialize_source_for_execution
+                        # and raises a bare ValueError (the defect), rather than
+                        # short-circuiting on a node site.
+                        {
+                            "id": f"model_choice_review:{node_id}",
+                            "kind": "llm_model_choice",
+                            "user_term": f"llm_model_choice:{node_id}",
+                            "status": "resolved",
+                            "draft": "test-model",
+                            "event_id": "model-choice-accepted",
+                            "accepted_value": "test-model",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("test-model"),
+                        },
+                        {
+                            "id": f"prompt_template_review:{node_id}",
+                            "kind": "llm_prompt_template",
+                            "user_term": f"llm_prompt_template:{node_id}",
+                            "status": "resolved",
+                            "draft": "Rate the rows.",
+                            "event_id": "prompt-template-accepted",
+                            "accepted_value": "Rate the rows.",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("Rate the rows."),
+                        },
+                    ],
+                },
+            }
+        ]
+        state.edges = None
+        state.outputs = [
+            {
+                "name": "results",
+                "plugin": "json",
+                "options": {"path": "outputs/scored.json", "format": "json"},
+                "on_write_failure": "discard",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_drifted_invented_source_as_pending_review(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """elspeth-5a94855935: a resolved invented_source whose content_hash
+        drifted after review is rejected with the same contract as any other
+        pending interpretation review (typed error -> HTTP 422), NOT a bare
+        ValueError that the route layer mis-maps to a 404."""
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        self._set_drifted_invented_source_state(mock_session_service)
+
+        with patch.object(service, "_run_pipeline"), pytest.raises(UnresolvedInterpretationPlaceholderError) as excinfo:
+            await service.execute(session_id=uuid4())
+
+        source_sites = [s for s in excinfo.value.sites if s.component_type == "source"]
+        assert len(source_sites) == 1
+        assert source_sites[0].kind.value == "invented_source"
+        assert source_sites[0].component_id == "source"
         mock_session_service.create_run.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -5247,6 +5735,72 @@ class TestResolveYamlPaths:
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "/srv/data/output/results.csv" in result
 
+    def test_sink_persist_directory_relative_path_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "source:\n"
+            "  plugin: csv\n"
+            "  options:\n"
+            "    path: /abs/in.csv\n"
+            "sinks:\n"
+            "  chroma:\n"
+            "    plugin: chroma_sink\n"
+            "    options:\n"
+            "      mode: persistent\n"
+            "      persist_directory: outputs/chroma-store\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-store" in result
+
+    def test_transform_provider_persist_directory_relative_path_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "source:\n"
+            "  plugin: csv\n"
+            "  options:\n"
+            "    path: /abs/in.csv\n"
+            "transforms:\n"
+            "  - name: rag\n"
+            "    plugin: rag_retrieval\n"
+            "    options:\n"
+            "      provider: chroma\n"
+            "      provider_config:\n"
+            "        persist_directory: outputs/chroma-index\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-index" in result
+
+    def test_transform_provider_persist_directory_absolute_path_unchanged(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "transforms:\n"
+            "  - name: rag\n"
+            "    plugin: rag_retrieval\n"
+            "    options:\n"
+            "      provider: chroma\n"
+            "      provider_config:\n"
+            "        persist_directory: /srv/data/outputs/chroma-index\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/outputs/chroma-index" in result
+
+    def test_non_rag_transform_without_provider_config_is_noop(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "transforms:\n  - name: vt\n    plugin: value_transform\n    options:\n      some_field: value\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "plugin: value_transform" in result
+
+    def test_sink_without_options_is_noop(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = "sinks:\n  primary:\n    plugin: csv\n"
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "plugin: csv" in result
+
     def test_non_string_input_raises_type_error(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
 
@@ -5254,11 +5808,18 @@ class TestResolveYamlPaths:
             _resolve_yaml_paths(123, "/srv/data")  # type: ignore[arg-type]
 
     def test_non_dict_yaml_raises_type_error(self) -> None:
-        """YAML that parses to a scalar (not a dict) is a generator bug."""
-        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+        """YAML that parses to a scalar (not a dict) is a generator bug.
+
+        Also the bound raising test for the @trust_boundary on
+        resolve_runtime_yaml_paths (source_param='pipeline_yaml'): the malformed
+        Tier-3 input is passed positionally as pipeline_yaml and the boundary
+        rejects it with TypeError. Imported unaliased so the trust_boundary.tests
+        rule matches the call to the decorated symbol.
+        """
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths
 
         with pytest.raises(TypeError, match="non-dict top-level"):
-            _resolve_yaml_paths("just a string", "/srv/data")
+            resolve_runtime_yaml_paths("just a string", "/srv/data")
 
     def test_no_source_or_sinks_is_noop(self) -> None:
         """YAML with no source/sinks passes through without error."""

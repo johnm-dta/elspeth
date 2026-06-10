@@ -502,10 +502,10 @@ class TestGenerateYaml:
         )
         parsed = yaml.safe_load(generate_yaml(state))
 
-        assert "blob_ref" not in parsed["source"]["options"]
-        assert "mode" not in parsed["source"]["options"]
-        assert parsed["source"]["options"]["path"] == "/data/input.txt"
-        assert parsed["source"]["options"]["column"] == "line"
+        assert "blob_ref" not in parsed["sources"]["source"]["options"]
+        assert "mode" not in parsed["sources"]["source"]["options"]
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["sources"]["source"]["options"]["column"] == "line"
 
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
@@ -527,7 +527,7 @@ class TestGenerateYaml:
         )
         parsed = yaml.safe_load(generate_yaml(state))
 
-        assert parsed["source"]["options"]["mode"] == "observed"
+        assert parsed["sources"]["source"]["options"]["mode"] == "observed"
 
     def test_on_error_emitted_when_set(self) -> None:
         state = CompositionState(

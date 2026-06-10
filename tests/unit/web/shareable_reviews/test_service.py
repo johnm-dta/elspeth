@@ -586,7 +586,9 @@ async def test_get_shareable_link_remints_with_stable_digest(
     state_record,
 ):
     """Two get_shareable_link calls on an unchanged state yield identical digests
-    but different token strings (different nonce each call)."""
+    but different token strings (different nonce each call). Re-minting writes
+    no new audit rows: the single mark_ready_for_review row remains the only
+    share decision on record."""
     snapshot = _readiness_snapshot(session_record.id)
     service, *_ = _build_service(
         engine=session_engine_with_row,
@@ -615,8 +617,10 @@ async def test_get_shareable_link_remints_with_stable_digest(
             .order_by(composer_completion_events_table.c.created_at)
         ).all()
 
-    assert [row.payload_digest for row in rows] == [marked.payload_digest, r1.payload_digest, r2.payload_digest]
-    assert rows[-1].expires_at.replace(tzinfo=UTC) == r2.expires_at
+    assert [row.payload_digest for row in rows] == [marked.payload_digest]
+    assert rows[0].payload_digest == r1.payload_digest
+    assert rows[0].payload_digest == r2.payload_digest
+    assert rows[0].expires_at.replace(tzinfo=UTC) == marked.expires_at
 
 
 @pytest.mark.asyncio

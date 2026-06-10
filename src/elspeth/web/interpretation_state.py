@@ -536,7 +536,14 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
                 kind=InterpretationKind.INVENTED_SOURCE,
             ),
         )
-    if requirement["status"] == "resolved":
+    # A resolved invented_source is clean ONLY while its accepted artifact still
+    # matches the current source content_hash. Resolved-but-drifted (the source
+    # content_hash changed after the review was accepted) falls through to a
+    # pending review site — the single source of truth for /validate and
+    # /execute — rather than letting the downstream
+    # _materialize_source_for_execution drift guard raise a bare ValueError that
+    # the route layer mis-maps to a 404/500.
+    if requirement["status"] == "resolved" and requirement["accepted_artifact_hash"] == metadata["content_hash"]:
         return ()
     return (
         InterpretationReviewSite(

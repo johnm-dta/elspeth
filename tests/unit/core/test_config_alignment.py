@@ -300,9 +300,9 @@ class TestCheckpointSettingsAlignment:
         db = make_landscape_db()
         try:
             orchestrator = Orchestrator(db, checkpoint_config=config)
-            assert orchestrator._checkpoint_config is config
-            assert orchestrator._checkpoint_config.enabled is True
-            assert orchestrator._checkpoint_config.frequency == 1  # every_row -> 1
+            assert orchestrator._checkpoints._checkpoint_config is config
+            assert orchestrator._checkpoints._checkpoint_config.enabled is True
+            assert orchestrator._checkpoints._checkpoint_config.frequency == 1  # every_row -> 1
         finally:
             db.close()
 

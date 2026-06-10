@@ -278,7 +278,7 @@ class TestResumeGuardrails:
 
         with (
             patch(
-                "elspeth.engine.orchestrator.core.build_runtime_val_manifest",
+                "elspeth.engine.orchestrator.resume.build_runtime_val_manifest",
                 return_value={
                     "declaration_contracts": [{"name": "drifted"}],
                     "expected_contract_sites": {"drifted": ["boundary_check"]},

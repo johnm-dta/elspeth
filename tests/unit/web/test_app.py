@@ -27,6 +27,7 @@ from elspeth.web.app import (
     lifespan,
 )
 from elspeth.web.auth.audit import AuthAuditRecorder
+from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -571,6 +572,7 @@ class TestOidcDiscoveryStartup:
         return _settings(
             tmp_path,
             auth_provider="oidc",
+            composer_boot_probe_enabled=False,
             oidc_issuer="https://issuer.example.com",
             oidc_audience="test-audience",
             oidc_client_id="test-client-id",
@@ -615,6 +617,156 @@ class TestLifespanShutdown:
     """Shutdown must await the execution-service drain path."""
 
     @pytest.mark.asyncio
+    async def test_lifespan_aborts_on_composer_config_rejection(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+
+        async def _reject_probe(**_kwargs: object) -> bool:
+            raise ComposerBootConfigError("composer sampling rejected")
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _reject_probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+        with (
+            patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])),
+            pytest.raises(ComposerBootConfigError, match="composer sampling rejected"),
+        ):
+            async with lifespan(app):
+                pass
+
+        counter.add.assert_called_once()
+        _, attributes = counter.add.call_args.args
+        assert attributes["probe_status"] == "rejected"
+        assert attributes["probed_model"] == "gpt-5.5"
+        latency.record.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lifespan_skips_composer_probe_when_disabled(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
+        called = False
+
+        async def _probe(**_kwargs: object) -> bool:
+            nonlocal called
+            called = True
+            return True
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _probe)
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+
+        assert called is False
+
+    @pytest.mark.asyncio
+    async def test_lifespan_emits_composer_boot_config_attributes(self, monkeypatch, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_boot_probe_enabled=True,
+                composer_temperature=0.0,
+                composer_seed=42,
+                composer_advisor_model="anthropic/claude-sonnet-4-6",
+            )
+        )
+        probed_models: list[str] = []
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+
+        async def _probe(**kwargs: object) -> bool:
+            probed_models.append(str(kwargs["model"]))
+            return True
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+
+        assert probed_models == ["gpt-5.5", "anthropic/claude-sonnet-4-6"]
+        assert counter.add.call_count == 2
+        assert latency.record.call_count == 2
+        counter_attributes = [call.args[1] for call in counter.add.call_args_list]
+        assert [attrs["probed_model"] for attrs in counter_attributes] == probed_models
+        for attributes in counter_attributes:
+            assert attributes["composer_model"] == "gpt-5.5"
+            assert attributes["composer_temperature"] == "0.0"
+            assert attributes["composer_seed"] == "42"
+            assert attributes["composer_advisor_model"] == "anthropic/claude-sonnet-4-6"
+            assert attributes["probe_status"] == "success"
+        for call in latency.record.call_args_list:
+            value, attributes = call.args
+            assert type(value) is int
+            assert attributes["probe_status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_lifespan_records_transient_failure_when_composer_probe_times_out(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+        cancelled = False
+
+        async def _hanging_probe(**_kwargs: object) -> bool:
+            nonlocal cancelled
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled = True
+            return True
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _hanging_probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        async def _enter_and_exit_lifespan() -> None:
+            async with lifespan(app):
+                pass
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            await asyncio.wait_for(_enter_and_exit_lifespan(), timeout=1.0)
+
+        # Advisor is mandatory, so both the primary and advisor models are
+        # probed. Both hang and time out as transient_failure; the loop does
+        # not break on a transient failure.
+        assert counter.add.call_count == 2
+        probed = [call.args[1]["probed_model"] for call in counter.add.call_args_list]
+        assert probed[0] == "gpt-5.5"
+        for call in counter.add.call_args_list:
+            _, attributes = call.args
+            assert attributes["probe_status"] == "transient_failure"
+        assert latency.record.call_count == 2
+        assert cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_lifespan_records_local_error_when_composer_probe_raises_programmer_error(self, monkeypatch, tmp_path) -> None:
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=True))
+        counter = MagicMock(spec=["add"])
+        latency = MagicMock(spec=["record"])
+
+        async def _buggy_probe(**_kwargs: object) -> bool:
+            raise TypeError("signature drift")
+
+        monkeypatch.setattr("elspeth.web.composer.boot_probe.probe_composer_config", _buggy_probe)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_COUNTER", counter)
+        monkeypatch.setattr("elspeth.web.app._COMPOSER_BOOT_CONFIG_PROBE_LATENCY", latency)
+
+        with (
+            patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])),
+            pytest.raises(TypeError, match="signature drift"),
+        ):
+            async with lifespan(app):
+                pass
+
+        counter.add.assert_called_once()
+        _, attributes = counter.add.call_args.args
+        assert attributes["probe_status"] == "local_error"
+        assert attributes["probed_model"] == "gpt-5.5"
+        latency.record.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_lifespan_propagates_catalog_client_context_failure(self, tmp_path) -> None:
         """Outer HTTP-client construction failures are startup failures, not fallback decisions."""
         app = create_app(_settings(tmp_path))
@@ -628,8 +780,8 @@ class TestLifespanShutdown:
 
     @pytest.mark.asyncio
     async def test_lifespan_awaits_execution_service_shutdown(self, tmp_path) -> None:
-        app = create_app(_settings(tmp_path))
-        fake_execution_service = MagicMock()
+        app = create_app(_settings(tmp_path, composer_boot_probe_enabled=False))
+        fake_execution_service = MagicMock(spec=["get_live_run_ids", "set_openrouter_catalog_snapshot", "shutdown"])
         fake_execution_service.get_live_run_ids.return_value = frozenset()
         fake_execution_service.shutdown = AsyncMock()
 

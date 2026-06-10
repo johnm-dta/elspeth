@@ -1,9 +1,9 @@
-# ELSPETH — Executive Summary (RC-5.2)
+# ELSPETH — Executive Summary (RC-5.3)
 
 > **DRAFT — awaiting review (20 May 2026).** Once approved for release, this banner is replaced by the provenance footer at the foot of the document; until then, claims about assurance status, compliance posture, and residual risk remain subject to revision.
 
 **Document date:** 20 May 2026
-**Release covered:** RC-5.2
+**Release covered:** RC-5.3
 **Audience:** Public-service executives, programme sponsors, assurance and risk staff
 **Register:** Australian Public Service / institutional
 **Prepared by:** John Morrissey, Digital Transformation Agency
@@ -12,7 +12,7 @@
 
 ## Document scope
 
-This brief is a capability and assurance summary for the ELSPETH platform at release RC-5.2. It is intended to support an evaluator considering whether the platform is suitable to assess for pilot adoption.
+This brief is a capability and assurance summary for the ELSPETH platform at release RC-5.3. It is intended to support an evaluator considering whether the platform is suitable to assess for pilot adoption.
 
 This document is not:
 
@@ -91,7 +91,7 @@ The mapping above identifies evidence that is already present. It is not a claim
 
 ## Deployment readiness
 
-| Dimension | State at RC-5.2 |
+| Dimension | State at RC-5.3 |
 |-----------|----------------|
 | Pilot deployment | RC-3 deployed in orchestration-only mode under the interim ATO; pilot evaluation processed approximately 2,200 rows, each producing a complete audit record. Full pipeline platform not yet deployed in any Australian government agency. |
 | Air-gapped deployment | Supported (Local auth provider, no required external services) |
@@ -105,7 +105,7 @@ The mapping above identifies evidence that is already present. It is not a claim
 
 ## Residual risk
 
-The following risks are present at RC-5.2. Mitigations in place are noted where they exist; residual exposure is described against each item.
+The following risks are present at RC-5.3. Mitigations in place are noted where they exist; residual exposure is described against each item.
 
 1. **Single-contributor continuity.** The platform has been developed by a single DTA staff member. The departure or unavailability of that contributor would suspend further development of the platform. Mitigations in place include architectural-decision records covering each load-bearing design choice, a contracts subsystem enforced by automated static analysis (so that future engineers cannot silently breach the trust-tier model), an operational runbook set covering resume, routing investigation, incident response, database maintenance, backup, Key Vault configuration, and Ansible-based Ubuntu deployment, and a test suite of approximately 14,100 cases that functions as an executable specification. Mitigations not yet in place include the onboarding of a second engineer, a documented succession arrangement, and a multi-party commitment to runbook and architecture-document currency. An adopting agency should treat continuity planning as a precondition for pilot adoption. Reasonable approaches include contributing engineering capacity, negotiating a documented succession arrangement, or scoping the engagement as a defined deliverable rather than as an ongoing capability.
 2. **Independent assurance is scope-limited.** The orchestration component holds an interim ATO. The rest of the platform — audit-integrity, trust-tier, and access-control claims outside the orchestration scope — has been internally tested but not independently assessed by an IRAP-registered assessor or equivalent. An agency adopting beyond the orchestration scope under a high-assurance obligation should factor an independent assessment into its adoption plan.
@@ -123,7 +123,9 @@ The following matters are not addressed by this document or its companions, and 
 - the shape of an agency-scale pilot beyond the orchestration-only scope already exercised, including the proposed use case, the participating agency, the data involved, and the assurance threshold to be met;
 - the contingency arrangements for the single-contributor risk identified above, including whether the platform's continuing development is expected to be undertaken by the Digital Transformation Agency, by the adopting agency, or by both.
 
-The companion documents [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (cumulative engineering output) and [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) (delivery cadence) record the engineering provenance behind the capability claims in this brief. They are intended for engineering reviewers and are not required reading for the matters listed above; they are available for an engineering team supporting an agency's evaluation. The contractual guarantees the platform makes are recorded in [`guarantees.md`](guarantees.md), which documents the audit, lineage, and trust-model assurances at RC-5.2.
+The companion documents [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (cumulative engineering output) and [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) (delivery cadence) record the engineering provenance behind the capability claims in this brief. They are intended for engineering reviewers and are not required reading for the matters listed above; they are available for an engineering team supporting an agency's evaluation. The contractual guarantees the platform makes are recorded in [`guarantees.md`](guarantees.md), which documents the audit, lineage, and trust-model assurances (RC-3 contract
+language with the RC-5.1/RC-5.2 multi-user, authentication, secret-reference, and
+composer-authoring additions; RC-5.3 introduces no new guarantees).
 
 ---
 

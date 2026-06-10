@@ -968,7 +968,7 @@ class TestStage1Validation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("path_a", "path_b"),
                 branches=None,
                 policy=None,
@@ -2213,7 +2213,7 @@ class TestStage1Validation:
             on_error=None,
             options={},
             condition="row['score'] >= 0.5",
-            routes={"high": "main", "low": "errors"},
+            routes={"true": "main", "false": "errors"},
             fork_to=None,
             branches=None,
             policy=None,
@@ -2237,6 +2237,60 @@ class TestStage1Validation:
         assert result.is_valid, result.errors
         assert result.warnings == ()
         assert result.suggestions == ()
+
+    def _gate_pipeline(self, *, condition: str, routes: dict[str, str]) -> CompositionState:
+        """Minimal source -> gate -> sink pipeline for route-parity checks."""
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="g1"))
+        state = state.with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="g1",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition=condition,
+                routes=routes,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        state = state.with_edge(self._make_edge("e0", "source", "g1"))
+        return state
+
+    def test_gate_boolean_condition_custom_labels_invalid(self) -> None:
+        """Boolean gate condition with non-true/false labels is rejected (parity with GateSettings).
+
+        Regression for elspeth-08e17b9253: composer validate() previously
+        green-lit a shape runtime GateSettings.validate_boolean_routes rejects.
+        """
+        result = self._gate_pipeline(condition="row['x'] > 0", routes={"high": "main", "low": "main"}).validate()
+        assert result.is_valid is False
+        assert any("boolean condition" in e.message and e.severity == "high" for e in result.errors), [e.message for e in result.errors]
+
+    def test_gate_numeric_condition_invalid(self) -> None:
+        """Provably-numeric gate condition can never be a route label; rejected for any labels."""
+        result = self._gate_pipeline(condition="row['x'] + 1", routes={"a": "main"}).validate()
+        assert result.is_valid is False
+        assert any("numeric value" in e.message and e.severity == "high" for e in result.errors), [e.message for e in result.errors]
+
+    def test_gate_boolean_condition_true_false_labels_valid(self) -> None:
+        """Boolean gate condition with exactly {true,false} labels stays valid."""
+        result = self._gate_pipeline(condition="row['x'] > 0", routes={"true": "main", "false": "main"}).validate()
+        assert result.is_valid is True, [e.message for e in result.errors]
+
+    def test_gate_string_route_condition_custom_labels_valid(self) -> None:
+        """POSITIVE CONTROL: a string-returning condition with custom labels is NOT over-rejected."""
+        result = self._gate_pipeline(
+            condition='"high" if row["x"] > 0 else "low"',
+            routes={"high": "main", "low": "main"},
+        ).validate()
+        assert result.is_valid is True, [e.message for e in result.errors]
 
 
 class TestWebScrapeAbuseContactValidation:
@@ -3602,7 +3656,7 @@ class TestSchemaContractValidation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("branch_a", "branch_b"),
                 branches=None,
                 policy=None,
@@ -3656,7 +3710,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"high": "main", "low": "errors"},
+                {"true": "main", "false": "errors"},
             )
         )
         state = state.with_node(
@@ -3692,7 +3746,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"a": "path_a", "b": "path_b"},
+                {"true": "path_a", "false": "path_b"},
             )
         )
         state = state.with_node(
@@ -3744,7 +3798,7 @@ class TestSchemaContractValidation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("path_a", "path_b"),
                 branches=None,
                 policy=None,
@@ -3929,7 +3983,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"high": "sink_a", "low": "sink_b"},
+                {"true": "sink_a", "false": "sink_b"},
             )
         )
         state = state.with_output(
@@ -3980,7 +4034,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"a": "path_a", "b": "path_b"},
+                {"true": "path_a", "false": "path_b"},
             )
         )
         state = state.with_node(

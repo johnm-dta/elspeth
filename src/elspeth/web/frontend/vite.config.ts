@@ -17,7 +17,9 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts", "./src/test/a11y/setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
+    // src/** for app unit tests, plus the e2e harness's pure logic (the
+    // outcome classifier) which deserves fast unit coverage without Playwright.
+    include: ["src/**/*.test.{ts,tsx}", "tests/e2e/harness/**/*.test.ts"],
     css: false,
   },
   server: {

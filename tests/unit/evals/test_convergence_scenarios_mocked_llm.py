@@ -43,18 +43,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
 from evals.lib.composer_rgr_score import score
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.web.blobs.service import content_hash as _content_hash
-from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -371,23 +372,52 @@ class TestCsvClassifierScenario:
                 },
             ],
         )
-        # Turn 4: claim completion (clean)
+        # Turn 4: claim completion → the schema is fixed, but the LLM node's
+        # model (anthropic/claude-3.5-sonnet) is now an ORPHANED llm_model_choice
+        # interpretation site (no matching pending review event). The fail-closed
+        # orphan gate (commit 33f05f186) injects the second forced repair, naming
+        # the orphaned handoff and instructing request_interpretation_review.
         turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
+        # Turn 5 (surfacing repair): the model surfaces the llm_model_choice review
+        # via request_interpretation_review, creating a pending event. This turns
+        # the orphan into a RESOLVABLE pending handoff. (The sibling
+        # llm_prompt_template review is backend-auto-surfaced at finalization, so
+        # the model only has to surface the model_choice one here.)
+        turn_surface_model_choice = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_model_choice_review",
+                    "name": "request_interpretation_review",
+                    "arguments": {
+                        "affected_node_id": "classifier",
+                        "kind": "llm_model_choice",
+                        "user_term": "llm_model_choice:classifier",
+                        "llm_draft": "anthropic/claude-3.5-sonnet",
+                    },
+                },
+            ],
+        )
 
-        passing_preflight = _passing_preflight()
         empty = _empty_state()
-        with (
-            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
-            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
-        ):
-            # Turn 5 (completion): the LLM node carries an authored prompt_template,
-            # which now triggers a mandatory llm_prompt_template interpretation review
-            # ("surface every authored LLM decision through interpretation review").
-            # The compose loop re-prompts for that unresolved review (CALL3 and CALL5
-            # are the assumption-review re-prompts) on top of the schema-mode repair,
-            # so this scenario converges to a valid (GREEN) structural state in
-            # 5 LLM calls / 2 forced repair turns rather than the pre-review 4 / 1.
-            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn4]
+        # NOTE: _runtime_preflight is deliberately NOT patched. An always-pass
+        # patch would mask the truth that a model-bearing pipeline ends compose()
+        # at is_valid=false (reviews surfaced, pending out-of-loop resolution).
+        # The REAL preflight is what makes is_valid honest here.
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            # Six LLM calls / two forced repair turns (Branch B terminal state):
+            #   1. set_pipeline (fixed schema omitting four observed columns)
+            #   2. claim completion → REPAIR 1 (preflight: schema omits columns)
+            #   3. patch_source_options → schema=observed
+            #   4. claim completion → REPAIR 2 (orphan gate: llm_model_choice on
+            #      'classifier' has no pending review event)
+            #   5. request_interpretation_review (llm_model_choice) → pending event
+            #   6. claim completion → CLEAN finalize. Both interpretation reviews
+            #      (llm_prompt_template auto-surfaced + llm_model_choice surfaced)
+            #      are now RESOLVABLE pending handoffs, zero orphans. The terminal
+            #      preflight is invalid-but-pending, so the finalize path SKIPS the
+            #      "runtime preflight failed" suffix → clean message, is_valid=false.
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice, turn4]
             result = await service.compose(
                 "Classify these tickets",
                 [],
@@ -396,12 +426,33 @@ class TestCsvClassifierScenario:
                 user_id="test-user",
             )
 
-        # Convergence behaviour: two forced repair turns (schema-mode + the
-        # mandatory interpretation-review re-prompt for the authored prompt_template).
-        assert mock_llm.call_count == 5, f"expected 5 LLM calls, got {mock_llm.call_count}"
+        # Convergence behaviour: two forced repair turns (schema-mode repair +
+        # the orphan-gate repair that surfaces the llm_model_choice review).
+        assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
         assert result.repair_turns_used == 2, f"expected 2 repair turns, got {result.repair_turns_used}"
 
-        # Score against the scenario file.
+        # The terminal state is the honest Branch-B converged shape: a model-
+        # bearing pipeline whose mandatory reviews are SURFACED but not yet
+        # resolved (resolution is the out-of-loop resolve_interpretation_event
+        # API). is_valid is false (not-yet-runnable), the blocking errors are the
+        # resolvable interpretation_review_pending handoff (NOT the orphaned
+        # variant), and the terminal message carries no build-failure sentinel.
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert all(err.error_code == "interpretation_review_pending" for err in result.runtime_preflight.errors), (
+            f"expected only pending (not orphaned) handoffs; got {[e.error_code for e in result.runtime_preflight.errors]}"
+        )
+        assert "runtime preflight failed" not in (result.message or "").lower()
+        # Both required reviews were surfaced (zero orphans): the auto-surfaced
+        # prompt_template review and the model-surfaced model_choice review.
+        pending_events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+        pending_kinds = {event.kind for event in pending_events}
+        assert InterpretationKind.LLM_MODEL_CHOICE in pending_kinds
+        assert InterpretationKind.LLM_PROMPT_TEMPLATE in pending_kinds
+
+        # Score against the scenario file. GREEN now means: structurally correct,
+        # both reviews surfaced (zero orphans, guarded by the retained sentinel),
+        # within the repair budget — with is_valid reflecting pending-resolution.
         scenario = _load_scenario("csv-classifier")
         assistant_messages = [{"role": "assistant", "content": result.message or ""}]
         state_dict = _state_dict_for_scoring(result)
@@ -896,4 +947,165 @@ class TestUrlTextSmokeScenario:
 
         assert verdict["verdict"] == "GREEN", (
             f"url-text-smoke did not score GREEN. red={verdict['red_reasons']} amber={verdict['amber_reasons']}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Fix 2 proof: preflight-invalid -> repair-continue (NOT a scenario contract)
+#
+# Unlike the four scenario tests above, this test does NOT patch
+# ``_runtime_preflight`` to always pass. It makes the deterministic runtime
+# preflight CONTENT-AWARE — invalid while the json sink path is a placeholder,
+# valid once the model fixes it — so the compose loop actually reaches the
+# preflight-invalid branch (no_tool_finalize.py:192) that Fix 2 hoists from a
+# terminate-now into a repair-continue.
+#
+# The pipeline deliberately fires ONLY the preflight gate:
+#   * csv source with schema mode=observed -> compute_proof_diagnostics finds
+#     no blocking entry, so _attempt_proof_repair returns False (proof gate
+#     does not fire even though _proof_repair_is_applicable is True).
+#   * no llm node -> no llm_prompt_template / llm_model_choice interpretation
+#     review is auto-staged, so the orphan gate does not fire.
+# The advisor end-gate is stubbed CLEAN per-instance (the canonical override
+# from tests/unit/web/composer/_helpers.py) so it cannot mask the preflight
+# path by failing closed on a missing API key.
+#
+# TDD signal (the asymmetry that uniquely exercises Fix 2):
+#   * PRE-Fix-2 (terminate-now): turn2's completion claim hits the
+#     preflight-invalid terminal branch -> call_count==2, repair_turns_used==0,
+#     is_valid False.
+#   * POST-Fix-2 (repair-continue): turn2 injects a repair message and
+#     continues; turn3 fixes the sink path; turn4's completion claim finalizes
+#     a now-valid pipeline -> call_count==4, repair_turns_used==1, is_valid True.
+# --------------------------------------------------------------------------
+
+_BROKEN_SINK_PATH = "outputs/__placeholder__.jsonl"
+_FIXED_SINK_PATH = "outputs/summary.jsonl"
+
+
+def _preflight_invalid_for_placeholder_sink() -> ValidationResult:
+    """A real (non-handoff) preflight failure attributed to the json sink."""
+    return ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id="summary",
+                component_type="sink",
+                message=(f"Output path {_BROKEN_SINK_PATH!r} is a placeholder and cannot be written."),
+                suggestion="Set the json sink path to a real workspace-relative path under outputs/.",
+                error_code="invalid_output_path",
+            )
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=True,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[],
+        ),
+    )
+
+
+def _placeholder_sink_pipeline(blob_id: str, *, sink_path: str) -> dict[str, Any]:
+    """csv(observed) -> json sink. No llm node, no fixed-schema hazard."""
+    return {
+        "source": {
+            "plugin": "csv",
+            "blob_id": blob_id,
+            "on_success": "rows",
+            "options": {"schema": {"mode": "observed"}},
+            "on_validation_failure": "discard",
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "rows",
+                "plugin": "json",
+                "options": {
+                    "path": sink_path,
+                    "format": "jsonl",
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {"name": "preflight-repair-continue"},
+    }
+
+
+class TestPreflightRepairContinue:
+    """Fix 2: a preflight-invalid finalize becomes a repair-continue."""
+
+    @pytest.mark.asyncio
+    async def test_preflight_invalid_finalize_repairs_before_finalising(self, tmp_path: Path) -> None:
+        engine, session_id, sessions_service = _session_engine()
+        body = b"url\nhttps://example.gov.au\n"
+        blob_id = _seed_blob(
+            engine,
+            session_id,
+            body=body,
+            filename="urls.csv",
+            mime_type="text/csv",
+            storage_dir=tmp_path / "blobs" / session_id,
+        )
+
+        catalog = _real_catalog()
+        settings = _make_settings(tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+
+        # Turn 1: build a structurally valid pipeline whose sink path is a
+        # placeholder -> content-aware preflight is INVALID.
+        turn1 = _llm_response(
+            content=None,
+            tool_calls=[
+                {"id": "call_set", "name": "set_pipeline", "arguments": _placeholder_sink_pipeline(blob_id, sink_path=_BROKEN_SINK_PATH)}
+            ],
+        )
+        # Turn 2: claim completion -> preflight-invalid finalize.
+        turn2 = _llm_response(content="All set.", tool_calls=None)
+        # Turn 3: repair -> re-issue the pipeline with a real sink path.
+        turn3 = _llm_response(
+            content=None,
+            tool_calls=[
+                {"id": "call_fix", "name": "set_pipeline", "arguments": _placeholder_sink_pipeline(blob_id, sink_path=_FIXED_SINK_PATH)}
+            ],
+        )
+        # Turn 4: claim completion (now valid).
+        turn4 = _llm_response(content="Fixed the sink path and ready.", tool_calls=None)
+
+        def _content_aware_preflight(state: CompositionState, user_id: str | None = None) -> ValidationResult:
+            sink_path = state.outputs[0].options.get("path") if state.outputs else None
+            if sink_path == _BROKEN_SINK_PATH:
+                return _preflight_invalid_for_placeholder_sink()
+            return _passing_preflight()
+
+        empty = _empty_state()
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", side_effect=_content_aware_preflight),
+            patch.object(
+                service,
+                "_run_advisor_checkpoint",
+                new=AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")),
+            ),
+        ):
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4]
+            result = await service.compose(
+                "Fetch the URL and write a JSONL summary",
+                [],
+                empty,
+                session_id=session_id,
+                user_id="test-user",
+            )
+
+        # Post-Fix-2: the preflight-invalid finalize injected one repair turn,
+        # the model fixed the sink path, and finalisation succeeded on a valid
+        # pipeline.
+        assert mock_llm.call_count == 4, f"expected 4 LLM calls (repair-continue), got {mock_llm.call_count}"
+        assert result.repair_turns_used == 1, f"expected 1 preflight repair turn, got {result.repair_turns_used}"
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True, (
+            "expected the finalised pipeline to be preflight-valid"
         )

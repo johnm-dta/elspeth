@@ -50,7 +50,7 @@
   audience: "Engineering reviewers, UX reviewers, operational stakeholders",
   classification: default-classification,
   status: "Reference — current as of " + data.doc-date,
-  distribution: "Internal — Digital Transformation Agency only",
+  distribution: "Public evaluation release copy",
 )
 
 #outline(

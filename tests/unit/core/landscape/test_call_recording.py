@@ -36,7 +36,7 @@ def _setup_no_store(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFact
     factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
     register_test_node(factory.data_flow, run_id, "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
     register_test_node(factory.data_flow, run_id, "transform-1", plugin_name="transform")
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     state = factory.execution.begin_node_state("tok-1", "transform-1", run_id, 0, {"name": "test"}, state_id="state-1")
     return db, factory, state.state_id

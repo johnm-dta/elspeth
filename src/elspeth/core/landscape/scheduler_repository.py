@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -1917,6 +1917,71 @@ class TokenSchedulerRepository:
                 .all()
             )
         return frozenset(rows)
+
+    @staticmethod
+    def _unresolved_work_predicate() -> ColumnElement[bool]:
+        """Predicate for work that has not reached a durable sink handoff.
+
+        PENDING_SINK rows — and LEASED rows carrying a ``pending_sink_name``
+        (a pending sink re-claimed during resume recovery) — are excluded:
+        their producer work is durably complete and they are terminalized
+        only after sink durability via ``mark_pending_sink_terminal``.
+        """
+        return or_(
+            token_work_items_table.c.status.in_(
+                (
+                    TokenWorkStatus.READY.value,
+                    TokenWorkStatus.WAITING.value,
+                    TokenWorkStatus.BLOCKED.value,
+                )
+            ),
+            and_(
+                token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
+                token_work_items_table.c.pending_sink_name.is_(None),
+            ),
+        )
+
+    def count_unresolved_work(self, *, run_id: str) -> int:
+        """Count scheduler work not yet resolved into a durable sink handoff."""
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(self._unresolved_work_predicate())
+            ).scalar_one()
+        return int(result)
+
+    def summarize_unresolved_work(self, *, run_id: str) -> tuple[str, ...]:
+        """Summarize unresolved work grouped by status and blocking keys."""
+        with self._engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.queue_key,
+                        token_work_items_table.c.barrier_key,
+                        func.count(),
+                    )
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(self._unresolved_work_predicate())
+                    .group_by(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.queue_key,
+                        token_work_items_table.c.barrier_key,
+                    )
+                    .order_by(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.queue_key,
+                        token_work_items_table.c.barrier_key,
+                    )
+                )
+                .tuples()
+                .all()
+            )
+        return tuple(
+            f"status={status}, queue={queue_key}, barrier={barrier_key}, count={count}" for status, queue_key, barrier_key, count in rows
+        )
 
     def summarize_active_work(self, *, run_id: str) -> tuple[str, ...]:
         """Summarize active work grouped by status and blocking keys."""

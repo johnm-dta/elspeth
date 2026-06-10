@@ -152,6 +152,7 @@ class TestResumeFinalizesAsFailed:
 
         # Mock the checkpoint manager requirement
         orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
+        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
 
         # Create a mock resume_point
         resume_point = MagicMock(spec=ResumePoint)
@@ -198,11 +199,11 @@ class TestResumeFinalizesAsFailed:
 
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
         with (
-            patch.object(orch, "_process_resumed_rows", side_effect=RuntimeError("test failure")),
-            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
-            patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=MagicMock(spec=SchemaContract)),
+            patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=RuntimeError("test failure")),
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
+            patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", return_value=MagicMock(spec=SchemaContract)),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
-            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch._ceremony, "emit_telemetry"),
             pytest.raises(RuntimeError, match="test failure"),
         ):
             orch.resume(
@@ -230,7 +231,8 @@ class TestResumeFinalizesAsFailed:
     def test_resume_loop_drains_scheduler_work_before_replaying_rows(self) -> None:
         """Persisted scheduler work supersedes the old unprocessed-row replay path."""
         processor = MagicMock(spec=RowProcessor)
-        processor.has_scheduled_work.side_effect = [True, False]
+        processor.has_scheduled_work.return_value = True
+        processor.has_unresolved_scheduler_work.return_value = False
         processor.active_scheduled_row_ids.return_value = frozenset({"row-should-not-replay"})
         processor.drain_scheduled_work.return_value = [make_row_result({"value": 1}, sink_name="default")]
         processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work exists")
@@ -335,11 +337,12 @@ class TestResumeFinalizesAsFailed:
         source.on_success = "default"
         processor = MagicMock(spec=RowProcessor)
         processor.run_id = "run-with-blocked-work"
-        processor.has_scheduled_work.side_effect = [True, True]
+        processor.has_scheduled_work.return_value = True
+        processor.has_unresolved_scheduler_work.return_value = True
         processor.active_scheduled_row_ids.return_value = frozenset({"row-should-not-replay"})
         processor.drain_scheduled_work.return_value = []
         processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work remains")
-        processor.summarize_scheduled_work.return_value = ("BLOCKED count=1 node=join-results",)
+        processor.summarize_unresolved_scheduler_work.return_value = ("BLOCKED count=1 node=join-results",)
         config = PipelineConfig(
             sources={"source": source},
             transforms=(),
@@ -360,13 +363,13 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch("elspeth.engine.orchestrator.core.setup_resume_context", return_value=artifacts),
-            patch.object(orch, "_initialize_run_context", return_value=run_ctx),
-            patch("elspeth.engine.orchestrator.core.run_transform_runtime_preflights"),
-            patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
+            patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
+            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch("elspeth.engine.orchestrator.resume.run_transform_runtime_preflights"),
+            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after end-of-source flush") as exc_info,
         ):
-            orch._process_resumed_rows(
+            orch._resume_coordinator.process_resumed_rows(
                 MagicMock(spec=RecorderFactory),
                 "run-with-blocked-work",
                 config,
@@ -442,6 +445,7 @@ class TestResumeFinalizesAsFailed:
         """Replayed rows from different sources must keep their source-specific schema contract."""
         processor = MagicMock(spec=RowProcessor)
         processor.has_scheduled_work.return_value = False
+        processor.has_unresolved_scheduler_work.return_value = False
         processor.process_existing_row.return_value = []
         config = PipelineConfig(
             sources={"orders": _specced_source(), "refunds": _specced_source()},
@@ -552,11 +556,11 @@ class TestResumeFinalizesAsFailed:
             return iter((make_source_row({"refund_id": "r1"}),))
 
         with (
-            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
-            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
+            patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
+            patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
             pytest.raises(RuntimeError, match="boom after row persisted"),
         ):
-            orch._run_main_processing_loop(
+            orch._source_driver.run_main_processing_loop(
                 loop_ctx,
                 factory,
                 run_id="run-1",
@@ -623,12 +627,12 @@ class TestResumeFinalizesAsFailed:
             raise RuntimeError("boom during EOF flush")
 
         with (
-            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
-            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
-            patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
+            patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
+            patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
+            patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
             pytest.raises(RuntimeError, match="boom during EOF flush"),
         ):
-            orch._run_main_processing_loop(
+            orch._source_driver.run_main_processing_loop(
                 loop_ctx,
                 factory,
                 run_id="run-1",
@@ -693,11 +697,11 @@ class TestResumeFinalizesAsFailed:
             return iter((make_source_row({"refund_id": "r1"}, contract=refunds_contract),))
 
         with (
-            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
-            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
+            patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
+            patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
             pytest.raises(RuntimeError, match="boom after source contract persisted"),
         ):
-            orch._run_main_processing_loop(
+            orch._source_driver.run_main_processing_loop(
                 loop_ctx,
                 factory,
                 run_id="run-1",
@@ -724,8 +728,8 @@ class TestResumeFinalizesAsFailed:
         )
         processor = MagicMock(spec=RowProcessor)
         processor.run_id = "run-stuck-scheduler"
-        processor.has_scheduled_work.return_value = True
-        processor.summarize_scheduled_work.return_value = ("READY count=1 node=transform-normalize",)
+        processor.has_unresolved_scheduler_work.return_value = True
+        processor.summarize_unresolved_scheduler_work.return_value = ("READY count=1 node=transform-normalize",)
         run_ctx = SimpleNamespace(
             processor=processor,
             ctx=MagicMock(spec=PluginContext),
@@ -742,14 +746,14 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch.object(orch, "_register_graph_nodes_and_edges", return_value=artifacts),
-            patch.object(orch, "_initialize_run_context", return_value=run_ctx),
+            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
             patch("elspeth.engine.orchestrator.core.run_transform_runtime_preflights"),
             patch.object(
-                orch,
-                "_run_main_processing_loop",
+                orch._source_driver,
+                "run_main_processing_loop",
                 return_value=LoopResult(interrupted=False, start_time=0.0, phase_start=0.0, last_progress_time=0.0),
             ),
-            patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after final source flush") as exc_info,
         ):
             orch._execute_run(
@@ -768,6 +772,7 @@ class TestResumeFinalizesAsFailed:
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
+        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
         run_id = "run-multi-source-reconstruct"
         checkpoint = Checkpoint(
             checkpoint_id="cp-multi-source-reconstruct",
@@ -825,11 +830,11 @@ class TestResumeFinalizesAsFailed:
         refunds_schema = MagicMock(spec=SchemaContract, name="RefundsSchema")
 
         with (
-            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
-            patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", side_effect=[orders_schema, refunds_schema]),
+            patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", side_effect=[orders_schema, refunds_schema]),
         ):
-            state = orch._reconstruct_resume_state(resume_point, MockPayloadStore())
+            state = orch._resume_coordinator.reconstruct_resume_state(resume_point, MockPayloadStore())
 
         assert state.unprocessed_rows == (
             ResumedRow(
@@ -860,6 +865,7 @@ class TestResumeFinalizesAsFailed:
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
+        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
         run_id = "run-exhausted-source-reconstruct"
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-reconstruct",
@@ -898,11 +904,11 @@ class TestResumeFinalizesAsFailed:
         source_schema = MagicMock(spec=SchemaContract, name="PrimarySchema")
 
         with (
-            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
+            patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
-            patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=source_schema),
+            patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", return_value=source_schema),
         ):
-            state = orch._reconstruct_resume_state(resume_point, MockPayloadStore())
+            state = orch._resume_coordinator.reconstruct_resume_state(resume_point, MockPayloadStore())
 
         assert state.source_lifecycle_by_source == {NodeID("source-primary"): "exhausted"}
         assert state.schema_contracts_by_source == {NodeID("source-primary"): source_contract}
@@ -949,14 +955,16 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
-            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")),
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")
+            ),
             patch(
-                "elspeth.engine.orchestrator.core.derive_resume_terminal_status_from_audit",
+                "elspeth.engine.orchestrator.resume.derive_resume_terminal_status_from_audit",
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
-            patch.object(orch, "_emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -1072,10 +1080,12 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
-            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
-            patch.object(orch, "_emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")
+            ),
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -1143,10 +1153,10 @@ class TestResumeFinalizesAsFailed:
         )
 
         with (
-            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
-            patch.object(orch, "_process_resumed_rows", return_value=resumed_result) as process_resumed,
-            patch.object(orch, "_emit_telemetry"),
-            patch.object(orch, "_delete_checkpoints"),
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints"),
         ):
             result = orch.resume(
                 resume_point,
@@ -1236,15 +1246,15 @@ class TestBuildProcessorCallsCleanupOnFailure:
             coalesce_id_map={},
         )
 
-        # _build_processor fails after on_start has been called on all plugins
+        # build_processor fails after on_start has been called on all plugins
         with (
-            patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
-            # cleanup_plugins is now a module function; patch it where core.py looks
-            # it up (the imported name in core's namespace), not on the instance.
-            patch("elspeth.engine.orchestrator.core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
+            patch.object(orch._run_core, "build_processor", side_effect=RuntimeError("processor build failed")),
+            # cleanup_plugins is now a module function; patch it where run_core.py looks
+            # it up (the imported name in run_core's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.run_core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
-            orch._initialize_run_context(
+            orch._run_core.initialize_run_context(
                 mock_factory,
                 "test-run",
                 config,

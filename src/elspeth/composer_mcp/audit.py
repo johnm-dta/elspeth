@@ -69,8 +69,10 @@ def events_sidecar_path(scratch_dir: Path, session_id: str) -> Path:
     """Return the canonical sidecar path for a session_id.
 
     Mirrors ``SessionManager._session_path`` shape — same scratch_dir,
-    sibling file name with ``.events.jsonl`` suffix. ``SessionManager.delete``
-    unlinks the sidecar via this helper to keep cleanup paths in lockstep.
+    sibling file name with ``.events.jsonl`` suffix. The sidecar is
+    append-only evidence and intentionally outlives ``SessionManager.delete``;
+    delete_session appends its tombstone to the existing history after the
+    canonical session JSON is removed.
     """
     return scratch_dir / f"{session_id}.events.jsonl"
 

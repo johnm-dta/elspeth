@@ -348,6 +348,7 @@ def get_operation_calls(db: LandscapeDB, factory: RecorderFactory, operation_id:
             "latency_ms": row.latency_ms,
             "request_hash": row.request_hash,
             "response_hash": row.response_hash,
+            "resolved_prompt_template_hash": row.resolved_prompt_template_hash,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
         for row in rows

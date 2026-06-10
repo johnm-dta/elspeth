@@ -293,6 +293,7 @@ class CallLoader:
             response_ref=row.response_ref,
             error_json=row.error_json,
             latency_ms=row.latency_ms,
+            resolved_prompt_template_hash=row.resolved_prompt_template_hash,
         )
 
 

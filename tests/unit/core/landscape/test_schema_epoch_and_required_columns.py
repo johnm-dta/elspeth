@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 11)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 18)."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_eleven() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 11
+def test_epoch_is_eighteen() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 18
 
 
 def test_tokens_has_token_data_ref_column() -> None:
@@ -52,7 +52,9 @@ def test_begin_node_state_writes_resume_checkpoint_id() -> None:
     factory = setup.factory
 
     # Create a row and token so the FK chain for checkpoints is satisfied
-    row = factory.data_flow.create_row("provenance-run", "src-node", row_index=0, data={"x": 1}, row_id="prov-row-1")
+    row = factory.data_flow.create_row(
+        "provenance-run", "src-node", row_index=0, data={"x": 1}, row_id="prov-row-1", source_row_index=0, ingest_sequence=0
+    )
     token = factory.data_flow.create_token(row.row_id, token_id="prov-tok-1")
 
     # Insert a minimal checkpoint row directly — the checkpoints table FKs require
@@ -100,7 +102,9 @@ def test_begin_node_state_resume_checkpoint_id_defaults_to_none() -> None:
     db = setup.db
     factory = setup.factory
 
-    row = factory.data_flow.create_row("default-run", "src-node", row_index=0, data={"x": 1}, row_id="def-row-1")
+    row = factory.data_flow.create_row(
+        "default-run", "src-node", row_index=0, data={"x": 1}, row_id="def-row-1", source_row_index=0, ingest_sequence=0
+    )
     token = factory.data_flow.create_token(row.row_id, token_id="def-tok-1")
 
     ns = factory.execution.begin_node_state(

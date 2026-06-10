@@ -97,6 +97,8 @@ async def solve_step_chat_with_auto_drop(
     model: str,
     step: GuidedStep,
     user_message: str,
+    temperature: float | None,
+    seed: int | None,
 ) -> StepChatResult:
     """Wrap ``solve_step_chat`` with the synthetic-message-on-transient contract.
 
@@ -114,7 +116,12 @@ async def solve_step_chat_with_auto_drop(
     The transient exception set mirrors the project canonical at
     ``composer/service.py`` / ``_guided_solve_chain.py``:
     ``LiteLLMAPIError``, ``LiteLLMAuthError``, ``LiteLLMBadRequestError``,
-    plus ``TimeoutError`` for asyncio timeouts. ``IndexError``,
+    plus the non-``APIError`` operational classes ``BudgetExceededError``,
+    ``BlockedPiiEntityError``, ``GuardrailRaisedException`` and
+    ``GuardrailInterventionNormalStringError`` (direct ``Exception``
+    subclasses — provider budget / content-policy failures that must be
+    absorbed, matching ``_explain_run_diagnostics``), and ``TimeoutError``
+    for asyncio timeouts. ``IndexError``,
     ``AttributeError``, and ``json.JSONDecodeError`` cover malformed-
     response shape from the LiteLLM response unpacking inside
     ``solve_step_chat`` (empty ``choices``, missing ``message``).
@@ -151,10 +158,22 @@ async def solve_step_chat_with_auto_drop(
     from litellm.exceptions import APIError as LiteLLMAPIError
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+    )
 
     started = time.perf_counter()
     try:
-        message = await solve_step_chat(model=model, step=step, user_message=user_message)
+        message = await solve_step_chat(
+            model=model,
+            step=step,
+            user_message=user_message,
+            temperature=temperature,
+            seed=seed,
+        )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return StepChatResult(
             assistant_message=message,
@@ -166,6 +185,10 @@ async def solve_step_chat_with_auto_drop(
         LiteLLMAPIError,
         LiteLLMAuthError,
         LiteLLMBadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
         TimeoutError,
         IndexError,
         AttributeError,

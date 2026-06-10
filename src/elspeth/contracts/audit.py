@@ -57,6 +57,27 @@ _SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
 _SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
+def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_template_hash: str | None) -> None:
+    """Validate the cross-DB prompt-hash anchor invariant (Tier 1).
+
+    ``resolved_prompt_template_hash`` is defined only for LLM calls and, when
+    present, must be a 64-character lowercase hex digest. Raises ``ValueError``
+    on violation; ``None`` is always valid.
+
+    This is the single source of truth for the invariant. ``Call.__post_init__``
+    calls it, and the ExecutionRepository write path MUST call it BEFORE the
+    audit row is inserted — otherwise a bad hash persists to ``calls`` and only
+    surfaces as a post-commit ``ValueError`` when the ``Call`` is constructed,
+    violating the Tier-1 guarantee that the audit trail is always pristine.
+    """
+    if resolved_prompt_template_hash is None:
+        return
+    if call_type is not CallType.LLM:
+        raise ValueError(f"Call.resolved_prompt_template_hash is defined only for CallType.LLM calls, got call_type={call_type!r}")
+    if not isinstance(resolved_prompt_template_hash, str) or not _SHA256_HEX_PATTERN.fullmatch(resolved_prompt_template_hash):
+        raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
+
+
 def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
     """Validate that value is an instance of the expected enum type.
 
@@ -384,15 +405,7 @@ class Call:
         require_int(self.call_index, "call_index", min_value=0)
         _validate_enum(self.call_type, CallType, "call_type")
         _validate_enum(self.status, CallStatus, "status")
-        if self.resolved_prompt_template_hash is not None:
-            if self.call_type is not CallType.LLM:
-                raise ValueError(
-                    f"Call.resolved_prompt_template_hash is defined only for CallType.LLM calls, got call_type={self.call_type!r}"
-                )
-            if not isinstance(self.resolved_prompt_template_hash, str) or not _SHA256_HEX_PATTERN.fullmatch(
-                self.resolved_prompt_template_hash
-            ):
-                raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
+        validate_resolved_prompt_template_hash(self.call_type, self.resolved_prompt_template_hash)
         # XOR: exactly one of state_id or operation_id must be set
         has_state = self.state_id is not None
         has_operation = self.operation_id is not None

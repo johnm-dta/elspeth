@@ -1709,17 +1709,23 @@ class TestGateExecutor:
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
     def test_config_gate_int_result_raises_type_error(self) -> None:
-        """Expression returning int raises TypeError — only bool/str are valid."""
+        """Expression returning int at runtime raises TypeError — only bool/str are valid.
+
+        Provably-numeric conditions (e.g. "40 + 2") are now rejected at config time by
+        GateSettings (elspeth-f78e84f509), so this exercises a statically-ambiguous
+        condition that only resolves to int once row values are known — confirming the
+        executor's runtime type guard remains live.
+        """
         factory = _make_factory()
         executor = GateExecutor(factory.execution, _make_span_factory(), _make_step_resolver())
         config = GateSettings(
             name="my_gate",
             input="in_conn",
-            condition="40 + 2",
+            condition="row['a'] + row['b']",
             routes={"true": "next_conn", "false": "error_sink"},
         )
         contract = _make_contract()
-        token = _make_token(contract=contract)
+        token = _make_token(data={"value": "test", "a": 40, "b": 2}, contract=contract)
         ctx = make_context()
 
         with pytest.raises(TypeError, match="int"):

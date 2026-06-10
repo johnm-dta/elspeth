@@ -35,6 +35,7 @@ _KNOWN_RED_KEYS = {
 
 _KNOWN_GREEN_KEYS = {
     "must_be_valid",
+    "must_be_valid_note",
     "must_have_node_kinds_substring_any_of",
     "must_have_node_chain_in_order",
     "must_have_node_chain_in_order_note",

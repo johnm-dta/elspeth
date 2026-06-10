@@ -3129,3 +3129,50 @@ class TestQuerySuccessPostFreezeMutationGuards:
 
         assert result.fields["label"] == "positive"
         assert result.audit_metadata["prompt_hash"] == "abc"
+
+
+class TestComposerInterpolationGuidance:
+    """Discovery-time hints must teach per-row interpolation, and ship a worked
+    web_scrape->llm scoring example whose prompt interpolates the fetched content.
+
+    These assert on stable substrings rather than full hint text so wording can
+    be refined without churning the test, while still pinning the load-bearing
+    guidance (interpolate per-row fields; don't judge from an identifier alone;
+    identical input means non-discriminating).
+    """
+
+    def test_composer_hints_teach_per_row_interpolation(self) -> None:
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        assistance = LLMTransform.get_agent_assistance(issue_code=None)
+        assert assistance is not None
+        joined = "\n".join(assistance.composer_hints)
+        assert "{{ row." in joined
+        assert "identifier alone" in joined
+        assert "identical input" in joined
+
+    def test_published_example_interpolates_per_row_content(self) -> None:
+        from collections.abc import Mapping
+
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        assistance = LLMTransform.get_agent_assistance(issue_code=None)
+        assert assistance is not None
+        assert assistance.examples, "llm plugin publishes no worked examples"
+
+        def _prompt_templates(mapping: object) -> list[str]:
+            found: list[str] = []
+            if isinstance(mapping, Mapping):
+                for key, value in mapping.items():
+                    if key == "prompt_template" and isinstance(value, str):
+                        found.append(value)
+                    found.extend(_prompt_templates(value))
+            return found
+
+        templates: list[str] = []
+        for example in assistance.examples:
+            templates.extend(_prompt_templates(example.after))
+            templates.extend(_prompt_templates(example.before))
+        assert any("{{ row.content }}" in t for t in templates), (
+            "no published example prompt_template interpolates the per-row fetched content field"
+        )

@@ -387,9 +387,9 @@ class TestT18CharacterizationExecuteRun:
         assert isinstance(exc_info.value.original_error, RuntimeError)
         assert str(exc_info.value.original_error) == "deliberate error for characterization test"
 
-        # Current behavior: _current_graph is NOT cleared on error
-        # (the assignment is after the finally block, not inside it)
-        assert orchestrator._current_graph is not None
+        # Current behavior: _active_graph is NOT cleared on error
+        # (the set_active_graph(None) call is after the finally block, not inside it)
+        assert orchestrator._checkpoints._active_graph is not None
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +488,7 @@ class TestT18CharacterizationResumePath:
         )
 
         # Resume with the real row_id from the original run
-        orchestrator._process_resumed_rows(
+        orchestrator._resume_coordinator.process_resumed_rows(
             factory=factory,
             run_id=run_id,
             config=config,
@@ -615,7 +615,7 @@ class TestT18CharacterizationResumePath:
         assert len(sources_list) == 1, "single-source pipeline expected for this test"
         source_node_id = sources_list[0]
         with patch.object(output_sink, "on_start", side_effect=tracking_sink_on_start):
-            result = orchestrator._process_resumed_rows(
+            result = orchestrator._resume_coordinator.process_resumed_rows(
                 factory=factory,
                 run_id=run_id,
                 config=config,

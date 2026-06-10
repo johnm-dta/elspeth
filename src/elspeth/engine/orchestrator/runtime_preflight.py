@@ -23,11 +23,11 @@ import threading
 from typing import TYPE_CHECKING, cast
 
 from elspeth.contracts import errors as contract_errors
-from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.contracts.errors import PluginRetryableError
+from elspeth.contracts.errors import OrchestrationInvariantError, PluginRetryableError
 from elspeth.core.operations import track_operation
 
 if TYPE_CHECKING:
+    from elspeth.contracts import TransformProtocol
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.types import PipelineConfig
@@ -72,9 +72,11 @@ def run_transform_runtime_preflights(
                 if retry_manager is None:
                     transform.runtime_preflight(ctx)
                 else:
-
-                    def run_runtime_preflight() -> None:
-                        transform.runtime_preflight(ctx)
+                    # Bind transform via default-argument capture (B023): the
+                    # closure is invoked synchronously within this iteration,
+                    # but the loop reassigns the name on each pass.
+                    def run_runtime_preflight(_transform: TransformProtocol = transform) -> None:
+                        _transform.runtime_preflight(ctx)
 
                     retry_manager.execute_with_retry(
                         run_runtime_preflight,

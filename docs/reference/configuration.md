@@ -1182,6 +1182,11 @@ checkpoint:
 | `checkpoint_interval` | int | - | Row interval (required for `every_n`) |
 | `aggregation_boundaries` | bool | `true` | Always checkpoint at aggregation flush |
 
+The defaults above are the programmatic fallback for omitted settings. Checked-in
+pipeline configs that make durability or performance claims should declare
+`checkpoint` explicitly and should record the selected frequency with benchmark
+results.
+
 ### Frequency Options
 
 | Frequency | Behavior | Trade-off |

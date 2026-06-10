@@ -9,9 +9,6 @@ from opentelemetry import metrics
 _CompletionPath = Literal["first_time", "skip", "retake", "repeat"]
 _COMPLETION_PATHS: frozenset[str] = frozenset({"first_time", "skip", "retake", "repeat"})
 
-_RuntimeNormalizationKind = Literal["bare_required_field_templates"]
-_RUNTIME_NORMALIZATION_KINDS: frozenset[str] = frozenset({"bare_required_field_templates"})
-
 # I6 — silent-failure-hunter remediation. Closed-list of reasons
 # ``_store_successful_live_projection`` may refuse to seed the
 # tutorial cache. Each name maps 1:1 to a branch in
@@ -50,15 +47,6 @@ _TUTORIAL_ABANDON_COUNTER = _meter.create_counter(
     "composer.tutorial.abandon_total",
     description="Best-effort tutorial abandon beacons sent during page unload/navigation away.",
 )
-_TUTORIAL_RUNTIME_NORMALIZATION_COUNTER = _meter.create_counter(
-    "composer.tutorial.runtime_normalization_total",
-    description=(
-        "First-run tutorial pre-execution state normalizations. Attributes: "
-        "kind in {bare_required_field_templates}. Emitted whenever "
-        "_normalise_current_tutorial_state_for_execution rewrites the "
-        "composition state before a live tutorial run."
-    ),
-)
 _TUTORIAL_CACHE_SKIPPED_COUNTER = _meter.create_counter(
     "composer.tutorial.cache_skipped_total",
     description=(
@@ -91,20 +79,6 @@ def record_tutorial_completed_path(completion_path: _CompletionPath) -> None:
 def record_tutorial_abandoned() -> None:
     """Increment the best-effort tutorial abandon counter."""
     _TUTORIAL_ABANDON_COUNTER.add(1, attributes={})
-    return None
-
-
-def record_tutorial_runtime_normalization(kind: _RuntimeNormalizationKind) -> None:
-    """Increment the tutorial runtime-normalization counter.
-
-    Operational telemetry (not logging) — see ``CLAUDE.md`` "Telemetry and
-    Logging" and ``feedback_no_slog_recommendations``. Fires once per
-    composition-state save where the tutorial pre-execution normalizer
-    rewrote the state.
-    """
-    if kind not in _RUNTIME_NORMALIZATION_KINDS:
-        raise ValueError(f"kind must be one of {sorted(_RUNTIME_NORMALIZATION_KINDS)!r}; got {kind!r}")
-    _TUTORIAL_RUNTIME_NORMALIZATION_COUNTER.add(1, attributes={"kind": kind})
     return None
 
 

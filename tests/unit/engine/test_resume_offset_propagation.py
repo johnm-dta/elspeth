@@ -108,6 +108,8 @@ class TestTokenResumeOffsetReachesSinkNodeState:
             setup.source_node_id,
             row_index=0,
             data={"value": "hello"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_db = factory.data_flow.create_token(row.row_id)
 
@@ -194,6 +196,8 @@ class TestTokenResumeOffsetReachesSinkNodeState:
             setup.source_node_id,
             row_index=0,
             data={"value": "world"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_db = factory.data_flow.create_token(row.row_id)
 

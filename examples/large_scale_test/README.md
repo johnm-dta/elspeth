@@ -92,6 +92,23 @@ SELECT state, COUNT(*) FROM tokens GROUP BY state;
 SELECT * FROM routing_events LIMIT 10;
 ```
 
+## Checkpoint Policy
+
+This example declares a coarse checkpoint policy explicitly:
+
+```yaml
+checkpoint:
+  enabled: true
+  frequency: every_n
+  checkpoint_interval: 100
+  aggregation_boundaries: true
+```
+
+That setting is the intended durability/performance balance for this high-cardinality
+local benchmark. When comparing `every_row`, `every_n`, `aggregation_only`, or
+disabled checkpointing, record the checkpoint policy with the timing results; do
+not rely on runtime defaults.
+
 ## Performance Expectations
 
 The current durable scheduler mode records recoverable scheduler state and
@@ -110,9 +127,9 @@ Use these as order-of-magnitude expectations on a local SQLite database:
 | 5,000 | ~50 seconds | ~100 rows/sec |
 | 50,000 | ~7-9 minutes | ~100 rows/sec |
 
-Actual performance depends on hardware, disk I/O, checkpoint frequency, payload
-storage, and database backend. PostgreSQL or a future high-cardinality scheduler
-batching mode may have different characteristics.
+Actual performance depends on hardware, disk I/O, the declared checkpoint
+policy, payload storage, and database backend. PostgreSQL or a future
+high-cardinality scheduler batching mode may have different characteristics.
 
 ## What Gets Audited
 

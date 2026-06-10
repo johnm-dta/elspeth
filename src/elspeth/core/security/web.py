@@ -363,7 +363,12 @@ def validate_url_for_ssrf(
     # SNI hostname is always bare (no port) — TLS SNI is hostname-only.
     scheme_lower = parsed.scheme.lower()
     default_port = 443 if scheme_lower == "https" else 80
-    host_header = f"{hostname}:{port}" if port != default_port else hostname
+    # IPv6 literals must be bracketed in the authority / Host header (RFC 3986
+    # §3.2.2, RFC 7230 §5.4); parsed.hostname strips the brackets, so re-add them
+    # for IPv6 (detected by ':') or a non-default port would yield an ambiguous
+    # Host like 2606:...:8080. (elspeth-7144494104)
+    host_for_header = f"[{hostname}]" if ":" in hostname else hostname
+    host_header = f"{host_for_header}:{port}" if port != default_port else host_for_header
 
     return SSRFSafeRequest(
         original_url=url,

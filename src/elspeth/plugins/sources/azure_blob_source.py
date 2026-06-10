@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9cf68d1c423de098"
+    source_file_hash: str | None = "sha256:2e4533eea58ca358"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -845,9 +845,6 @@ class AzureBlobSource(BaseSource):
             yield from _record_file_level_error(error_msg, "parse")
             return
 
-        # Log row count for operator visibility
-        logger.info("json_blob_parsed", row_count=len(data), blob_path=self._blob_path)
-
         for source_row_index, row in enumerate(data):
             yield from self._validate_and_yield(row, ctx, source_row_index=source_row_index)
 
@@ -975,6 +972,7 @@ class AzureBlobSource(BaseSource):
                 raw_headers=raw_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
             if self._contract_builder is None and self.get_schema_contract() is None:
@@ -991,7 +989,13 @@ class AzureBlobSource(BaseSource):
             if key in mapping:
                 normalized[mapping[key]] = value
             else:
-                normalized[normalize_field_name(key)] = value
+                # New key not in the cached resolution — normalize it, then apply
+                # field_mapping by normalized name so a mapped key that first appears
+                # in a LATER row still maps to its target. (Relaxing the strict resolve
+                # check for sparse records unmasks this path — elspeth-bdcdce6f58.)
+                nk = normalize_field_name(key)
+                final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
+                normalized[final_name] = value
                 has_unmapped_fields = True
 
         if has_unmapped_fields:
@@ -999,6 +1003,7 @@ class AzureBlobSource(BaseSource):
                 raw_headers=list(row.keys()),
                 field_mapping=self._field_mapping,
                 columns=None,
+                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
         return normalized
@@ -1066,6 +1071,18 @@ class AzureBlobSource(BaseSource):
             # fields. Pydantic extra="allow" accepts any type for extras — the
             # contract knows inferred types from the first row and enforces here.
             contract = self.require_schema_contract()
+            if self._format in ("json", "jsonl") and self._contract_builder is not None and contract.mode in ("OBSERVED", "FLEXIBLE"):
+                # JSON/JSONL blobs can be sparse. If a later row emits a new
+                # normalized key, the row contract must own its original-name
+                # and type metadata before validation and yield.
+                if self._field_resolution is None:
+                    raise ValueError("field_resolution must be established before sparse-field contract inference")
+                contract = self._contract_builder.process_sparse_fields(
+                    validated_row,
+                    self._field_resolution.resolution_mapping,
+                )
+                self.set_schema_contract(contract)
+
             if contract.locked:
                 violations = contract.validate(validated_row)
                 if violations:

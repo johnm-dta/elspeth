@@ -38,68 +38,20 @@ _PIPELINE_SKILL, PIPELINE_COMPOSER_SKILL_HASH = load_skill_with_hash("pipeline_c
 PIPELINE_COMPOSER_SKILL_NAME: str = "pipeline_composer"
 PIPELINE_COMPOSER_SKILL_FILENAME: str = f"{PIPELINE_COMPOSER_SKILL_NAME}.md"
 
-# SYSTEM_PROMPT is bound below, once the strip helpers are defined — it is the
+# SYSTEM_PROMPT is bound below, once the strip helper is defined — it is the
 # advisor-enabled, no-deployment-layer projection of the loaded skill (i.e.,
-# what ``build_system_prompt(None, advisor_enabled=True)`` returns). Exported
-# for tests that need to assert identity with the core skill; build_messages
-# no longer uses it as a fast path (the F1 fix routes every call through
-# ``build_system_prompt`` so advisor-strip applies consistently).
-
-
-def _strip_advisor_content(text: str) -> str:
-    r"""Remove advisor-specific content from skill text.
-
-    When ``composer_advisor_enabled`` is False, the system prompt fed to
-    the composer LLM must NOT teach it about ``request_advisor_hint``.
-    Otherwise the LLM sees the tool name in the skill, attempts to call
-    it, and hits the defense-in-depth "disabled" rejection — wasting a
-    turn for no reason and leaving the model confused about why a tool
-    the skill described doesn't actually exist.
-
-    Removes:
-
-    1. The ``, `request_advisor_hint``` token from the Step-0 Diagnostics
-       line (leaves ``- **Diagnostics:** `explain_validation_error```).
-    2. The dedicated ``#### When You Are Still Stuck — `request_advisor_hint```
-       subsection — from its heading through to (but not including) the
-       next ``#### `` heading.
-    3. Any content wrapped in ``<!-- ADVISOR-ONLY -->...<!-- /ADVISOR-ONLY -->``
-       markers — used for advisor-conditional clauses inline in prose where
-       a section-level strip would damage surrounding content (e.g., table
-       rows, inline guidance referencing the advisor by name).
-    4. The marker tags ``<!-- ADVISOR-DISABLED -->...<!-- /ADVISOR-DISABLED -->``
-       are removed but their *content* is kept — these wrap fallback prose
-       that should only reach the LLM when advisor is disabled. The mirror
-       function ``_strip_advisor_disabled_fallback`` strips both the markers
-       *and* the content when advisor is enabled.
-
-    The transformation operates on the loaded skill text without touching
-    the on-disk file, so the parity test
-    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
-    (which scans the unfiltered file content) is unaffected.
-    """
-    text = text.replace(", `request_advisor_hint`", "")
-    start = text.find("#### When You Are Still Stuck")
-    if start != -1:
-        end = text.find("\n#### ", start + 1)
-        if end == -1:
-            # Advisor subsection is the trailing subsection of its parent
-            # section. Strip from the heading to the next top-level (``## ``)
-            # heading, or to end-of-file if none.
-            next_h2 = text.find("\n## ", start + 1)
-            text = text[:start].rstrip() + "\n" if next_h2 == -1 else text[:start] + text[next_h2 + 1 :]
-        else:
-            text = text[:start] + text[end + 1 :]  # +1 to skip the leading newline
-    text = re.sub(r"<!-- ADVISOR-ONLY -->.*?<!-- /ADVISOR-ONLY -->", "", text, flags=re.DOTALL)
-    text = text.replace("<!-- ADVISOR-DISABLED -->", "").replace("<!-- /ADVISOR-DISABLED -->", "")
-    return text
+# what ``build_system_prompt(None)`` returns). Exported for tests that need
+# to assert identity with the core skill; build_messages no longer uses it
+# as a fast path (the F1 fix routes every call through ``build_system_prompt``
+# so the advisor-disabled-fallback strip applies consistently).
 
 
 def _strip_advisor_disabled_fallback(text: str) -> str:
-    """Inverse of ``_strip_advisor_content``: when advisor IS enabled, strip
-    the ``<!-- ADVISOR-DISABLED -->...<!-- /ADVISOR-DISABLED -->`` blocks
-    (markers and content) so the LLM doesn't see contradictory fallback
-    guidance that only applies on advisor-disabled deployments."""
+    """Advisor is mandatory, so strip the on-disk fallback prose that only
+    applied to advisor-disabled deployments. Removes the
+    ``<!-- ADVISOR-DISABLED -->...<!-- /ADVISOR-DISABLED -->`` blocks (markers
+    and content) so the LLM never sees fallback guidance that contradicts the
+    always-on advisor. The advisor-teaching content in the skill is kept."""
     return re.sub(r"<!-- ADVISOR-DISABLED -->.*?<!-- /ADVISOR-DISABLED -->", "", text, flags=re.DOTALL)
 
 
@@ -107,7 +59,7 @@ SYSTEM_PROMPT = _strip_advisor_disabled_fallback(_PIPELINE_SKILL)
 
 
 @lru_cache(maxsize=8)
-def build_system_prompt(data_dir: str | None = None, *, advisor_enabled: bool = True) -> str:
+def build_system_prompt(data_dir: str | None = None) -> str:
     """Build the full system prompt: core skill + optional deployment skill.
 
     The deployment skill is loaded from ``{data_dir}/skills/pipeline_composer.md``
@@ -115,26 +67,20 @@ def build_system_prompt(data_dir: str | None = None, *, advisor_enabled: bool = 
     (provider mappings, custom patterns, domain vocabulary) without editing
     the core skill pack.
 
-    When ``advisor_enabled`` is False, advisor-specific sections are stripped
-    from the core skill before deployment overlay (deployment skills are
-    operator-controlled and not stripped — operators must police their own
-    overlays).
+    Advisor is mandatory, so the core skill always teaches the LLM about
+    ``request_advisor_hint``; only the advisor-disabled fallback prose is
+    stripped via ``_strip_advisor_disabled_fallback``.
 
-    Cached per ``(data_dir, advisor_enabled)`` pair — the deployment skill
-    is read once from disk per unique combination, not on every LLM call.
-    Cache size 8 covers the realistic combinations
-    (None x {True, False} plus 3 typical data_dirs x {True, False}).
+    Cached per ``data_dir`` — the deployment skill is read once from disk per
+    unique value, not on every LLM call.
 
     Args:
         data_dir: Root data directory.  ``None`` skips the deployment layer.
-        advisor_enabled: When False, strip advisor-specific content from
-            the core skill so the LLM does not learn about a tool that
-            will reject its calls as "disabled".
 
     Returns:
         Combined system prompt string.
     """
-    core = _strip_advisor_disabled_fallback(_PIPELINE_SKILL) if advisor_enabled else _strip_advisor_content(_PIPELINE_SKILL)
+    core = _strip_advisor_disabled_fallback(_PIPELINE_SKILL)
     deployment = load_deployment_skill("pipeline_composer", data_dir)
     if deployment:
         return core + "\n\n---\n\n" + deployment
@@ -333,7 +279,6 @@ def build_messages(
     catalog: CatalogService,
     data_dir: str | None = None,
     *,
-    advisor_enabled: bool = True,
     guided_terminal: TerminalState | None = None,
     schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
 ) -> list[dict[str, Any]]:
@@ -373,11 +318,6 @@ def build_messages(
         guided_terminal: When set, the resolved TerminalState from the
             completed guided session; triggers the layered transition
             prompt instead of the freeform-only prompt.
-        advisor_enabled: When False, strip advisor-specific sections from
-            the core skill before forming the system prompt — the LLM
-            should not learn about the ``request_advisor_hint`` tool when
-            the operator has it disabled (otherwise it tries to call the
-            tool and hits a "disabled" rejection, wasting a turn).
         schemas_loaded: Forwarded verbatim to ``build_context_string``.
             Defaults to the ``_SCHEMAS_LOADED_UNSET`` sentinel; the
             production caller (``ComposerServiceImpl._build_messages``)
@@ -419,18 +359,18 @@ def build_messages(
             if guided_terminal.reason is None:
                 raise InvariantError("EXITED_TO_FREEFORM terminal must have a reason")
             reason_str = guided_terminal.reason.value
-        # Thread data_dir and advisor_enabled through the transition prompt so the
-        # first freeform turn after guided exit carries the same deployment overlay
-        # and advisor-strip policy as all subsequent freeform turns (Codex #17).
-        # build_system_prompt is @lru_cache'd — this call hits the same cache entry
-        # as the non-transition branch below.
-        freeform_skill = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
+        # Thread data_dir through the transition prompt so the first freeform
+        # turn after guided exit carries the same deployment overlay as all
+        # subsequent freeform turns (Codex #17). build_system_prompt is
+        # @lru_cache'd — this call hits the same cache entry as the
+        # non-transition branch below.
+        freeform_skill = build_system_prompt(data_dir)
         prompt = build_mode_transition_system_prompt(
             terminal_reason=reason_str,
             freeform_skill=freeform_skill,
         )
     else:
-        prompt = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
+        prompt = build_system_prompt(data_dir)
     messages.append({"role": "system", "content": prompt})
 
     # 2. Dynamic state/plugin context. Keep this outside the first

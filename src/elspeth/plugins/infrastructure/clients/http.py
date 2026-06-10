@@ -535,6 +535,7 @@ class AuditedHTTPClient(AuditedClientBase):
             return client.post(
                 connection_url,
                 json=json,
+                params=params,
                 headers=headers,
                 extensions=extensions,
             )
@@ -570,7 +571,7 @@ class AuditedHTTPClient(AuditedClientBase):
             request: SSRFSafeRequest from validate_url_for_ssrf()
             headers: Additional headers for this request
             json: JSON body for POST requests.
-            params: Query parameters for GET requests.
+            params: Query parameters for the request.
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
             allowed_ranges: IP networks that may bypass the default SSRF
@@ -673,34 +674,6 @@ class AuditedHTTPClient(AuditedClientBase):
                     status_code=response.status_code,
                 )
 
-            call = self._record_call(
-                call_index=call_index,
-                call_type=CallType.HTTP,
-                status=call_status,
-                request_data=request_dto,
-                response_data=response_dto,
-                error=error_data,
-                latency_ms=latency_ms,
-            )
-
-            self._emit_telemetry_after_audit(
-                provider=request.host_header,
-                call_status=call_status,
-                latency_ms=latency_ms,
-                request_data=request_data,
-                response_data=response_data,
-                request_payload=request_dto,
-                response_payload=response_dto,
-                call_type_label="http_ssrf_safe",
-            )
-
-            return response, final_hostname_url, call
-
-        except contract_errors.TIER_1_ERRORS:
-            # Telemetry re-raise after successful Landscape record_call.
-            # The SUCCESS record already exists — do NOT record a second
-            # ERROR call with the same call_index (unique constraint).
-            raise
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
 
@@ -734,6 +707,38 @@ class AuditedHTTPClient(AuditedClientBase):
             )
 
             raise
+
+        # Success path: record + emit OUTSIDE the network try block, mirroring
+        # _execute_request (post/get). _emit_telemetry_after_audit re-raises
+        # programmer bugs (TypeError/AttributeError/KeyError/NameError) and
+        # Tier-1 errors; keeping it inside the try would let `except Exception`
+        # record a SECOND ERROR call at the same call_index after the SUCCESS
+        # record already committed — a duplicate-index audit write that also
+        # misattributes a telemetry/programmer bug to the HTTP call
+        # (elspeth-affb35a660). Out here, that re-raise propagates cleanly with
+        # exactly one SUCCESS record written.
+        call = self._record_call(
+            call_index=call_index,
+            call_type=CallType.HTTP,
+            status=call_status,
+            request_data=request_dto,
+            response_data=response_dto,
+            error=error_data,
+            latency_ms=latency_ms,
+        )
+
+        self._emit_telemetry_after_audit(
+            provider=request.host_header,
+            call_status=call_status,
+            latency_ms=latency_ms,
+            request_data=request_data,
+            response_data=response_data,
+            request_payload=request_dto,
+            response_payload=response_dto,
+            call_type_label="http_ssrf_safe",
+        )
+
+        return response, final_hostname_url, call
 
     def get_ssrf_safe(
         self,

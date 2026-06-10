@@ -1,4 +1,15 @@
 per_file_rules:
+- pattern: web/execution/service.py
+  rules:
+  - FG3
+  reason: _OutputBlobFinalizationOutcome.errors is tuple[Mapping[str, str], ...] of flat
+    str->str dicts built fresh at construction and consumed read-only (truthiness, len,
+    and list() into a slog.error partial-failure event). Surfaced by the FG3 nested-mutable
+    detector fix (elspeth-ec6749f8da). deep_freeze would convert the inner dicts to
+    MappingProxyType and risks breaking the structlog serialisation of that log event, so
+    the proper fix is deferred to elspeth-640168fa4b; nothing mutates the inner dicts.
+  expires: null
+  max_hits: 1
 - pattern: web/composer/_producer_resolver.py
   rules:
   - FG3

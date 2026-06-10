@@ -63,12 +63,21 @@ export const useAuthStore = create<AuthState>((set) => ({
   async logout() {
     localStorage.removeItem(TOKEN_KEY);
     set({ token: null, user: null, loginError: null, isLoading: false });
-    const [{ useSessionStore }, { useExecutionStore }] = await Promise.all([
+    const [
+      { useSessionStore },
+      { useExecutionStore },
+      { useBlobStore },
+      { useSecretsStore },
+    ] = await Promise.all([
       import("./sessionStore"),
       import("./executionStore"),
+      import("./blobStore"),
+      import("./secretsStore"),
     ]);
     useSessionStore.getState().reset?.();
     useExecutionStore.getState().reset?.();
+    useBlobStore.getState().reset();
+    useSecretsStore.getState().reset();
     usePreferencesStore.getState().reset();
   },
 

@@ -2,7 +2,7 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.5.2` (RC-5.2 line)
+**Framework status:** `0.5.3` (RC-5.3 line)
 **Archive note:** current release, architecture, contract, guide, reference, and
 runbook docs remain visible here. Point-in-time audit, architecture-pack,
 generated-review, and handover snapshots from earlier workstreams were moved to

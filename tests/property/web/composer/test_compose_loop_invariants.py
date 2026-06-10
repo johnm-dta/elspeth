@@ -488,7 +488,11 @@ async def _drive_trace_async(
 
 async def _wait_for_tool_rows(harness: _Harness) -> None:
     for _ in range(1000):
-        if [row.role for row in _chat_rows(harness)] == ["assistant", "tool"]:
+        # Tail check, not exact-equality: when session_state='has_prior_state'
+        # the harness pre-inserts a legitimate 'user' chat row, so a successful
+        # turn persists ['user', 'assistant', 'tool']. The invariant under test
+        # is that the assistant+tool pair was persisted, regardless of prior rows.
+        if [row.role for row in _chat_rows(harness)][-2:] == ["assistant", "tool"]:
             return
         await asyncio.sleep(0.01)
     pytest.fail("property trace did not persist assistant/tool rows within 10s")

@@ -15,7 +15,7 @@ import pytest
 
 chromadb = pytest.importorskip("chromadb")
 
-from elspeth.contracts.enums import CallStatus  # noqa: E402
+from elspeth.contracts.enums import CallStatus, CallType  # noqa: E402
 from elspeth.core.landscape.execution_repository import ExecutionRepository  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.chroma import (  # noqa: E402
@@ -258,6 +258,20 @@ class TestChromaSearchProvider:
         )
         assert chunks == []
 
+        # Audit integrity (elspeth-6ae78686e4): the empty-collection path is
+        # still an auditable retrieval decision. It must record a SUCCESS
+        # VECTOR call with result_count 0, not silently exit before recording.
+        # Without this, an auditor cannot distinguish "retrieval ran against an
+        # empty corpus" from "retrieval never ran". collection_count makes it
+        # distinguishable from a populated query that simply matched nothing.
+        provider._execution.record_call.assert_called_once()
+        kwargs = provider._execution.record_call.call_args.kwargs
+        assert kwargs["call_type"] == CallType.VECTOR
+        assert kwargs["status"] == CallStatus.SUCCESS
+        response = kwargs["response_data"].to_dict()
+        assert response["result_count"] == 0
+        assert response["collection_count"] == 0
+
     def test_source_id_matches_document_id(self):
         provider = self._make_provider(
             documents=[
@@ -491,6 +505,36 @@ class TestTier3ResultBoundary:
         # Simulate malformed SDK response — missing 'documents' key
         with (
             patch.object(provider._collection, "query", return_value={"ids": [["doc1"]]}),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+    def test_non_mapping_metadata_raises_retrieval_error(self):
+        """A truthy non-mapping metadata from a corrupt index must become RetrievalError.
+
+        `dict(metadata)` raises TypeError (not ValueError) for a non-mapping truthy
+        value (e.g. an int or a list of non-pairs); that escaped the `except ValueError`
+        chunk-construction guard and bypassed search()'s audit-ERROR handler.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"t3m-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        config = ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral")
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider._collection.add(documents=["test doc"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["test doc"]],
+                    "distances": [[0.1]],
+                    "metadatas": [[12345]],  # truthy non-mapping → dict(12345) raises TypeError
+                },
+            ),
             pytest.raises(RetrievalError),
         ):
             provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
@@ -746,6 +790,80 @@ class TestPostQueryFailureAudit:
                 provider._collection,
                 "query",
                 return_value={"ids": [["doc1"]], "documents": None, "distances": [[0.1]], "metadatas": [[{}]]},
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_length_mismatch_records_error_call(self):
+        """Mismatched result array lengths produce audit record, not a bare ValueError.
+
+        Regression for elspeth-c0fac78210: zip(..., strict=True) over arrays of
+        unequal length raised plain ValueError after the external query returned,
+        bypassing the RetrievalError-only post-query audit handler.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"pqlm-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1", "doc2"]],  # two ids
+                    "documents": [["doc a"]],  # one document — length mismatch
+                    "distances": [[0.1, 0.2]],
+                    "metadatas": [[{}, {}]],
+                },
+            ),
+            pytest.raises(RetrievalError, match="mismatched"),
+        ):
+            provider.search("test", top_k=2, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_non_serializable_metadata_records_error_call(self):
+        """RetrievalChunk ValueError (non-JSON metadata) produces audit record, not a bare ValueError.
+
+        Same root cause as elspeth-c0fac78210: a ValueError from chunk
+        construction in the post-query parse path must be converted to
+        RetrievalError so search()'s audit handler records the ERROR call.
+        """
+        from unittest.mock import patch
+
+        unique_name = f"pqms-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["doc a"]],
+                    "distances": [[0.1]],
+                    "metadatas": [[{"bad": float("nan")}]],  # NaN → not JSON-serializable
+                },
             ),
             pytest.raises(RetrievalError),
         ):

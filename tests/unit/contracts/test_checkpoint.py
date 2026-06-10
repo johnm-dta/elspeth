@@ -307,6 +307,16 @@ def test_node_from_dict_multiple_missing_fields_reports_all() -> None:
     assert "condition_fire_offset" in msg
 
 
+def test_node_from_dict_rejects_non_dict_token_entry() -> None:
+    """Regression (elspeth-0ef10bec3b): a non-dict token entry must raise
+    AuditIntegrityError before delegating to AggregationTokenCheckpoint.from_dict
+    (which would otherwise crash with AttributeError on data.keys())."""
+    data = _valid_node_dict()
+    data["tokens"] = [123]
+    with pytest.raises(AuditIntegrityError, match=r"tokens\[0\] must be a dict"):
+        AggregationNodeCheckpoint.from_dict("node-001", data)
+
+
 # === Aggregation checkpoint type guard tests ===
 
 
@@ -436,13 +446,36 @@ def test_state_from_dict_rejects_unknown_underscore_key() -> None:
     """Regression: only _version is a valid metadata key — others must crash."""
     from elspeth.contracts.errors import AuditIntegrityError
 
-    data = {"_version": 1, "_unknown": "corrupt", "node-A": _valid_node_dict()}
+    data = {"_version": "1", "_unknown": "corrupt", "node-A": _valid_node_dict()}
     with pytest.raises(AuditIntegrityError, match="unexpected reserved key '_unknown'"):
         AggregationCheckpointState.from_dict(data)
 
 
 def test_state_from_dict_accepts_version_key() -> None:
     """_version key is valid metadata and must not raise."""
-    data = {"_version": 1, "node-A": _valid_node_dict()}
+    data = {"_version": "1", "node-A": _valid_node_dict()}
     state = AggregationCheckpointState.from_dict(data)
     assert "node-A" in state.nodes
+
+
+def test_state_from_dict_rejects_non_dict_top_level() -> None:
+    """Regression (elspeth-0ef10bec3b): a non-dict top-level value must raise a
+    contract-grade AuditIntegrityError, not an incidental AttributeError from data.keys()."""
+    with pytest.raises(AuditIntegrityError, match="top-level value must be a dict"):
+        AggregationCheckpointState.from_dict(["not", "a", "dict"])  # type: ignore[arg-type]
+
+
+def test_state_from_dict_rejects_non_string_version() -> None:
+    """Regression (elspeth-0ef10bec3b): _version must be a str. An int slips past the
+    truthiness-only __post_init__ guard, so the restore boundary must reject it
+    (parity with CoalesceCheckpointState, which already enforces this)."""
+    with pytest.raises(AuditIntegrityError, match=r"_version.*must be a str"):
+        AggregationCheckpointState.from_dict({"_version": 4})
+
+
+def test_state_from_dict_rejects_non_dict_node_value() -> None:
+    """Regression (elspeth-0ef10bec3b): a non-dict node value must raise
+    AuditIntegrityError before delegating to AggregationNodeCheckpoint.from_dict
+    (which would otherwise crash with AttributeError on data.keys())."""
+    with pytest.raises(AuditIntegrityError, match="node 'node-A' must be a dict"):
+        AggregationCheckpointState.from_dict({"_version": "5.0", "node-A": 123})

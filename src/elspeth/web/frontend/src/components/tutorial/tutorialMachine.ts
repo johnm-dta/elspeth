@@ -1,12 +1,20 @@
 import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
 import { sortedSourceEntries } from "@/utils/compositionState";
 
+// Kept BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT``
+// in ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string
+// to ``/api/tutorial/run``; the backend only engages the tutorial cache when
+// ``effective_prompt == CANONICAL_SEED_PROMPT``. If the two drift apart the cache
+// silently never hits and every tutorial run goes live. The Python test
+// ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
 export const CANONICAL_TUTORIAL_PROMPT =
-  "Create a data source with URLs for five public government agency web pages " +
-  "that you choose. Use abuse contact noreply@dta.gov.au and " +
-  "scraping reason 'DTA technical demonstration'. Read the HTML for each " +
-  "page, have an LLM identify the primary colours for each government agency. " +
-  "Remove the HTML and save the rest to a json file.";
+  "Create a data source from these five Australian government pages: " +
+  "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
+  "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
+  "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
+  "Read the HTML for each page, have an LLM return a single fact about each " +
+  "government agency based on the page HTML. Remove the HTML and save the " +
+  "rest to a json file.";
 
 export type TutorialStep =
   | "welcome"

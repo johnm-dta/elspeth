@@ -113,7 +113,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:08dc7bc1f1c7baa7"
+    source_file_hash: str | None = "sha256:5abcccae4baff90d"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -634,8 +634,20 @@ class CSVSink(BaseSink):
         if display_map is None:
             return data_fields, data_fields
 
-        # Map field names to display names, falling back to original if not mapped
-        # This handles transform-added fields that have no original header
+        from elspeth.contracts.header_modes import HeaderMode
+
+        if self._headers_mode == HeaderMode.CUSTOM:
+            for field in data_fields:
+                if field not in display_map:
+                    raise ValueError(
+                        f"CUSTOM header mode has no mapping for field '{field}'. "
+                        f"All fields must be explicitly mapped — silent fallback to normalized "
+                        f"names risks data corruption in external system handover. "
+                        f"Mapped fields: {sorted(display_map.keys())}"
+                    )
+
+        # ORIGINAL mode falls back to the normalized field name for
+        # transform-added fields that have no source header.
         display_fields = [display_name_for(display_map, field) for field in data_fields]
         return data_fields, display_fields
 

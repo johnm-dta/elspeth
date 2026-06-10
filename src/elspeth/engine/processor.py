@@ -10,7 +10,6 @@ Coordinates:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
@@ -26,6 +25,7 @@ from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
 from elspeth.engine._best_effort import best_effort
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
@@ -72,8 +72,8 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
-from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkItem, TokenWorkStatus
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
@@ -853,7 +853,7 @@ class RowProcessor:
         Both modes now have BUFFERED (non-terminal) at buffer time,
         so FAILED can be recorded as the terminal outcome for all tokens.
         """
-        error_hash = hashlib.sha256(fctx.error_msg.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(fctx.error_msg, exception_type="TransformError")
         results: list[RowResult] = []
         failure = FailureInfo(exception_type="TransformError", message=fctx.error_msg)
 
@@ -1085,7 +1085,7 @@ class RowProcessor:
             violation_summary = f"PassThroughContractViolation:{fctx.transform.name}:{sorted(violation.divergence_set)}"
         else:
             violation_summary = f"{type(violation).__name__}:{fctx.transform.name}"
-        error_hash = hashlib.sha256(violation_summary.encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(violation_summary)
         base_audit = violation.to_audit_dict()
 
         for token in fctx.buffered_tokens:
@@ -1362,7 +1362,7 @@ class RowProcessor:
             # child tokens if a later step fails — recovery would skip them.
             for i, token in enumerate(fctx.buffered_tokens):
                 if i in quarantined_index_set:
-                    error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
+                    error_hash = compute_error_hash(f"quarantined_in_batch:{fctx.batch_id}:{i}")
                     batch_id = None
                     outcome = TerminalOutcome.FAILURE
                     path = TerminalPath.QUARANTINED_AT_SOURCE
@@ -1928,7 +1928,7 @@ class RowProcessor:
             )
             else "failure"
         )
-        error_hash = hashlib.sha256(f"{type(failure).__name__}:{effective_source_node_id}".encode()).hexdigest()[:16]
+        error_hash = compute_error_hash(f"{type(failure).__name__}:{effective_source_node_id}")
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
@@ -2449,7 +2449,7 @@ class RowProcessor:
                 active_token_id=current_token.token_id,
             )
             error_msg = coalesce_outcome.failure_reason
-            error_hash = hashlib.sha256(error_msg.encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(error_msg)
 
             # Bug 9z8 fix: Only record if CoalesceExecutor didn't already record
             if not coalesce_outcome.outcomes_recorded:
@@ -2648,6 +2648,20 @@ class RowProcessor:
     def summarize_scheduled_work(self) -> tuple[str, ...]:
         """Return grouped active scheduler work for invariant diagnostics."""
         return self._scheduler.summarize_active_work(run_id=self._run_id)
+
+    def has_unresolved_scheduler_work(self) -> bool:
+        """Return whether scheduler work remains short of a durable sink handoff.
+
+        PENDING_SINK handoffs (and pending sinks re-claimed during resume)
+        are excluded: they are terminalized only after sink durability via
+        ``mark_sink_bound_scheduler_terminal_many``, which runs during sink
+        writes — after the pre-sink completion invariants that call this.
+        """
+        return self._scheduler.count_unresolved_work(run_id=self._run_id) > 0
+
+    def summarize_unresolved_scheduler_work(self) -> tuple[str, ...]:
+        """Return grouped unresolved scheduler work for invariant diagnostics."""
+        return self._scheduler.summarize_unresolved_work(run_id=self._run_id)
 
     def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
         """Mark durable scheduler work consumed by a barrier as terminal."""
@@ -3324,7 +3338,7 @@ class RowProcessor:
             return None
         if result.error is None:
             raise OrchestrationInvariantError(f"Scheduler ON_ERROR_ROUTED result missing error for token {result.token.token_id!r}")
-        return hashlib.sha256(result.error.message.encode()).hexdigest()[:16]
+        return compute_error_hash(result.error.message, exception_type=result.error.exception_type)
 
     @staticmethod
     def _scheduler_error_message(result: RowResult) -> str | None:
@@ -3502,7 +3516,7 @@ class RowProcessor:
             )
         except MaxRetriesExceeded as e:
             # All retries exhausted - return FAILED outcome
-            error_hash = hashlib.sha256(str(e).encode()).hexdigest()[:16]
+            error_hash = compute_error_hash(str(e), exception_type=type(e).__name__)
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
                 outcome=TerminalOutcome.FAILURE,
@@ -3655,7 +3669,7 @@ class RowProcessor:
             # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
             # below — see the offensive guard in the routed branch.
             error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
-            quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
+            quarantine_error_hash = compute_error_hash(error_detail)
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
                 outcome=TerminalOutcome.FAILURE,

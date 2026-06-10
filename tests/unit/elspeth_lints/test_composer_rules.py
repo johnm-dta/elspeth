@@ -8,7 +8,7 @@ from pathlib import Path
 
 from elspeth_lints.core.protocols import Finding, RuleContext
 from elspeth_lints.rules.composer.catch_order import RULE as CATCH_ORDER_RULE
-from elspeth_lints.rules.composer.catch_order.rule import _SUBCLASS_TO_SUPERCLASSES
+from elspeth_lints.rules.composer.catch_order.rule import _BROAD_SUPERTYPES, _SUBCLASS_TO_SUPERCLASSES
 from elspeth_lints.rules.composer.exception_channel import RULE as EXCEPTION_CHANNEL_RULE
 
 
@@ -170,6 +170,60 @@ def test_catch_order_reports_runtime_preflight_shadowing(tmp_path: Path) -> None
     assert "ComposerRuntimePreflightError" in findings[0].message
 
 
+def test_catch_order_reports_aliased_handler_shadowing(tmp_path: Path) -> None:
+    # elspeth-c0c4f49981: an aliased supertype handler still shadows the narrow
+    # subclass at runtime and must be flagged.
+    source = (
+        "CSE = ComposerServiceError\n"
+        "CPCE = ComposerPluginCrashError\n"
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except CSE as exc:\n"
+        "        pass\n"
+        "    except CPCE as crash:\n"
+        "        pass\n"
+    )
+
+    findings = _catch_order_findings(tmp_path, source)
+
+    assert [finding.rule_id for finding in findings] == ["CCO1"]
+
+
+def test_catch_order_reports_broad_exception_before_subclass(tmp_path: Path) -> None:
+    # elspeth-eb90341cdb: a bare except Exception before a composer crash
+    # subclass shadows it (the subclass descends from Exception).
+    source = (
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        pass\n"
+        "    except ComposerPluginCrashError as crash:\n"
+        "        pass\n"
+    )
+
+    findings = _catch_order_findings(tmp_path, source)
+
+    assert [finding.rule_id for finding in findings] == ["CCO1"]
+
+
+def test_catch_order_accepts_broad_exception_after_subclass(tmp_path: Path) -> None:
+    # Correct order: the narrow composer handler precedes the broad except
+    # Exception — no finding (guards against over-flagging the common shape).
+    source = (
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ComposerPluginCrashError as crash:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        pass\n"
+    )
+
+    assert _catch_order_findings(tmp_path, source) == []
+
+
 def test_catch_order_declared_map_matches_real_composer_exception_mro() -> None:
     import_module("elspeth.web.composer.protocol")
     import_module("elspeth.web.composer.service")
@@ -185,7 +239,12 @@ def test_catch_order_declared_map_matches_real_composer_exception_mro() -> None:
         assert "ComposerServiceError" in declared_supers
         cls = name_to_cls[sub_name]
         real_supers = {ancestor.__name__ for ancestor in cls.__mro__[1:] if ancestor in composer_family}
-        assert declared_supers == frozenset(real_supers)
+        # Declared = the real composer-family supertypes PLUS the broad
+        # Exception/BaseException supertypes (elspeth-eb90341cdb): a bare
+        # except Exception also shadows the narrow handler.
+        assert declared_supers == frozenset(real_supers) | _BROAD_SUPERTYPES
+        # The broad supertypes are genuinely in the class's real MRO.
+        assert _BROAD_SUPERTYPES.issubset({ancestor.__name__ for ancestor in cls.__mro__})
 
 
 def _exception_channel_findings(tmp_path: Path, source: str) -> list[Finding]:

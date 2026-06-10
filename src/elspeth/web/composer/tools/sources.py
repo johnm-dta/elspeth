@@ -25,6 +25,7 @@ from elspeth.web.composer.redaction import (
     SetSourceFromBlobArgumentsModel,
 )
 from elspeth.web.composer.source_inspection import (
+    delimiter_for_filename,
     facts_to_dict,
     inspect_blob_content,
 )
@@ -149,6 +150,27 @@ _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
     "text/jsonl": ("json", {"format": "jsonl"}),
     "text/plain": ("text", {}),
 }
+
+
+def _delimiter_extra_for_csv_blob(
+    plugin: str,
+    filename: str,
+    caller_options: Mapping[str, Any],
+) -> dict[str, str]:
+    """Derive a filename-implied csv delimiter for a blob-backed source.
+
+    ``_MIME_TO_SOURCE`` keys only on MIME type, so a ``.tsv`` file uploaded as
+    ``text/csv`` binds the ``csv`` plugin with no delimiter and parses as one
+    column at runtime. ``inspect_blob_content`` already reports the tab via
+    :func:`delimiter_for_filename`; reuse that single rule so inspection and
+    binding agree. Inject only a fixed tab and only when (a) the bound plugin is
+    ``csv``, (b) the filename means tab, and (c) the caller/LLM did not already
+    supply a delimiter (never clobber an explicit one).
+    """
+    if plugin != "csv" or "delimiter" in caller_options:
+        return {}
+    delimiter = delimiter_for_filename(filename)
+    return {"delimiter": delimiter} if delimiter is not None else {}
 
 
 class SourceBlobPayload(TypedDict):
@@ -314,6 +336,7 @@ def _resolve_source_blob(
     merged_options: Mapping[str, Any] = {
         **caller_options,
         **mime_extra,
+        **_delimiter_extra_for_csv_blob(plugin, blob["filename"], caller_options),
         "path": blob["storage_path"],
         "blob_ref": blob["id"],
         "mode": "bind_source",

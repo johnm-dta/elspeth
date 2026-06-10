@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "contracts/shadow_marker.py",
+    "fingerprint": "contracts/shadow_marker.py:MC3b:shadow_marker::post_emission_check",
+    "line": 22,
+    "message": "contract 'shadow_marker' manifest names dispatch site 'post_emission_check', but the contract class has no @implements_dispatch_site('post_emission_check') marker on any method. Under multi-level inheritance the marker MUST be on the concrete class (per D1 correction, comment #418 on H2).",
+    "rule_id": "MC3b",
+    "severity": "error",
+    "suggestion": "Keep EXPECTED_CONTRACT_SITES, register_declaration_contract(...) calls, and @implements_dispatch_site markers in sync."
+  }
+]

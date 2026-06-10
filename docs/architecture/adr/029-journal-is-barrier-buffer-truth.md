@@ -41,7 +41,7 @@ The journal is reconciled *to* the blob via `ensure_blocked_barrier_work_item`
   memory-buffered token whose journal row is still `LEASED`; a subsequent
   `ensure_blocked` against a `LEASED` row hard-fails with `AuditIntegrityError`.
 - A live `BLOCKED` row at `attempt > 1` can collide with a manufactured
-  `attempt = 1` twin (different content hash, same logical slot).
+  `attempt = 1` twin.
 
 The blob carries six categories of state beyond what the journal and audit
 trail can supply: per aggregation node `elapsed_age_seconds`,
@@ -84,8 +84,12 @@ is the barrier identity by construction (`processor.py:3460-3466`: coalesce →
 — queue-holds are BLOCKED rows with `queue_key` set and `barrier_key` NULL.
 Barrier restore and the resume buffered-exclusion both select
 `status='blocked' AND barrier_key IS NOT NULL`; queue-holds are untouched.
-Partition: `barrier_key` in coalesce names → coalesce; `barrier_key` in
-str-keyed aggregation node ids → aggregation; neither → `AuditIntegrityError`.
+Partition: `barrier_key` in coalesce names (keys of `_coalesce_node_ids`,
+which is keyed by `CoalesceName` — `processor.py:408`) → coalesce;
+`barrier_key` in str-keyed aggregation node ids (from the aggregation settings
+map) → aggregation; neither → `AuditIntegrityError`. Aggregation rows may
+carry non-NULL `coalesce_name` *lineage* (`processor.py:531-537`), so never
+discriminate on `coalesce_name IS NOT NULL`.
 
 *Integrity argument:* the journal row was written by the live run at buffer
 time. The `ensure_blocked_barrier_work_item` byte-identity validation passing
@@ -98,7 +102,10 @@ payload embeds the contract and is not a re-serialization.
 ### D2 — Absolute timestamps replace offset arithmetic
 
 A new nullable column `token_work_items.barrier_blocked_at` (DateTime tz) is
-written by `mark_blocked` only. On restore:
+written by `mark_blocked` only. (It is stamped at the drain's BLOCKED
+transition — a few ms after the in-memory accept — so restored ages are
+conservatively slightly *younger*; harmless, and stamped on queue-holds too,
+where nothing reads it.) On restore:
 
 - Coalesce per-branch `arrival_time` ← row's `barrier_blocked_at`;
   `first_arrival` ← min over branches; `elapsed_age_seconds` ← now −
@@ -106,7 +113,9 @@ written by `mark_blocked` only. On restore:
   (offset reconstruction, stale by last-checkpoint-age) are deleted with
   *better* fidelity, not worse.
 - Aggregation `first_accept_time` ← min `barrier_blocked_at` of the node's
-  BLOCKED rows. `TriggerEvaluator.restore_from_checkpoint(batch_count,
+  BLOCKED rows (the first accepted row of a batch always blocks; a count-1
+  trigger fires in-claim and has no timing to restore).
+  `TriggerEvaluator.restore_from_checkpoint(batch_count,
   elapsed_age_seconds, count_fire_offset, condition_fire_offset)` keeps its
   signature — only the source of elapsed changes.
 
@@ -126,17 +135,21 @@ stored:
   `handle_incomplete_batches`' dead-batch remap.
 - Coalesce `state_id` ← query `node_states` for the token's PENDING hold at
   the coalesce node (precedent: `_completed_keys` is already
-  Landscape-reconstructed, `coalesce_executor.py:328-385`).
+  Landscape-reconstructed, `coalesce_executor.py:328-385`). Not stored, no
+  new column.
 - `completed_flush_count` ← `COUNT(batches WHERE status='completed' AND
-  aggregation node = ?)` — derivation is fresher than any stored scalar (no
-  lost-increment crash window between flush success and the next checkpoint).
+  aggregation node = ?)` — the only COMPLETED-status `complete_batch` call is
+  the flush-success path (`executors/aggregation.py:491`) where the counter
+  increments (`:501`); failed flushes complete FAILED (`:516`/`:532`).
+  Derivation is *fresher* than any stored scalar (no lost-increment crash
+  window between flush success and the next checkpoint).
 
 **Stored** (the truly underivable scalars), in one new
 `checkpoints.barrier_scalars_json` Text column replacing the two blob columns:
 per aggregation node `{count_fire_offset, condition_fire_offset}` (the two
-trigger latches); per coalesce pending key `{lost_branches}`. A new small
-contracts module `contracts/barrier_scalars.py` replaces both blob families.
-`format_version` 4→5.
+trigger latches); per coalesce pending key `{lost_branches}`. That is the
+whole inventory. A new small contracts module `contracts/barrier_scalars.py`
+replaces both blob families. `format_version` 4→5.
 
 *Staleness audit:* stored scalars are stale by last-checkpoint-age — same as
 the blob today, no regression. A missing count latch is healed by the existing
@@ -198,7 +211,8 @@ become internal arms of `complete_barrier`. This closes the out-of-claim flush
 window: a timeout/EOF flush output is journal-durable (`PENDING_SINK`) the
 moment its inputs are consumed. A crash before sink write recovers via the
 existing `PENDING_SINK` re-drive. In-claim flush keeps the `LEASED`
-triggering-token exclusion exactly as today.
+triggering-token exclusion exactly as today (the claim's own result rides the
+normal drain arms).
 
 ### Scope exclusions (D7)
 

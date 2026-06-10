@@ -115,9 +115,8 @@ where nothing reads it.) On restore:
 - Aggregation `first_accept_time` ← min `barrier_blocked_at` of the node's
   BLOCKED rows (the first accepted row of a batch always blocks; a count-1
   trigger fires in-claim and has no timing to restore).
-  `TriggerEvaluator.restore_from_checkpoint(batch_count,
-  elapsed_age_seconds, count_fire_offset, condition_fire_offset)` keeps its
-  signature — only the source of elapsed changes.
+  `TriggerEvaluator.restore_from_checkpoint(batch_count, elapsed_age_seconds, count_fire_offset, condition_fire_offset)`
+  keeps its signature — only the source of elapsed changes.
 
 Reusing `updated_at` for arrival times is rejected (see *Alternatives
 Considered*). A dedicated column is honest and the epoch bumps anyway.
@@ -137,8 +136,9 @@ stored:
   the coalesce node (precedent: `_completed_keys` is already
   Landscape-reconstructed, `coalesce_executor.py:328-385`). Not stored, no
   new column.
-- `completed_flush_count` ← `COUNT(batches WHERE status='completed' AND
-  aggregation node = ?)` — the only COMPLETED-status `complete_batch` call is
+- `completed_flush_count` ←
+  `COUNT(batches WHERE status='completed' AND aggregation node = ?)` —
+  the only COMPLETED-status `complete_batch` call is
   the flush-success path (`executors/aggregation.py:491`) where the counter
   increments (`:501`); failed flushes complete FAILED (`:516`/`:532`).
   Derivation is *fresher* than any stored scalar (no lost-increment crash
@@ -178,8 +178,8 @@ Consequences:
 - Checkpoint deletion on success removes the sequence-0 row with the rest
   (lifecycle unchanged).
 - Restored `TokenInfo` gets `resume_checkpoint_id` from this always-present
-  resume point, satisfying the `resume_attempt_offset > 0 ⟹
-  resume_checkpoint_id is not None` invariant.
+  resume point, satisfying the
+  `resume_attempt_offset > 0 ⟹ resume_checkpoint_id is not None` invariant.
 
 ### D5 — Attempt discipline from the journal
 

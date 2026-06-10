@@ -20,7 +20,9 @@ class MockCoalesceExecutor(CoalesceExecutor):
     Tests bypass the DAG builder, so this wrapper provides an OBSERVED-mode schema
     by default, matching the contract mode used by test fixtures.
 
-    This eliminates the need for the fallback path in CoalesceExecutor._execute_merge().
+    An OBSERVED output_schema routes _execute_merge() through the runtime
+    merge_union_contracts() path (the all-OBSERVED union path), which shares
+    its core algorithm with merge_union_fields().
     """
 
     def register_coalesce(

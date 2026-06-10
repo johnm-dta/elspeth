@@ -4110,7 +4110,7 @@ class TestSinkExecutor:
             mode="FLEXIBLE",
             locked=True,
         )
-        expected_merged = contract_a.merge(contract_b)
+        expected_merged = contract_a.merge_for_batch(contract_b)
 
         tokens = [
             _make_token(data={"value": "a"}, contract=contract_a, token_id="t1"),

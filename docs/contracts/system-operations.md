@@ -448,7 +448,10 @@ CoalesceExecutor.accept(token, coalesce_name, step)
         │
         ├── Merge row data per strategy (union/nested/select)
         ├── Build merged SchemaContract
-        │   ├── union:  SchemaContract.merge() across branches
+        │   ├── union:  typed → precomputed build-time merge_union_fields() contract
+        │   │           (overlaid with winning-branch original_names);
+        │   │           all-OBSERVED → merge_union_contracts() across branches
+        │   │           (policy-aware: collision policy + require-all semantics)
         │   ├── nested: new contract with branch keys as object fields
         │   └── select: use selected branch's contract directly
         ├── TokenManager.coalesce_tokens(parents, merged_data)

@@ -430,7 +430,7 @@ class SinkExecutor:
         try:
             batch_contract = tokens[0].row_data.contract
             for token in tokens[1:]:
-                batch_contract = batch_contract.merge(token.row_data.contract)
+                batch_contract = batch_contract.merge_for_batch(token.row_data.contract)
         except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as e:

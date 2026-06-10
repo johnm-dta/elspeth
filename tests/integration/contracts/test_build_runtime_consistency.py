@@ -1,14 +1,16 @@
 # tests/integration/contracts/test_build_runtime_consistency.py
-"""Integration tests for build→runtime schema contract consistency.
+"""Build↔runtime parity tests for the canonical union-merge algorithm.
 
-D6 fix: Verifies that the build-time schema computation (merge_union_fields)
-produces equivalent contracts to what runtime merge (SchemaContract.merge)
-would produce. This ensures precomputed schemas match runtime behavior.
+The DAG builder precomputes coalesce schemas during compilation using
+merge_union_fields() (SchemaConfig level). The coalesce executor merges
+all-OBSERVED branch contracts at runtime using merge_union_contracts()
+(SchemaContract level). Both are thin wrappers over the same core algorithm
+(elspeth.contracts.union_merge.merge_union_field_flags), so for any policy
+configuration they must produce identical per-field (type, required, nullable)
+results on equivalent inputs.
 
-The gap this addresses: The DAG builder precomputes coalesce schemas during
-compilation using merge_union_fields(). The coalesce executor has a fallback
-path using SchemaContract.merge(). If these diverge, a pipeline compiled with
-one schema could behave differently at runtime.
+This suite pins that parity across the full policy matrix:
+require_all x collision_policy x branch_order.
 """
 
 from __future__ import annotations
@@ -19,68 +21,16 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
-from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.dag.coalesce_merge import merge_union_fields
 
 # Type alias matching FieldDefinition.field_type
 _FieldType = Literal["str", "int", "float", "bool", "any"]
+_CollisionPolicy = Literal["last_wins", "first_wins", "fail"]
 
-
-# =============================================================================
-# Test Helpers
-# =============================================================================
-
-
-def schema_config_to_contract(config: SchemaConfig) -> SchemaContract:
-    """Convert SchemaConfig to SchemaContract for comparison.
-
-    Uses the production factory to ensure test matches real behavior.
-    """
-    return create_contract_from_config(config)
-
-
-def assert_contracts_equivalent(
-    build_time: SchemaConfig,
-    runtime: SchemaContract,
-    *,
-    check_mode: bool = True,
-) -> None:
-    """Assert that a SchemaConfig and SchemaContract represent equivalent schemas.
-
-    Compares:
-    - Field set (normalized names)
-    - Field types
-    - Field nullable flags
-    - Optionally, mode (though mode semantics differ slightly between config and contract)
-
-    Note: required field handling differs between merge_union_fields() and
-    SchemaContract.merge() based on require_all flag, so we don't compare
-    required here - that's policy-dependent.
-    """
-    # Convert build-time SchemaConfig to comparable form
-    build_fields = {f.name: f for f in build_time.fields} if build_time.fields else {}
-    runtime_fields = {f.normalized_name: f for f in runtime.fields}
-
-    # Field sets must match
-    assert set(build_fields.keys()) == set(runtime_fields.keys()), (
-        f"Field set mismatch: build={set(build_fields.keys())}, runtime={set(runtime_fields.keys())}"
-    )
-
-    # Field types must match (via type string comparison)
-    type_map = {"int": int, "str": str, "float": float, "bool": bool, "any": object}
-    for name in build_fields:
-        build_type = type_map[build_fields[name].field_type]
-        runtime_type = runtime_fields[name].python_type
-        assert build_type == runtime_type, f"Type mismatch for field '{name}': build={build_type}, runtime={runtime_type}"
-
-    # Nullable must match (D7 fix)
-    for name in build_fields:
-        build_nullable = build_fields[name].nullable
-        runtime_nullable = runtime_fields[name].nullable
-        assert build_nullable == runtime_nullable, (
-            f"Nullable mismatch for field '{name}': build={build_nullable}, runtime={runtime_nullable}"
-        )
+# Mapping from SchemaConfig field types to runtime contract types
+_TYPE_MAP: dict[str, type] = {"int": int, "str": str, "float": float, "bool": bool, "any": object}
 
 
 # =============================================================================
@@ -90,17 +40,7 @@ def assert_contracts_equivalent(
 
 field_types: st.SearchStrategy[_FieldType] = st.sampled_from(["int", "str", "float", "bool"])
 
-
-@st.composite
-def field_definitions(draw: st.DrawFn) -> FieldDefinition:
-    """Generate a FieldDefinition for testing."""
-    name = draw(st.text(alphabet="abcdefghij", min_size=1, max_size=4))
-    return FieldDefinition(
-        name=name,
-        field_type=draw(field_types),
-        required=draw(st.booleans()),
-        nullable=draw(st.booleans()),
-    )
+collision_policies: st.SearchStrategy[_CollisionPolicy] = st.sampled_from(["last_wins", "first_wins", "fail"])
 
 
 @st.composite
@@ -172,126 +112,59 @@ def schema_configs_for_merge(draw: st.DrawFn) -> tuple[SchemaConfig, SchemaConfi
 
 
 # =============================================================================
-# Build→Runtime Consistency Tests
+# Build↔Runtime Parity
 # =============================================================================
 
 
-class TestBuildRuntimeNullableConsistency:
-    """Test that build-time and runtime merge produce consistent nullable flags.
+class TestBuildRuntimeParity:
+    """merge_union_fields and merge_union_contracts must agree on equivalent inputs.
 
-    This is the D6 gap: ensuring precomputed schemas behave correctly at runtime.
-
-    Note: merge_union_fields() has policy-aware nullable semantics:
-    - first_wins: uses first branch's nullable
-    - last_wins: uses last branch's nullable (default)
-    - fail: uses OR semantics
-
-    SchemaContract.merge() always uses OR semantics, but per the code comment at
-    schema_contract.py:489-494, this fallback is "never reached in production"
-    since the precomputed schema is always used. Therefore:
-
-    1. With collision_policy='fail', both use OR → should match
-    2. With 'first_wins'/'last_wins', they intentionally differ
-    3. The key invariant is that the executor uses the precomputed schema
+    Strictly stronger than the retired divergence suite: every policy
+    combination is compared on the full per-field (type, required, nullable)
+    map, not just nullable under collision_policy='fail'.
     """
 
-    def test_fail_policy_matches_runtime_or_semantics(self) -> None:
-        """With collision_policy='fail', build-time uses OR, matching runtime merge.
+    @given(
+        configs=schema_configs_for_merge(),
+        require_all=st.booleans(),
+        collision_policy=collision_policies,
+        a_first=st.booleans(),
+    )
+    @settings(max_examples=300)
+    def test_parity_property(
+        self,
+        configs: tuple[SchemaConfig, SchemaConfig],
+        require_all: bool,
+        collision_policy: _CollisionPolicy,
+        a_first: bool,
+    ) -> None:
+        """Property: build-time and runtime merges produce identical field flags."""
+        config_a, config_b = configs
+        branch_order = ("a", "b") if a_first else ("b", "a")
 
-        This is the only collision policy where both merge algorithms produce
-        identical nullable results for shared fields.
-        """
-        config_a = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=False),),
-        )
-        config_b = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=True),),
-        )
-
-        # Build-time merge with 'fail' policy (uses OR semantics)
         build_merged = merge_union_fields(
             {"a": config_a, "b": config_b},
-            require_all=True,
-            collision_policy="fail",
+            require_all=require_all,
+            collision_policy=collision_policy,
+            branch_order=branch_order,
         )
 
-        # Runtime merge (always uses OR semantics)
-        contract_a = schema_config_to_contract(config_a)
-        contract_b = schema_config_to_contract(config_b)
-        runtime_merged = contract_a.merge(contract_b)
-
-        # Both must produce nullable=True (OR semantics: False OR True = True)
-        assert build_merged.fields is not None
-        build_x = next(f for f in build_merged.fields if f.name == "x")
-        runtime_x = next(f for f in runtime_merged.fields if f.normalized_name == "x")
-
-        assert build_x.nullable is True, "Build-time merge with 'fail' policy should use OR"
-        assert runtime_x.nullable is True, "Runtime merge uses OR semantics"
-        assert build_x.nullable == runtime_x.nullable
-
-    def test_last_wins_policy_uses_last_branch_nullable(self) -> None:
-        """With collision_policy='last_wins', build-time uses last branch's nullable.
-
-        This intentionally differs from SchemaContract.merge() OR semantics.
-        The precomputed schema is correct for the policy; runtime merge is a
-        fallback that would give different (less accurate) results.
-        """
-        config_a = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=True),),
-        )
-        config_b = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=False),),
-        )
-
-        # Build-time merge with 'last_wins' (default)
-        build_merged = merge_union_fields(
-            {"a": config_a, "b": config_b},
-            require_all=True,
-            collision_policy="last_wins",
-            branch_order=["a", "b"],  # b is last
+        runtime_merged = merge_union_contracts(
+            {"a": create_contract_from_config(config_a), "b": create_contract_from_config(config_b)},
+            require_all=require_all,
+            collision_policy=collision_policy,
+            branch_order=branch_order,
         )
 
         assert build_merged.fields is not None
-        build_x = next(f for f in build_merged.fields if f.name == "x")
+        build_flags = {f.name: (_TYPE_MAP[f.field_type], f.required, f.nullable) for f in build_merged.fields}
+        runtime_flags = {f.normalized_name: (f.python_type, f.required, f.nullable) for f in runtime_merged.fields}
 
-        # Last branch (b) has nullable=False, so result should be False
-        assert build_x.nullable is False, "last_wins should use last branch's nullable"
+        assert set(build_flags) == set(runtime_flags), f"Field set mismatch: build={set(build_flags)}, runtime={set(runtime_flags)}"
+        assert build_flags == runtime_flags, f"Per-field flag mismatch: build={build_flags}, runtime={runtime_flags}"
 
-    def test_first_wins_policy_uses_first_branch_nullable(self) -> None:
-        """With collision_policy='first_wins', build-time uses first branch's nullable."""
-        config_a = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=True),),
-        )
-        config_b = SchemaConfig(
-            mode="flexible",
-            fields=(FieldDefinition(name="x", field_type="int", required=True, nullable=False),),
-        )
-
-        # Build-time merge with 'first_wins'
-        build_merged = merge_union_fields(
-            {"a": config_a, "b": config_b},
-            require_all=True,
-            collision_policy="first_wins",
-            branch_order=["a", "b"],  # a is first
-        )
-
-        assert build_merged.fields is not None
-        build_x = next(f for f in build_merged.fields if f.name == "x")
-
-        # First branch (a) has nullable=True, so result should be True
-        assert build_x.nullable is True, "first_wins should use first branch's nullable"
-
-    def test_branch_exclusive_nullable_consistency(self) -> None:
-        """Build-time and runtime must agree on forced nullable for exclusive fields.
-
-        Under best_effort (require_all=False), branch-exclusive fields become nullable
-        because the source branch may not arrive. Both paths must produce the same result.
-        """
+    def test_require_all_exclusive_field_keeps_source_flags(self) -> None:
+        """Concrete example: under require_all, a branch-exclusive field keeps its flags in BOTH merges."""
         config_a = SchemaConfig(
             mode="flexible",
             fields=(
@@ -304,105 +177,46 @@ class TestBuildRuntimeNullableConsistency:
             fields=(FieldDefinition(name="shared", field_type="int", required=True, nullable=False),),
         )
 
-        # Build-time merge with best_effort (AND semantics)
-        build_merged = merge_union_fields({"a": config_a, "b": config_b}, require_all=False)
-
-        # Runtime merge
-        contract_a = schema_config_to_contract(config_a)
-        contract_b = schema_config_to_contract(config_b)
-        runtime_merged = contract_a.merge(contract_b)
+        build_merged = merge_union_fields({"a": config_a, "b": config_b}, require_all=True, branch_order=("a", "b"))
+        runtime_merged = merge_union_contracts(
+            {"a": create_contract_from_config(config_a), "b": create_contract_from_config(config_b)},
+            require_all=True,
+            branch_order=("a", "b"),
+        )
 
         assert build_merged.fields is not None
-
-        # Shared field: non-nullable in both → non-nullable
-        build_shared = next(f for f in build_merged.fields if f.name == "shared")
-        runtime_shared = next(f for f in runtime_merged.fields if f.normalized_name == "shared")
-        assert build_shared.nullable == runtime_shared.nullable
-
-        # Branch-exclusive field: forced nullable in both
         build_a_only = next(f for f in build_merged.fields if f.name == "a_only")
         runtime_a_only = next(f for f in runtime_merged.fields if f.normalized_name == "a_only")
-        assert build_a_only.nullable is True, "Build: branch-exclusive forced nullable"
-        assert runtime_a_only.nullable is True, "Runtime: branch-exclusive forced nullable"
 
-    @given(configs=schema_configs_for_merge())
-    @settings(max_examples=100)
-    def test_fail_policy_nullable_consistency_property(self, configs: tuple[SchemaConfig, SchemaConfig]) -> None:
-        """Property: With collision_policy='fail', build and runtime nullables match.
+        # Branch always arrives under require_all → source flags preserved
+        assert (build_a_only.required, build_a_only.nullable) == (True, False)
+        assert (runtime_a_only.required, runtime_a_only.nullable) == (True, False)
 
-        The 'fail' policy uses OR semantics, which matches SchemaContract.merge().
-        This is the only policy where both merge algorithms produce identical results.
-        """
-        config_a, config_b = configs
+    def test_best_effort_exclusive_field_forced_optional_nullable(self) -> None:
+        """Concrete example: under best_effort, a branch-exclusive field is forced optional+nullable in BOTH merges."""
+        config_a = SchemaConfig(
+            mode="flexible",
+            fields=(
+                FieldDefinition(name="shared", field_type="int", required=True, nullable=False),
+                FieldDefinition(name="a_only", field_type="str", required=True, nullable=False),
+            ),
+        )
+        config_b = SchemaConfig(
+            mode="flexible",
+            fields=(FieldDefinition(name="shared", field_type="int", required=True, nullable=False),),
+        )
 
-        # Build-time merge with 'fail' policy (OR semantics)
-        build_merged = merge_union_fields(
-            {"a": config_a, "b": config_b},
+        build_merged = merge_union_fields({"a": config_a, "b": config_b}, require_all=False, branch_order=("a", "b"))
+        runtime_merged = merge_union_contracts(
+            {"a": create_contract_from_config(config_a), "b": create_contract_from_config(config_b)},
             require_all=False,
-            collision_policy="fail",
+            branch_order=("a", "b"),
         )
 
-        # Runtime merge (always OR semantics)
-        contract_a = schema_config_to_contract(config_a)
-        contract_b = schema_config_to_contract(config_b)
-        runtime_merged = contract_a.merge(contract_b)
-
-        # Compare nullable for all fields
         assert build_merged.fields is not None
-        build_nullable = {f.name: f.nullable for f in build_merged.fields}
-        runtime_nullable = {f.normalized_name: f.nullable for f in runtime_merged.fields}
+        build_a_only = next(f for f in build_merged.fields if f.name == "a_only")
+        runtime_a_only = next(f for f in runtime_merged.fields if f.normalized_name == "a_only")
 
-        assert build_nullable == runtime_nullable, (
-            f"Nullable mismatch with 'fail' policy: build={build_nullable}, runtime={runtime_nullable}"
-        )
-
-
-class TestBuildRuntimeTypeConsistency:
-    """Test that build-time and runtime merge produce the same field types."""
-
-    @given(configs=schema_configs_for_merge())
-    @settings(max_examples=100)
-    def test_type_consistency_property(self, configs: tuple[SchemaConfig, SchemaConfig]) -> None:
-        """Property: Build-time and runtime merges produce the same field types."""
-        config_a, config_b = configs
-
-        # Build-time merge
-        build_merged = merge_union_fields({"a": config_a, "b": config_b}, require_all=False)
-
-        # Runtime merge
-        contract_a = schema_config_to_contract(config_a)
-        contract_b = schema_config_to_contract(config_b)
-        runtime_merged = contract_a.merge(contract_b)
-
-        # Compare types
-        type_map = {"int": int, "str": str, "float": float, "bool": bool, "any": object}
-        assert build_merged.fields is not None
-        build_types = {f.name: type_map[f.field_type] for f in build_merged.fields}
-        runtime_types = {f.normalized_name: f.python_type for f in runtime_merged.fields}
-
-        assert build_types == runtime_types
-
-
-class TestBuildRuntimeFieldSetConsistency:
-    """Test that build-time and runtime merge produce the same field sets."""
-
-    @given(configs=schema_configs_for_merge())
-    @settings(max_examples=100)
-    def test_field_set_consistency_property(self, configs: tuple[SchemaConfig, SchemaConfig]) -> None:
-        """Property: Build-time and runtime merges produce the same field set."""
-        config_a, config_b = configs
-
-        # Build-time merge
-        build_merged = merge_union_fields({"a": config_a, "b": config_b}, require_all=False)
-
-        # Runtime merge
-        contract_a = schema_config_to_contract(config_a)
-        contract_b = schema_config_to_contract(config_b)
-        runtime_merged = contract_a.merge(contract_b)
-
-        # Compare field sets
-        assert build_merged.fields is not None
-        build_fields = {f.name for f in build_merged.fields}
-        runtime_fields = {f.normalized_name for f in runtime_merged.fields}
-
-        assert build_fields == runtime_fields
+        # Branch may not arrive → forced optional and nullable
+        assert (build_a_only.required, build_a_only.nullable) == (False, True)
+        assert (runtime_a_only.required, runtime_a_only.nullable) == (False, True)

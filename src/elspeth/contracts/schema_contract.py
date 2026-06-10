@@ -16,7 +16,6 @@ from typing import Any, Literal
 
 from elspeth.contracts.errors import (
     AuditIntegrityError,
-    ContractMergeError,
     ContractViolation,
     ExtraFieldViolation,
     MissingFieldViolation,
@@ -440,14 +439,27 @@ class SchemaContract:
 
         return contract
 
-    def merge(self, other: SchemaContract) -> SchemaContract:
-        """Merge two contracts at a coalesce point.
+    def merge_for_batch(self, other: SchemaContract) -> SchemaContract:
+        """Describe a heterogeneous batch/accumulation of sibling row contracts.
 
-        Rules:
-        1. Mode: Most restrictive wins (FIXED > FLEXIBLE > OBSERVED)
-        2. Fields present in both: Types must match; required only if both require (AND)
-        3. Fields in only one: Included but marked non-required
-        4. Locked: True if either is locked
+        Used when N sibling tokens (possibly from different pipeline
+        branches/paths) are bound for one sink and the batch needs a single
+        truthful description:
+
+        - A field is required only if EVERY member requires it (AND): a field
+          some member's contract does not require cannot be promised for every
+          row in the batch.
+        - Fields absent from any member are optional and nullable: those
+          members' rows lack them.
+        - Shared-field nullable is OR (any member may supply None).
+        - Mode: most restrictive wins (FIXED > FLEXIBLE > OBSERVED);
+          locked: True if either is locked.
+
+        NOT for coalesce union merges — use
+        elspeth.contracts.union_merge.merge_union_contracts, which is
+        policy-aware (require_all coalesces need OR-required semantics).
+        This method delegates to the same canonical algorithm with
+        require_all=False.
 
         Args:
             other: Contract to merge with
@@ -458,79 +470,13 @@ class SchemaContract:
         Raises:
             ContractMergeError: If field types conflict
         """
-        # Mode precedence: FIXED > FLEXIBLE > OBSERVED
-        mode_order: dict[str, int] = {"FIXED": 0, "FLEXIBLE": 1, "OBSERVED": 2}
-        merged_mode = min(
-            self.mode,
-            other.mode,
-            key=lambda m: mode_order[m],
-        )
+        # Deferred import: union_merge imports SchemaContract from this module.
+        from elspeth.contracts.union_merge import merge_union_contracts
 
-        # Build merged field set
-        merged_fields: dict[str, FieldContract] = {}
-
-        all_names = {fc.normalized_name for fc in self.fields} | {fc.normalized_name for fc in other.fields}
-
-        for name in sorted(all_names):
-            in_self = name in self._by_normalized
-            in_other = name in other._by_normalized
-
-            if in_self and in_other:
-                self_fc = self._by_normalized[name]
-                other_fc = other._by_normalized[name]
-                # Both have field - types must match
-                if self_fc.python_type != other_fc.python_type:
-                    raise ContractMergeError(
-                        field=name,
-                        type_a=self_fc.python_type.__name__,
-                        type_b=other_fc.python_type.__name__,
-                    )
-                # Required only if BOTH branches require it (AND semantics).
-                # NOTE: This is only correct for best_effort/quorum coalesces.
-                # For require_all coalesces, OR semantics should apply (field is
-                # required if required in ANY branch, since all branches arrive).
-                # However, this fallback path is never reached in production —
-                # the precomputed schema from merge_union_fields() is used instead.
-                # See D2 investigation for details.
-                # Use declared source if either is declared
-                merged_fields[name] = FieldContract(
-                    normalized_name=name,
-                    original_name=self_fc.original_name,
-                    python_type=self_fc.python_type,
-                    required=self_fc.required and other_fc.required,
-                    source="declared" if self_fc.source == "declared" or other_fc.source == "declared" else "inferred",
-                    nullable=self_fc.nullable or other_fc.nullable,
-                )
-            elif in_self:
-                # Only in self - include but mark non-required and nullable.
-                # The source branch may not arrive (e.g., timeout under best_effort),
-                # so the merged row would have None for this field. (D3 fix)
-                fc = self._by_normalized[name]
-                merged_fields[name] = FieldContract(
-                    normalized_name=fc.normalized_name,
-                    original_name=fc.original_name,
-                    python_type=fc.python_type,
-                    required=False,  # Can't require field from only one path
-                    source=fc.source,
-                    nullable=True,  # Branch may not arrive — field may be None
-                )
-            else:
-                # Only in other (in_other must be True since name came from union).
-                # Same reasoning: source branch may not arrive. (D3 fix)
-                fc = other._by_normalized[name]
-                merged_fields[name] = FieldContract(
-                    normalized_name=fc.normalized_name,
-                    original_name=fc.original_name,
-                    python_type=fc.python_type,
-                    required=False,  # Can't require field from only one path
-                    source=fc.source,
-                    nullable=True,  # Branch may not arrive — field may be None
-                )
-
-        return SchemaContract(
-            mode=merged_mode,
-            fields=tuple(merged_fields.values()),
-            locked=self.locked or other.locked,
+        return merge_union_contracts(
+            {"self": self, "other": other},
+            require_all=False,
+            branch_order=("self", "other"),
         )
 
 

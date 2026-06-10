@@ -1,15 +1,21 @@
 # tests/property/contracts/test_schema_contract_properties.py
-"""Property-based tests for SchemaContract merge, validation, and checkpoint invariants.
+"""Property-based tests for SchemaContract merge_for_batch, validation, and checkpoint invariants.
 
-SchemaContract is the central type contract in the pipeline. At coalesce (join)
-points, contracts from parallel paths must merge. The merge operation has:
+SchemaContract is the central type contract in the pipeline. When a batch of
+sibling tokens (possibly from different pipeline paths) is bound for one sink,
+their contracts are merged with merge_for_batch into one description of the
+batch. The merge operation has:
 - Mode precedence: FIXED > FLEXIBLE > OBSERVED (most restrictive wins)
 - Field union: fields present in both must have matching types
-- Fields from only one side become non-required
+- Fields from only one side become non-required (those members' rows lack them)
 - Locked status: True if either input is locked
 
+These require_all=False semantics are fully commutative, so all properties
+below remain valid. (Coalesce union merges use the policy-aware
+merge_union_contracts instead — see tests/unit/contracts/test_union_merge.py.)
+
 Properties tested:
-- Merge field commutativity: A.merge(B).fields ≡ B.merge(A).fields (same set)
+- Merge field commutativity: A.merge_for_batch(B).fields ≡ B.merge_for_batch(A).fields (same set)
 - Merge mode determinism: same inputs → same mode (most restrictive wins)
 - Merge type conflict detection: mismatched types always raise
 - Checkpoint round-trip: to_checkpoint_format → from_checkpoint preserves all state
@@ -214,15 +220,15 @@ def mergeable_contract_pairs(draw: st.DrawFn) -> tuple[SchemaContract, SchemaCon
 
 
 class TestMergeCommutativityProperties:
-    """A.merge(B) and B.merge(A) must produce equivalent field sets."""
+    """A.merge_for_batch(B) and B.merge_for_batch(A) must produce equivalent field sets."""
 
     @given(pair=mergeable_contract_pairs())
     @settings(max_examples=200)
     def test_merge_field_set_is_commutative(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
-        """Property: A.merge(B) has the same normalized_names as B.merge(A)."""
+        """Property: A.merge_for_batch(B) has the same normalized_names as B.merge_for_batch(A)."""
         a, b = pair
-        ab = a.merge(b)
-        ba = b.merge(a)
+        ab = a.merge_for_batch(b)
+        ba = b.merge_for_batch(a)
 
         ab_names = {fc.normalized_name for fc in ab.fields}
         ba_names = {fc.normalized_name for fc in ba.fields}
@@ -233,8 +239,8 @@ class TestMergeCommutativityProperties:
     def test_merge_types_are_commutative(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Merged field types match regardless of merge order."""
         a, b = pair
-        ab = a.merge(b)
-        ba = b.merge(a)
+        ab = a.merge_for_batch(b)
+        ba = b.merge_for_batch(a)
 
         ab_types = {fc.normalized_name: fc.python_type for fc in ab.fields}
         ba_types = {fc.normalized_name: fc.python_type for fc in ba.fields}
@@ -245,14 +251,14 @@ class TestMergeCommutativityProperties:
     def test_merge_mode_is_commutative(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Merged mode is the same regardless of merge order."""
         a, b = pair
-        assert a.merge(b).mode == b.merge(a).mode
+        assert a.merge_for_batch(b).mode == b.merge_for_batch(a).mode
 
     @given(pair=mergeable_contract_pairs())
     @settings(max_examples=100)
     def test_merge_locked_is_commutative(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Merged locked status is the same regardless of order."""
         a, b = pair
-        assert a.merge(b).locked == b.merge(a).locked
+        assert a.merge_for_batch(b).locked == b.merge_for_batch(a).locked
 
     @given(pair=mergeable_contract_pairs())
     @settings(max_examples=200)
@@ -260,11 +266,11 @@ class TestMergeCommutativityProperties:
         """Property: Merged field nullable is the same regardless of merge order.
 
         D7 fix: The nullable OR propagation must be commutative. For any shared
-        field, A.merge(B)[field].nullable == B.merge(A)[field].nullable.
+        field, A.merge_for_batch(B)[field].nullable == B.merge_for_batch(A)[field].nullable.
         """
         a, b = pair
-        ab = a.merge(b)
-        ba = b.merge(a)
+        ab = a.merge_for_batch(b)
+        ba = b.merge_for_batch(a)
 
         ab_nullable = {fc.normalized_name: fc.nullable for fc in ab.fields}
         ba_nullable = {fc.normalized_name: fc.nullable for fc in ba.fields}
@@ -280,9 +286,8 @@ class TestMergeNullableOrSemantics:
     """Property tests for nullable OR propagation in shared fields (D7 fix).
 
     When two contracts share a field, the merged field's nullable flag uses
-    OR semantics: nullable if EITHER input is nullable. This reflects the
-    runtime behavior where any nullable branch can contribute None via
-    collision resolution.
+    OR semantics: nullable if EITHER input is nullable. Any batch member with
+    a nullable field may contribute a None value.
     """
 
     @given(pair=mergeable_contract_pairs())
@@ -290,7 +295,7 @@ class TestMergeNullableOrSemantics:
     def test_shared_field_nullable_uses_or_semantics(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Shared field nullable = a.nullable OR b.nullable."""
         a, b = pair
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
 
         a_by_name = {fc.normalized_name: fc for fc in a.fields}
         b_by_name = {fc.normalized_name: fc for fc in b.fields}
@@ -311,14 +316,14 @@ class TestMergeNullableOrSemantics:
     @given(pair=mergeable_contract_pairs())
     @settings(max_examples=200)
     def test_branch_exclusive_field_forced_nullable(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
-        """Property: Branch-exclusive fields are forced nullable=True.
+        """Property: Member-exclusive fields are forced nullable=True.
 
-        A field present in only one branch becomes nullable in the merged
-        contract because the source branch may not arrive (e.g., timeout
-        under best_effort policy). The merged row would have None for that field.
+        A field present in only one member's contract becomes nullable in the
+        merged contract because the other members' rows lack that field
+        (rendered as missing/None at the sink).
         """
         a, b = pair
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
 
         a_names = {fc.normalized_name for fc in a.fields}
         b_names = {fc.normalized_name for fc in b.fields}
@@ -346,7 +351,7 @@ class TestMergeModePrecedenceProperties:
         a, b = pair
         mode_order = {"FIXED": 0, "FLEXIBLE": 1, "OBSERVED": 2}
 
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
         expected_rank = min(mode_order[a.mode], mode_order[b.mode])
         actual_rank = mode_order[merged.mode]
         assert actual_rank == expected_rank
@@ -355,8 +360,8 @@ class TestMergeModePrecedenceProperties:
         """Property: Merging with FIXED always produces FIXED."""
         fixed = SchemaContract(mode="FIXED", fields=())
         observed = SchemaContract(mode="OBSERVED", fields=())
-        assert fixed.merge(observed).mode == "FIXED"
-        assert observed.merge(fixed).mode == "FIXED"
+        assert fixed.merge_for_batch(observed).mode == "FIXED"
+        assert observed.merge_for_batch(fixed).mode == "FIXED"
 
 
 # =============================================================================
@@ -387,7 +392,7 @@ class TestMergeTypeConflictProperties:
         )
 
         with pytest.raises(ContractMergeError):
-            a.merge(b)
+            a.merge_for_batch(b)
 
     @given(
         name=normalized_names,
@@ -405,7 +410,7 @@ class TestMergeTypeConflictProperties:
             fields=(FieldContract(normalized_name=name, original_name=name, python_type=ptype, required=False, source="inferred"),),
         )
 
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
         field = merged.get_field(name)
         assert field is not None
         assert field.python_type == ptype
@@ -424,7 +429,7 @@ class TestMergeFieldUnionProperties:
     def test_merged_fields_are_union(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Merged field set is the union of both contracts' fields."""
         a, b = pair
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
 
         a_names = {fc.normalized_name for fc in a.fields}
         b_names = {fc.normalized_name for fc in b.fields}
@@ -437,7 +442,7 @@ class TestMergeFieldUnionProperties:
     def test_fields_only_in_one_side_are_not_required(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
         """Property: Fields from only one side are marked non-required after merge."""
         a, b = pair
-        merged = a.merge(b)
+        merged = a.merge_for_batch(b)
 
         a_names = {fc.normalized_name for fc in a.fields}
         b_names = {fc.normalized_name for fc in b.fields}

@@ -45,7 +45,9 @@ class _TestCoalesceExecutor(CoalesceExecutor):
     Tests bypass the DAG builder, so this wrapper provides an OBSERVED-mode schema
     by default, matching the contract mode used by test fixtures.
 
-    This eliminates the need for the fallback path in CoalesceExecutor._execute_merge().
+    An OBSERVED output_schema routes _execute_merge() through the runtime
+    merge_union_contracts() path (the all-OBSERVED union path), which shares
+    its core algorithm with merge_union_fields().
     """
 
     def register_coalesce(
@@ -1695,6 +1697,44 @@ class TestContractHandling:
         assert mc.get_field("x") is not None
         assert mc.get_field("y") is not None
 
+    def test_all_observed_require_all_exclusive_fields_not_forced_nullable(self):
+        """All-OBSERVED require_all union: branch-exclusive fields keep nullable=False.
+
+        Regression pin for the schema-merge collapse: the runtime union merge
+        is policy-aware (merge_union_contracts). Under require_all every branch
+        is guaranteed to arrive, so a branch-exclusive field keeps its source
+        flags (required=False, nullable=False for observed/inferred fields)
+        instead of being forced (required=False, nullable=True) as the old
+        AND-only SchemaContract.merge fold did.
+        """
+        executor, _, _, tm, _ = _make_executor()
+        executor.register_coalesce(_settings(policy="require_all", merge="union"), "node_1")
+        # Production-shape OBSERVED contracts: inferred fields are always
+        # required=False, nullable=False (SchemaContract.with_field hardcodes them).
+        c_a = _make_contract(
+            fields=[
+                make_field("shared", python_type=int, required=False, source="inferred"),
+                make_field("a_only", python_type=str, required=False, source="inferred"),
+            ],
+            mode="OBSERVED",
+        )
+        c_b = _make_contract(
+            fields=[
+                make_field("shared", python_type=int, required=False, source="inferred"),
+                make_field("b_only", python_type=float, required=False, source="inferred"),
+            ],
+            mode="OBSERVED",
+        )
+        t1 = _make_token(branch_name="a", token_id="t1", data={"shared": 1, "a_only": "hi"}, contract=c_a)
+        t2 = _make_token(branch_name="b", token_id="t2", data={"shared": 1, "b_only": 2.5}, contract=c_b)
+        executor.accept(t1, "merge")
+        executor.accept(t2, "merge")
+        mc = tm.coalesce_tokens.call_args.kwargs["merged_data"].contract
+        for name in ("a_only", "b_only"):
+            fc = mc.get_field(name)
+            assert fc.required is False
+            assert fc.nullable is False, f"require_all union: exclusive field '{name}' must keep nullable=False"
+
     def test_nested_merge_branch_key_contract(self):
         """Nested merge produces FIXED contract with branch keys typed as object."""
         executor, _, _, tm, _ = _make_executor()
@@ -3341,10 +3381,10 @@ class TestNotifyBranchLostEvaluateAfterLoss:
 class TestPrecomputedOutputSchema:
     """Tests for P2 fix: using pre-computed DAG schema for build/runtime alignment.
 
-    When output_schema is passed to register_coalesce(), the executor uses it
-    directly for union merge instead of calling SchemaContract.merge(). This
-    ensures runtime contracts match the DAG-computed schema, preserving the
-    nullable semantics from the P1 fix.
+    When a typed output_schema is passed to register_coalesce(), the executor
+    uses it directly for union merge instead of calling merge_union_contracts()
+    on the branch contracts at runtime. This ensures runtime contracts match
+    the DAG-computed schema, preserving the nullable semantics from the P1 fix.
     """
 
     def test_union_merge_uses_precomputed_schema_when_provided(self):

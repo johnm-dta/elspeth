@@ -159,7 +159,7 @@ def resolve_contract_from_context_if_needed(sink: DisplayHeaderHost, ctx: SinkCo
 
     incoming_names = {field.normalized_name for field in incoming.fields}
     if not incoming_names.issubset(existing_original_by_normalized):
-        sink._output_contract = existing.merge(incoming)
+        sink._output_contract = existing.merge_for_batch(incoming)
 
 
 def set_resume_field_resolution(sink: DisplayHeaderHost, resolution_mapping: dict[str, str]) -> None:

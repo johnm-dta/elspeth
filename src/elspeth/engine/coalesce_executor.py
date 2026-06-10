@@ -29,6 +29,7 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
+from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -231,8 +232,10 @@ class CoalesceExecutor:
                 fields from that branch's producer schema. May be None for pipelines
                 using observed-mode schemas where no fields are declared.
             output_schema: Optional pre-computed output schema from DAG builder.
-                When provided, used directly in union merge instead of runtime
-                SchemaContract.merge() to ensure build/runtime contract alignment.
+                When provided (and typed), used directly in union merge so the
+                runtime contract matches the build-time computation exactly;
+                all-OBSERVED unions merge branch contracts at runtime with
+                merge_union_contracts(), which shares the same core algorithm.
         """
         self._settings[settings.name] = settings
         self._node_ids[settings.name] = node_id
@@ -825,14 +828,14 @@ class CoalesceExecutor:
             contracts: list[SchemaContract] = list(branch_contracts.values())
 
             if settings.merge == "union":
-                # For typed schemas, the DAG builder's merge_union_fields() computes
-                # correct policy-aware semantics (OR for require_all, AND otherwise).
-                # Runtime SchemaContract.merge() uses incorrect AND-only semantics,
-                # so precomputed is REQUIRED for typed schemas.
-                #
-                # For OBSERVED schemas, precomputed is empty (fields=()) since types
-                # are inferred at runtime. Skip precomputed entirely and merge branch
-                # contracts directly. (P1 fix: skip precomputed for observed unions)
+                # Both union paths derive from one canonical algorithm
+                # (elspeth.contracts.union_merge.merge_union_field_flags):
+                # - Typed schemas use the precomputed build-time result of
+                #   merge_union_fields(), overlaid with branch original_names
+                #   via _merge_with_original_names (P2 alignment guarantee).
+                # - All-OBSERVED schemas have an empty precomputed contract
+                #   (types are inferred at runtime), so the branch contracts
+                #   are merged directly with merge_union_contracts().
                 all_branches_observed = all(c.mode == "OBSERVED" for c in contracts)
 
                 if settings.name in self._output_schemas:
@@ -859,20 +862,26 @@ class CoalesceExecutor:
                     # not first-arrived branch.
                     merged_contract = self._merge_with_original_names(precomputed, branch_contracts, field_origins)
                 else:
-                    # OBSERVED or no precomputed: merge branch contracts directly.
-                    # Type conflicts are still possible when types are inferred from data.
-                    merged_contract = contracts[0]
-                    for c in contracts[1:]:
-                        try:
-                            merged_contract = merged_contract.merge(c)
-                        except ContractMergeError as e:
-                            # Type conflict between branches — fail this row gracefully.
-                            return self._fail_pending(
-                                settings=settings,
-                                key=key,
-                                step=step,
-                                failure_reason=f"contract_type_conflict: {e}",
-                            )
+                    # All-OBSERVED (or observed-mode precomputed): merge branch
+                    # contracts directly with the policy-aware union algorithm.
+                    # Type conflicts are still possible when types are inferred
+                    # from data.
+                    try:
+                        merged_contract = merge_union_contracts(
+                            branch_contracts,
+                            require_all=settings.has_all_branch_semantics,
+                            collision_policy=settings.union_collision_policy,
+                            branch_order=tuple(settings.branches),
+                            coalesce_id=settings.name,
+                        )
+                    except ContractMergeError as e:
+                        # Type conflict between branches — fail this row gracefully.
+                        return self._fail_pending(
+                            settings=settings,
+                            key=key,
+                            step=step,
+                            failure_reason=f"contract_type_conflict: {e}",
+                        )
 
             elif settings.merge == "nested":
                 # Nested: Contract declares branch keys with object type

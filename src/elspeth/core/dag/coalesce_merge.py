@@ -2,7 +2,8 @@
 """Coalesce merge logic for schema computation.
 
 Extracted from builder.py to enable direct testing without reimplementation.
-This module contains the core logic for merging schemas at coalesce points.
+This module contains the build-time wrappers for merging schemas at coalesce
+points.
 
 Two operations are provided:
 
@@ -10,19 +11,36 @@ Two operations are provided:
    using union (require_all) or intersection (other policies).
 
 2. merge_union_fields: Combines typed field definitions with policy-aware
-   required/optional semantics for union merge strategy.
+   required/optional semantics for union merge strategy. The per-field
+   algorithm lives in elspeth.contracts.union_merge (merge_union_field_flags)
+   and is shared with the runtime merge_union_contracts, so build-time and
+   runtime union merges cannot diverge.
 
 Both functions are called by builder.py during graph construction and can
 be called directly by tests to verify semantics without reimplementing logic.
+
+merge_union_contracts is re-exported here for discoverability next to its
+build-time sibling.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Literal
 
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
+from elspeth.contracts.union_merge import (
+    UnionTypeConflictError,
+    merge_union_contracts,
+    merge_union_field_flags,
+)
 from elspeth.core.dag.models import GraphValidationError
+
+__all__ = [
+    "merge_guaranteed_fields",
+    "merge_union_contracts",
+    "merge_union_fields",
+]
 
 
 def merge_guaranteed_fields(
@@ -120,15 +138,6 @@ def merge_union_fields(
         GraphValidationError: If branches have incompatible types for the same
             field name.
     """
-    # Track (type, required, nullable, branch) for each field.
-    # For shared fields, nullable depends on collision_policy:
-    # - first_wins: first branch's value wins, so use first branch's nullable
-    # - last_wins: last branch's value wins, so use last branch's nullable
-    # - fail: collisions fail at runtime, use OR as conservative fallback
-    seen_types: dict[str, tuple[str, bool, bool, str]] = {}
-    branches_with_field: dict[str, set[str]] = {}
-    contributing_branches: set[str] = set()
-
     # Check if ALL branches are observed BEFORE processing. Only return observed
     # mode if every branch is observed - otherwise process the typed branches.
     # Previous bug: the loop would break on the FIRST observed branch, silently
@@ -143,85 +152,44 @@ def merge_union_fields(
             audit_fields=audit_fields,
         )
 
-    # Determine branch iteration order. Use branch_order if provided (declaration
-    # order from config), otherwise fall back to dict iteration order. This is
-    # critical for first_wins/last_wins nullable semantics — the first/last branch
-    # in declaration order determines the winning value.
-    branch_names = branch_order if branch_order is not None else list(branch_schemas.keys())
+    # Build the core algorithm's input, EXCLUDING non-contributing branches:
+    # observed branches contribute no typed fields (mixed observed/explicit is
+    # handled by processing only the explicit branches; upstream validation may
+    # reject mixed schemas at a higher level), and fields=None branches have
+    # nothing to contribute. A typed branch with fields=() still counts as
+    # contributing (it can force siblings' exclusive fields optional).
+    #
+    # Iteration order: branch_order if provided (declaration order from config),
+    # otherwise dict iteration order. This is critical for first_wins/last_wins
+    # nullable semantics — the first/last branch in declaration order determines
+    # the winning value. branch_order may include branches not in branch_schemas
+    # (e.g., not wired up yet); the core skips names absent from its input.
+    branch_fields: dict[str, list[tuple[str, Hashable, bool, bool]]] = {
+        branch_name: [(fd.name, fd.field_type, fd.required, fd.nullable) for fd in schema_cfg.fields]
+        for branch_name, schema_cfg in branch_schemas.items()
+        if not schema_cfg.is_observed and schema_cfg.fields is not None
+    }
 
-    for branch_name in branch_names:
-        if branch_name not in branch_schemas:
-            # branch_order may include branches not in branch_schemas (e.g., if
-            # some branches haven't been wired up yet). Skip missing branches.
-            continue
-        schema_cfg = branch_schemas[branch_name]
-        if schema_cfg.is_observed:
-            # Skip observed branches - they contribute no typed fields.
-            # Mixed observed/explicit is handled by processing only the explicit branches.
-            # Note: upstream validation (validate_edge_compatibility) may reject
-            # mixed schemas at a higher level; here we process what we can.
-            continue
-        if schema_cfg.fields is None:
-            continue
-        contributing_branches.add(branch_name)
-        for fd in schema_cfg.fields:
-            if fd.name not in branches_with_field:
-                branches_with_field[fd.name] = set()
-            branches_with_field[fd.name].add(branch_name)
+    try:
+        merged_flags = merge_union_field_flags(
+            branch_fields,
+            require_all=require_all,
+            collision_policy=collision_policy,
+            branch_order=branch_order,
+        )
+    except UnionTypeConflictError as e:
+        node_desc = f"'{coalesce_id}'" if coalesce_id else "coalesce node"
+        raise GraphValidationError(
+            f"Coalesce node {node_desc} receives incompatible "
+            f"types for field '{e.field}' in union merge: "
+            f"branch '{e.branch_a}' has {e.type_a!r}, "
+            f"branch '{e.branch_b}' has {e.type_b!r}. "
+            "Union merge requires compatible types on shared fields.",
+            component_id=coalesce_id,
+            component_type="coalesce",
+        ) from e
 
-            fd_nullable = fd.nullable
-
-            if fd.name in seen_types:
-                prior_type, prior_req, prior_nullable, prior_branch = seen_types[fd.name]
-                if prior_type != fd.field_type:
-                    node_desc = f"'{coalesce_id}'" if coalesce_id else "coalesce node"
-                    raise GraphValidationError(
-                        f"Coalesce node {node_desc} receives incompatible "
-                        f"types for field '{fd.name}' in union merge: "
-                        f"branch '{prior_branch}' has {prior_type!r}, "
-                        f"branch '{branch_name}' has {fd.field_type!r}. "
-                        "Union merge requires compatible types on shared fields.",
-                        component_id=coalesce_id,
-                        component_type="coalesce",
-                    )
-                if require_all:
-                    # OR for required: required if required in ANY branch.
-                    merged_req = prior_req or fd.required
-                    # Nullable depends on collision_policy (D5 fix):
-                    # - first_wins: keep first branch's nullable (prior_nullable)
-                    # - last_wins: use current branch's nullable (fd_nullable)
-                    # - fail: OR of all (conservative; collisions fail at runtime)
-                    if collision_policy == "first_wins":
-                        merged_nullable = prior_nullable  # First seen wins
-                    elif collision_policy == "last_wins":
-                        merged_nullable = fd_nullable  # Last seen wins
-                    else:  # "fail" — conservative OR
-                        merged_nullable = prior_nullable or fd_nullable
-                    seen_types[fd.name] = (prior_type, merged_req, merged_nullable, prior_branch)
-                else:
-                    # AND: optional if optional in ANY branch.
-                    merged_req = prior_req and fd.required
-                    # Under partial-arrival (non-require_all), any branch might be
-                    # the one that arrives. The collision_policy determines VALUE
-                    # resolution if multiple arrive, but the SCHEMA must be sound
-                    # for all arrival combinations. If ANY branch can produce None,
-                    # the merged schema must be nullable. (P1 soundness fix)
-                    merged_nullable = prior_nullable or fd_nullable
-                    seen_types[fd.name] = (prior_type, merged_req, merged_nullable, prior_branch)
-            else:
-                seen_types[fd.name] = (fd.field_type, fd.required, fd_nullable, branch_name)
-
-    # Branch-exclusive field handling (post-loop pass):
-    # - require_all: keep the source-branch required flag (branch always arrives)
-    # - other policies: force optional (branch may not arrive)
-    if not require_all:
-        for field_name in list(seen_types):
-            if branches_with_field[field_name] != contributing_branches:
-                ftype, _, _, first_branch = seen_types[field_name]
-                # Force optional, and nullable (since branch may not arrive)
-                seen_types[field_name] = (ftype, False, True, first_branch)
-
-    if not seen_types:
+    if not merged_flags:
         # No typed fields from any branch (all branches had fields=None or were
         # observed and skipped). Return observed mode.
         return SchemaConfig(
@@ -233,7 +201,7 @@ def merge_union_fields(
 
     merged_fields = tuple(
         FieldDefinition(name=name, field_type=ftype, required=req, nullable=is_nullable)  # type: ignore[arg-type]
-        for name, (ftype, req, is_nullable, _) in seen_types.items()
+        for name, (ftype, req, is_nullable, _) in merged_flags.items()
     )
     return SchemaConfig(
         mode="flexible",

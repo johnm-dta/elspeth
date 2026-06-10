@@ -29,7 +29,7 @@ def _make_token(token_id: str, row_data: dict[str, object] | None = None) -> Mag
     mock_row = MagicMock()
     mock_row.to_dict.return_value = row_data or {"field": "value"}
     mock_row.contract = MagicMock()
-    mock_row.contract.merge.return_value = mock_row.contract
+    mock_row.contract.merge_for_batch.return_value = mock_row.contract
     token.row_data = mock_row
     return token
 

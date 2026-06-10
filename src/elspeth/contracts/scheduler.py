@@ -81,6 +81,7 @@ class TokenWorkItem:
     coalesce_name: str | None = None
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
+    barrier_blocked_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

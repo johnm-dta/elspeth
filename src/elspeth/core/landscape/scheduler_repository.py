@@ -1223,6 +1223,11 @@ class TokenSchedulerRepository:
             expected_lease_owner=expected_lease_owner,
             queue_key=queue_key,
             barrier_key=barrier_key,
+            # F1: barrier holds are restored from the journal using this
+            # absolute timestamp. Queue-holds (ADR-028) get stamped too —
+            # harmless; nothing reads the column on that arm, and a single
+            # UPDATE shape keeps this verb the column's only writer.
+            barrier_blocked_at=now,
             lease_owner=None,
             lease_expires_at=None,
         )
@@ -1835,6 +1840,38 @@ class TokenSchedulerRepository:
             )
         return frozenset(rows)
 
+    def list_blocked_barrier_items(self, *, run_id: str) -> list[TokenWorkItem]:
+        """Return BLOCKED barrier holds for a run in deterministic order.
+
+        BLOCKED rows are dual-use (D1): barrier holds carry a non-NULL
+        ``barrier_key`` (coalesce_name for coalesce, str(node_id) for
+        aggregation) while ADR-028 queue-holds carry only a ``queue_key``.
+        The ``barrier_key IS NOT NULL`` filter is what keeps queue-holds out
+        of barrier-restore sweeps.
+
+        Iteration order is ``(barrier_key, ingest_sequence, work_item_id)``
+        for determinism only; buffer ORDER at restore comes from
+        ``batch_members.ordinal``, not from this verb. Read-only: no
+        scheduler_event is recorded.
+        """
+        with self._engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.barrier_key.is_not(None))
+                    .order_by(
+                        token_work_items_table.c.barrier_key,
+                        token_work_items_table.c.ingest_sequence,
+                        token_work_items_table.c.work_item_id,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [self._item_from_mapping(row) for row in rows]
+
     @staticmethod
     def _unresolved_work_predicate() -> ColumnElement[bool]:
         """Predicate for work that has not reached a durable sink handoff.
@@ -2036,7 +2073,7 @@ class TokenSchedulerRepository:
     @staticmethod
     def _item_from_mapping(row: RowMapping) -> TokenWorkItem:
         data = dict(row)
-        for key in ("available_at", "created_at", "updated_at", "lease_expires_at"):
+        for key in ("available_at", "created_at", "updated_at", "lease_expires_at", "barrier_blocked_at"):
             value = data[key]
             if type(value) is datetime and value.tzinfo is None:
                 data[key] = value.replace(tzinfo=UTC)
@@ -2070,6 +2107,7 @@ class TokenSchedulerRepository:
             available_at=data["available_at"],
             created_at=data["created_at"],
             updated_at=data["updated_at"],
+            barrier_blocked_at=data["barrier_blocked_at"],
         )
 
     @staticmethod

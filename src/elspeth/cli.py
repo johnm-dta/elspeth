@@ -2002,14 +2002,32 @@ def resume(
         # Get count of unprocessed rows
         unprocessed_row_ids = recovery_manager.get_unprocessed_rows(run_id)
 
+        # F1: buffered barrier tokens live in the scheduler journal, not the
+        # checkpoint — "what will be restored" is the journal's BLOCKED
+        # barrier rows plus the checkpoint's scalar barrier metadata.
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+
+        from elspeth.contracts.scheduler import TokenWorkStatus
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.engine.connect() as conn:
+            blocked_barrier_rows = conn.execute(
+                sa_select(sa_func.count())
+                .select_from(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                .where(token_work_items_table.c.barrier_key.is_not(None))
+            ).scalar_one()
+
         # Display resume point information
         resume_info = {
             "run_id": run_id,
             "can_resume": True,
             "resume_point": {
                 "sequence_number": resume_point.sequence_number,
-                "has_aggregation_state": resume_point.aggregation_state is not None,
-                "has_coalesce_state": resume_point.coalesce_state is not None,
+                "has_barrier_scalars": resume_point.barrier_scalars is not None,
+                "blocked_barrier_rows": blocked_barrier_rows,
             },
             "unprocessed_rows": len(unprocessed_row_ids),
         }
@@ -2025,14 +2043,11 @@ def resume(
             typer.echo(f"Run {run_id} can be resumed.")
             typer.echo("\nResume point:")
             typer.echo(f"  Sequence number: {resume_point.sequence_number}")
-            if resume_point.aggregation_state is not None:
-                typer.echo("  Has aggregation state: Yes")
+            if resume_point.barrier_scalars is not None:
+                typer.echo("  Has barrier scalars: Yes")
             else:
-                typer.echo("  Has aggregation state: No")
-            if resume_point.coalesce_state is not None:
-                typer.echo("  Has coalesce state: Yes")
-            else:
-                typer.echo("  Has coalesce state: No")
+                typer.echo("  Has barrier scalars: No")
+            typer.echo(f"  Blocked barrier rows (journal): {blocked_barrier_rows}")
             typer.echo(f"  Unprocessed rows: {len(unprocessed_row_ids)}")
 
         if not execute:

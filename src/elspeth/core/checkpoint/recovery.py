@@ -30,8 +30,7 @@ from elspeth.contracts import (
     SchemaContract,
     TerminalPath,
 )
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
@@ -56,7 +55,9 @@ _METADATA_CHUNK_SIZE = 500
 _CHECKPOINT_STATE_CACHE_MAX = 16
 _DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
 _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
-_CheckpointStateCacheKey = tuple[str, str | None, str | None]
+# (checkpoint_id, barrier_scalars_json) — keyed by payload so a re-read of the
+# same checkpoint row with mutated JSON cannot serve a stale deserialization.
+_CheckpointStateCacheKey = tuple[str, str | None]
 
 __all__ = [
     "IncompleteTokenSpec",
@@ -174,18 +175,12 @@ class IncompleteTokenSpec:
                     raise ValueError(f"IncompleteTokenSpec.{field_name} must be None or non-empty string, got {value!r}")
 
 
-@dataclass(frozen=True, slots=True)
-class _RestoredCheckpointStates:
-    aggregation_state: AggregationCheckpointState | None
-    coalesce_state: CoalesceCheckpointState | None
-
-
 class RecoveryManager:
     """Manages recovery of failed runs from checkpoints.
 
     Recovery protocol:
     1. Check if run can be resumed (failed status + checkpoint exists)
-    2. Load checkpoint and aggregation state
+    2. Load checkpoint and barrier scalar metadata
     3. Identify unprocessed rows (sequence > checkpoint.sequence)
     4. Resume processing from checkpoint position
 
@@ -207,7 +202,7 @@ class RecoveryManager:
         """
         self._db = db
         self._checkpoint_manager = checkpoint_manager
-        self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, _RestoredCheckpointStates] = {}
+        self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, BarrierScalars | None] = {}
 
     def can_resume(self, run_id: str, graph: ExecutionGraph) -> ResumeCheck:
         """Check if a run can be resumed.
@@ -266,7 +261,7 @@ class RecoveryManager:
         Returns all information needed to resume processing:
         - The checkpoint itself (for audit trail)
         - Sequence number for ordering
-        - Deserialized aggregation state (if any)
+        - Deserialized barrier scalar metadata (if any)
 
         Args:
             run_id: The run to get resume point for
@@ -291,13 +286,12 @@ class RecoveryManager:
             return None
 
         self.verify_contract_integrity(run_id)
-        restored_states = self._restore_checkpoint_states(checkpoint)
+        barrier_scalars = self._restore_barrier_scalars(checkpoint)
 
         return ResumePoint(
             checkpoint=checkpoint,
             sequence_number=checkpoint.sequence_number,
-            aggregation_state=restored_states.aggregation_state,
-            coalesce_state=restored_states.coalesce_state,
+            barrier_scalars=barrier_scalars,
         )
 
     def get_unprocessed_row_data(
@@ -571,10 +565,11 @@ class RecoveryManager:
         if checkpoint is None:
             return []
 
-        # Extract buffered token IDs from checkpoint aggregation state.
-        # These buffered tokens will be restored from checkpoint state and must not
+        # Buffered-token exclusion: tokens restored from barrier buffers must not
         # trigger duplicate reprocessing, but row-level exclusion is unsafe when a row
         # has mixed buffered and non-buffered incomplete tokens.
+        # F1 Task 1.2: checkpoint blobs no longer carry buffered tokens, so this set
+        # is empty until Phase 2 sources it from journal BLOCKED rows.
         buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint)
 
         with self._db.engine.connect() as conn:
@@ -795,53 +790,33 @@ class RecoveryManager:
         return PipelineRow(envelope["data"], contract)
 
     def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
-        """Collect token IDs restored from checkpoint state."""
-        buffered_token_ids: set[str] = set()
+        """Collect token IDs restored from checkpoint state.
 
-        restored_states = self._restore_checkpoint_states(checkpoint)
-        if restored_states.aggregation_state is not None:
-            for node_checkpoint in restored_states.aggregation_state.nodes.values():
-                for token in node_checkpoint.tokens:
-                    buffered_token_ids.add(token.token_id)
+        F1 Task 1.2: the checkpoint no longer carries buffered token payloads —
+        journal BLOCKED rows (token_work_items) own them. Until Phase 2 rewires
+        this exclusion onto the journal, no token is checkpoint-buffered, so
+        the exclusion set is empty.
+        """
+        del checkpoint
+        return set()
 
-        if restored_states.coalesce_state is not None:
-            for pending in restored_states.coalesce_state.pending:
-                for coalesce_token in pending.branches.values():
-                    buffered_token_ids.add(coalesce_token.token_id)
-
-        return buffered_token_ids
-
-    def _restore_checkpoint_states(self, checkpoint: Checkpoint) -> _RestoredCheckpointStates:
-        """Deserialize typed checkpoint states once per observed checkpoint payload."""
-        key = (
-            checkpoint.checkpoint_id,
-            checkpoint.aggregation_state_json,
-            checkpoint.coalesce_state_json,
-        )
+    def _restore_barrier_scalars(self, checkpoint: Checkpoint) -> BarrierScalars | None:
+        """Deserialize barrier scalar metadata once per observed checkpoint payload."""
+        key = (checkpoint.checkpoint_id, checkpoint.barrier_scalars_json)
         if key in self._checkpoint_state_cache:
-            cached = self._checkpoint_state_cache[key]
-            return cached
+            return self._checkpoint_state_cache[key]
 
-        agg_state = None
-        if checkpoint.aggregation_state_json:
-            # Use checkpoint_loads for type restoration (datetime -> datetime, not string)
-            raw = checkpoint_loads(checkpoint.aggregation_state_json)
-            agg_state = AggregationCheckpointState.from_dict(raw)
+        scalars: BarrierScalars | None = None
+        if checkpoint.barrier_scalars_json:
+            # checkpoint_loads preserves float fidelity for the trigger-offset latches
+            raw = checkpoint_loads(checkpoint.barrier_scalars_json)
+            scalars = BarrierScalars.from_dict(raw)
 
-        coalesce_state = None
-        if checkpoint.coalesce_state_json:
-            raw = checkpoint_loads(checkpoint.coalesce_state_json)
-            coalesce_state = CoalesceCheckpointState.from_dict(raw)
-
-        restored = _RestoredCheckpointStates(
-            aggregation_state=agg_state,
-            coalesce_state=coalesce_state,
-        )
         if len(self._checkpoint_state_cache) >= _CHECKPOINT_STATE_CACHE_MAX:
             oldest_key = next(iter(self._checkpoint_state_cache))
             del self._checkpoint_state_cache[oldest_key]
-        self._checkpoint_state_cache[key] = restored
-        return restored
+        self._checkpoint_state_cache[key] = scalars
+        return scalars
 
     def _get_run(self, run_id: str) -> Row[Any] | None:
         """Get run metadata from the database.

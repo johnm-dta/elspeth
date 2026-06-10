@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars, CoalescePendingScalars
 from elspeth.contracts.errors import OrchestrationInvariantError
 
 if TYPE_CHECKING:
@@ -21,6 +22,40 @@ if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator.types import CheckpointAfterSinkCallback, LoopContext, RowProcessorHandle, _CheckpointFactory
+
+
+def _barrier_scalars_from_states(
+    aggregation_state: AggregationCheckpointState | None,
+    coalesce_state: CoalesceCheckpointState | None,
+) -> BarrierScalars | None:
+    """Project executor checkpoint states down to scalar barrier metadata.
+
+    F1 Task 1.2 transitional seam: the executors still surface the full blob
+    states (buffered tokens and all); the checkpoint row now persists only the
+    underivable scalars (design D3) — trigger fire-time latches per in-flight
+    aggregation node and lost-branch records per pending coalesce key. Task 2.4
+    replaces this projection with executors reading scalars directly.
+
+    Counter-only aggregation nodes (empty token buffer) are skipped: their
+    counters derive from audit tables at restore time and their fire offsets
+    are structurally None.
+    """
+    aggregation: dict[str, AggregationNodeScalars] = {}
+    if aggregation_state is not None:
+        for node_id, node in aggregation_state.nodes.items():
+            if not node.tokens:
+                continue
+            aggregation[node_id] = AggregationNodeScalars(
+                count_fire_offset=node.count_fire_offset,
+                condition_fire_offset=node.condition_fire_offset,
+            )
+    coalesce: dict[tuple[str, str], CoalescePendingScalars] = {}
+    if coalesce_state is not None:
+        for pending in coalesce_state.pending:
+            coalesce[(pending.coalesce_name, pending.row_id)] = CoalescePendingScalars(lost_branches=pending.lost_branches)
+    if not aggregation and not coalesce:
+        return None
+    return BarrierScalars(aggregation=aggregation, coalesce=coalesce)
 
 
 class CheckpointCoordinator:
@@ -66,6 +101,10 @@ class CheckpointCoordinator:
             run_id: Current run ID
             aggregation_state: Typed aggregation checkpoint state for crash recovery
             coalesce_state: Typed pending coalesce state for crash recovery
+
+        F1 Task 1.2: only the scalar barrier metadata projected from these
+        states (via ``_barrier_scalars_from_states``) is persisted; buffered
+        tokens live in journal BLOCKED rows.
         """
         if not self._checkpoint_config or not self._checkpoint_config.enabled:
             return
@@ -99,9 +138,8 @@ class CheckpointCoordinator:
             self._checkpoint_manager.create_checkpoint(
                 run_id=run_id,
                 sequence_number=self._sequence_number,
+                barrier_scalars=_barrier_scalars_from_states(aggregation_state, coalesce_state),
                 graph=self._active_graph,
-                aggregation_state=aggregation_state,
-                coalesce_state=coalesce_state,
             )
 
     def make_checkpoint_after_sink_factory(
@@ -175,20 +213,16 @@ class CheckpointCoordinator:
 
         aggregation_state = loop_ctx.processor.get_aggregation_checkpoint_state()
         raw_coalesce = loop_ctx.processor.get_coalesce_checkpoint_state()
-        # Persist coalesce state when it has pending barriers or completed keys
-        # needed for late-arrival detection on resume. Counter-only aggregation
-        # nodes (flush-emptied buffers) carry durable counters that resume
-        # restores wholesale via restore_from_checkpoint.
+        # Persist coalesce scalars when the state has pending barriers or
+        # completed keys needed for late-arrival detection on resume.
         coalesce_state = raw_coalesce if raw_coalesce is not None and raw_coalesce.has_resumable_state else None
-        checkpoint_agg_state = aggregation_state if aggregation_state.nodes else None
 
         self._sequence_number += 1
         self._checkpoint_manager.create_checkpoint(
             run_id=run_id,
             sequence_number=self._sequence_number,
+            barrier_scalars=_barrier_scalars_from_states(aggregation_state, coalesce_state),
             graph=self._active_graph,
-            aggregation_state=checkpoint_agg_state,
-            coalesce_state=coalesce_state,
         )
 
     def delete_checkpoints(self, run_id: str) -> None:

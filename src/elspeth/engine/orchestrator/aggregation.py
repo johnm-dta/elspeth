@@ -124,6 +124,11 @@ def rebind_checkpoint_batch_ids(
 ) -> AggregationCheckpointState:
     """Create a new checkpoint state with batch_ids rebound to retry batches.
 
+    F1 Task 1.2: dead until Task 3.2 deletes it — checkpoints no longer carry
+    blob aggregation state, so the resume path (its only production caller)
+    severed its call site. Task 3.2's journal-based restore replaces the
+    mechanism.
+
     When ``handle_incomplete_batches()`` retries failed/executing batches, the
     checkpoint still references the dead original batch_ids. This function
     produces a new ``AggregationCheckpointState`` where each node's batch_id

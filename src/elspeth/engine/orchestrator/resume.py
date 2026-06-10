@@ -60,7 +60,6 @@ from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     flush_remaining_aggregation_buffers,
     handle_incomplete_batches,
-    rebind_checkpoint_batch_ids,
 )
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
@@ -581,21 +580,24 @@ class ResumeCoordinator:
             source_schema_classes=source_schema_classes,
         )
 
-        # 1. Handle incomplete batches - call module function directly
-        batch_id_mapping = handle_incomplete_batches(factory.execution, run_id)
+        # 1. Handle incomplete batches - call module function directly.
+        # F1 Task 1.2: the returned old→retry batch_id mapping is currently
+        # unconsumed — the checkpoint no longer carries blob state whose
+        # batch_ids needed rebinding (rebind_checkpoint_batch_ids is dead
+        # until Task 3.2 deletes it). Task 3.2's journal-based restore
+        # mechanism takes over batch rebinding.
+        handle_incomplete_batches(factory.execution, run_id)
 
         # 2. Update run status to running after validation has succeeded.
         factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
-        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches.
-        # Keyed by the node ids carried inside the checkpoint state itself; the
-        # consumer (RowProcessor) deduplicates by content equality and restores
-        # via .values(), so every key maps to the same rebound state object.
+        # 3. F1 Task 1.2: barrier buffer truth moves to journal BLOCKED rows
+        # (token_work_items); the checkpoint carries only scalar barrier
+        # metadata (resume_point.barrier_scalars). Tasks 2.4/3.2 rewire the
+        # restore path onto the journal + scalars; until then no executor
+        # state is restored here (planned mid-chain red window).
         restored_state: dict[str, AggregationCheckpointState] = {}
-        if resume_point.aggregation_state is not None:
-            rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
-            restored_state = dict.fromkeys(rebound_state.nodes, rebound_state)
-        restored_coalesce_state = resume_point.coalesce_state
+        restored_coalesce_state: CoalesceCheckpointState | None = None
 
         return ResumeState(
             factory=factory,

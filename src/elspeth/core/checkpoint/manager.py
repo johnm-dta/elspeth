@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import asc, delete, desc, select
 
@@ -16,14 +15,10 @@ from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table
 
-logger = logging.getLogger(__name__)
-
-_LARGE_AGGREGATION_CHECKPOINT_BYTES = 1_000_000
 _MAX_CHECKPOINT_STATE_BYTES = 10_000_000
 
 if TYPE_CHECKING:
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.core.dag import ExecutionGraph
 
 
@@ -43,39 +38,23 @@ class CheckpointCorruptionError(Exception):
     pass
 
 
-def _validate_checkpoint_state_json_size(
-    *,
-    state_name: Literal["aggregation", "coalesce"],
-    serialized: str,
-    total_rows: int | None = None,
-    node_count: int | None = None,
-    pending_joins: int | None = None,
-) -> None:
-    """Validate serialized checkpoint state at the single persistence boundary."""
+def _validate_barrier_scalars_json_size(serialized: str) -> None:
+    """Hard-fail size guard at the single checkpoint persistence boundary.
+
+    Post-F1, the checkpoint carries only scalar barrier metadata (two float
+    trigger latches per in-flight aggregation node plus lost-branch records
+    per pending coalesce key) — payloads are tiny by construction. A payload
+    anywhere near the limit indicates corrupted state construction upstream,
+    not a large pipeline, so this is a crash, not a warning.
+    """
     serialized_bytes = len(serialized.encode("utf-8"))
-    size_mb = serialized_bytes / 1_000_000
-
-    if state_name == "aggregation" and serialized_bytes > _LARGE_AGGREGATION_CHECKPOINT_BYTES:
-        logger.warning(
-            "Large checkpoint: %.1fMB for %d buffered rows across %d nodes",
-            size_mb,
-            total_rows or 0,
-            node_count or 0,
-        )
-
     if serialized_bytes <= _MAX_CHECKPOINT_STATE_BYTES:
         return
-
-    if state_name == "aggregation":
-        raise OrchestrationInvariantError(
-            f"Checkpoint size {size_mb:.1f}MB exceeds 10MB limit. "
-            f"Buffer contains {total_rows or 0} total rows across {node_count or 0} nodes. "
-            f"Solutions: (1) Reduce aggregation count trigger to <5000 rows, "
-            f"(2) Reduce row_data payload size, or (3) Implement checkpoint retention "
-            f"policy"
-        )
-
-    raise RuntimeError(f"Coalesce checkpoint size {size_mb:.1f}MB exceeds 10MB limit. Pending joins: {pending_joins or 0}.")
+    raise OrchestrationInvariantError(
+        f"Checkpoint barrier_scalars size {serialized_bytes / 1_000_000:.1f}MB exceeds 10MB limit. "
+        f"Barrier scalars carry only trigger latches and lost-branch records; "
+        f"a payload this large indicates a bug in barrier state construction."
+    )
 
 
 class CheckpointManager:
@@ -85,7 +64,9 @@ class CheckpointManager:
     enabling resume after crash. Each checkpoint records:
     - A monotonic sequence number for ordering
     - The full-topology hash for compatibility validation
-    - Optional aggregation/coalesce buffer state for stateful plugins
+    - Optional scalar barrier metadata (BarrierScalars) for in-flight
+      aggregation/coalesce barriers — buffered tokens themselves live in
+      token_work_items journal BLOCKED rows (F1 durability unification)
     """
 
     def __init__(self, db: LandscapeDB) -> None:
@@ -98,20 +79,21 @@ class CheckpointManager:
 
     def create_checkpoint(
         self,
+        *,
         run_id: str,
         sequence_number: int,
+        barrier_scalars: BarrierScalars | None,
         graph: ExecutionGraph,
-        aggregation_state: AggregationCheckpointState | None = None,
-        coalesce_state: CoalesceCheckpointState | None = None,
     ) -> Checkpoint:
         """Create a checkpoint at current progress point.
 
         Args:
             run_id: The run being checkpointed
             sequence_number: Monotonic progress marker
+            barrier_scalars: Scalar barrier metadata for in-flight
+                aggregation/coalesce barriers, or None. Empty scalars
+                (``has_state`` False) persist NULL, same as None.
             graph: Execution graph for topology validation (REQUIRED)
-            aggregation_state: Optional serializable aggregation buffers
-            coalesce_state: Optional serializable pending coalesce state
 
         Returns:
             The created Checkpoint
@@ -140,30 +122,15 @@ class CheckpointManager:
             checkpoint_id = f"cp-{uuid.uuid4().hex}"
             created_at = datetime.now(UTC)
 
-            # Prepare aggregation state JSON
+            # Serialize barrier scalars JSON.
             # checkpoint_dumps() handles:
-            # - datetime serialization with type tags for round-trip fidelity
             # - NaN/Infinity rejection per CLAUDE.md audit integrity requirements
-            # Note: We don't use canonical_json because it normalizes floats to integers,
-            # breaking round-trip for aggregation state
-            agg_json: str | None = None
-            if aggregation_state is not None:
-                agg_json = checkpoint_dumps(aggregation_state.to_dict())
-                _validate_checkpoint_state_json_size(
-                    state_name="aggregation",
-                    serialized=agg_json,
-                    total_rows=sum(len(node.tokens) for node in aggregation_state.nodes.values()),
-                    node_count=len(aggregation_state.nodes),
-                )
-
-            coalesce_json: str | None = None
-            if coalesce_state is not None:
-                coalesce_json = checkpoint_dumps(coalesce_state.to_dict())
-                _validate_checkpoint_state_json_size(
-                    state_name="coalesce",
-                    serialized=coalesce_json,
-                    pending_joins=len(coalesce_state.pending),
-                )
+            # Note: We don't use canonical_json because it normalizes floats to
+            # integers, breaking round-trip for the float trigger-offset latches.
+            scalars_json: str | None = None
+            if barrier_scalars is not None and barrier_scalars.has_state:
+                scalars_json = checkpoint_dumps(barrier_scalars.to_dict())
+                _validate_barrier_scalars_json_size(scalars_json)
 
             # Compute topology hash inside transaction
             # This ensures hash matches graph state at exact moment of checkpoint creation
@@ -177,8 +144,7 @@ class CheckpointManager:
                     checkpoint_id=checkpoint_id,
                     run_id=run_id,
                     sequence_number=sequence_number,
-                    aggregation_state_json=agg_json,
-                    coalesce_state_json=coalesce_json,
+                    barrier_scalars_json=scalars_json,
                     created_at=created_at,
                     upstream_topology_hash=upstream_topology_hash,
                     format_version=Checkpoint.CURRENT_FORMAT_VERSION,
@@ -192,8 +158,7 @@ class CheckpointManager:
             sequence_number=sequence_number,
             created_at=created_at,
             upstream_topology_hash=upstream_topology_hash,
-            aggregation_state_json=agg_json,
-            coalesce_state_json=coalesce_json,
+            barrier_scalars_json=scalars_json,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 
@@ -227,8 +192,7 @@ class CheckpointManager:
                 sequence_number=result.sequence_number,
                 created_at=result.created_at,
                 upstream_topology_hash=result.upstream_topology_hash,
-                aggregation_state_json=result.aggregation_state_json,
-                coalesce_state_json=result.coalesce_state_json,
+                barrier_scalars_json=result.barrier_scalars_json,
                 format_version=result.format_version,  # None for legacy checkpoints
             )
         except ValueError as e:
@@ -265,8 +229,7 @@ class CheckpointManager:
                         sequence_number=r.sequence_number,
                         created_at=r.created_at,
                         upstream_topology_hash=r.upstream_topology_hash,
-                        aggregation_state_json=r.aggregation_state_json,
-                        coalesce_state_json=r.coalesce_state_json,
+                        barrier_scalars_json=r.barrier_scalars_json,
                         format_version=r.format_version,  # None for legacy checkpoints
                     )
                 )

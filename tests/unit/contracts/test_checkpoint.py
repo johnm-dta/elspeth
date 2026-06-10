@@ -12,6 +12,7 @@ from elspeth.contracts.aggregation_checkpoint import (
     AggregationNodeCheckpoint,
     AggregationTokenCheckpoint,
 )
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError
 
 
@@ -83,24 +84,24 @@ def test_resume_point_rejects_negative_sequence_number() -> None:
 # === ResumePoint Tier 1 type guards (elspeth-0b184125ca) ===
 
 
-def test_resume_point_rejects_dict_aggregation_state() -> None:
+def test_resume_point_rejects_dict_barrier_scalars() -> None:
     """Regression: elspeth-0b184125ca — raw dict must not be accepted as state."""
-    with pytest.raises(TypeError, match="aggregation_state must be AggregationCheckpointState"):
+    with pytest.raises(TypeError, match="barrier_scalars must be BarrierScalars"):
         ResumePoint(
             checkpoint=_checkpoint(),
             sequence_number=1,
-            aggregation_state={"version": "3.0", "nodes": {}},  # type: ignore[arg-type]
+            barrier_scalars={"_version": "1.0", "aggregation": {}, "coalesce": []},  # type: ignore[arg-type]
         )
 
 
-def test_resume_point_rejects_dict_coalesce_state() -> None:
-    """Regression: elspeth-0b184125ca — raw dict must not be accepted as state."""
-    with pytest.raises(TypeError, match="coalesce_state must be CoalesceCheckpointState"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            sequence_number=1,
-            coalesce_state={"version": "1.0", "pending": []},  # type: ignore[arg-type]
-        )
+def test_resume_point_accepts_barrier_scalars() -> None:
+    """F1: ResumePoint carries scalar barrier metadata, not buffer blobs."""
+    scalars = BarrierScalars(
+        aggregation={"agg-1": AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=None)},
+        coalesce={},
+    )
+    point = ResumePoint(checkpoint=_checkpoint(), sequence_number=1, barrier_scalars=scalars)
+    assert point.barrier_scalars is scalars
 
 
 # === ResumePoint checkpoint type guard + sequence_number type guard ===

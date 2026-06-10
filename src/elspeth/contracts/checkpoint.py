@@ -10,9 +10,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.audit import Checkpoint
-from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.types import NodeID
 
@@ -45,8 +44,7 @@ class ResumePoint:
 
     checkpoint: Checkpoint
     sequence_number: int
-    aggregation_state: AggregationCheckpointState | None = None
-    coalesce_state: CoalesceCheckpointState | None = None
+    barrier_scalars: BarrierScalars | None = None
 
     def __post_init__(self) -> None:
         """Validate resume point fields — Tier 1 crash on invalid data.
@@ -58,12 +56,8 @@ class ResumePoint:
         if not isinstance(self.checkpoint, Checkpoint):
             raise TypeError(f"ResumePoint.checkpoint must be Checkpoint, got {type(self.checkpoint).__name__}")
         require_int(self.sequence_number, "ResumePoint.sequence_number", min_value=0)
-        if self.aggregation_state is not None and not isinstance(self.aggregation_state, AggregationCheckpointState):
-            raise TypeError(
-                f"ResumePoint.aggregation_state must be AggregationCheckpointState or None, got {type(self.aggregation_state).__name__}"
-            )
-        if self.coalesce_state is not None and not isinstance(self.coalesce_state, CoalesceCheckpointState):
-            raise TypeError(f"ResumePoint.coalesce_state must be CoalesceCheckpointState or None, got {type(self.coalesce_state).__name__}")
+        if self.barrier_scalars is not None and not isinstance(self.barrier_scalars, BarrierScalars):
+            raise TypeError(f"ResumePoint.barrier_scalars must be BarrierScalars or None, got {type(self.barrier_scalars).__name__}")
         # Invariant: the duplicated field must match the embedded Checkpoint.
         # It exists for convenience access but is derived data, not an
         # independent input. Mismatch = corrupted construction.

@@ -498,21 +498,22 @@ class TestCheckpoint:
         assert checkpoint.run_id == "run-456"
         assert checkpoint.sequence_number == 42
         assert checkpoint.created_at == now
-        assert checkpoint.aggregation_state_json is None
+        assert checkpoint.barrier_scalars_json is None
 
-    def test_checkpoint_with_aggregation_state(self) -> None:
-        """Checkpoint can have aggregation_state_json for stateful nodes."""
+    def test_checkpoint_with_barrier_scalars(self) -> None:
+        """Checkpoint can carry barrier_scalars_json for in-flight barriers (F1)."""
 
+        scalars_json = '{"_version": "1.0", "aggregation": {}, "coalesce": []}'
         checkpoint = Checkpoint(
             checkpoint_id="cp-123",
             run_id="run-456",
             sequence_number=42,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            aggregation_state_json='{"count": 10, "sum": 500}',
+            barrier_scalars_json=scalars_json,
         )
 
-        assert checkpoint.aggregation_state_json == '{"count": 10, "sum": 500}'
+        assert checkpoint.barrier_scalars_json == scalars_json
 
     def test_checkpoint_created_at_required(self) -> None:
         """Checkpoint.created_at is required (Tier 1 audit data).

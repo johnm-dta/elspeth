@@ -513,21 +513,26 @@ class BatchOutput:
 class Checkpoint:
     """Checkpoint for crash recovery.
 
-    Captures run progress at sink-durability boundaries. The real resume
-    work-set is token_outcomes completeness + the serialized aggregation/
-    coalesce buffer state + sequence_number; compatibility is enforced by
-    the full-topology hash (which embeds every node's config hash), so the
-    checkpoint carries no per-node anchor.
+    Captures run progress at sink-durability boundaries. Post-F1 durability
+    unification, buffered tokens live in token_work_items (journal BLOCKED
+    rows); the checkpoint carries only scalar barrier metadata
+    (``barrier_scalars_json``). The real resume work-set is token_outcomes
+    completeness + journal BLOCKED rows + sequence_number; compatibility is
+    enforced by the full-topology hash (which embeds every node's config
+    hash), so the checkpoint carries no per-node anchor.
 
     Format Versions:
         Version 1: Pre-deterministic node IDs (legacy, incompatible)
         Version 2: Deterministic node IDs (2026-01-24+)
         Version 3: Phase 2 traversal refactor checkpoint break
-        Version 4: Pending coalesce state persisted in checkpoints (current)
+        Version 4: Pending coalesce state persisted in checkpoints
+        Version 5: F1 durability unification — buffered tokens live in
+            token_work_items; checkpoint carries only scalar barrier
+            metadata (current)
     """
 
     # Current checkpoint format version (ClassVar excludes from dataclass fields)
-    CURRENT_FORMAT_VERSION: ClassVar[int] = 4
+    CURRENT_FORMAT_VERSION: ClassVar[int] = 5
 
     checkpoint_id: str
     run_id: str
@@ -537,8 +542,9 @@ class Checkpoint:
     # Schema enforces NOT NULL - audit-critical for resume validation
     upstream_topology_hash: str  # Hash of ALL nodes + edges in DAG (full topology)
     # Optional fields (with defaults) MUST come after required fields in dataclass
-    aggregation_state_json: str | None = None
-    coalesce_state_json: str | None = None
+    # Serialized BarrierScalars (elspeth.contracts.barrier_scalars), or None
+    # when no barriers were in flight at checkpoint time.
+    barrier_scalars_json: str | None = None
     # Format version for compatibility checking
     format_version: int | None = None
 

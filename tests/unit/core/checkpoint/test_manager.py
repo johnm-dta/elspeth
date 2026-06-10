@@ -2,25 +2,28 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
-from sqlalchemy import Connection
+from sqlalchemy import Connection, select
+from sqlalchemy.engine import Row
 
 from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
-from elspeth.contracts.coalesce_checkpoint import (
-    CoalesceCheckpointState,
-    CoalescePendingCheckpoint,
-    CoalesceTokenCheckpoint,
+from elspeth.contracts.barrier_scalars import (
+    AggregationNodeScalars,
+    BarrierScalars,
+    CoalescePendingScalars,
 )
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.checkpoint.manager import (
     CheckpointManager,
     IncompatibleCheckpointError,
-    _validate_checkpoint_state_json_size,
+    _validate_barrier_scalars_json_size,
 )
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, tokens_table
+from elspeth.core.landscape.schema import checkpoints_table, nodes_table, rows_table, runs_table, tokens_table
 from tests.fixtures.factories import make_graph_linear
 from tests.fixtures.landscape import make_landscape_db
 
@@ -91,34 +94,74 @@ def _insert_checkpoint_prereqs(
     )
 
 
+def _select_checkpoint(db: LandscapeDB, checkpoint_id: str) -> Row[Any]:
+    with db.engine.connect() as conn:
+        row = conn.execute(select(checkpoints_table).where(checkpoints_table.c.checkpoint_id == checkpoint_id)).fetchone()
+    assert row is not None
+    return row
+
+
 def test_create_checkpoint_requires_graph(checkpoint_manager: CheckpointManager) -> None:
     with pytest.raises(ValueError, match="graph parameter is required"):
         checkpoint_manager.create_checkpoint(
             run_id="run-001",
             sequence_number=1,
+            barrier_scalars=None,
             graph=None,  # type: ignore[arg-type]  # testing None rejection
         )
 
 
-def test_validate_checkpoint_state_json_size_rejects_large_aggregation_state() -> None:
-    """Serialized aggregation-size guard lives at the manager boundary."""
+def test_validate_barrier_scalars_json_size_rejects_large_payload() -> None:
+    """Serialized barrier-scalars size guard lives at the manager boundary (hard-fail)."""
     with pytest.raises(OrchestrationInvariantError, match="exceeds 10MB limit"):
-        _validate_checkpoint_state_json_size(
-            state_name="aggregation",
-            serialized="x" * 10_000_001,
-            total_rows=7,
-            node_count=2,
-        )
+        _validate_barrier_scalars_json_size("x" * 10_000_001)
 
 
-def test_validate_checkpoint_state_json_size_rejects_large_coalesce_state() -> None:
-    """Serialized coalesce-size guard lives at the manager boundary."""
-    with pytest.raises(RuntimeError, match=r"Coalesce checkpoint size .* exceeds 10MB limit"):
-        _validate_checkpoint_state_json_size(
-            state_name="coalesce",
-            serialized="x" * 10_000_001,
-            pending_joins=3,
-        )
+def test_create_checkpoint_persists_barrier_scalars(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """F1 Task 1.2: the checkpoint row carries BarrierScalars only (format_version 5)."""
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn)
+
+    graph = make_graph_linear("node-001")
+    scalars = BarrierScalars(
+        aggregation={"agg-1": AggregationNodeScalars(count_fire_offset=2.25, condition_fire_offset=None)},
+        coalesce={},
+    )
+    cp = checkpoint_manager.create_checkpoint(
+        run_id="run-001",
+        sequence_number=1,
+        barrier_scalars=scalars,
+        graph=graph,
+    )
+
+    row = _select_checkpoint(db, cp.checkpoint_id)
+    assert row.barrier_scalars_json is not None
+    persisted = json.loads(row.barrier_scalars_json)
+    # Wire shape: per-node envelope carries _version alongside the offsets.
+    assert persisted["aggregation"]["agg-1"]["count_fire_offset"] == 2.25
+    assert persisted["aggregation"]["agg-1"]["condition_fire_offset"] is None
+    assert cp.format_version == 5
+    assert cp.barrier_scalars_json == row.barrier_scalars_json
+
+
+def test_create_checkpoint_empty_scalars_persist_null(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Empty BarrierScalars (has_state=False) persists NULL, same as None."""
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn)
+
+    graph = make_graph_linear("node-001")
+    cp_none = checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+    cp_empty = checkpoint_manager.create_checkpoint(
+        run_id="run-001",
+        sequence_number=2,
+        barrier_scalars=BarrierScalars(aggregation={}, coalesce={}),
+        graph=graph,
+    )
+
+    assert cp_none.barrier_scalars_json is None
+    assert cp_empty.barrier_scalars_json is None
+    assert _select_checkpoint(db, cp_none.checkpoint_id).barrier_scalars_json is None
+    assert _select_checkpoint(db, cp_empty.checkpoint_id).barrier_scalars_json is None
 
 
 def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
@@ -126,9 +169,9 @@ def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, check
         _insert_checkpoint_prereqs(conn)
 
     graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint("run-001", 5, graph)
-    checkpoint_manager.create_checkpoint("run-001", 1, graph)
-    checkpoint_manager.create_checkpoint("run-001", 3, graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=5, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=3, barrier_scalars=None, graph=graph)
 
     checkpoints = checkpoint_manager.get_checkpoints("run-001")
     assert [cp.sequence_number for cp in checkpoints] == [1, 3, 5]
@@ -140,53 +183,34 @@ def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, c
         _insert_checkpoint_prereqs(conn)
 
     graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint("run-001", 1, graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
 
     with pytest.raises(OrchestrationInvariantError, match="Duplicate checkpoint sequence_number"):
-        checkpoint_manager.create_checkpoint("run-001", 1, graph)
+        checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
 
 
-def test_create_checkpoint_round_trips_coalesce_state(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+def test_create_checkpoint_round_trips_coalesce_scalars(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Coalesce lost-branch scalars round-trip through persistence unchanged."""
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     graph = make_graph_linear("node-001")
     checkpoint = checkpoint_manager.create_checkpoint(
-        "run-001",
-        1,
-        graph,
-        coalesce_state=CoalesceCheckpointState(
-            version="1.0",
-            pending=(
-                CoalescePendingCheckpoint(
-                    coalesce_name="merge_paths",
-                    row_id="row-001",
-                    elapsed_age_seconds=2.0,
-                    branches={
-                        "branch_a": CoalesceTokenCheckpoint(
-                            token_id="tok-001",
-                            row_id="row-001",
-                            branch_name="branch_a",
-                            fork_group_id="fork-001",
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"value": 1},
-                            contract={"mode": "OBSERVED", "locked": True, "fields": [], "version_hash": "vh-1"},
-                            state_id="state-001",
-                            arrival_offset_seconds=0.0,
-                        )
-                    },
-                    lost_branches={},
-                ),
-            ),
-            completed_keys=(),
+        run_id="run-001",
+        sequence_number=1,
+        barrier_scalars=BarrierScalars(
+            aggregation={},
+            coalesce={("merge_paths", "row-001"): CoalescePendingScalars(lost_branches={"branch_b": "timeout"})},
         ),
+        graph=graph,
     )
 
-    assert checkpoint.coalesce_state_json is not None
+    assert checkpoint.barrier_scalars_json is not None
     loaded = checkpoint_manager.get_latest_checkpoint("run-001")
     assert loaded is not None
-    assert loaded.coalesce_state_json == checkpoint.coalesce_state_json
+    assert loaded.barrier_scalars_json == checkpoint.barrier_scalars_json
+    restored = BarrierScalars.from_dict(json.loads(loaded.barrier_scalars_json))
+    assert restored.coalesce[("merge_paths", "row-001")].lost_branches == {"branch_b": "timeout"}
 
 
 def test_validate_checkpoint_compatibility_rejects_missing_format_version(checkpoint_manager: CheckpointManager) -> None:
@@ -226,8 +250,8 @@ def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_mana
         _insert_checkpoint_prereqs(conn)
 
     graph = make_graph_linear("node-001")
-    checkpoint_manager.create_checkpoint("run-001", 1, graph)
-    checkpoint_manager.create_checkpoint("run-001", 2, graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=1, barrier_scalars=None, graph=graph)
+    checkpoint_manager.create_checkpoint(run_id="run-001", sequence_number=2, barrier_scalars=None, graph=graph)
 
     deleted = checkpoint_manager.delete_checkpoints("run-001")
     assert deleted == 2

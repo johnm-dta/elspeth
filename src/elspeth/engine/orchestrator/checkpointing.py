@@ -17,7 +17,6 @@ from elspeth.contracts.errors import OrchestrationInvariantError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
     from elspeth.contracts.identity import TokenInfo
     from elspeth.contracts.types import NodeID
@@ -28,23 +27,20 @@ if TYPE_CHECKING:
 
 def _barrier_scalars_from_states(
     aggregation_scalars: Mapping[NodeID, AggregationNodeScalars] | None,
-    coalesce_state: CoalesceCheckpointState | None,
+    coalesce_scalars: Mapping[tuple[str, str], CoalescePendingScalars] | None,
 ) -> BarrierScalars | None:
     """Project executor scalar state down to the checkpoint-row BarrierScalars.
 
     F1 design D3: the checkpoint row persists only the underivable scalars —
     trigger fire-time latches per latched aggregation node (read live from the
     executor via ``get_aggregation_barrier_scalars``, Task 2.1) and lost-branch
-    records per pending coalesce key (still projected from the coalesce blob
-    state until its twin lands in Task 2.2).
+    records per pending coalesce key with recorded losses (read live via
+    ``get_coalesce_barrier_scalars``, Task 2.2).
     """
     aggregation: dict[str, AggregationNodeScalars] = (
         {str(node_id): node_scalars for node_id, node_scalars in aggregation_scalars.items()} if aggregation_scalars else {}
     )
-    coalesce: dict[tuple[str, str], CoalescePendingScalars] = {}
-    if coalesce_state is not None:
-        for pending in coalesce_state.pending:
-            coalesce[(pending.coalesce_name, pending.row_id)] = CoalescePendingScalars(lost_branches=pending.lost_branches)
+    coalesce: dict[tuple[str, str], CoalescePendingScalars] = dict(coalesce_scalars) if coalesce_scalars else {}
     if not aggregation and not coalesce:
         return None
     return BarrierScalars(aggregation=aggregation, coalesce=coalesce)
@@ -78,7 +74,7 @@ class CheckpointCoordinator:
         self,
         run_id: str,
         aggregation_scalars: Mapping[NodeID, AggregationNodeScalars] | None = None,
-        coalesce_state: CoalesceCheckpointState | None = None,
+        coalesce_scalars: Mapping[tuple[str, str], CoalescePendingScalars] | None = None,
     ) -> None:
         """Create checkpoint if configured.
 
@@ -93,7 +89,9 @@ class CheckpointCoordinator:
             run_id: Current run ID
             aggregation_scalars: Live trigger-latch scalars per latched
                 aggregation node (executor get_barrier_scalars, Task 2.1)
-            coalesce_state: Typed pending coalesce state for crash recovery
+            coalesce_scalars: Live lost-branch scalars per pending coalesce
+                key with recorded losses (executor get_barrier_scalars,
+                Task 2.2)
 
         F1: only scalar barrier metadata (via ``_barrier_scalars_from_states``)
         is persisted; buffered tokens live in journal BLOCKED rows.
@@ -130,7 +128,7 @@ class CheckpointCoordinator:
             self._checkpoint_manager.create_checkpoint(
                 run_id=run_id,
                 sequence_number=self._sequence_number,
-                barrier_scalars=_barrier_scalars_from_states(aggregation_scalars, coalesce_state),
+                barrier_scalars=_barrier_scalars_from_states(aggregation_scalars, coalesce_scalars),
                 graph=self._active_graph,
             )
 
@@ -157,11 +155,11 @@ class CheckpointCoordinator:
 
             def __call__(self, token: TokenInfo) -> None:
                 agg_scalars = processor.get_aggregation_barrier_scalars()
-                coalesce_state = processor.get_coalesce_checkpoint_state()
+                coalesce_scalars = processor.get_coalesce_barrier_scalars()
                 coordinator.maybe_checkpoint(
                     run_id=run_id,
                     aggregation_scalars=agg_scalars,
-                    coalesce_state=coalesce_state,
+                    coalesce_scalars=coalesce_scalars,
                 )
                 if self._terminalize_scheduler:
                     self._pending_terminal_tokens.append(token.token_id)
@@ -204,13 +202,13 @@ class CheckpointCoordinator:
             raise OrchestrationInvariantError("Cannot create shutdown checkpoint: execution graph not available")
 
         aggregation_scalars = loop_ctx.processor.get_aggregation_barrier_scalars()
-        coalesce_state = loop_ctx.processor.get_coalesce_checkpoint_state()
+        coalesce_scalars = loop_ctx.processor.get_coalesce_barrier_scalars()
 
         self._sequence_number += 1
         self._checkpoint_manager.create_checkpoint(
             run_id=run_id,
             sequence_number=self._sequence_number,
-            barrier_scalars=_barrier_scalars_from_states(aggregation_scalars, coalesce_state),
+            barrier_scalars=_barrier_scalars_from_states(aggregation_scalars, coalesce_scalars),
             graph=self._active_graph,
         )
 

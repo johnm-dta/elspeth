@@ -42,7 +42,7 @@ def _loop_ctx(
 ) -> Mock:
     processor = Mock()
     processor.get_aggregation_barrier_scalars.return_value = aggregation_scalars
-    processor.get_coalesce_checkpoint_state.return_value = None
+    processor.get_coalesce_barrier_scalars.return_value = {}
 
     loop_ctx = Mock()
     loop_ctx.processor = processor

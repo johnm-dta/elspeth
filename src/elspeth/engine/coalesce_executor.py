@@ -5,16 +5,16 @@ Tokens are correlated by row_id (same source row that was forked).
 """
 
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.coalesce_checkpoint import (
-    CoalesceCheckpointState,
-    CoalescePendingCheckpoint,
-    CoalesceTokenCheckpoint,
-)
+from elspeth.contracts.barrier_scalars import CoalescePendingScalars
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
@@ -26,13 +26,14 @@ from elspeth.contracts.errors import (
     ExecutionError,
     OrchestrationInvariantError,
 )
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.scheduler import TokenWorkItem
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.spans import SpanFactory
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.tokens import TokenManager
 
-COALESCE_CHECKPOINT_VERSION = "1.0"
+slog = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +197,9 @@ class CoalesceExecutor:
         # Used to record expected fields when a branch is lost (diverted to error sink).
         # This enables audit queries like "what fields were expected from lost branch X?"
         # NOTE: Populated by register_coalesce(), which the orchestrator calls BEFORE
-        # restore_from_checkpoint(). Branch schemas come from fresh graph data each run,
-        # not from checkpoint — the checkpoint stores only pending tokens and lost branches.
+        # restore_from_journal(). Branch schemas come from fresh graph data each run,
+        # not from resume state — the journal stores token payloads and the checkpoint
+        # row stores only lost-branch scalars.
         self._branch_expected_fields: dict[str, dict[str, tuple[str, ...]]] = {}
         # Pre-computed output schemas: coalesce_name -> SchemaContract
         # Used to ensure runtime contracts match DAG-computed schemas (P2 fix).
@@ -254,109 +256,233 @@ class CoalesceExecutor:
         """
         return list(self._settings.keys())
 
-    def get_checkpoint_state(self) -> CoalesceCheckpointState:
-        """Return checkpoint state for pending coalesces."""
+    def get_barrier_scalars(self) -> dict[tuple[str, str], CoalescePendingScalars]:
+        """Return the underivable lost-branch scalars for the checkpoint row.
 
-        pending_entries: list[CoalescePendingCheckpoint] = []
-        for (coalesce_name, row_id), pending in self._pending.items():
-            branch_entries = {
-                branch_name: CoalesceTokenCheckpoint(
-                    token_id=entry.token.token_id,
-                    row_id=entry.token.row_id,
-                    branch_name=branch_name,
-                    fork_group_id=entry.token.fork_group_id,
-                    join_group_id=entry.token.join_group_id,
-                    expand_group_id=entry.token.expand_group_id,
-                    row_data=entry.token.row_data.to_dict(),
-                    contract=entry.token.row_data.contract.to_checkpoint_format(),
-                    state_id=entry.state_id,
-                    arrival_offset_seconds=entry.arrival_time - pending.first_arrival,
-                )
-                for branch_name, entry in pending.branches.items()
-            }
-            pending_entries.append(
-                CoalescePendingCheckpoint(
-                    coalesce_name=coalesce_name,
-                    row_id=row_id,
-                    elapsed_age_seconds=self._clock.monotonic() - pending.first_arrival,
-                    branches=branch_entries,
-                    lost_branches=dict(pending.lost_branches),
-                )
-            )
+        F1 design D3: the checkpoint persists ONLY scalar barrier metadata —
+        arrived-branch token payloads live in journal BLOCKED rows and state
+        ids derive from audit tables at restore time. The only underivable
+        coalesce state is the lost_branches record per pending key (loss
+        notifications are in-memory events with no journal row of their own).
 
-        # completed_keys is no longer persisted in checkpoints — it's
-        # reconstructed from the Landscape on restore (Phase 1 of
-        # elspeth-cc36c8eaef). Empty tuple preserves schema compatibility
-        # with existing checkpoint parsers / version validation.
-        checkpoint = CoalesceCheckpointState(
-            version=COALESCE_CHECKPOINT_VERSION,
-            pending=tuple(pending_entries),
-            completed_keys=(),
-        )
+        Emission choice: only keys with a non-empty lost_branches record are
+        emitted. The checkpoint writer serializes None when no scalars exist
+        (``BarrierScalars.has_state``), and restore treats a missing entry as
+        empty lost_branches — so emitting loss-free pending keys would add
+        bytes without information. This mirrors aggregation's only-latched
+        emission (Task 2.1).
 
-        return checkpoint
-
-    def restore_from_checkpoint(self, state: CoalesceCheckpointState) -> None:
-        """Restore pending coalesces from checkpoint.
-
-        Completed keys are reconstructed from the Landscape (source of truth)
-        rather than from checkpoint data. This eliminates the FIFO eviction gap:
-        the Landscape query returns ALL completed coalesces for this run, not
-        just the last max_completed_keys entries.
-
-        The checkpoint's completed_keys field is ignored (Phase 1 of
-        elspeth-cc36c8eaef). Phase 3 will remove it from the checkpoint schema.
+        Returns:
+            Mapping of (coalesce_name, row_id) -> CoalescePendingScalars for
+            pending keys with recorded losses only.
         """
-        if state.version != COALESCE_CHECKPOINT_VERSION:
-            raise AuditIntegrityError(
-                f"Incompatible coalesce checkpoint version: {state.version!r}. Expected: {COALESCE_CHECKPOINT_VERSION!r}."
-            )
+        scalars: dict[tuple[str, str], CoalescePendingScalars] = {}
+        for key, pending in self._pending.items():
+            if pending.lost_branches:
+                scalars[key] = CoalescePendingScalars(lost_branches=dict(pending.lost_branches))
+        return scalars
 
-        # Validate ALL entries before clearing state — if validation fails,
-        # the executor's in-memory state must remain intact for error recovery.
-        for pending_entry in state.pending:
-            if pending_entry.coalesce_name not in self._settings:
+    def restore_from_journal(
+        self,
+        *,
+        items: Sequence[TokenWorkItem],
+        scalars: Mapping[tuple[str, str], CoalescePendingScalars],
+        state_ids: Mapping[str, str],
+        attempt_offsets: Mapping[str, int],
+        resume_checkpoint_id: str,
+        now: datetime,
+    ) -> None:
+        """Rebuild pending coalesces from journal BLOCKED rows (F1 resume path).
+
+        Replaces the checkpoint-blob restore: the journal (token_work_items
+        BLOCKED rows) is authoritative for arrived-branch token payloads; the
+        caller (processor, Task 3.1) partitions journal items by barrier kind
+        and derives state ids / attempt offsets from audit tables. Items group
+        by ``(coalesce_name, row_id)``; per group, ``first_arrival`` anchors to
+        the OLDEST ``barrier_blocked_at`` expressed on the executor's monotonic
+        clock (clamped at 0 against wall-clock skew), and each branch's
+        arrival_time preserves the absolute blocked-at offsets.
+
+        Completed keys are reconstructed from the Landscape (source of truth),
+        unchanged from the blob-restore era — see
+        ``_reconstruct_completed_keys_from_landscape``.
+
+        Args:
+            items: BLOCKED journal rows for coalesce barriers (all keys).
+            scalars: Per-pending-key lost_branches records from the checkpoint
+                row. A key with journal items but no scalars entry restores
+                with empty lost_branches (the writer only emits keys with
+                recorded losses — D3). A scalars entry whose key has NO
+                journal items is STALE (that pending key flushed/completed
+                after the checkpoint — a legitimate window under D3's
+                staleness model, since the checkpoint may be older than the
+                journal) and is dropped with a log line rather than rejected.
+            state_ids: Per-token node_state hold id (the PENDING node_state
+                written at accept() time, derived from audit tables). Every
+                journal token must be covered — a BLOCKED row whose hold is
+                absent is an audit inconsistency.
+            attempt_offsets: Per-token resume attempt offset (max_attempt + 1).
+            resume_checkpoint_id: Checkpoint id stamped on restored tokens
+                (resume provenance).
+            now: Current wall-clock time (tz-aware) — pending age derives from
+                ``now - min(barrier_blocked_at)``, not from an offset blob.
+
+        Raises:
+            AuditIntegrityError: On any journal/audit disagreement — NULL
+                barrier_blocked_at, missing branch_name or coalesce_name,
+                unknown coalesce, duplicate journal rows, duplicate branch
+                claims, missing attempt offset, missing state_id.
+        """
+        # Validate and group ALL items before touching executor state — if
+        # validation fails, the in-memory state must remain intact for error
+        # recovery (same discipline as the old blob restore).
+        grouped: dict[tuple[str, str], dict[str, TokenWorkItem]] = {}
+        blocked_at_by_token: dict[str, datetime] = {}
+        for item in items:
+            if not item.coalesce_name:
                 raise AuditIntegrityError(
-                    f"Checkpoint references unknown coalesce '{pending_entry.coalesce_name}'. "
-                    f"Configured coalesces: {sorted(self._settings)}"
+                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
+                    f"resume checkpoint {resume_checkpoint_id!r}) has no coalesce_name — "
+                    "coalesce barrier rows always carry the coalesce cursor; journal corruption."
+                )
+            if item.coalesce_name not in self._settings:
+                raise AuditIntegrityError(
+                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
+                    f"resume checkpoint {resume_checkpoint_id!r}) references unknown coalesce "
+                    f"'{item.coalesce_name}'. Configured coalesces: {sorted(self._settings)}"
+                )
+            if item.barrier_blocked_at is None:
+                # Every post-epoch-20 BLOCKED row is stamped by mark_blocked.
+                raise AuditIntegrityError(
+                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
+                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
+                    f"{resume_checkpoint_id!r}) has NULL barrier_blocked_at — journal "
+                    "corruption (every BLOCKED row is stamped at mark_blocked time)."
+                )
+            if not item.branch_name:
+                raise AuditIntegrityError(
+                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
+                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
+                    f"{resume_checkpoint_id!r}) has no branch_name — only forked branch "
+                    "tokens block at a coalesce barrier; journal corruption."
+                )
+            if item.token_id in blocked_at_by_token:
+                raise AuditIntegrityError(
+                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
+                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
+                )
+            if attempt_offsets.get(item.token_id) is None:
+                raise AuditIntegrityError(
+                    f"No entry in attempt_offsets for journal token {item.token_id!r} at "
+                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
+                    "cover every BLOCKED journal row."
+                )
+            if state_ids.get(item.token_id) is None:
+                # The PENDING node_state hold is written at accept() time, before
+                # the journal row blocks; a BLOCKED row with no hold means the
+                # journal and the audit trail disagree — corruption, not a default.
+                raise AuditIntegrityError(
+                    f"No entry in state_ids for journal token {item.token_id!r} at "
+                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {resume_checkpoint_id!r}) — every BLOCKED coalesce row "
+                    "holds a PENDING node_state in the audit trail; a missing hold is "
+                    "an audit inconsistency."
                 )
 
-        now = self._clock.monotonic()
+            key = (item.coalesce_name, item.row_id)
+            branch_items = grouped.setdefault(key, {})
+            if item.branch_name in branch_items:
+                raise AuditIntegrityError(
+                    f"BLOCKED journal rows for tokens "
+                    f"{branch_items[item.branch_name].token_id!r} and {item.token_id!r} "
+                    f"both claim branch '{item.branch_name}' at coalesce "
+                    f"{item.coalesce_name!r} for row {item.row_id!r} (run {self._run_id!r}, "
+                    f"resume checkpoint {resume_checkpoint_id!r}) — accept() crashes on a "
+                    "duplicate arrival, so this is journal corruption."
+                )
+            branch_items[item.branch_name] = item
+            blocked_at_by_token[item.token_id] = item.barrier_blocked_at
+
+        monotonic_now = self._clock.monotonic()
+        new_pending: dict[tuple[str, str], _PendingCoalesce] = {}
+        for key, branch_items in grouped.items():
+            min_blocked_at = min(blocked_at_by_token[it.token_id] for it in branch_items.values())
+            # Pending age derives from the absolute blocked-at stamp of the
+            # OLDEST branch (first arrival of this pending key), clamped at 0:
+            # a wall-clock backward step must not put first_arrival in the
+            # monotonic future.
+            first_arrival = monotonic_now - max(0.0, (now - min_blocked_at).total_seconds())
+            branches: dict[str, _BranchEntry] = {}
+            for branch_name, branch_item in branch_items.items():
+                row_data = TokenSchedulerRepository.deserialize_row_payload(branch_item.row_payload_json)
+                token = TokenInfo(
+                    row_id=branch_item.row_id,
+                    token_id=branch_item.token_id,
+                    row_data=row_data,
+                    branch_name=branch_name,
+                    fork_group_id=branch_item.fork_group_id,
+                    join_group_id=branch_item.join_group_id,
+                    expand_group_id=branch_item.expand_group_id,
+                    resume_attempt_offset=attempt_offsets[branch_item.token_id],
+                    resume_checkpoint_id=resume_checkpoint_id,
+                )
+                branches[branch_name] = _BranchEntry(
+                    token=token,
+                    arrival_time=first_arrival + (blocked_at_by_token[branch_item.token_id] - min_blocked_at).total_seconds(),
+                    state_id=state_ids[branch_item.token_id],
+                )
+
+            key_scalars = scalars.get(key)
+            new_pending[key] = _PendingCoalesce(
+                branches=branches,
+                first_arrival=first_arrival,
+                lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
+            )
+
+        # Stale scalars: a key with a checkpoint lost_branches record but no
+        # journal items means that pending key flushed/completed after the
+        # checkpoint was written (the crash landed between the flush
+        # terminalizing the BLOCKED rows and the next checkpoint — a
+        # legitimate window under D3's staleness model, so rejecting would
+        # refuse valid resumes). Drop them, logged.
+        #
+        # NOTE: a zero-arrival pending key whose ONLY state was lost_branches
+        # (losses notified before any branch arrived) has the same signature —
+        # no BLOCKED rows — and is dropped with it. The journal is authoritative
+        # for pending membership; if a branch later arrives for such a row, a
+        # fresh pending entry forms without the loss record and resolves via
+        # timeout/flush instead of early loss-accounting (degraded latency,
+        # not corruption). Loss re-notification on resume is Task 3.1's caller.
+        for stale_key in scalars.keys() - grouped.keys():
+            slog.info(
+                "coalesce_journal_restore_dropped_stale_scalars",
+                coalesce_name=stale_key[0],
+                row_id=stale_key[1],
+                run_id=self._run_id,
+                resume_checkpoint_id=resume_checkpoint_id,
+                lost_branches=dict(scalars[stale_key].lost_branches),
+            )
+
         self._pending.clear()
         self._completed_keys.clear()
 
-        # Reconstruct completed keys from Landscape (source of truth).
-        # This replaces checkpoint-based restoration, eliminating:
+        # Reconstruct completed keys from Landscape (source of truth) —
+        # unchanged from the blob-restore era. This eliminates:
         # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
         # - Checkpoint-Landscape divergence risk
         self._reconstruct_completed_keys_from_landscape()
 
-        for pending_entry in state.pending:
-            first_arrival = now - pending_entry.elapsed_age_seconds
-            branches: dict[str, _BranchEntry] = {}
-            for branch_name, token_checkpoint in pending_entry.branches.items():
-                restored_contract = SchemaContract.from_checkpoint(dict(token_checkpoint.contract))
-                restored_row = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
-                token = TokenInfo(
-                    row_id=token_checkpoint.row_id,
-                    token_id=token_checkpoint.token_id,
-                    row_data=restored_row,
-                    branch_name=token_checkpoint.branch_name,
-                    fork_group_id=token_checkpoint.fork_group_id,
-                    join_group_id=token_checkpoint.join_group_id,
-                    expand_group_id=token_checkpoint.expand_group_id,
-                )
-                branches[branch_name] = _BranchEntry(
-                    token=token,
-                    arrival_time=first_arrival + token_checkpoint.arrival_offset_seconds,
-                    state_id=token_checkpoint.state_id,
-                )
+        self._pending.update(new_pending)
 
-            self._pending[(pending_entry.coalesce_name, pending_entry.row_id)] = _PendingCoalesce(
-                branches=branches,
-                first_arrival=first_arrival,
-                lost_branches=dict(pending_entry.lost_branches),
-            )
+        slog.info(
+            "coalesce_journal_restored",
+            pending_keys=len(new_pending),
+            token_count=len(blocked_at_by_token),
+            run_id=self._run_id,
+            resume_checkpoint_id=resume_checkpoint_id,
+        )
 
     def _reconstruct_completed_keys_from_landscape(self) -> None:
         """Populate _completed_keys from the Landscape audit trail.

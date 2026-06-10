@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeIs, cast
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.barrier_scalars import AggregationNodeScalars
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, CoalescePendingScalars
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
@@ -816,11 +816,17 @@ class RowProcessor:
         """
         return self._aggregation_executor.get_barrier_scalars()
 
-    def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
-        """Get checkpoint state for pending coalesces."""
+    def get_coalesce_barrier_scalars(self) -> dict[tuple[str, str], CoalescePendingScalars]:
+        """Get the underivable lost-branch scalars for the checkpoint row.
+
+        F1 design D3: the checkpoint persists only scalar barrier metadata —
+        arrived-branch token payloads live in journal BLOCKED rows; state ids
+        derive from audit tables at restore. Only pending keys with recorded
+        losses are emitted (see CoalesceExecutor.get_barrier_scalars).
+        """
         if self._coalesce_executor is None:
-            return None
-        return self._coalesce_executor.get_checkpoint_state()
+            return {}
+        return self._coalesce_executor.get_barrier_scalars()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Aggregation flush helpers (shared by handle_timeout_flush and

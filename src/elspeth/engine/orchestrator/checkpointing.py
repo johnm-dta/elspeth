@@ -180,6 +180,12 @@ class CheckpointCoordinator:
         This preserves resumability for runs that stop before any sink-token
         checkpoint has been emitted, especially buffered aggregation/coalesce
         pipelines that intentionally skip end-of-source flushes on shutdown.
+
+        The checkpoint anchor (token_id/node_id) must reference a token that
+        actually exists: aggregation nodes whose buffers were flush-emptied
+        (counter-only snapshots) cannot anchor the checkpoint, but their
+        durable counters are still persisted because resume restores the full
+        aggregation state regardless of the anchor.
         """
         if not self._checkpoint_config or not self._checkpoint_config.enabled:
             return
@@ -199,29 +205,38 @@ class CheckpointCoordinator:
         checkpoint_agg_state: AggregationCheckpointState | None = None
 
         if aggregation_state.nodes:
-            agg_node_id, agg_node_state = next(iter(aggregation_state.nodes.items()))
-            token_id = agg_node_state.tokens[-1].token_id
-            node_id = agg_node_id
+            # Persist the full aggregation state whenever any node is present.
+            # Counter-only nodes (flush-emptied buffers) carry durable counters
+            # (accepted_count_total / completed_flush_count) that resume restores
+            # wholesale via restore_from_checkpoint, independent of which token
+            # anchors the checkpoint row.
             checkpoint_agg_state = aggregation_state
-        elif coalesce_state is not None and coalesce_state.pending:
-            pending_entry = coalesce_state.pending[-1]
-            node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
-            if pending_entry.branches:
-                last_branch = list(pending_entry.branches.values())[-1]
-                token_id = last_branch.token_id
-        else:
-            for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
-                if not token_outcome_pairs:
-                    continue
-                token_id = token_outcome_pairs[-1][0].token_id
-                node_id = str(sink_id_map[SinkName(sink_name)])
-                break
+            for agg_node_id, agg_node_state in aggregation_state.nodes.items():
+                if agg_node_state.tokens:
+                    token_id = agg_node_state.tokens[-1].token_id
+                    node_id = agg_node_id
+                    break
+
+        if token_id is None and node_id is None:
+            if coalesce_state is not None and coalesce_state.pending:
+                pending_entry = coalesce_state.pending[-1]
+                node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
+                if pending_entry.branches:
+                    last_branch = list(pending_entry.branches.values())[-1]
+                    token_id = last_branch.token_id
+            else:
+                for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
+                    if not token_outcome_pairs:
+                        continue
+                    token_id = token_outcome_pairs[-1][0].token_id
+                    node_id = str(sink_id_map[SinkName(sink_name)])
+                    break
 
         if token_id is None and loop_ctx.last_token_id is not None:
             token_id = loop_ctx.last_token_id
             if node_id is None:
                 last_token_source_id = loop_ctx.last_token_source_id
-                node_id = str(last_token_source_id if isinstance(last_token_source_id, str) else source_id)
+                node_id = str(last_token_source_id) if last_token_source_id is not None else str(source_id)
 
         if token_id is None or node_id is None:
             slog.warning(

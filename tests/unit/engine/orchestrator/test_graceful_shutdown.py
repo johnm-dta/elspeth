@@ -364,6 +364,7 @@ class TestCheckpointInterruptedProgress:
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}
             loop_ctx.last_token_id = "token-99"
+            loop_ctx.last_token_source_id = None
 
             source_id = NodeID("source_0")
             orchestrator._checkpoints.checkpoint_interrupted_progress(
@@ -408,6 +409,7 @@ class TestCheckpointInterruptedProgress:
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}
             loop_ctx.last_token_id = "token-42"  # Has a last token
+            loop_ctx.last_token_source_id = None  # LoopContext default: NodeID | None
 
             source_id = NodeID("source_0")
             orchestrator._checkpoints.checkpoint_interrupted_progress(

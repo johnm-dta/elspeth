@@ -548,7 +548,10 @@ class TestQuarantineHappyPath:
 
         result = Orchestrator(db).run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.FAILED
+        # All rows quarantined = a clean determination on every row, so the
+        # terminal verdict is COMPLETED_WITH_FAILURES, not FAILED (see
+        # derive_terminal_run_status in contracts/run_result.py).
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 2
         with db.engine.connect() as conn:
             source_row_indexes = (

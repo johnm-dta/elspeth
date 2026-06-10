@@ -48,7 +48,10 @@ def cleanup_plugins(
 
     Each call is individually try/excepted so one plugin's failure does not
     prevent other plugins from cleaning up. All errors are collected and
-    raised together after all cleanup completes.
+    raised together after all cleanup completes — unless an exception is
+    already propagating (this function runs in ``finally`` blocks), in which
+    case the collected cleanup errors are logged and the in-flight exception
+    is preserved as the primary outcome.
 
     Extracted from _execute_run() and _process_resumed_rows() to eliminate
     duplication of the finally-block cleanup pattern.
@@ -60,8 +63,9 @@ def cleanup_plugins(
             on the source. Set to False for resume path where source wasn't opened.
 
     Raises:
-        RuntimeError: If any plugin cleanup hook fails. Chained from the
-            pending exception if one exists.
+        RuntimeError: If any plugin cleanup hook fails and no exception is
+            already propagating. When a pending exception exists, cleanup
+            failures are logged instead so they never mask it.
     """
     logger = slog
     pending_exc = sys.exc_info()[1]
@@ -122,5 +126,16 @@ def cleanup_plugins(
     if cleanup_errors:
         error_summary = "; ".join(cleanup_errors)
         if pending_exc is not None:
-            raise RuntimeError(f"Plugin cleanup failed: {error_summary}") from pending_exc
+            # An exception is already propagating through the caller's finally
+            # block. Raising here would REPLACE it — e.g. swap a
+            # _RunFailedWithPartialResultError (real partial counters, failed
+            # ceremony) for a cleanup RuntimeError handled by the generic
+            # ceremony. The per-hook failures are already logged above; record
+            # the aggregate and let the original exception continue.
+            logger.error(
+                "Plugin cleanup failed during exception propagation; original error preserved",
+                cleanup_errors=tuple(cleanup_errors),
+                pending_error_type=type(pending_exc).__name__,
+            )
+            return
         raise RuntimeError(f"Plugin cleanup failed: {error_summary}")

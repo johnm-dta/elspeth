@@ -44,7 +44,6 @@ class TokenSchedulerRepository:
 
     _SCRUBBED_ROW_PAYLOAD_JSON = canonical_json({"row_payload": "purged", "payload_hash": None})
     _TRANSITION_EVENT_TYPES: ClassVar[dict[TokenWorkStatus, SchedulerEventType]] = {
-        TokenWorkStatus.WAITING: SchedulerEventType.MARK_WAITING,
         TokenWorkStatus.BLOCKED: SchedulerEventType.MARK_BLOCKED,
         TokenWorkStatus.TERMINAL: SchedulerEventType.MARK_TERMINAL,
         TokenWorkStatus.FAILED: SchedulerEventType.MARK_FAILED,
@@ -1202,84 +1201,6 @@ class TokenSchedulerRepository:
             )
         return new_expires_at
 
-    def mark_waiting(
-        self,
-        *,
-        work_item_id: str,
-        available_at: datetime,
-        now: datetime,
-        expected_lease_owner: str,
-    ) -> TokenWorkItem:
-        """Move a claimed item to WAITING until ``available_at``."""
-        return self._transition(
-            work_item_id=work_item_id,
-            now=now,
-            status=TokenWorkStatus.WAITING,
-            expected_lease_owner=expected_lease_owner,
-            available_at=available_at,
-            lease_owner=None,
-            lease_expires_at=None,
-        )
-
-    def release_waiting(self, *, run_id: str, now: datetime) -> int:
-        """Release due WAITING items back to READY."""
-        with self._engine.begin() as conn:
-            waiting_rows = (
-                conn.execute(
-                    select(token_work_items_table)
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.WAITING.value)
-                    .where(token_work_items_table.c.available_at <= now)
-                    .order_by(
-                        token_work_items_table.c.ingest_sequence,
-                        token_work_items_table.c.step_index,
-                        token_work_items_table.c.work_item_id,
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            released = 0
-            for row in waiting_rows:
-                result = conn.execute(
-                    update(token_work_items_table)
-                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.WAITING.value)
-                    .where(token_work_items_table.c.available_at <= now)
-                    .values(
-                        status=TokenWorkStatus.READY.value,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        updated_at=now,
-                    )
-                )
-                if result.rowcount == 1:
-                    self._record_scheduler_event(
-                        conn,
-                        event_type=SchedulerEventType.RELEASE_WAITING,
-                        run_id=run_id,
-                        token_id=row["token_id"],
-                        work_item_id=row["work_item_id"],
-                        node_id=row["node_id"],
-                        from_status=TokenWorkStatus.WAITING,
-                        to_status=TokenWorkStatus.READY,
-                        from_lease_owner=row["lease_owner"],
-                        to_lease_owner=None,
-                        from_attempt=row["attempt"],
-                        to_attempt=row["attempt"],
-                        recorded_at=now,
-                        from_lease_expires_at=row["lease_expires_at"],
-                        to_lease_expires_at=None,
-                    )
-                    released += 1
-                elif result.rowcount not in (0, None):
-                    raise AuditIntegrityError(
-                        f"Scheduler release_waiting affected {result.rowcount} rows for "
-                        f"run_id={run_id!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
-                    )
-        return released
-
     def mark_blocked(
         self,
         *,
@@ -1318,14 +1239,12 @@ class TokenSchedulerRepository:
             lease_expires_at=None,
         )
 
-    def mark_failed(self, *, work_item_id: str, now: datetime, expected_lease_owner: str | None = None) -> TokenWorkItem:
-        """Mark a work item failed after retries are exhausted."""
-        expected_statuses = (TokenWorkStatus.READY,) if expected_lease_owner is None else (TokenWorkStatus.LEASED,)
+    def mark_failed(self, *, work_item_id: str, now: datetime, expected_lease_owner: str) -> TokenWorkItem:
+        """Mark a leased work item failed after retries are exhausted."""
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.FAILED,
-            expected_statuses=expected_statuses,
             expected_lease_owner=expected_lease_owner,
             row_payload_json=self._scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
@@ -1883,7 +1802,6 @@ class TokenSchedulerRepository:
         active_statuses = (
             TokenWorkStatus.READY.value,
             TokenWorkStatus.LEASED.value,
-            TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
             TokenWorkStatus.PENDING_SINK.value,
         )
@@ -1901,7 +1819,6 @@ class TokenSchedulerRepository:
         active_statuses = (
             TokenWorkStatus.READY.value,
             TokenWorkStatus.LEASED.value,
-            TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
             TokenWorkStatus.PENDING_SINK.value,
         )
@@ -1931,7 +1848,6 @@ class TokenSchedulerRepository:
             token_work_items_table.c.status.in_(
                 (
                     TokenWorkStatus.READY.value,
-                    TokenWorkStatus.WAITING.value,
                     TokenWorkStatus.BLOCKED.value,
                 )
             ),
@@ -1988,7 +1904,6 @@ class TokenSchedulerRepository:
         active_statuses = (
             TokenWorkStatus.READY.value,
             TokenWorkStatus.LEASED.value,
-            TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
             TokenWorkStatus.PENDING_SINK.value,
         )

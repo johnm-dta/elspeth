@@ -25,7 +25,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 
-_SchedulerTransition = Literal["waiting", "blocked", "terminal", "failed"]
+_SchedulerTransition = Literal["blocked", "terminal", "failed"]
 
 
 def test_plural_sources_are_canonical_and_stable_named() -> None:
@@ -1711,7 +1711,7 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
     assert row.lease_owner is None
 
 
-@pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
+@pytest.mark.parametrize("transition", ["blocked", "terminal", "failed"])
 def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(transition: _SchedulerTransition) -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
@@ -2044,13 +2044,6 @@ def _apply_scheduler_transition(
     now: datetime,
     expected_lease_owner: str = "worker-a",
 ):
-    if transition == "waiting":
-        return repo.mark_waiting(
-            work_item_id=work_item_id,
-            available_at=now + timedelta(seconds=10),
-            now=now,
-            expected_lease_owner=expected_lease_owner,
-        )
     if transition == "blocked":
         return repo.mark_blocked(
             work_item_id=work_item_id,
@@ -2388,7 +2381,7 @@ def test_scheduler_repository_rejects_duplicate_enqueue_with_incompatible_cursor
     assert "do-not-leak" not in message
 
 
-@pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
+@pytest.mark.parametrize("transition", ["blocked", "terminal", "failed"])
 def test_scheduler_transitions_raise_for_missing_work_item(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -2401,7 +2394,7 @@ def test_scheduler_transitions_raise_for_missing_work_item(transition: _Schedule
         _apply_scheduler_transition(repo, transition, work_item_id=f"missing-{transition}", now=now)
 
 
-@pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
+@pytest.mark.parametrize("transition", ["blocked", "terminal", "failed"])
 def test_scheduler_transitions_raise_when_work_item_already_in_target_status(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -2418,7 +2411,7 @@ def test_scheduler_transitions_raise_when_work_item_already_in_target_status(tra
         _apply_scheduler_transition(repo, transition, work_item_id=item.work_item_id, now=now + timedelta(seconds=1))
 
 
-@pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal"])
+@pytest.mark.parametrize("transition", ["blocked", "terminal"])
 def test_scheduler_transitions_raise_when_work_item_is_not_leased(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -2458,23 +2451,7 @@ def test_scheduler_marks_failed_clears_lease_and_blocks_reclaim() -> None:
     assert repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=2)) is None
 
 
-def test_scheduler_marks_failed_from_ready() -> None:
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
-
-    engine = _make_tier1_engine()
-    repo = TokenSchedulerRepository(engine)
-    now = datetime.now(UTC)
-    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
-
-    failed = repo.mark_failed(work_item_id=item.work_item_id, now=now)
-
-    assert failed.status is TokenWorkStatus.FAILED
-    assert failed.lease_owner is None
-    assert failed.lease_expires_at is None
-    assert repo.count_active_work(run_id="run-1") == 0
-
-
-def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownership() -> None:
+def test_scheduler_requeues_blocks_and_marks_terminal_with_leased_ownership() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
@@ -2501,29 +2478,15 @@ def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownershi
     )
     claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
     assert claimed is not None
+    assert claimed.status is TokenWorkStatus.LEASED
 
     retry_at = now + timedelta(seconds=10)
-    waiting = repo.mark_waiting(
-        work_item_id=item.work_item_id,
-        available_at=retry_at,
-        now=now,
-        expected_lease_owner="worker-a",
-    )
-    assert waiting.status is TokenWorkStatus.WAITING
-    assert waiting.available_at == retry_at
-
-    released = repo.release_waiting(run_id="run-1", now=retry_at)
-    assert released == 1
-    reclaimed = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=retry_at)
-    assert reclaimed is not None
-    assert reclaimed.status is TokenWorkStatus.LEASED
-
     blocked = repo.mark_blocked(
         work_item_id=item.work_item_id,
         queue_key="queue:inbound",
         barrier_key="barrier:row-1",
         now=retry_at,
-        expected_lease_owner="worker-b",
+        expected_lease_owner="worker-a",
     )
     assert blocked.status is TokenWorkStatus.BLOCKED
     assert blocked.queue_key == "queue:inbound"

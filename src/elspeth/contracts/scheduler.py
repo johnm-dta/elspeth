@@ -14,7 +14,6 @@ class TokenWorkStatus(StrEnum):
 
     READY = "ready"
     LEASED = "leased"
-    WAITING = "waiting"
     BLOCKED = "blocked"
     PENDING_SINK = "pending_sink"
     TERMINAL = "terminal"
@@ -30,8 +29,6 @@ class SchedulerEventType(StrEnum):
     CLAIM_PENDING_SINK = "claim_pending_sink"
     RECOVER_EXPIRED_LEASE = "recover_expired_lease"
     LEASE_LOST = "lease_lost"
-    MARK_WAITING = "mark_waiting"
-    RELEASE_WAITING = "release_waiting"
     MARK_BLOCKED = "mark_blocked"
     MARK_TERMINAL = "mark_terminal"
     MARK_FAILED = "mark_failed"

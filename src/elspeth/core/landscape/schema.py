@@ -90,7 +90,12 @@ metadata = MetaData()
 #   18 → Source exhaustion lifecycle evidence: run_sources.lifecycle_state
 #        distinguishes exhausted-before-EOF-engine-work from interrupted source
 #        iteration so resume can safely drain recoverable engine state.
-SQLITE_SCHEMA_EPOCH = 18
+#   19 → Dead-lane and vestigial-anchor subtraction (F4+F2): scheduler WAITING
+#        status and mark_waiting/release_waiting event types removed from the
+#        scheduler_events CHECK constraints; checkpoints lose the token_id/
+#        node_id anchor columns and checkpoint_node_config_hash (full-topology
+#        hash subsumes per-node compatibility validation).
+SQLITE_SCHEMA_EPOCH = 19
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -508,17 +513,17 @@ scheduler_events_table = Table(
     Column("context_json", Text, nullable=False, server_default=text("'{}'")),
     CheckConstraint(
         "event_type IN ('enqueue', 'restore_blocked', 'claim_ready', 'claim_pending_sink', "
-        "'recover_expired_lease', 'lease_lost', 'mark_waiting', 'release_waiting', 'mark_blocked', "
+        "'recover_expired_lease', 'lease_lost', 'mark_blocked', "
         "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
         "'mark_blocked_barrier_terminal')",
         name="ck_scheduler_events_event_type",
     ),
     CheckConstraint(
-        "from_status IS NULL OR from_status IN ('ready', 'leased', 'waiting', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        "from_status IS NULL OR from_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
         name="ck_scheduler_events_from_status",
     ),
     CheckConstraint(
-        "to_status IN ('ready', 'leased', 'waiting', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        "to_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
         name="ck_scheduler_events_to_status",
     ),
     CheckConstraint("from_attempt IS NULL OR from_attempt >= 0", name="ck_scheduler_events_from_attempt_non_negative"),

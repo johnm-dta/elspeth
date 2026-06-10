@@ -1046,7 +1046,7 @@ class Orchestrator:
                 active_work = "; ".join(loop_ctx.processor.summarize_unresolved_scheduler_work()) or "<unknown>"
                 raise OrchestrationInvariantError(
                     f"Run '{run_ctx.processor.run_id}' left non-terminal scheduler work after final source flush. "
-                    "Blocked, READY, or future WAITING scheduler state must be resolved before run completion. "
+                    "Blocked or READY scheduler state must be resolved before run completion. "
                     f"Active scheduler work: {active_work}."
                 )
 

@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 18)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 19)."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_eighteen() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 18
+def test_epoch_is_nineteen() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 19
 
 
 def test_tokens_has_token_data_ref_column() -> None:

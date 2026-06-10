@@ -391,47 +391,6 @@ def test_heartbeat_lease_lost_records_event_when_expired_lease_was_recovered() -
     }
 
 
-def test_waiting_release_records_transition_events() -> None:
-    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-
-    engine = _make_scheduler_engine()
-    repo = TokenSchedulerRepository(engine)
-    now = datetime.now(UTC)
-    payload = _insert_scheduler_prerequisites(engine, now=now)
-    item = repo.enqueue_ready(
-        run_id="run-1",
-        token_id="token-1",
-        row_id="row-1",
-        node_id="normalize",
-        step_index=1,
-        ingest_sequence=0,
-        available_at=now,
-        row_payload_json=payload,
-    )
-    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
-
-    repo.mark_waiting(
-        work_item_id=item.work_item_id,
-        available_at=now + timedelta(seconds=10),
-        now=now + timedelta(seconds=2),
-        expected_lease_owner="worker-a",
-    )
-    released = repo.release_waiting(run_id="run-1", now=now + timedelta(seconds=11))
-
-    events = _scheduler_events(engine)
-    assert released == 1
-    assert [event.event_type for event in events] == [
-        SchedulerEventType.ENQUEUE.value,
-        SchedulerEventType.CLAIM_READY.value,
-        SchedulerEventType.MARK_WAITING.value,
-        SchedulerEventType.RELEASE_WAITING.value,
-    ]
-    release_event = events[-1]
-    assert release_event.from_status == TokenWorkStatus.WAITING.value
-    assert release_event.to_status == TokenWorkStatus.READY.value
-
-
 def test_mark_blocked_and_mark_failed_record_transition_events() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -483,12 +442,17 @@ def test_mark_blocked_and_mark_failed_record_transition_events() -> None:
         available_at=now,
         row_payload_json=payload,
     )
-    failed = repo.mark_failed(work_item_id=item.work_item_id, now=now + timedelta(seconds=1))
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    failed = repo.mark_failed(work_item_id=item.work_item_id, now=now + timedelta(seconds=2), expected_lease_owner="worker-a")
 
     events = _scheduler_events(engine)
     assert failed.status is TokenWorkStatus.FAILED
-    assert [event.event_type for event in events] == [SchedulerEventType.ENQUEUE.value, SchedulerEventType.MARK_FAILED.value]
-    assert events[-1].from_status == TokenWorkStatus.READY.value
+    assert [event.event_type for event in events] == [
+        SchedulerEventType.ENQUEUE.value,
+        SchedulerEventType.CLAIM_READY.value,
+        SchedulerEventType.MARK_FAILED.value,
+    ]
+    assert events[-1].from_status == TokenWorkStatus.LEASED.value
     assert events[-1].to_status == TokenWorkStatus.FAILED.value
 
 
@@ -846,57 +810,6 @@ def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
     assert events[-1].from_status == TokenWorkStatus.BLOCKED.value
     assert events[-1].to_status == TokenWorkStatus.PENDING_SINK.value
     assert json.loads(events[-1].context_json) == {"barrier_key": "agg-1"}
-
-
-def test_release_waiting_rolls_back_work_item_update_when_scheduler_event_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-
-    engine = _make_scheduler_engine()
-    repo = TokenSchedulerRepository(engine)
-    now = datetime.now(UTC)
-    payload = _insert_scheduler_prerequisites(engine, now=now)
-    item = repo.enqueue_ready(
-        run_id="run-1",
-        token_id="token-1",
-        row_id="row-1",
-        node_id="normalize",
-        step_index=1,
-        ingest_sequence=0,
-        available_at=now,
-        row_payload_json=payload,
-    )
-    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
-    repo.mark_waiting(
-        work_item_id=item.work_item_id,
-        available_at=now + timedelta(seconds=10),
-        now=now + timedelta(seconds=2),
-        expected_lease_owner="worker-a",
-    )
-    original_record_scheduler_event = repo._record_scheduler_event
-
-    def fail_release_event(conn, *, event_type, **kwargs):
-        if event_type is SchedulerEventType.RELEASE_WAITING:
-            raise LandscapeRecordError("forced release event failure")
-        return original_record_scheduler_event(conn, event_type=event_type, **kwargs)
-
-    monkeypatch.setattr(repo, "_record_scheduler_event", fail_release_event)
-
-    with pytest.raises(LandscapeRecordError, match="forced release event failure"):
-        repo.release_waiting(run_id="run-1", now=now + timedelta(seconds=11))
-
-    with engine.connect() as conn:
-        row = conn.execute(
-            select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
-                token_work_items_table.c.work_item_id == item.work_item_id
-            )
-        ).one()
-    assert row == (TokenWorkStatus.WAITING.value, None)
-    assert [event.event_type for event in _scheduler_events(engine)] == [
-        SchedulerEventType.ENQUEUE.value,
-        SchedulerEventType.CLAIM_READY.value,
-        SchedulerEventType.MARK_WAITING.value,
-    ]
 
 
 def test_claim_ready_rolls_back_work_item_update_when_scheduler_event_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:

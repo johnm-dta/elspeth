@@ -378,7 +378,6 @@ class TestConstructorErrorEdgeMap:
                 factory.scheduler, "enqueue_ready_claimed", wraps=factory.scheduler.enqueue_ready_claimed
             ) as enqueue_ready_claimed,
             patch.object(factory.scheduler, "claim_ready", wraps=factory.scheduler.claim_ready) as claim_ready,
-            patch.object(factory.scheduler, "release_waiting", wraps=factory.scheduler.release_waiting) as release_waiting,
             patch.object(factory.scheduler, "recover_expired_leases", wraps=factory.scheduler.recover_expired_leases) as recover_expired,
         ):
             for idx in range(SCHEDULER_MAINTENANCE_INTERVAL - 1):
@@ -391,7 +390,6 @@ class TestConstructorErrorEdgeMap:
                     ingest_sequence=idx,
                 )
 
-            assert release_waiting.call_count == 0
             assert recover_expired.call_count == 0
 
             processor.process_row(
@@ -403,7 +401,6 @@ class TestConstructorErrorEdgeMap:
                 ingest_sequence=SCHEDULER_MAINTENANCE_INTERVAL - 1,
             )
 
-        assert release_waiting.call_count == 1
         assert recover_expired.call_count == 1
         assert enqueue_ready_claimed.call_count == SCHEDULER_MAINTENANCE_INTERVAL
         assert claim_ready.call_count == 0

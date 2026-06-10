@@ -31,9 +31,9 @@ agreement plus the global lifecycle properties:
 6. BLOCKED is released only via its own barrier_key; a release naming a
    different barrier raises and changes nothing.
 
-WAITING is deliberately NOT modelled: ``mark_waiting`` has no production
-caller (dead lane; ``release_waiting`` maintenance services an unreachable
-state), so exploring it would launder unreachable behavior into a proof.
+WAITING is NOT modelled: the lane was deleted outright (F4, 2026-06-10)
+after verification that ``mark_waiting`` had no production caller and the
+``release_waiting`` maintenance sweep serviced an unreachable state.
 The single-row-token lifecycle (fork/coalesce lineage) is covered separately
 by test_token_lifecycle_state_machine.py.
 """

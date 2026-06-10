@@ -114,8 +114,8 @@ class TestLeaseOwnerCheckConstraint:
 
     def test_non_leased_row_with_null_lease_owner_succeeds(self) -> None:
         """Non-LEASED rows may carry NULL lease_owner — that's the normal
-        state for READY / BLOCKED / WAITING / PENDING_SINK / TERMINAL /
-        FAILED. The CHECK must only apply when status='leased'.
+        state for READY / BLOCKED / PENDING_SINK / TERMINAL / FAILED.
+        The CHECK must only apply when status='leased'.
         """
         db = LandscapeDB("sqlite:///:memory:")
         with db.engine.connect() as conn:

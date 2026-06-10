@@ -2800,15 +2800,14 @@ class RowProcessor:
         return results
 
     def _run_scheduler_maintenance(self, now: datetime) -> int:
-        """Release due delayed work and recover expired peer leases."""
-        released = self._scheduler.release_waiting(run_id=self._run_id, now=now)
+        """Recover expired peer leases."""
         recovered = self._scheduler.recover_expired_leases(
             run_id=self._run_id,
             now=now,
             caller_owner=self._scheduler_lease_owner,
         )
         self._scheduler_drains_since_maintenance = 0
-        return released + recovered
+        return recovered
 
     def _scheduler_maintenance_due(self, *, recover_pending_sinks: bool) -> bool:
         """Return whether this drain should run scheduler maintenance up front."""

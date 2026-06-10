@@ -438,7 +438,7 @@ def run_resume_processing_loop(
             active_work = "; ".join(processor.summarize_unresolved_scheduler_work()) or "<unknown>"
             raise OrchestrationInvariantError(
                 f"Resume for run '{processor.run_id}' left non-terminal scheduler work after end-of-source flush. "
-                "Blocked or future WAITING scheduler state must be recovered explicitly before run completion. "
+                "Blocked scheduler state must be recovered explicitly before run completion. "
                 f"Active scheduler work: {active_work}."
             )
 

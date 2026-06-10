@@ -61,24 +61,15 @@ class TestPhase5CheckpointSchema:
         assert "upstream_topology_hash" in columns, "Missing upstream_topology_hash column"
         assert columns["upstream_topology_hash"].nullable is False, "upstream_topology_hash must be non-nullable for checkpoint validation"
 
-        # checkpoint_node_config_hash must exist and be non-nullable
-        assert "checkpoint_node_config_hash" in columns, "Missing checkpoint_node_config_hash column"
-        assert columns["checkpoint_node_config_hash"].nullable is False, (
-            "checkpoint_node_config_hash must be non-nullable for checkpoint validation"
-        )
-
     def test_checkpoint_model(self) -> None:
         from elspeth.contracts import Checkpoint
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-001",
             run_id="run-001",
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=42,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
         )
         assert checkpoint.sequence_number == 42
 
@@ -89,12 +80,9 @@ class TestPhase5CheckpointSchema:
         checkpoint = Checkpoint(
             checkpoint_id="cp-002",
             run_id="run-001",
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=100,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             aggregation_state_json='{"buffer": [1, 2, 3]}',
         )
         assert checkpoint.aggregation_state_json == '{"buffer": [1, 2, 3]}'

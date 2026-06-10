@@ -886,8 +886,6 @@ class TestResumeIdempotence:
         # Create checkpoint at row 2 (0-indexed, so rows 0-2 processed)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=token_ids[2],
-            node_id="sink_default",
             sequence_number=3,
             graph=graph_b,
         )
@@ -1211,8 +1209,6 @@ class TestCheckpointRecovery:
         # Checkpoint at row 2 (token tok-002)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="tok-002",
-            node_id="transform",
             sequence_number=2,
             graph=mock_graph,
         )
@@ -1356,8 +1352,6 @@ class TestCheckpointRecovery:
         )
         original_checkpoint = checkpoint_mgr1.create_checkpoint(
             run_id=run_id,
-            token_id="tok-000",
-            node_id="transform",
             sequence_number=0,
             graph=mock_graph,
             aggregation_state=_agg_state,
@@ -1377,11 +1371,8 @@ class TestCheckpointRecovery:
         # Verify all checkpoint fields match
         assert restored_checkpoint.checkpoint_id == original_checkpoint.checkpoint_id
         assert restored_checkpoint.run_id == original_checkpoint.run_id
-        assert restored_checkpoint.token_id == original_checkpoint.token_id
-        assert restored_checkpoint.node_id == original_checkpoint.node_id
         assert restored_checkpoint.sequence_number == original_checkpoint.sequence_number
         assert restored_checkpoint.upstream_topology_hash == original_checkpoint.upstream_topology_hash
-        assert restored_checkpoint.checkpoint_node_config_hash == original_checkpoint.checkpoint_node_config_hash
 
         # Verify can_resume works with restored checkpoint
         check = recovery_mgr2.can_resume(run_id, mock_graph)
@@ -1570,8 +1561,6 @@ class TestAggregationRecovery:
         # Create checkpoint with aggregation state
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[-1].token_id,
-            node_id="aggregator",
             sequence_number=2,
             aggregation_state=agg_state,
             graph=mock_graph,

@@ -513,7 +513,11 @@ class BatchOutput:
 class Checkpoint:
     """Checkpoint for crash recovery.
 
-    Captures run progress at row/transform boundaries.
+    Captures run progress at sink-durability boundaries. The real resume
+    work-set is token_outcomes completeness + the serialized aggregation/
+    coalesce buffer state + sequence_number; compatibility is enforced by
+    the full-topology hash (which embeds every node's config hash), so the
+    checkpoint carries no per-node anchor.
 
     Format Versions:
         Version 1: Pre-deterministic node IDs (legacy, incompatible)
@@ -527,14 +531,11 @@ class Checkpoint:
 
     checkpoint_id: str
     run_id: str
-    token_id: str
-    node_id: str
     sequence_number: int
     created_at: datetime  # Required - schema enforces NOT NULL (Tier 1 audit data)
-    # Topology validation fields - REQUIRED for checkpoint compatibility checking
-    # Schema enforces NOT NULL - these are audit-critical for resume validation
+    # Topology validation field - REQUIRED for checkpoint compatibility checking
+    # Schema enforces NOT NULL - audit-critical for resume validation
     upstream_topology_hash: str  # Hash of ALL nodes + edges in DAG (full topology)
-    checkpoint_node_config_hash: str  # Hash of checkpoint node config only
     # Optional fields (with defaults) MUST come after required fields in dataclass
     aggregation_state_json: str | None = None
     coalesce_state_json: str | None = None
@@ -551,8 +552,6 @@ class Checkpoint:
         require_int(self.format_version, "format_version", optional=True, min_value=0)
         if not self.upstream_topology_hash:
             raise ValueError("upstream_topology_hash is required and cannot be empty")
-        if not self.checkpoint_node_config_hash:
-            raise ValueError("checkpoint_node_config_hash is required and cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)

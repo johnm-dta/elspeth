@@ -361,8 +361,6 @@ def _setup_adr019_failed_resume_run(
     if processed_count > 0:
         CheckpointManager(db).create_checkpoint(
             run_id=run_id,
-            token_id=f"t{processed_count - 1}",
-            node_id=xform_nid,
             sequence_number=processed_count - 1,
             graph=graph,
         )

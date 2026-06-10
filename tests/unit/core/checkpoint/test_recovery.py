@@ -257,8 +257,6 @@ def _create_failed_run_with_checkpoint(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-0",
-        node_id=checkpoint_node_id,
         sequence_number=1,
         graph=active_graph,
         aggregation_state=aggregation_state,
@@ -364,7 +362,6 @@ def test_can_resume_rejects_topology_mismatch(
     check = recovery_manager.can_resume(run_id, changed_graph)
     assert check.can_resume is False
     assert check.reason is not None
-    assert "configuration has changed" in check.reason
 
 
 def test_can_resume_true_for_failed_run_with_valid_checkpoint(
@@ -436,8 +433,6 @@ def test_get_resume_point_restores_aggregation_state(
 
     resume_point = recovery_manager.get_resume_point(run_id, graph)
     assert resume_point is not None
-    assert resume_point.token_id == "tok-0"
-    assert resume_point.node_id == "checkpoint-node"
     assert resume_point.sequence_number == 1
     assert resume_point.aggregation_state is not None
     assert "agg-node" in resume_point.aggregation_state.nodes
@@ -526,8 +521,6 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="token-checkpoint",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
     )
@@ -566,8 +559,6 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="token-resume-delegation-parent",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
     )
@@ -615,8 +606,6 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-completed",
-        node_id="checkpoint-node",
         sequence_number=10,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
@@ -696,8 +685,6 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-a",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
@@ -791,8 +778,6 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-coalesce-buf",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
         coalesce_state=_make_coalesce_state(
@@ -836,8 +821,6 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-agg",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
@@ -900,8 +883,6 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-branch-a",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
         coalesce_state=_make_coalesce_state(
@@ -1166,8 +1147,6 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-child",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
     )
@@ -1233,8 +1212,6 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-0",
-        node_id="checkpoint-node",
         sequence_number=99,
         graph=graph,
     )
@@ -1260,13 +1237,10 @@ def test_get_resume_point_revalidates_checkpoint_loaded_after_can_resume(
             checkpoints_table.insert().values(
                 checkpoint_id="cp-later-incompatible",
                 run_id=run_id,
-                token_id="tok-0",
-                node_id="checkpoint-node",
                 sequence_number=99,
                 aggregation_state_json=None,
                 created_at=datetime.now(UTC),
                 upstream_topology_hash="x" * 64,
-                checkpoint_node_config_hash="y" * 64,
                 format_version=Checkpoint.CURRENT_FORMAT_VERSION,
             )
         )
@@ -1307,8 +1281,6 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
-        token_id="tok-diverted",
-        node_id="checkpoint-node",
         sequence_number=1,
         graph=graph,
     )

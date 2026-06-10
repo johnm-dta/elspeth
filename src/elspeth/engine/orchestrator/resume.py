@@ -370,10 +370,6 @@ def run_resume_processing_loop(
                 source_on_success=source_on_success,
             )
 
-        if results:
-            loop_ctx.last_token_id = results[-1].token.token_id
-            loop_ctx.last_token_source_id = source_node_id
-
         # Handle all results from this row
         accumulate_row_outcomes(results, counters, pending_tokens)
 
@@ -584,11 +580,14 @@ class ResumeCoordinator:
         # 2. Update run status to running after validation has succeeded.
         factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
-        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches
+        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches.
+        # Keyed by the node ids carried inside the checkpoint state itself; the
+        # consumer (RowProcessor) deduplicates by content equality and restores
+        # via .values(), so every key maps to the same rebound state object.
         restored_state: dict[str, AggregationCheckpointState] = {}
         if resume_point.aggregation_state is not None:
             rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
-            restored_state[resume_point.node_id] = rebound_state
+            restored_state = dict.fromkeys(rebound_state.nodes, rebound_state)
         restored_coalesce_state = resume_point.coalesce_state
 
         return ResumeState(
@@ -1021,7 +1020,6 @@ class ResumeCoordinator:
                 artifacts.edge_map,
                 interrupted,
                 on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
 
             # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b

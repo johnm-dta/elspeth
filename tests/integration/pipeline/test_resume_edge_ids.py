@@ -231,8 +231,6 @@ class TestResumeEdgeIDs:
         # 4. Create checkpoint (simulating partial run)
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[0].token_id,
-            node_id="gate",
             sequence_number=1,
             graph=gate_graph,
         )

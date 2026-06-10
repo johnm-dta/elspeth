@@ -271,8 +271,6 @@ class TestAggregationStateRoundTripProperties:
             # Create checkpoint with typed aggregation state
             checkpoint = manager.create_checkpoint(
                 run_id="test-run-001",
-                token_id="token-001",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
                 aggregation_state=state,
@@ -302,16 +300,12 @@ class TestAggregationStateRoundTripProperties:
 
             checkpoint1 = manager.create_checkpoint(
                 run_id="test-run-json",
-                token_id="token-json",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
                 aggregation_state=state,
             )
             checkpoint2 = manager.create_checkpoint(
                 run_id="test-run-json",
-                token_id="token-json",
-                node_id="transform_0",
                 sequence_number=2,
                 graph=graph,
                 aggregation_state=state,
@@ -333,8 +327,6 @@ class TestAggregationStateRoundTripProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-run-002",
-                token_id="token-002",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
                 aggregation_state=None,
@@ -388,8 +380,6 @@ class TestAggregationStateRoundTripProperties:
             with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
                 manager.create_checkpoint(
                     run_id="test-nan",
-                    token_id="token-nan",
-                    node_id="transform_0",
                     sequence_number=1,
                     graph=graph,
                     aggregation_state=nan_state,
@@ -441,8 +431,6 @@ class TestAggregationStateRoundTripProperties:
             with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
                 manager.create_checkpoint(
                     run_id="test-inf",
-                    token_id="token-inf",
-                    node_id="transform_0",
                     sequence_number=1,
                     graph=graph,
                     aggregation_state=inf_state,
@@ -482,8 +470,6 @@ class TestFormatVersionProperties:
             # Create a valid checkpoint first
             manager.create_checkpoint(
                 run_id="test-run-version",
-                token_id="token-version",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
             )
@@ -517,8 +503,6 @@ class TestFormatVersionProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-run-current",
-                token_id="token-current",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
             )
@@ -629,8 +613,6 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-unchanged",
-                token_id="token-unchanged",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph,
             )
@@ -653,8 +635,6 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-missing-node",
-                token_id="token-missing",
-                node_id="transform_1",  # Will be missing in modified graph
                 sequence_number=1,
                 graph=graph_original,
             )
@@ -666,7 +646,6 @@ class TestCompatibilityValidationProperties:
             result = validator.validate(checkpoint, graph_modified)
 
             assert result.can_resume is False
-            assert result.reason is not None and "no longer exists" in result.reason
         finally:
             db.close()
 
@@ -693,8 +672,6 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-config-change",
-                token_id="token-config",
-                node_id="transform_0",
                 sequence_number=1,
                 graph=graph1,
             )
@@ -716,7 +693,6 @@ class TestCompatibilityValidationProperties:
             result = validator.validate(checkpoint, graph2)
 
             assert result.can_resume is False
-            assert result.reason is not None and "configuration has changed" in result.reason
         finally:
             db.close()
 
@@ -744,8 +720,6 @@ class TestSequenceNumberProperties:
             for seq in reversed(seq_numbers):
                 manager.create_checkpoint(
                     run_id="test-ordering",
-                    token_id="token-001",  # Reuse same token - sequence_number is unique
-                    node_id="transform_0",
                     sequence_number=seq,
                     graph=graph,
                 )
@@ -773,8 +747,6 @@ class TestSequenceNumberProperties:
             for seq in seq_numbers:
                 manager.create_checkpoint(
                     run_id="test-latest",
-                    token_id="token-001",  # Reuse same token - sequence_number is unique
-                    node_id="transform_0",
                     sequence_number=seq,
                     graph=graph,
                 )
@@ -797,26 +769,6 @@ class TestSequenceNumberProperties:
 class TestCheckpointCreationProperties:
     """Property tests for checkpoint creation validation."""
 
-    def test_create_checkpoint_requires_valid_node(self) -> None:
-        """Property: Checkpoint creation fails if node doesn't exist in graph."""
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-invalid-node")
-
-            with pytest.raises(ValueError, match="does not exist"):
-                manager.create_checkpoint(
-                    run_id="test-invalid-node",
-                    token_id="token-invalid",
-                    node_id="nonexistent_node",
-                    sequence_number=1,
-                    graph=graph,
-                )
-        finally:
-            db.close()
-
     def test_create_checkpoint_requires_graph(self) -> None:
         """Property: Checkpoint creation fails if graph is None."""
         db, _ = create_test_db()
@@ -826,8 +778,6 @@ class TestCheckpointCreationProperties:
             with pytest.raises(ValueError, match="graph parameter is required"):
                 manager.create_checkpoint(
                     run_id="test-no-graph",
-                    token_id="token-no-graph",
-                    node_id="transform_0",
                     sequence_number=1,
                     graph=None,  # type: ignore
                 )

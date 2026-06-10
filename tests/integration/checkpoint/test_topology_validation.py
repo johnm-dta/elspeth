@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 from elspeth.contracts import Checkpoint
 from elspeth.contracts.enums import NodeType, RoutingMode
-from elspeth.core.canonical import compute_full_topology_hash, stable_hash
+from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.dag import ExecutionGraph
 
@@ -61,22 +61,16 @@ class TestCheckpointTopologyValidation:
     def _create_checkpoint_for_graph(
         self,
         graph: ExecutionGraph,
-        node_id: str = "transform_0",
     ) -> Checkpoint:
         """Create a checkpoint with topology hash from the given graph."""
         topology_hash = compute_full_topology_hash(graph)
-        node_info = graph.get_node_info(node_id)
-        config_hash = stable_hash(node_info.config)
 
         return Checkpoint(
             checkpoint_id="cp-test123",
             run_id="run-123",
-            token_id="token-456",
-            node_id=node_id,
             sequence_number=100,
             created_at=datetime.now(UTC),
             upstream_topology_hash=topology_hash,
-            checkpoint_node_config_hash=config_hash,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 
@@ -110,7 +104,7 @@ class TestCheckpointTopologyValidation:
     def test_removed_transform_causes_validation_failure(self) -> None:
         """Removing a transform after checkpoint must fail validation."""
         original_graph = self._create_linear_graph(num_transforms=3)
-        checkpoint = self._create_checkpoint_for_graph(original_graph, node_id="transform_0")
+        checkpoint = self._create_checkpoint_for_graph(original_graph)
 
         modified_graph = self._create_linear_graph(num_transforms=2)
 
@@ -164,24 +158,10 @@ class TestCheckpointTopologyValidation:
         assert result.reason is not None
         assert "topology" in result.reason.lower() or "configuration changed" in result.reason.lower()
 
-    def test_checkpoint_node_missing_causes_validation_failure(self) -> None:
-        """Checkpoint node not existing in new graph must fail validation."""
-        original_graph = self._create_linear_graph(num_transforms=3)
-        checkpoint = self._create_checkpoint_for_graph(original_graph, node_id="transform_2")
-
-        modified_graph = self._create_linear_graph(num_transforms=2)
-
-        validator = CheckpointCompatibilityValidator()
-        result = validator.validate(checkpoint, modified_graph)
-
-        assert result.can_resume is False
-        assert result.reason is not None
-        assert "node" in result.reason.lower() or "topology" in result.reason.lower()
-
     def test_checkpoint_node_config_changed_causes_validation_failure(self) -> None:
         """Changing checkpoint node's config must fail validation."""
         original_graph = self._create_linear_graph(num_transforms=2)
-        checkpoint = self._create_checkpoint_for_graph(original_graph, node_id="transform_0")
+        checkpoint = self._create_checkpoint_for_graph(original_graph)
 
         modified_graph = ExecutionGraph()
         modified_graph.add_node(
@@ -338,12 +318,9 @@ class TestResumeAuditIntegrity:
         checkpoint = Checkpoint(
             checkpoint_id="cp-audit-test",
             run_id="run-audit",
-            token_id="token-audit",
-            node_id="transform_A",
             sequence_number=50,
             created_at=datetime.now(UTC),
             upstream_topology_hash=compute_full_topology_hash(original),
-            checkpoint_node_config_hash=stable_hash({"version": 1}),
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 
@@ -375,12 +352,9 @@ class TestResumeAuditIntegrity:
         checkpoint = Checkpoint(
             checkpoint_id="cp-size-test",
             run_id="run-size",
-            token_id="token-size",
-            node_id="t1",
             sequence_number=10,
             created_at=datetime.now(UTC),
             upstream_topology_hash=compute_full_topology_hash(original),
-            checkpoint_node_config_hash=stable_hash({}),
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 

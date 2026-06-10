@@ -818,10 +818,6 @@ class SourceIterationDriver:
                             loop_ctx,
                             active_source=active_source,
                         )
-                        quarantine_sink = source_item.quarantine_destination
-                        if quarantine_sink is not None and loop_ctx.pending_tokens[quarantine_sink]:
-                            loop_ctx.last_token_id = loop_ctx.pending_tokens[quarantine_sink][-1][0].token_id
-                            loop_ctx.last_token_source_id = source_id
                         last_progress_time = self.maybe_emit_progress(
                             counters,
                             start_time,
@@ -871,9 +867,6 @@ class SourceIterationDriver:
                         source_row_index=source_identity_index,
                         ingest_sequence=ingest_sequence,
                     )
-                    if results:
-                        loop_ctx.last_token_id = results[-1].token.token_id
-                        loop_ctx.last_token_source_id = source_id
                     accumulate_row_outcomes(results, counters, pending_tokens)
 
                     # Check coalesce timeouts after each row

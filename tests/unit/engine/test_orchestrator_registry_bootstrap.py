@@ -444,18 +444,13 @@ def test_resume_calls_prepare_for_run() -> None:
         checkpoint = Checkpoint(
             checkpoint_id="cp-resume-bootstrap",
             run_id="run-resume-bootstrap",
-            token_id="tok-resume-bootstrap",
-            node_id="node-resume-bootstrap",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
 

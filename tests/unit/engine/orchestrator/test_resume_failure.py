@@ -158,7 +158,6 @@ class TestResumeFinalizesAsFailed:
         resume_point = MagicMock(spec=ResumePoint)
         resume_point.checkpoint.run_id = "test-run-123"
         resume_point.aggregation_state = None
-        resume_point.node_id = "node-1"
 
         # Create mock config and graph
         config = MagicMock(spec=PipelineConfig)
@@ -777,18 +776,13 @@ class TestResumeFinalizesAsFailed:
         checkpoint = Checkpoint(
             checkpoint_id="cp-multi-source-reconstruct",
             run_id=run_id,
-            token_id="tok-multi-source-reconstruct",
-            node_id="node-multi-source-reconstruct",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
         orders_contract = MagicMock(spec=SchemaContract, name="orders-contract")
@@ -870,18 +864,13 @@ class TestResumeFinalizesAsFailed:
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-reconstruct",
             run_id=run_id,
-            token_id="tok-exhausted-source-reconstruct",
-            node_id="node-exhausted-source-reconstruct",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
         source_contract = MagicMock(spec=SchemaContract, name="source-contract")
@@ -926,18 +915,13 @@ class TestResumeFinalizesAsFailed:
         checkpoint = Checkpoint(
             checkpoint_id="cp-empty-coalesce-state",
             run_id=run_id,
-            token_id="tok-empty-coalesce-state",
-            node_id="node-empty-coalesce-state",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
             coalesce_state=empty_coalesce_state,
         )
@@ -1052,18 +1036,13 @@ class TestResumeFinalizesAsFailed:
         checkpoint = Checkpoint(
             checkpoint_id="cp-structural-counter-resume",
             run_id=run_id,
-            token_id="tok-structural-counter-resume",
-            node_id="node-structural-counter-resume",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
         resume_state = ResumeState(
@@ -1115,18 +1094,13 @@ class TestResumeFinalizesAsFailed:
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-engine-work",
             run_id=run_id,
-            token_id="tok-exhausted-source-engine-work",
-            node_id="node-exhausted-source-engine-work",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
         resume_state = ResumeState(

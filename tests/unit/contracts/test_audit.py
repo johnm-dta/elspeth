@@ -489,18 +489,13 @@ class TestCheckpoint:
         checkpoint = Checkpoint(
             checkpoint_id="cp-123",
             run_id="run-456",
-            token_id="token-789",
-            node_id="node-1",
             sequence_number=42,
             created_at=now,
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
         )
 
         assert checkpoint.checkpoint_id == "cp-123"
         assert checkpoint.run_id == "run-456"
-        assert checkpoint.token_id == "token-789"
-        assert checkpoint.node_id == "node-1"
         assert checkpoint.sequence_number == 42
         assert checkpoint.created_at == now
         assert checkpoint.aggregation_state_json is None
@@ -511,12 +506,9 @@ class TestCheckpoint:
         checkpoint = Checkpoint(
             checkpoint_id="cp-123",
             run_id="run-456",
-            token_id="token-789",
-            node_id="node-1",
             sequence_number=42,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             aggregation_state_json='{"count": 10, "sum": 500}',
         )
 
@@ -533,12 +525,9 @@ class TestCheckpoint:
         checkpoint = Checkpoint(
             checkpoint_id="cp-123",
             run_id="run-456",
-            token_id="token-789",
-            node_id="node-1",
             sequence_number=0,
             created_at=now,
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
         )
 
         # created_at is always present and valid for audit integrity

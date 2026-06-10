@@ -157,8 +157,6 @@ class TestAggregationRecoveryIntegration:
         )
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[-1].token_id,
-            node_id="sum_aggregator",
             sequence_number=2,
             aggregation_state=agg_state,
             graph=mock_graph,
@@ -269,8 +267,6 @@ class TestAggregationRecoveryIntegration:
         # Checkpoint at last processed token — typed DTO
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[3].token_id,
-            node_id="count_aggregator",
             sequence_number=3,
             aggregation_state=AggregationCheckpointState(
                 version="5.0",
@@ -356,8 +352,6 @@ class TestAggregationRecoveryIntegration:
         # Checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[-1].token_id,
-            node_id="sum_aggregator",
             sequence_number=4,
             graph=mock_graph,
         )
@@ -614,8 +608,6 @@ class TestAggregationRecoveryIntegration:
 
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[-1].token_id,
-            node_id="sum_aggregator",
             sequence_number=2,
             aggregation_state=agg_state,
             graph=mock_graph,

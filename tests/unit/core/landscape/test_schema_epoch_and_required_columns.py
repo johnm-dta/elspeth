@@ -51,26 +51,22 @@ def test_begin_node_state_writes_resume_checkpoint_id() -> None:
     db = setup.db
     factory = setup.factory
 
-    # Create a row and token so the FK chain for checkpoints is satisfied
+    # Create a row and token so the FK chain for node_states is satisfied
     row = factory.data_flow.create_row(
         "provenance-run", "src-node", row_index=0, data={"x": 1}, row_id="prov-row-1", source_row_index=0, ingest_sequence=0
     )
     token = factory.data_flow.create_token(row.row_id, token_id="prov-tok-1")
 
-    # Insert a minimal checkpoint row directly — the checkpoints table FKs require
-    # (token_id, run_id) → tokens and (node_id, run_id) → nodes.  Both exist.
+    # Insert a minimal checkpoint row directly
     ck_id = "ck-prov-1"
     with db.engine.begin() as conn:
         conn.execute(
             checkpoints_table.insert().values(
                 checkpoint_id=ck_id,
                 run_id="provenance-run",
-                token_id=token.token_id,
-                node_id="src-node",
                 sequence_number=1,
                 created_at=datetime.now(UTC),
                 upstream_topology_hash="a" * 64,
-                checkpoint_node_config_hash="b" * 64,
                 format_version=4,
             )
         )

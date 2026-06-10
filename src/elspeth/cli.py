@@ -1986,8 +1986,6 @@ def resume(
             "run_id": run_id,
             "can_resume": True,
             "resume_point": {
-                "token_id": resume_point.token_id,
-                "node_id": resume_point.node_id,
                 "sequence_number": resume_point.sequence_number,
                 "has_aggregation_state": resume_point.aggregation_state is not None,
                 "has_coalesce_state": resume_point.coalesce_state is not None,
@@ -2005,8 +2003,6 @@ def resume(
         if output_format != "json":
             typer.echo(f"Run {run_id} can be resumed.")
             typer.echo("\nResume point:")
-            typer.echo(f"  Token ID: {resume_point.token_id}")
-            typer.echo(f"  Node ID: {resume_point.node_id}")
             typer.echo(f"  Sequence number: {resume_point.sequence_number}")
             if resume_point.aggregation_state is not None:
                 typer.echo("  Has aggregation state: Yes")

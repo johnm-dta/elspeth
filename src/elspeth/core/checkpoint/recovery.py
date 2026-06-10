@@ -204,8 +204,6 @@ class RecoveryManager:
 
         Returns all information needed to resume processing:
         - The checkpoint itself (for audit trail)
-        - Token ID to resume from
-        - Node ID where processing stopped
         - Sequence number for ordering
         - Deserialized aggregation state (if any)
 
@@ -236,8 +234,6 @@ class RecoveryManager:
 
         return ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
             aggregation_state=restored_states.aggregation_state,
             coalesce_state=restored_states.coalesce_state,

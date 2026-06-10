@@ -19,12 +19,9 @@ def _checkpoint() -> Checkpoint:
     return Checkpoint(
         checkpoint_id="cp-001",
         run_id="run-001",
-        token_id="tok-001",
-        node_id="node-001",
         sequence_number=1,
         created_at=datetime.now(UTC),
         upstream_topology_hash="a" * 64,
-        checkpoint_node_config_hash="b" * 64,
         format_version=Checkpoint.CURRENT_FORMAT_VERSION,
     )
 
@@ -75,70 +72,15 @@ def test_resume_check_rejects_false_without_reason() -> None:
         ResumeCheck(can_resume=False)
 
 
-def test_resume_point_rejects_empty_token_id() -> None:
-    with pytest.raises(ValueError, match="token_id must not be empty"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            token_id="",
-            node_id="node-001",
-            sequence_number=1,
-        )
-
-
-def test_resume_point_rejects_empty_node_id() -> None:
-    with pytest.raises(ValueError, match="node_id must not be empty"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="",
-            sequence_number=1,
-        )
-
-
 def test_resume_point_rejects_negative_sequence_number() -> None:
     with pytest.raises(ValueError, match="sequence_number must be >= 0"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=-1,
         )
 
 
-# === ResumePoint Tier 1 type guards (elspeth-0b184125ca, elspeth-65428b478c) ===
-
-
-def test_resume_point_rejects_none_token_id() -> None:
-    """Regression: elspeth-65428b478c — None must raise TypeError, not ValueError."""
-    with pytest.raises(TypeError, match="token_id must be str"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            token_id=None,  # type: ignore[arg-type]
-            node_id="node-001",
-            sequence_number=1,
-        )
-
-
-def test_resume_point_rejects_none_node_id() -> None:
-    """Regression: elspeth-65428b478c — None must raise TypeError, not ValueError."""
-    with pytest.raises(TypeError, match="node_id must be str"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id=None,  # type: ignore[arg-type]
-            sequence_number=1,
-        )
-
-
-def test_resume_point_rejects_int_token_id() -> None:
-    """Non-string token_id is corruption, not an empty-string issue."""
-    with pytest.raises(TypeError, match="token_id must be str"):
-        ResumePoint(
-            checkpoint=_checkpoint(),
-            token_id=42,  # type: ignore[arg-type]
-            node_id="node-001",
-            sequence_number=1,
-        )
+# === ResumePoint Tier 1 type guards (elspeth-0b184125ca) ===
 
 
 def test_resume_point_rejects_dict_aggregation_state() -> None:
@@ -146,8 +88,6 @@ def test_resume_point_rejects_dict_aggregation_state() -> None:
     with pytest.raises(TypeError, match="aggregation_state must be AggregationCheckpointState"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=1,
             aggregation_state={"version": "3.0", "nodes": {}},  # type: ignore[arg-type]
         )
@@ -158,8 +98,6 @@ def test_resume_point_rejects_dict_coalesce_state() -> None:
     with pytest.raises(TypeError, match="coalesce_state must be CoalesceCheckpointState"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=1,
             coalesce_state={"version": "1.0", "pending": []},  # type: ignore[arg-type]
         )
@@ -174,8 +112,6 @@ def test_resume_point_rejects_non_checkpoint_type() -> None:
     with pytest.raises(TypeError, match="checkpoint must be Checkpoint"):
         ResumePoint(
             checkpoint={"run_id": "r1"},  # type: ignore[arg-type]
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=1,
         )
 
@@ -185,8 +121,6 @@ def test_resume_point_rejects_none_checkpoint() -> None:
     with pytest.raises(TypeError, match="checkpoint must be Checkpoint"):
         ResumePoint(
             checkpoint=None,  # type: ignore[arg-type]
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=1,
         )
 
@@ -196,8 +130,6 @@ def test_resume_point_rejects_float_sequence_number() -> None:
     with pytest.raises(TypeError, match="sequence_number must be int"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=0.5,  # type: ignore[arg-type]
         )
 
@@ -207,8 +139,6 @@ def test_resume_point_rejects_bool_sequence_number() -> None:
     with pytest.raises(TypeError, match="sequence_number must be int"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=True,
         )
 
@@ -218,8 +148,6 @@ def test_resume_point_rejects_string_sequence_number() -> None:
     with pytest.raises(TypeError, match="sequence_number must be int"):
         ResumePoint(
             checkpoint=_checkpoint(),
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number="3",  # type: ignore[arg-type]
         )
 

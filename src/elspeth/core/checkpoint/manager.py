@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Literal
 from sqlalchemy import asc, delete, desc, select
 
 from elspeth.contracts import Checkpoint
-from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
-from elspeth.core.canonical import compute_full_topology_hash, stable_hash
+from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import checkpoints_table, tokens_table
+from elspeth.core.landscape.schema import checkpoints_table
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +81,11 @@ def _validate_checkpoint_state_json_size(
 class CheckpointManager:
     """Manages checkpoint creation and retrieval.
 
-    Checkpoints capture run progress at row boundaries, enabling
-    resume after crash. Each checkpoint records:
-    - Which token was being processed
-    - Which node it was at
+    Checkpoints capture run progress at sink-durability boundaries,
+    enabling resume after crash. Each checkpoint records:
     - A monotonic sequence number for ordering
-    - Optional aggregation state for stateful plugins
+    - The full-topology hash for compatibility validation
+    - Optional aggregation/coalesce buffer state for stateful plugins
     """
 
     def __init__(self, db: LandscapeDB) -> None:
@@ -100,8 +99,6 @@ class CheckpointManager:
     def create_checkpoint(
         self,
         run_id: str,
-        token_id: str,
-        node_id: str,
         sequence_number: int,
         graph: ExecutionGraph,
         aggregation_state: AggregationCheckpointState | None = None,
@@ -111,8 +108,6 @@ class CheckpointManager:
 
         Args:
             run_id: The run being checkpointed
-            token_id: Current token being processed
-            node_id: Current node in the pipeline
             sequence_number: Monotonic progress marker
             graph: Execution graph for topology validation (REQUIRED)
             aggregation_state: Optional serializable aggregation buffers
@@ -122,27 +117,14 @@ class CheckpointManager:
             The created Checkpoint
 
         Raises:
-            ValueError: If graph is None or node_id not in graph
+            ValueError: If graph is None
         """
         # Validate parameters early
         if graph is None:
             raise ValueError("graph parameter is required for checkpoint creation")
-        if not graph.has_node(node_id):
-            raise ValueError(f"node_id '{node_id}' does not exist in graph")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
         with self._db.engine.begin() as conn:
-            # Verify token belongs to the specified run (Tier 1 invariant).
-            # Cross-run checkpoint contamination is audit corruption.
-            token_row = conn.execute(select(tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)).fetchone()
-            if token_row is None:
-                raise AuditIntegrityError(f"Cannot create checkpoint: token '{token_id}' does not exist")
-            if token_row.run_id != run_id:
-                raise AuditIntegrityError(
-                    f"Cannot create checkpoint: token '{token_id}' belongs to run "
-                    f"'{token_row.run_id}' but checkpoint targets run '{run_id}'. "
-                    f"Cross-run checkpoint contamination is audit corruption."
-                )
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
                 .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
@@ -183,27 +165,22 @@ class CheckpointManager:
                     pending_joins=len(coalesce_state.pending),
                 )
 
-            # Compute topology hashes inside transaction
+            # Compute topology hash inside transaction
             # This ensures hash matches graph state at exact moment of checkpoint creation
-            # Use FULL topology hash instead of upstream-only hash.
+            # Use FULL topology hash (every node's id + config hash + all edges).
             # This ensures changes to ANY branch (including sibling sink branches)
             # are detected during resume validation, enforcing "one run = one config".
             upstream_topology_hash = compute_full_topology_hash(graph)
-            node_info = graph.get_node_info(node_id)
-            checkpoint_node_config_hash = stable_hash(node_info.config)
 
             conn.execute(
                 checkpoints_table.insert().values(
                     checkpoint_id=checkpoint_id,
                     run_id=run_id,
-                    token_id=token_id,
-                    node_id=node_id,
                     sequence_number=sequence_number,
                     aggregation_state_json=agg_json,
                     coalesce_state_json=coalesce_json,
                     created_at=created_at,
                     upstream_topology_hash=upstream_topology_hash,
-                    checkpoint_node_config_hash=checkpoint_node_config_hash,
                     format_version=Checkpoint.CURRENT_FORMAT_VERSION,
                 )
             )
@@ -212,12 +189,9 @@ class CheckpointManager:
         return Checkpoint(
             checkpoint_id=checkpoint_id,
             run_id=run_id,
-            token_id=token_id,
-            node_id=node_id,
             sequence_number=sequence_number,
             created_at=created_at,
             upstream_topology_hash=upstream_topology_hash,
-            checkpoint_node_config_hash=checkpoint_node_config_hash,
             aggregation_state_json=agg_json,
             coalesce_state_json=coalesce_json,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
@@ -250,12 +224,9 @@ class CheckpointManager:
             checkpoint = Checkpoint(
                 checkpoint_id=result.checkpoint_id,
                 run_id=result.run_id,
-                token_id=result.token_id,
-                node_id=result.node_id,
                 sequence_number=result.sequence_number,
                 created_at=result.created_at,
                 upstream_topology_hash=result.upstream_topology_hash,
-                checkpoint_node_config_hash=result.checkpoint_node_config_hash,
                 aggregation_state_json=result.aggregation_state_json,
                 coalesce_state_json=result.coalesce_state_json,
                 format_version=result.format_version,  # None for legacy checkpoints
@@ -291,12 +262,9 @@ class CheckpointManager:
                     Checkpoint(
                         checkpoint_id=r.checkpoint_id,
                         run_id=r.run_id,
-                        token_id=r.token_id,
-                        node_id=r.node_id,
                         sequence_number=r.sequence_number,
                         created_at=r.created_at,
                         upstream_topology_hash=r.upstream_topology_hash,
-                        checkpoint_node_config_hash=r.checkpoint_node_config_hash,
                         aggregation_state_json=r.aggregation_state_json,
                         coalesce_state_json=r.coalesce_state_json,
                         format_version=r.format_version,  # None for legacy checkpoints

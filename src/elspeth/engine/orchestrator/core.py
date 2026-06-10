@@ -1021,8 +1021,6 @@ class Orchestrator:
                     agg_transform_lookup=loop_ctx.agg_transform_lookup,
                     coalesce_executor=loop_ctx.coalesce_executor,
                     coalesce_node_map=loop_ctx.coalesce_node_map,
-                    last_token_id=loop_ctx.last_token_id,
-                    last_token_source_id=loop_ctx.last_token_source_id,
                 )
                 loop_result = self._source_driver.run_main_processing_loop(
                     source_loop_ctx,
@@ -1035,8 +1033,6 @@ class Orchestrator:
                     shutdown_event=shutdown_event,
                     flush_end_of_input=source_ordinal == len(source_items) - 1,
                 )
-                loop_ctx.last_token_id = source_loop_ctx.last_token_id
-                loop_ctx.last_token_source_id = source_loop_ctx.last_token_source_id
                 if loop_result.interrupted:
                     break
 
@@ -1060,7 +1056,6 @@ class Orchestrator:
                 artifacts.edge_map,
                 loop_result.interrupted,
                 on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
 
             # ADR-019 Phase 4: deferred cross-table invariant sweep.

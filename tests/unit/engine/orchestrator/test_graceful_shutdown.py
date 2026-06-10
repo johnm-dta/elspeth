@@ -13,8 +13,6 @@ import signal
 import threading
 from unittest.mock import Mock, patch
 
-import structlog.testing
-
 from elspeth.contracts import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.events import RunCompletionStatus
@@ -147,11 +145,15 @@ class TestShutdownHandlerContext:
 
 
 class TestCheckpointInterruptedProgress:
-    """Tests for _checkpoint_interrupted_progress warning when no checkpoint is possible."""
+    """Tests for checkpoint_interrupted_progress shutdown-checkpoint behavior."""
 
-    def test_logs_warning_when_no_token_available(self) -> None:
-        """Shutdown checkpoint skip must emit a structured warning, not silently return."""
-        from elspeth.contracts.types import NodeID
+    def test_creates_checkpoint_even_with_no_buffered_state(self) -> None:
+        """Shutdown always writes a recovery checkpoint.
+
+        With the token anchor deleted (F2), the former no-anchor skip arm is
+        gone: a shutdown with empty buffers still produces a resumable
+        checkpoint carrying sequence ordering and (empty) buffer state.
+        """
         from elspeth.engine.orchestrator import Orchestrator
         from tests.fixtures.landscape import make_landscape_db
 
@@ -165,11 +167,6 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._active_graph = Mock()
             orchestrator._checkpoints._sequence_number = 0
 
-            # Build a LoopContext where all token resolution paths return None:
-            # - no aggregation nodes
-            # - no coalesce pending entries
-            # - no pending sink tokens
-            # - last_token_id is None
             mock_processor = Mock()
             mock_agg_state = Mock()
             mock_agg_state.nodes = {}  # Empty — no aggregation buffers
@@ -179,24 +176,18 @@ class TestCheckpointInterruptedProgress:
             loop_ctx = Mock()
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}  # No pending tokens
-            loop_ctx.last_token_id = None
 
-            with structlog.testing.capture_logs() as captured:
-                orchestrator._checkpoints.checkpoint_interrupted_progress(
-                    run_id="run-test-123",
-                    loop_ctx=loop_ctx,
-                    sink_id_map={},
-                    source_id=NodeID("source_0"),
-                )
-
-            # Verify NO checkpoint was created
-            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_not_called()
-
-            # Verify warning was emitted via structlog
-            events = [entry["event"] for entry in captured]
-            assert "shutdown_checkpoint_skipped" in events, (
-                f"Expected 'shutdown_checkpoint_skipped' warning in structlog output, got: {events}"
+            orchestrator._checkpoints.checkpoint_interrupted_progress(
+                run_id="run-test-123",
+                loop_ctx=loop_ctx,
             )
+
+            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
+            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
+            assert call_kwargs["run_id"] == "run-test-123"
+            assert call_kwargs["sequence_number"] == 1
+            assert call_kwargs["aggregation_state"] is None  # empty nodes → not persisted
+            assert call_kwargs["coalesce_state"] is None
         finally:
             db.close()
 
@@ -334,7 +325,6 @@ class TestCheckpointInterruptedProgress:
         late-arrival detection on resume.
         """
         from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-        from elspeth.contracts.types import NodeID
         from elspeth.engine.orchestrator import Orchestrator
         from tests.fixtures.landscape import make_landscape_db
 
@@ -363,15 +353,10 @@ class TestCheckpointInterruptedProgress:
             loop_ctx = Mock()
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}
-            loop_ctx.last_token_id = "token-99"
-            loop_ctx.last_token_source_id = None
 
-            source_id = NodeID("source_0")
             orchestrator._checkpoints.checkpoint_interrupted_progress(
                 run_id="run-completed-keys",
                 loop_ctx=loop_ctx,
-                sink_id_map={},
-                source_id=source_id,
             )
 
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
@@ -381,89 +366,5 @@ class TestCheckpointInterruptedProgress:
                 ("merge_1", "row-1"),
                 ("merge_2", "row-2"),
             )
-        finally:
-            db.close()
-
-    def test_creates_checkpoint_when_last_token_available(self) -> None:
-        """When last_token_id is set, the fallback path creates a checkpoint."""
-        from elspeth.contracts.types import NodeID
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
-
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoints._checkpoint_config = Mock()
-            orchestrator._checkpoints._checkpoint_config.enabled = True
-            orchestrator._checkpoints._checkpoint_manager = Mock()
-            orchestrator._checkpoints._active_graph = Mock()
-            orchestrator._checkpoints._sequence_number = 0
-
-            mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_agg_state.nodes = {}
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = None
-
-            loop_ctx = Mock()
-            loop_ctx.processor = mock_processor
-            loop_ctx.pending_tokens = {"default": []}
-            loop_ctx.last_token_id = "token-42"  # Has a last token
-            loop_ctx.last_token_source_id = None  # LoopContext default: NodeID | None
-
-            source_id = NodeID("source_0")
-            orchestrator._checkpoints.checkpoint_interrupted_progress(
-                run_id="run-test-456",
-                loop_ctx=loop_ctx,
-                sink_id_map={},
-                source_id=source_id,
-            )
-
-            # Checkpoint SHOULD have been created with the fallback token
-            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args
-            assert call_kwargs.kwargs["token_id"] == "token-42"
-            assert call_kwargs.kwargs["node_id"] == str(source_id)
-        finally:
-            db.close()
-
-    def test_last_token_checkpoint_uses_source_that_produced_token(self) -> None:
-        """Multi-source shutdown checkpoints must not fall back to the first source."""
-        from elspeth.contracts.types import NodeID
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
-
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoints._checkpoint_config = Mock()
-            orchestrator._checkpoints._checkpoint_config.enabled = True
-            orchestrator._checkpoints._checkpoint_manager = Mock()
-            orchestrator._checkpoints._active_graph = Mock()
-            orchestrator._checkpoints._sequence_number = 0
-
-            mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_agg_state.nodes = {}
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = None
-
-            loop_ctx = Mock()
-            loop_ctx.processor = mock_processor
-            loop_ctx.pending_tokens = {"default": []}
-            loop_ctx.last_token_id = "token-from-source-2"
-            loop_ctx.last_token_source_id = NodeID("source_2")
-
-            orchestrator._checkpoints.checkpoint_interrupted_progress(
-                run_id="run-test-source-2",
-                loop_ctx=loop_ctx,
-                sink_id_map={},
-                source_id=NodeID("source_1"),
-            )
-
-            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args
-            assert call_kwargs.kwargs["token_id"] == "token-from-source-2"
-            assert call_kwargs.kwargs["node_id"] == "source_2"
         finally:
             db.close()

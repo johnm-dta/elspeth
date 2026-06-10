@@ -45,11 +45,8 @@ class TestSchemaNotNullConstraints:
         checkpoint_data = {
             "checkpoint_id": "test_checkpoint_1",
             "run_id": "test_run",
-            "token_id": "test_token",
-            "node_id": "test_node",
             "sequence_number": 1,
             "upstream_topology_hash": None,  # Intentionally NULL
-            "checkpoint_node_config_hash": "valid_hash",
             "created_at": datetime.now(UTC),
         }
 
@@ -61,40 +58,6 @@ class TestSchemaNotNullConstraints:
         error_msg = str(exc_info.value).lower()
         assert "not null" in error_msg or "null constraint" in error_msg
         assert "upstream_topology_hash" in error_msg
-
-    def test_checkpoint_node_config_hash_not_null(
-        self,
-        test_db: LandscapeDB,
-    ) -> None:
-        """Verify checkpoint_node_config_hash field does not allow NULL.
-
-        Scenario:
-        1. Attempt to insert checkpoint with NULL checkpoint_node_config_hash
-        2. Verify: IntegrityError raised (NOT NULL constraint)
-
-        This is Bug #7 fix: audit-critical config hash must never be NULL.
-        """
-        from datetime import UTC, datetime
-
-        checkpoint_data = {
-            "checkpoint_id": "test_checkpoint_2",
-            "run_id": "test_run",
-            "token_id": "test_token",
-            "node_id": "test_node",
-            "sequence_number": 2,
-            "upstream_topology_hash": "valid_hash",
-            "checkpoint_node_config_hash": None,  # Intentionally NULL
-            "created_at": datetime.now(UTC),
-        }
-
-        # Attempt to insert with NULL hash should fail
-        with pytest.raises(IntegrityError) as exc_info, test_db.engine.begin() as conn:
-            conn.execute(insert(checkpoints_table).values(**checkpoint_data))
-
-        # Verify error message mentions NOT NULL constraint
-        error_msg = str(exc_info.value).lower()
-        assert "not null" in error_msg or "null constraint" in error_msg
-        assert "checkpoint_node_config_hash" in error_msg
 
     def test_checkpoint_with_valid_hashes_succeeds(
         self,
@@ -176,11 +139,8 @@ class TestSchemaNotNullConstraints:
                 insert(checkpoints_table).values(
                     checkpoint_id="test_checkpoint_3",
                     run_id="test_run",
-                    token_id="test_token",
-                    node_id="test_node",
                     sequence_number=3,
                     upstream_topology_hash="abc123def456",  # Valid hash
-                    checkpoint_node_config_hash="xyz789uvw012",  # Valid hash
                     created_at=now,
                 )
             )
@@ -191,37 +151,3 @@ class TestSchemaNotNullConstraints:
 
         assert result is not None
         assert result.upstream_topology_hash == "abc123def456"
-        assert result.checkpoint_node_config_hash == "xyz789uvw012"
-
-    def test_both_hashes_null_fails(
-        self,
-        test_db: LandscapeDB,
-    ) -> None:
-        """Verify both topology hashes cannot be NULL simultaneously.
-
-        Scenario:
-        1. Attempt to insert checkpoint with both hashes NULL
-        2. Verify: IntegrityError raised
-
-        This is the most severe violation of audit integrity.
-        """
-        from datetime import UTC, datetime
-
-        checkpoint_data = {
-            "checkpoint_id": "test_checkpoint_4",
-            "run_id": "test_run",
-            "token_id": "test_token",
-            "node_id": "test_node",
-            "sequence_number": 4,
-            "upstream_topology_hash": None,  # NULL
-            "checkpoint_node_config_hash": None,  # NULL
-            "created_at": datetime.now(UTC),
-        }
-
-        # Attempt to insert with both hashes NULL should fail
-        with pytest.raises(IntegrityError) as exc_info, test_db.engine.begin() as conn:
-            conn.execute(insert(checkpoints_table).values(**checkpoint_data))
-
-        # Verify error mentions NOT NULL constraint
-        error_msg = str(exc_info.value).lower()
-        assert "not null" in error_msg or "null constraint" in error_msg

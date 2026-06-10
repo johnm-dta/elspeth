@@ -528,7 +528,6 @@ class RunExecutionCore:
         interrupted_by_shutdown: bool,
         *,
         on_token_written_factory: _CheckpointFactory | None = None,
-        shutdown_checkpoint_source_id: NodeID | None = None,
     ) -> None:
         """Write all pending tokens to sinks and handle post-loop bookkeeping.
 
@@ -563,13 +562,10 @@ class RunExecutionCore:
         # At this point: sink writes are done, and any buffered aggregation/coalesce
         # state that we intentionally preserved can be checkpointed for resume.
         if interrupted_by_shutdown:
-            if shutdown_checkpoint_source_id is not None:
-                self._checkpoints.checkpoint_interrupted_progress(
-                    run_id=run_id,
-                    loop_ctx=loop_ctx,
-                    sink_id_map=sink_id_map,
-                    source_id=shutdown_checkpoint_source_id,
-                )
+            self._checkpoints.checkpoint_interrupted_progress(
+                run_id=run_id,
+                loop_ctx=loop_ctx,
+            )
             raise GracefulShutdownError(
                 rows_processed=counters.rows_processed,
                 run_id=run_id,

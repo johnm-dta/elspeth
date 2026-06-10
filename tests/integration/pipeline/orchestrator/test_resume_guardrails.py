@@ -60,23 +60,18 @@ def _make_schema_contract() -> SchemaContract:
     )
 
 
-def _make_resume_point(run_id: str, *, node_id: str = "source") -> ResumePoint:
+def _make_resume_point(run_id: str) -> ResumePoint:
     """Create a synthetic ResumePoint targeting a run in the test database."""
     checkpoint = Checkpoint(
         checkpoint_id="cp-test",
         run_id=run_id,
-        token_id="tok-test",
-        node_id=node_id,
         sequence_number=0,
         created_at=datetime.now(UTC),
         upstream_topology_hash="topology-hash",
-        checkpoint_node_config_hash="config-hash",
         format_version=Checkpoint.CURRENT_FORMAT_VERSION,
     )
     return ResumePoint(
         checkpoint=checkpoint,
-        token_id=checkpoint.token_id,
-        node_id=checkpoint.node_id,
         sequence_number=checkpoint.sequence_number,
         aggregation_state=None,
     )

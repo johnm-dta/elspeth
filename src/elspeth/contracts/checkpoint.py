@@ -44,8 +44,6 @@ class ResumePoint:
     """
 
     checkpoint: Checkpoint
-    token_id: str
-    node_id: str
     sequence_number: int
     aggregation_state: AggregationCheckpointState | None = None
     coalesce_state: CoalesceCheckpointState | None = None
@@ -54,19 +52,11 @@ class ResumePoint:
         """Validate resume point fields — Tier 1 crash on invalid data.
 
         Per CLAUDE.md Data Manifesto: Checkpoints are Tier 1 audit data.
-        Wrong types, None, or empty token_id/node_id indicate corrupted
-        checkpoint data — crash immediately with distinct error messages.
+        Wrong types indicate corrupted checkpoint data — crash immediately
+        with distinct error messages.
         """
         if not isinstance(self.checkpoint, Checkpoint):
             raise TypeError(f"ResumePoint.checkpoint must be Checkpoint, got {type(self.checkpoint).__name__}")
-        if not isinstance(self.token_id, str):
-            raise TypeError(f"ResumePoint.token_id must be str, got {type(self.token_id).__name__}: {self.token_id!r}")
-        if not self.token_id:
-            raise ValueError("ResumePoint.token_id must not be empty")
-        if not isinstance(self.node_id, str):
-            raise TypeError(f"ResumePoint.node_id must be str, got {type(self.node_id).__name__}: {self.node_id!r}")
-        if not self.node_id:
-            raise ValueError("ResumePoint.node_id must not be empty")
         require_int(self.sequence_number, "ResumePoint.sequence_number", min_value=0)
         if self.aggregation_state is not None and not isinstance(self.aggregation_state, AggregationCheckpointState):
             raise TypeError(
@@ -74,13 +64,9 @@ class ResumePoint:
             )
         if self.coalesce_state is not None and not isinstance(self.coalesce_state, CoalesceCheckpointState):
             raise TypeError(f"ResumePoint.coalesce_state must be CoalesceCheckpointState or None, got {type(self.coalesce_state).__name__}")
-        # Invariant: duplicated fields must match the embedded Checkpoint.
-        # These fields exist for convenience access but are derived data,
-        # not independent inputs. Mismatch = corrupted construction.
-        if self.token_id != self.checkpoint.token_id:
-            raise ValueError(f"ResumePoint.token_id ({self.token_id!r}) does not match checkpoint.token_id ({self.checkpoint.token_id!r})")
-        if self.node_id != self.checkpoint.node_id:
-            raise ValueError(f"ResumePoint.node_id ({self.node_id!r}) does not match checkpoint.node_id ({self.checkpoint.node_id!r})")
+        # Invariant: the duplicated field must match the embedded Checkpoint.
+        # It exists for convenience access but is derived data, not an
+        # independent input. Mismatch = corrupted construction.
         if self.sequence_number != self.checkpoint.sequence_number:
             raise ValueError(
                 f"ResumePoint.sequence_number ({self.sequence_number}) does not match "

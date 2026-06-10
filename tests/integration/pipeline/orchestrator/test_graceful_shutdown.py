@@ -995,8 +995,6 @@ class TestInterruptAndResume:
             checkpoint_mgr = CheckpointManager(db)
             checkpoint_mgr.create_checkpoint(
                 run_id=run_id,
-                token_id=f"t{processed_count - 1}",
-                node_id=xform_nid,
                 sequence_number=processed_count - 1,
                 graph=graph,
             )
@@ -1233,8 +1231,6 @@ class TestInterruptAndResume:
 
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t1",
-            node_id=agg_node_id,
             sequence_number=1,
             graph=graph,
             aggregation_state=AggregationCheckpointState(

@@ -181,8 +181,6 @@ class TestSinkDurability:
             nonlocal checkpoint_created
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
-                token_id=token_info.token_id,
-                node_id="sink",
                 sequence_number=0,
                 graph=mock_graph,
             )
@@ -351,8 +349,6 @@ class TestSinkDurability:
             call_order.append("checkpoint")
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
-                token_id=token_info.token_id,
-                node_id="sink",
                 sequence_number=0,
                 graph=mock_graph,
             )
@@ -377,4 +373,3 @@ class TestSinkDurability:
         # Verify: Checkpoint was created successfully
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run.run_id)
         assert checkpoint is not None
-        assert checkpoint.token_id == token.token_id

@@ -9,13 +9,9 @@ Extracted from Orchestrator (core.py) — these methods own:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-import structlog
-
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.contracts.types import CoalesceName, NodeID, SinkName
 
 if TYPE_CHECKING:
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
@@ -25,8 +21,6 @@ if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator.types import CheckpointAfterSinkCallback, LoopContext, RowProcessorHandle, _CheckpointFactory
-
-slog = structlog.get_logger(__name__)
 
 
 class CheckpointCoordinator:
@@ -56,16 +50,13 @@ class CheckpointCoordinator:
     def maybe_checkpoint(
         self,
         run_id: str,
-        token_id: str,
-        node_id: str,
         aggregation_state: AggregationCheckpointState | None = None,
         coalesce_state: CoalesceCheckpointState | None = None,
     ) -> None:
         """Create checkpoint if configured.
 
         Called after a token has been durably written to its terminal sink.
-        The checkpoint represents a durable progress marker - recovery can
-        safely skip any row whose token has a checkpoint with a sink node_id.
+        The checkpoint represents a durable progress marker.
 
         IMPORTANT: Checkpoints are created AFTER sink writes, not during
         the main processing loop. This ensures the checkpoint represents
@@ -73,8 +64,6 @@ class CheckpointCoordinator:
 
         Args:
             run_id: Current run ID
-            token_id: Token that was just written to sink
-            node_id: Sink node that received the token
             aggregation_state: Typed aggregation checkpoint state for crash recovery
             coalesce_state: Typed pending coalesce state for crash recovery
         """
@@ -109,8 +98,6 @@ class CheckpointCoordinator:
         if should_checkpoint:
             self._checkpoint_manager.create_checkpoint(
                 run_id=run_id,
-                token_id=token_id,
-                node_id=node_id,
                 sequence_number=self._sequence_number,
                 graph=self._active_graph,
                 aggregation_state=aggregation_state,
@@ -134,8 +121,7 @@ class CheckpointCoordinator:
         class BatchCheckpointCallback:
             """Checkpoint tokens immediately and terminalize scheduler work in batches."""
 
-            def __init__(self, sink_node_id: str, *, terminalize_scheduler: bool) -> None:
-                self._sink_node_id = sink_node_id
+            def __init__(self, *, terminalize_scheduler: bool) -> None:
                 self._terminalize_scheduler = terminalize_scheduler
                 self._pending_terminal_tokens: list[str] = []
 
@@ -144,8 +130,6 @@ class CheckpointCoordinator:
                 coalesce_state = processor.get_coalesce_checkpoint_state()
                 coordinator.maybe_checkpoint(
                     run_id=run_id,
-                    token_id=token.token_id,
-                    node_id=self._sink_node_id,
                     aggregation_state=agg_state,
                     coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
                 )
@@ -162,7 +146,10 @@ class CheckpointCoordinator:
                 processor.mark_sink_bound_scheduler_terminal_many(token_ids)
 
         def factory(sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
-            return BatchCheckpointCallback(sink_node_id, terminalize_scheduler=terminalize_scheduler)
+            # sink_node_id is the factory's per-sink discriminator; the callback
+            # itself no longer persists a per-sink anchor (F2).
+            del sink_node_id
+            return BatchCheckpointCallback(terminalize_scheduler=terminalize_scheduler)
 
         return factory
 
@@ -170,8 +157,6 @@ class CheckpointCoordinator:
         self,
         run_id: str,
         loop_ctx: LoopContext,
-        sink_id_map: Mapping[SinkName, NodeID],
-        source_id: NodeID,
     ) -> None:
         """Persist a resumable checkpoint for graceful shutdown.
 
@@ -180,12 +165,6 @@ class CheckpointCoordinator:
         This preserves resumability for runs that stop before any sink-token
         checkpoint has been emitted, especially buffered aggregation/coalesce
         pipelines that intentionally skip end-of-source flushes on shutdown.
-
-        The checkpoint anchor (token_id/node_id) must reference a token that
-        actually exists: aggregation nodes whose buffers were flush-emptied
-        (counter-only snapshots) cannot anchor the checkpoint, but their
-        durable counters are still persisted because resume restores the full
-        aggregation state regardless of the anchor.
         """
         if not self._checkpoint_config or not self._checkpoint_config.enabled:
             return
@@ -197,66 +176,15 @@ class CheckpointCoordinator:
         aggregation_state = loop_ctx.processor.get_aggregation_checkpoint_state()
         raw_coalesce = loop_ctx.processor.get_coalesce_checkpoint_state()
         # Persist coalesce state when it has pending barriers or completed keys
-        # needed for late-arrival detection on resume
+        # needed for late-arrival detection on resume. Counter-only aggregation
+        # nodes (flush-emptied buffers) carry durable counters that resume
+        # restores wholesale via restore_from_checkpoint.
         coalesce_state = raw_coalesce if raw_coalesce is not None and raw_coalesce.has_resumable_state else None
-
-        token_id: str | None = None
-        node_id: str | None = None
-        checkpoint_agg_state: AggregationCheckpointState | None = None
-
-        if aggregation_state.nodes:
-            # Persist the full aggregation state whenever any node is present.
-            # Counter-only nodes (flush-emptied buffers) carry durable counters
-            # (accepted_count_total / completed_flush_count) that resume restores
-            # wholesale via restore_from_checkpoint, independent of which token
-            # anchors the checkpoint row.
-            checkpoint_agg_state = aggregation_state
-            for agg_node_id, agg_node_state in aggregation_state.nodes.items():
-                if agg_node_state.tokens:
-                    token_id = agg_node_state.tokens[-1].token_id
-                    node_id = agg_node_id
-                    break
-
-        if token_id is None and node_id is None:
-            if coalesce_state is not None and coalesce_state.pending:
-                pending_entry = coalesce_state.pending[-1]
-                node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
-                if pending_entry.branches:
-                    last_branch = list(pending_entry.branches.values())[-1]
-                    token_id = last_branch.token_id
-            else:
-                for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
-                    if not token_outcome_pairs:
-                        continue
-                    token_id = token_outcome_pairs[-1][0].token_id
-                    node_id = str(sink_id_map[SinkName(sink_name)])
-                    break
-
-        if token_id is None and loop_ctx.last_token_id is not None:
-            token_id = loop_ctx.last_token_id
-            if node_id is None:
-                last_token_source_id = loop_ctx.last_token_source_id
-                node_id = str(last_token_source_id) if last_token_source_id is not None else str(source_id)
-
-        if token_id is None or node_id is None:
-            slog.warning(
-                "shutdown_checkpoint_skipped",
-                run_id=run_id,
-                reason="no_token_or_node_id_available",
-                has_aggregation_nodes=bool(aggregation_state.nodes),
-                has_coalesce_pending=coalesce_state is not None,
-                has_pending_sink_tokens=any(bool(pairs) for pairs in loop_ctx.pending_tokens.values()),
-                last_token_id=loop_ctx.last_token_id,
-                resolved_token_id=token_id,
-                resolved_node_id=node_id,
-            )
-            return
+        checkpoint_agg_state = aggregation_state if aggregation_state.nodes else None
 
         self._sequence_number += 1
         self._checkpoint_manager.create_checkpoint(
             run_id=run_id,
-            token_id=token_id,
-            node_id=node_id,
             sequence_number=self._sequence_number,
             graph=self._active_graph,
             aggregation_state=checkpoint_agg_state,

@@ -231,12 +231,9 @@ class TestDataclassToDict:
         checkpoint = Checkpoint(
             checkpoint_id="chk-1",
             run_id="run-001",
-            token_id="tok-123",
-            node_id="node-1",
             sequence_number=1,
             created_at=now,
             upstream_topology_hash="topology-hash",
-            checkpoint_node_config_hash="config-hash",
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 

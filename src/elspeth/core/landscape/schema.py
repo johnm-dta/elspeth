@@ -905,28 +905,20 @@ checkpoints_table = Table(
     metadata,
     Column("checkpoint_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("token_id", String(64), nullable=False),
-    Column("node_id", String(64), nullable=False),  # Part of composite FK to nodes
     Column("sequence_number", Integer, nullable=False),  # Monotonic progress marker
     Column("aggregation_state_json", Text),  # Serialized aggregation buffers (if any)
     Column("coalesce_state_json", Text),  # Serialized pending coalesce state (if any)
     Column("created_at", DateTime(timezone=True), nullable=False),
-    # Topology validation (topological checkpoint compatibility)
-    Column("upstream_topology_hash", String(64), nullable=False),  # Hash of nodes + edges upstream of checkpoint
-    Column("checkpoint_node_config_hash", String(64), nullable=False),  # Hash of checkpoint node config only
+    # Topology validation (topological checkpoint compatibility). The full
+    # topology hash embeds every node's config hash, so no per-node anchor
+    # columns are needed for compatibility checking (epoch 19).
+    Column("upstream_topology_hash", String(64), nullable=False),  # Hash of ALL nodes + edges in the DAG
     # Format version for compatibility checking (replaces hardcoded date check)
     # Version 1: Pre-deterministic node IDs (legacy, rejected)
     # Version 2: Deterministic node IDs (2026-01-24+)
     # Version 3: Phase 2 traversal refactor checkpoint break
     # Version 4: Pending coalesce state persisted in checkpoints
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
-    # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
-    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
-    # Composite FK to nodes (node_id, run_id)
-    ForeignKeyConstraint(
-        ["node_id", "run_id"],
-        ["nodes.node_id", "nodes.run_id"],
-    ),
 )
 
 Index("ix_checkpoints_run", checkpoints_table.c.run_id)

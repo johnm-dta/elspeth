@@ -748,29 +748,9 @@ class TestForkRecoveryInvariant:
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run.run_id)
         # Create a checkpoint (required for recovery to work)
-        # Use actual token and sink node from the run
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            # Get an actual token from the run
-            actual_token = conn.execute(
-                text("""
-                    SELECT t.token_id
-                    FROM tokens t
-                    JOIN rows r ON r.row_id = t.row_id
-                    WHERE r.run_id = :run_id
-                    LIMIT 1
-                """),
-                {"run_id": run.run_id},
-            ).fetchone()
-            # Token must exist since run completed successfully
-            assert actual_token is not None, "No tokens found for run"
-            token_id = actual_token.token_id
-
         checkpoint_manager = CheckpointManager(db)
         checkpoint_manager.create_checkpoint(
             run_id=run.run_id,
-            token_id=token_id,  # Use actual token from run
-            node_id=sink_node_ids[0],  # Use actual sink node ID from graph
             sequence_number=1,
             graph=graph,
         )
@@ -907,20 +887,10 @@ class TestForkRecoveryInvariant:
             conn.commit()
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
-        # A checkpoint is the precondition for resume. Anchor it on a real token
-        # and the sink node from the run.
+        # A checkpoint is the precondition for resume.
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -1080,17 +1050,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -2250,18 +2211,8 @@ class TestForkRecoveryInvariant:
             )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -2537,11 +2488,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Create the checkpoint WITH the genuine coalesce pending state ──
-        sink_node_ids = graph.get_sinks()
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=held_branch.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
             coalesce_state=coalesce_state,
@@ -2748,17 +2696,8 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=next(iter(sink_node_ids)),
             sequence_number=1,
             graph=graph,
         )
@@ -3039,17 +2978,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            any_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert any_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=any_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -3374,17 +3304,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            any_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert any_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=any_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -3644,17 +3565,8 @@ class TestForkRecoveryInvariant:
         _scrub_scheduler_work_for_outcomeless_tokens(db_b, run_id)
         # Create checkpoint + mark run failed (resume preconditions).
         checkpoint_mgr = CheckpointManager(db_b)
-        sink_node_ids = graph_b.get_sinks()
-        with db_b.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph_b,
         )
@@ -3946,18 +3858,8 @@ class TestForkRecoveryInvariant:
         # ── Resume ────────────────────────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -4215,17 +4117,8 @@ class TestForkRecoveryInvariant:
         # reconstructs the cumulative counters from the intact audit trail.
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -4337,16 +4230,7 @@ class TestForkRecoveryInvariant:
         run_id = run_b1.run_id
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id, token_id=actual_token.token_id, node_id=sink_node_ids[0], sequence_number=1, graph=graph
-        )
+        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, graph=graph)
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
             conn.commit()
@@ -4529,17 +4413,8 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
         )
@@ -5281,16 +5156,8 @@ class TestForkRecoveryInvariant:
         assert spec.token_data_ref == merged_data_ref, f"recovery must surface the merged token_data_ref; got {spec.token_data_ref!r}"
 
         # ── Resume ──
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=next(iter(sink_node_ids)),
             sequence_number=1,
             graph=graph,
         )
@@ -5439,8 +5306,8 @@ class TestForkRecoveryInvariant:
 
         # ── Build a GENUINE AggregationCheckpointState buffering the sink_a token ──
         # The node_id key is opaque to _get_buffered_checkpoint_token_ids (it only reads
-        # nodes.values() → tokens → token_id), but create_checkpoint validates node_id is
-        # in the graph, so key the buffered state on a real node id (the source node).
+        # nodes.values() → tokens → token_id); key the buffered state on a real node id
+        # (the source node).
         source_node_ids = graph.get_sources()
         assert source_node_ids, "expected at least one source node in fork recovery test graph"
         agg_node_key = str(source_node_ids[0])
@@ -5495,8 +5362,6 @@ class TestForkRecoveryInvariant:
         # ── Create the checkpoint WITH the genuine aggregation state ──
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=buffered_child.token_id,
-            node_id=agg_node_key,
             sequence_number=1,
             graph=graph,
             aggregation_state=agg_state,
@@ -5747,11 +5612,8 @@ class TestForkRecoveryInvariant:
             },
         )
 
-        sink_node_ids = graph.get_sinks()
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=children[0].token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
             graph=graph,
             aggregation_state=agg_state,

@@ -160,13 +160,11 @@ class TestResumeSchemaRequired:
             source_row_index=0,
             ingest_sequence=0,
         )
-        token = factory.data_flow.create_token(row_id=row.row_id)
+        factory.data_flow.create_token(row_id=row.row_id)
 
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=token.token_id,
-            node_id="source",
             sequence_number=0,
             graph=simple_graph,
         )

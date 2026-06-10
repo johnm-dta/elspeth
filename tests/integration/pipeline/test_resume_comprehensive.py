@@ -232,8 +232,6 @@ def _build_two_source_failed_run(
 
     checkpoint_mgr.create_checkpoint(
         run_id=run_id,
-        token_id="tok-multi-source",
-        node_id="sink",
         sequence_number=1,
         graph=graph,
     )
@@ -514,8 +512,6 @@ class TestResumeComprehensive:
         # Create checkpoint at row 2
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t2",
-            node_id="xform",
             sequence_number=2,
             graph=graph,
         )
@@ -600,8 +596,6 @@ class TestResumeComprehensive:
 
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -762,8 +756,6 @@ class TestResumeComprehensive:
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t2",
-            node_id="xform",
             sequence_number=2,
             graph=graph,
         )
@@ -1000,8 +992,6 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -1241,8 +1231,6 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -1467,8 +1455,6 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -1693,8 +1679,6 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -1899,8 +1883,6 @@ class TestResumeComprehensive:
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
             graph=graph,
         )
@@ -2011,8 +1993,6 @@ class TestResumeComprehensive:
         # exercised even though no rows remain to process.
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t4",
-            node_id="xform",
             sequence_number=4,
             graph=graph,
         )
@@ -2196,8 +2176,6 @@ class TestResumeComprehensive:
         # gate-MOVE test setup.
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t4",
-            node_id="xform",
             sequence_number=4,
             graph=graph,
         )
@@ -2641,8 +2619,6 @@ class TestMultiSourceResumeContractDispatch:
 
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="tok-single",
-            node_id="sink",
             sequence_number=1,
             graph=graph,
         )

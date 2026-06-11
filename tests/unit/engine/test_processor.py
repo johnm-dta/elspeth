@@ -6220,6 +6220,125 @@ class TestMaybeCoalesceToken:
 
 
 # =============================================================================
+# complete_coalesce_merge (out-of-claim timeout/EOF coalesce fire, F1/D6)
+# =============================================================================
+
+
+class TestCompleteCoalesceMerge:
+    """Real-journal proof of the orchestrator-facing atomic coalesce merge verb."""
+
+    def test_complete_coalesce_merge_consumes_siblings_and_drives_merged_child(self) -> None:
+        """ONE atomic transition: held branches -> TERMINAL, merged child READY+claimed.
+
+        Out-of-claim fires (timeout/EOF) have no LEASED triggering token: every
+        held branch is BLOCKED, and the merged child must be journal-durable
+        before the consumed branches are terminalized. The drain's initial
+        enqueue then reconciles idempotently against the READY row inserted by
+        the barrier completion (strict field equality) and claims it.
+        """
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        payload = make_row({"value": 7})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=payload.to_dict(),
+        )
+        # One held branch, BLOCKED at the coalesce barrier through the
+        # production verbs (enqueue -> claim -> mark_blocked).
+        factory.data_flow.create_token(row.row_id, token_id="token-held-a", branch_name="path_a", fork_group_id="fork-1")
+        now = datetime.now(UTC)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id="token-held-a",
+            row_id=row.row_id,
+            node_id=str(coalesce_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+            branch_name="path_a",
+            fork_group_id="fork-1",
+            coalesce_node_id=str(coalesce_node),
+            coalesce_name="merge",
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None and claimed.token_id == "token-held-a"
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner="seeder",
+        )
+        held_token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-held-a",
+            row_data=payload,
+            branch_name="path_a",
+            fork_group_id="fork-1",
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"value": 7})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1", join_group_id="join-1")
+
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor.complete_coalesce_merge(
+            coalesce_name=CoalesceName("merge"),
+            consumed_tokens=(held_token,),
+            merged_token=merged_token,
+            coalesce_node_id=coalesce_node,
+            ctx=ctx,
+        )
+
+        # The merged token was driven to its terminal coalesce sink handoff
+        # (same continuation semantics as the old process_token hop: the
+        # merged token resolves the coalesce on_success sink).
+        assert len(results) == 1
+        assert results[0].token.token_id == "merged-1"
+        assert (results[0].outcome, results[0].path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+        assert results[0].sink_name == "merged_sink"
+        assert results[0].scheduler_pending_sink is True
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = dict(
+                conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.token_id.in_(["token-held-a", "merged-1"])
+                    )
+                ).all()
+            )
+        assert statuses == {
+            "token-held-a": "terminal",
+            "merged-1": "pending_sink",
+        }
+
+
+# =============================================================================
 # _notify_coalesce_of_lost_branch
 # =============================================================================
 

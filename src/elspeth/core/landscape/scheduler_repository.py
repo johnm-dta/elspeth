@@ -1377,6 +1377,7 @@ class TokenSchedulerRepository:
         now: datetime,
         leased_exclusion_token_id: str | None = None,
         require_exhaustive_release: bool = True,
+        scope_row_id: str | None = None,
     ) -> int:
         """Complete a barrier atomically: consume BLOCKED inputs and emit outputs.
 
@@ -1388,6 +1389,18 @@ class TokenSchedulerRepository:
           or handed off (``leased_exclusion_token_id`` exempts the in-claim
           triggering token, matching the processor's ``leased_token_id``
           exclusions);
+
+          ``scope_row_id`` narrows that BLOCKED universe — both the
+          missing-token cross-check and the exhaustiveness check — to one
+          pending group. COALESCE barriers share ONE ``barrier_key`` (the
+          coalesce_name) across ALL row_ids pending at the coalesce, and
+          fork/expand children inherit their parent's ``row_id``, so a firing
+          group's identity is exactly ``(run_id, barrier_key, row_id)``.
+          Coalesce call sites MUST pass the firing group's ``row_id`` —
+          otherwise every other row's held branches would be spuriously
+          reported as orphaned. Aggregation call sites omit it
+          (``barrier_key`` = the node id; one batch consumes ALL BLOCKED rows
+          of the node, so whole-key exhaustiveness is correct);
         - consumed rows -> TERMINAL with payload scrub and per-row
           ``MARK_BLOCKED_BARRIER_TERMINAL`` events (``{"barrier_key"}`` context,
           the existing event shape);
@@ -1411,6 +1424,12 @@ class TokenSchedulerRepository:
 
         Returns the number of consumed rows terminalized.
         """
+        if scope_row_id is not None and not require_exhaustive_release:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
+                f"scope_row_id={scope_row_id!r} with require_exhaustive_release=False; row scoping narrows the "
+                "exhaustiveness universe and is meaningless on the legacy partial-release arm."
+            )
         consumed = tuple(consumed_token_ids)
         consumed_set = frozenset(consumed)
         if len(consumed_set) != len(consumed):
@@ -1452,14 +1471,19 @@ class TokenSchedulerRepository:
         if require_exhaustive_release:
             emission_context["consumed_count"] = len(consumed_set)
 
+        blocked_select = (
+            select(token_work_items_table)
+            .where(token_work_items_table.c.run_id == run_id)
+            .where(token_work_items_table.c.barrier_key == barrier_key)
+            .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+        )
+        if scope_row_id is not None:
+            blocked_select = blocked_select.where(token_work_items_table.c.row_id == scope_row_id)
+
         with self._engine.begin() as conn:
             blocked_rows = (
                 conn.execute(
-                    select(token_work_items_table)
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.barrier_key == barrier_key)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .order_by(
+                    blocked_select.order_by(
                         token_work_items_table.c.ingest_sequence,
                         token_work_items_table.c.step_index,
                         token_work_items_table.c.work_item_id,

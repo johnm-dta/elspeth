@@ -56,7 +56,32 @@ def _make_scheduler_engine() -> Tier1Engine:
 def _seed_run(engine: Tier1Engine, *, run_id: str, tokens: list[tuple[str, str, int]], now: datetime) -> str:
     """Insert run/node/row/token prerequisites; return a serialized row payload.
 
-    ``tokens`` is a list of ``(row_id, token_id, ingest_sequence)`` triples.
+    ``tokens`` is a list of ``(row_id, token_id, ingest_sequence)`` triples,
+    one row per token.
+    """
+    return _seed_run_grouped(
+        engine,
+        run_id=run_id,
+        rows=[(row_id, ingest_sequence) for row_id, _token_id, ingest_sequence in tokens],
+        tokens=[(row_id, token_id) for row_id, token_id, _ingest_sequence in tokens],
+        now=now,
+    )
+
+
+def _seed_run_grouped(
+    engine: Tier1Engine,
+    *,
+    run_id: str,
+    rows: list[tuple[str, int]],
+    tokens: list[tuple[str, str]],
+    now: datetime,
+) -> str:
+    """Insert run/node/row/token prerequisites; return a serialized row payload.
+
+    ``rows`` is a list of ``(row_id, ingest_sequence)`` pairs; ``tokens`` is a
+    list of ``(row_id, token_id)`` pairs — multiple tokens may share a row,
+    the coalesce-group shape (fork/expand children inherit their parent's
+    row_id).
     """
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -102,7 +127,7 @@ def _seed_run(engine: Tier1Engine, *, run_id: str, tokens: list[tuple[str, str, 
                 registered_at=now,
             )
         )
-        for index, (row_id, token_id, ingest_sequence) in enumerate(tokens):
+        for index, (row_id, ingest_sequence) in enumerate(rows):
             conn.execute(
                 insert(rows_table).values(
                     row_id=row_id,
@@ -115,6 +140,7 @@ def _seed_run(engine: Tier1Engine, *, run_id: str, tokens: list[tuple[str, str, 
                     created_at=now,
                 )
             )
+        for row_id, token_id in tokens:
             conn.execute(
                 insert(tokens_table).values(
                     token_id=token_id,
@@ -577,3 +603,116 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
     assert terminalized == 1
     assert _row_for_token(engine, "t2")["status"] == TokenWorkStatus.TERMINAL.value
     assert _row_for_token(engine, "t3")["status"] == TokenWorkStatus.BLOCKED.value
+
+
+COALESCE_KEY = "coalesce:merge"
+
+
+def _seed_two_coalesce_groups(engine: Tier1Engine, repo) -> str:
+    """Two rows' branch groups BLOCKED under ONE shared coalesce barrier_key.
+
+    Coalesce barriers key on coalesce_name, shared by ALL row_ids pending at
+    the coalesce; fork children inherit their parent's row_id, so each pending
+    group is (run_id, barrier_key, row_id).
+    """
+    payload = _seed_run_grouped(
+        engine,
+        run_id=RUN_ID,
+        rows=[("r1", 0), ("r2", 1)],
+        tokens=[("r1", "t1a"), ("r1", "t1b"), ("r2", "t2a"), ("r2", "t2b")],
+        now=NOW,
+    )
+    for token_id, row_id, ingest_sequence in [("t1a", "r1", 0), ("t1b", "r1", 0), ("t2a", "r2", 1), ("t2b", "r2", 1)]:
+        _enqueue_and_block(
+            repo,
+            token_id=token_id,
+            row_id=row_id,
+            ingest_sequence=ingest_sequence,
+            payload=payload,
+            now=NOW,
+            barrier_key=COALESCE_KEY,
+        )
+    return payload
+
+
+def test_complete_barrier_scope_row_id_isolates_coalesce_group() -> None:
+    """A strict coalesce fire scoped to one row consumes ONLY that row's branches.
+
+    Without scope_row_id the shared coalesce barrier_key would make r2's held
+    branches look uncovered and spuriously trip the would-orphan check.
+    """
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=COALESCE_KEY,
+        consumed_token_ids=["t1a", "t1b"],
+        emitted_pending_sink=[],
+        emitted_ready=[],
+        now=NOW,
+        scope_row_id="r1",
+    )
+
+    assert n == 2
+    assert _statuses(engine, ["t1a", "t1b"]) == {TokenWorkStatus.TERMINAL.value}
+    # The other row's pending group is untouched.
+    assert _statuses(engine, ["t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_scoped_group_still_catches_cross_group_consumed_token() -> None:
+    """scope_row_id narrows the missing-token cross-check too: another group's token is refused."""
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"missing token_ids.*t2a"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=COALESCE_KEY,
+            consumed_token_ids=["t1a", "t1b", "t2a"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            scope_row_id="r1",
+        )
+
+    assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_scoped_group_still_catches_uncovered_blocked_row() -> None:
+    """Exhaustiveness still holds WITHIN the scoped group: a held branch left behind raises."""
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"uncovered token_ids.*t1b"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=COALESCE_KEY,
+            consumed_token_ids=["t1a"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            scope_row_id="r1",
+        )
+
+    assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_scope_row_id_requires_exhaustive_release() -> None:
+    """scope_row_id is meaningless on the legacy partial-release arm and is refused."""
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match="meaningless on the legacy partial-release arm"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=COALESCE_KEY,
+            consumed_token_ids=["t1a", "t1b"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            scope_row_id="r1",
+            require_exhaustive_release=False,
+        )
+
+    assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}

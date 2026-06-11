@@ -18,6 +18,7 @@ from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from elspeth.contracts import TokenInfo
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
@@ -38,6 +39,36 @@ from elspeth.core.landscape.schema import (
     token_work_items_table,
     tokens_table,
 )
+
+
+def token_from_journal_item(
+    item: TokenWorkItem,
+    *,
+    attempt_offset: int,
+    resume_checkpoint_id: str,
+) -> TokenInfo:
+    """Rebuild a ``TokenInfo`` from a journal BLOCKED row (F1 resume path).
+
+    Shared by the aggregation and coalesce executors' ``restore_from_journal``:
+    the journal row is authoritative for the payload and token lineage, while
+    the resume provenance (``attempt_offset`` = audit-derived max_attempt + 1,
+    ``resume_checkpoint_id``) is supplied by the restoring caller.
+
+    Lives next to ``serialize_row_payload`` / ``deserialize_row_payload``
+    because the payload round-trip is the heart of the mapping.
+    """
+    row_data = TokenSchedulerRepository.deserialize_row_payload(item.row_payload_json)
+    return TokenInfo(
+        row_id=item.row_id,
+        token_id=item.token_id,
+        row_data=row_data,
+        branch_name=item.branch_name,
+        fork_group_id=item.fork_group_id,
+        join_group_id=item.join_group_id,
+        expand_group_id=item.expand_group_id,
+        resume_attempt_offset=attempt_offset,
+        resume_checkpoint_id=resume_checkpoint_id,
+    )
 
 
 class TokenSchedulerRepository:

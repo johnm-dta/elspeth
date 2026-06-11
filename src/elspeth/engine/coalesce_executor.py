@@ -33,7 +33,7 @@ from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.spans import SpanFactory
@@ -433,16 +433,9 @@ class CoalesceExecutor:
             first_arrival = monotonic_now - max(0.0, (now - min_blocked_at).total_seconds())
             branches: dict[str, _BranchEntry] = {}
             for branch_name, branch_item in branch_items.items():
-                row_data = TokenSchedulerRepository.deserialize_row_payload(branch_item.row_payload_json)
-                token = TokenInfo(
-                    row_id=branch_item.row_id,
-                    token_id=branch_item.token_id,
-                    row_data=row_data,
-                    branch_name=branch_name,
-                    fork_group_id=branch_item.fork_group_id,
-                    join_group_id=branch_item.join_group_id,
-                    expand_group_id=branch_item.expand_group_id,
-                    resume_attempt_offset=attempt_offsets[branch_item.token_id],
+                token = token_from_journal_item(
+                    branch_item,
+                    attempt_offset=attempt_offsets[branch_item.token_id],
                     resume_checkpoint_id=resume_checkpoint_id,
                 )
                 branches[branch_name] = _BranchEntry(

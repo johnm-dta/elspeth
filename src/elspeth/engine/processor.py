@@ -21,17 +21,16 @@ from typing import TYPE_CHECKING, Any, TypeIs, cast
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
-from elspeth.contracts.freeze import deep_freeze, deep_thaw
-from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars, CoalescePendingScalars
+from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts import Batch
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.engine.clock import Clock
@@ -49,6 +48,7 @@ from elspeth.contracts.declaration_contracts import (
     DeclarationContractViolation,
 )
 from elspeth.contracts.enums import (
+    BatchStatus,
     NodeStateStatus,
     OutputMode,
     RoutingKind,
@@ -130,6 +130,57 @@ class DAGTraversalContext:
         object.__setattr__(self, "node_to_next", deep_freeze(self.node_to_next))
         object.__setattr__(self, "coalesce_node_map", deep_freeze(self.coalesce_node_map))
         object.__setattr__(self, "branch_first_node", deep_freeze(self.branch_first_node))
+
+
+@dataclass(frozen=True, slots=True)
+class _AggregationRestorePlan:
+    """Derived restore inputs for one aggregation node (journal restore).
+
+    Built during the derivation phase of ``_restore_barriers_from_journal``
+    so every audit read completes (and can raise) before any executor
+    mutation runs.
+    """
+
+    node_id: NodeID
+    items: Sequence[TokenWorkItem]
+    member_order: Sequence[str]
+    batch_id: str | None
+    accepted_count_total: int
+    completed_flush_count: int
+    scalars: AggregationNodeScalars
+
+
+@dataclass(frozen=True, slots=True)
+class BarrierJournalRestoreContext:
+    """Resume inputs for the journal-based barrier restore (F1 design D3).
+
+    Built by the resume path (``ResumeCoordinator``) and handed to
+    ``RowProcessor.__init__``; its presence IS the resume signal — a normal
+    run passes ``None`` and no restore sweep runs.
+
+    Attributes:
+        resume_checkpoint_id: Checkpoint id stamped on every journal-restored
+            token (resume provenance).
+        barrier_scalars: Underivable scalar barrier metadata from the
+            checkpoint row (trigger latches / lost_branches). ``None`` means
+            the checkpoint carried no scalars — every node restores with
+            unlatched / no-losses defaults. The scalars snapshot is
+            NON-transactional vs the journal (D3 staleness model): an absent
+            entry always means not-fired / re-derivable, never corruption.
+        batch_id_remap: old->retry batch_id mapping returned by
+            ``handle_incomplete_batches`` — BUFFERED token_outcomes still
+            reference the dead original batch ids, so the restored in-progress
+            batch id must be read through this remap.
+    """
+
+    resume_checkpoint_id: str
+    barrier_scalars: BarrierScalars | None
+    batch_id_remap: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not self.resume_checkpoint_id:
+            raise ValueError("BarrierJournalRestoreContext.resume_checkpoint_id must not be empty")
+        object.__setattr__(self, "batch_id_remap", deep_freeze(self.batch_id_remap))
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,8 +394,7 @@ class RowProcessor:
         branch_to_sink: dict[BranchName, SinkName] | None = None,
         sink_names: frozenset[str] | None = None,
         coalesce_on_success_map: dict[CoalesceName, str] | None = None,
-        restored_aggregation_state: Mapping[NodeID, AggregationCheckpointState] | None = None,
-        restored_coalesce_state: CoalesceCheckpointState | None = None,
+        barrier_restore: BarrierJournalRestoreContext | None = None,
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
@@ -377,7 +427,10 @@ class RowProcessor:
                 If None, sink validation on jump-target resolution is skipped.
             coalesce_on_success_map: Map of coalesce_name -> terminal sink_name
                 for COALESCED outcomes produced at terminal coalesce points
-            restored_aggregation_state: Map of node_id -> state dict for crash recovery
+            barrier_restore: Resume-only inputs for the journal-based barrier
+                restore (F1). Non-None means this processor is being built on
+                the resume path: barrier buffers are rebuilt from journal
+                BLOCKED rows + audit tables before the first row is processed.
             payload_store: Optional PayloadStore for persisting source row payloads
             clock: Optional clock for time access. Defaults to system clock.
                    Inject MockClock for deterministic testing.
@@ -492,99 +545,251 @@ class RowProcessor:
         self._last_heartbeat_at: datetime | None = None
         self._scheduler_drains_since_maintenance = 0
 
-        # Restore aggregation state if provided (crash recovery / resume).
-        # Multiple node_id keys may map to the same state — deduplicate by
-        # content equality (not id()) to handle both shared references and
-        # independently deserialized copies.
-        if restored_aggregation_state:
-            unique_states: list[AggregationCheckpointState] = []
-            for state in restored_aggregation_state.values():
-                if state not in unique_states:
-                    unique_states.append(state)
-            for state in unique_states:
-                self._aggregation_executor.restore_from_checkpoint(state)
-            self._restore_scheduler_blocks_from_aggregation_checkpoint(unique_states)
-        if restored_coalesce_state is not None and restored_coalesce_state.has_resumable_state:
-            self._restore_scheduler_blocks_from_coalesce_checkpoint(restored_coalesce_state)
+        # F1 (THE RESTORE INVERSION): on resume, barrier buffers are rebuilt
+        # FROM journal BLOCKED rows + audit tables. The old direction —
+        # materializing journal rows from checkpoint blobs — is gone; the
+        # checkpoint contributes only scalars (via barrier_restore).
+        if barrier_restore is not None:
+            self._restore_barriers_from_journal(barrier_restore)
 
     @property
     def token_manager(self) -> TokenManager:
         """Expose token manager for orchestrator to create tokens for quarantined rows."""
         return self._token_manager
 
-    def _restore_scheduler_blocks_from_aggregation_checkpoint(self, states: Sequence[AggregationCheckpointState]) -> None:
-        """Materialize durable BLOCKED scheduler rows for restored aggregation buffers."""
-        restored_at = self._clock.now_utc()
-        for state in states:
-            for node_id_str, node_checkpoint in state.nodes.items():
-                if not node_checkpoint.tokens:
-                    continue
-                node_id = NodeID(node_id_str)
-                for token_checkpoint in node_checkpoint.tokens:
-                    restored_contract = SchemaContract.from_checkpoint(dict(token_checkpoint.contract))
-                    if token_checkpoint.contract_version != restored_contract.version_hash():
-                        raise AuditIntegrityError(
-                            f"Contract version mismatch for scheduler-restored token {token_checkpoint.token_id}: "
-                            f"expected {restored_contract.version_hash()}, got {token_checkpoint.contract_version}. "
-                            "Checkpoint may be corrupted."
+    def _restore_barriers_from_journal(self, restore: BarrierJournalRestoreContext) -> None:
+        """Rebuild aggregation buffers and coalesce pendings from journal BLOCKED rows.
+
+        F1 resume path. The journal (token_work_items BLOCKED rows with a
+        non-NULL barrier_key) is authoritative for buffered/held token
+        payloads; counters, batch membership, hold state ids and attempt
+        offsets derive from audit tables; the checkpoint contributes only
+        the underivable scalars (``restore.barrier_scalars``).
+
+        Discipline: ALL derivations complete (and raise, if they must) before
+        any executor restore call mutates state. The coalesce restore is a
+        single all-or-nothing call (its contract — a second call would discard
+        the first); aggregation restores run per node afterwards, each
+        internally validate-before-mutate.
+
+        KNOWN TRANSITIONAL EXCEPTION: rows manufactured by the old
+        ``ensure_blocked_barrier_work_item`` blob-materialization path lack
+        ``barrier_blocked_at``, so the executors' NULL-means-corruption assert
+        is honest only because the epoch-20 delete-the-DB policy retires those
+        rows; no live DB carries them (the writer itself is deleted in Task 4.1).
+
+        Raises:
+            AuditIntegrityError: On any journal/audit disagreement (orphan
+                barrier_key, missing/foreign batch ids, membership mismatch,
+                NULL barrier_blocked_at, missing hold state ...).
+        """
+        now = self._clock.now_utc()
+        items = self._scheduler.list_blocked_barrier_items(run_id=self._run_id)
+        scalars = restore.barrier_scalars if restore.barrier_scalars is not None else BarrierScalars(aggregation={}, coalesce={})
+
+        # ---- Partition (design D1) ----------------------------------------
+        # A BLOCKED row's barrier KIND is decided by its barrier_key ONLY:
+        # barrier_key == coalesce_name        -> coalesce barrier
+        # barrier_key == str(aggregation node_id) -> aggregation barrier
+        # NEVER partition on node_id (a BLOCKED row's node_id is the
+        # enqueue-time cursor, not the barrier owner) and NEVER on
+        # coalesce_name (aggregation rows may carry non-NULL coalesce_name
+        # LINEAGE for tokens that will coalesce after the flush).
+        coalesce_keys: set[str] = {str(name) for name in self._coalesce_node_ids}
+        aggregation_keys: set[str] = {str(node_id) for node_id in self._aggregation_settings}
+        ambiguous = coalesce_keys & aggregation_keys
+        if ambiguous:
+            raise OrchestrationInvariantError(
+                f"Barrier-key namespace collision between coalesce names and aggregation node ids: {sorted(ambiguous)}. "
+                "The journal restore partition cannot disambiguate BLOCKED rows for these keys."
+            )
+
+        agg_items_by_node: dict[NodeID, list[TokenWorkItem]] = {}
+        coalesce_items: list[TokenWorkItem] = []
+        for item in items:
+            if item.barrier_key is None:  # pragma: no cover - excluded by the query contract
+                raise AuditIntegrityError(
+                    f"list_blocked_barrier_items returned a row without barrier_key "
+                    f"(work_item_id={item.work_item_id!r}, run {self._run_id!r})."
+                )
+            if item.barrier_key in coalesce_keys:
+                coalesce_items.append(item)
+            elif item.barrier_key in aggregation_keys:
+                agg_items_by_node.setdefault(NodeID(item.barrier_key), []).append(item)
+            else:
+                raise AuditIntegrityError(
+                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {restore.resume_checkpoint_id!r}) carries orphan barrier_key "
+                    f"{item.barrier_key!r}: not a configured coalesce ({sorted(coalesce_keys)}) "
+                    f"or aggregation node ({sorted(aggregation_keys)}). The journal references a "
+                    "barrier this pipeline no longer has — refusing to resume."
+                )
+        if coalesce_items and self._coalesce_executor is None:
+            raise OrchestrationInvariantError(
+                f"Journal has {len(coalesce_items)} BLOCKED coalesce rows but no CoalesceExecutor is configured."
+            )
+
+        # ---- Audit derivations (no mutation yet) ---------------------------
+        # Attempt offsets: max node_states attempt per journal token, + 1.
+        # Derived here with ONE focused query rather than plumbed from
+        # recovery's incomplete_by_row map: that map's exclusion set is being
+        # repointed at the journal in Task 3.2 (so the resume loop stops
+        # re-driving blocked tokens), which would exclude exactly the tokens
+        # this restore needs offsets for.
+        token_ids = [item.token_id for item in items]
+        max_attempts = self._execution.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
+        attempt_offsets: dict[str, int] = {token_id: max_attempts.get(token_id, -1) + 1 for token_id in token_ids}
+
+        # Per-node batch metadata for every configured aggregation node.
+        agg_plans: list[_AggregationRestorePlan] = []
+        if self._aggregation_settings:
+            members_by_batch: dict[str, list[str]] = {}
+            for member in self._execution.get_all_batch_members_for_run(self._run_id):
+                members_by_batch.setdefault(member.batch_id, []).append(member.token_id)
+            batches_by_node: dict[str, list[Batch]] = {}
+            for batch in self._execution.get_batches(self._run_id):
+                batches_by_node.setdefault(str(batch.aggregation_node_id), []).append(batch)
+
+            for node_id in sorted(self._aggregation_settings, key=str):
+                node_items = agg_items_by_node.get(node_id, [])
+                node_batches = batches_by_node.get(str(node_id), [])
+                # COUNT(DISTINCT token_id), not raw COUNT: retry_batch COPIES
+                # members into the retry batch, and handle_incomplete_batches
+                # runs BEFORE this derivation on resume — a raw count would
+                # double-count every member of a retried batch.
+                accepted_count_total = len(
+                    {member_token for node_batch in node_batches for member_token in members_by_batch.get(node_batch.batch_id, ())}
+                )
+                completed_flush_count = sum(1 for node_batch in node_batches if node_batch.status is BatchStatus.COMPLETED)
+                node_scalars = scalars.aggregation.get(str(node_id), AggregationNodeScalars(None, None))
+                if node_items:
+                    batch_id = self._derive_restored_batch_id(node_id, node_items, restore)
+                    agg_plans.append(
+                        _AggregationRestorePlan(
+                            node_id=node_id,
+                            items=node_items,
+                            member_order=members_by_batch.get(batch_id, []),
+                            batch_id=batch_id,
+                            accepted_count_total=accepted_count_total,
+                            completed_flush_count=completed_flush_count,
+                            scalars=node_scalars,
                         )
-                    row_data = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
-                    coalesce_name: CoalesceName | None = None
-                    coalesce_node_id: NodeID | None = None
-                    if token_checkpoint.branch_name is not None:
-                        branch_name = BranchName(token_checkpoint.branch_name)
-                        if branch_name in self._branch_to_coalesce:
-                            coalesce_name = self._branch_to_coalesce[branch_name]
-                            coalesce_node_id = self._coalesce_node_ids[coalesce_name]
-                    self._scheduler.ensure_blocked_barrier_work_item(
-                        run_id=self._run_id,
-                        token_id=token_checkpoint.token_id,
-                        row_id=token_checkpoint.row_id,
-                        node_id=str(node_id),
-                        step_index=self._scheduler_step_index(node_id),
-                        ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token_checkpoint.row_id),
-                        row_payload_json=self._scheduler.serialize_row_payload(row_data),
-                        barrier_key=str(node_id),
-                        available_at=restored_at,
-                        branch_name=token_checkpoint.branch_name,
-                        fork_group_id=token_checkpoint.fork_group_id,
-                        join_group_id=token_checkpoint.join_group_id,
-                        expand_group_id=token_checkpoint.expand_group_id,
-                        coalesce_node_id=str(coalesce_node_id) if coalesce_node_id is not None else None,
-                        coalesce_name=str(coalesce_name) if coalesce_name is not None else None,
+                    )
+                elif completed_flush_count > 0 or str(node_id) in scalars.aggregation:
+                    # Counter-only node: nothing buffered, but completed
+                    # flushes (or a stale scalars entry) exist — restore the
+                    # derived counters so post-flush pagination metadata
+                    # survives the resume.
+                    agg_plans.append(
+                        _AggregationRestorePlan(
+                            node_id=node_id,
+                            items=[],
+                            member_order=[],
+                            batch_id=None,
+                            accepted_count_total=accepted_count_total,
+                            completed_flush_count=completed_flush_count,
+                            scalars=node_scalars,
+                        )
                     )
 
-    def _restore_scheduler_blocks_from_coalesce_checkpoint(self, state: CoalesceCheckpointState) -> None:
-        """Materialize durable BLOCKED scheduler rows for restored coalesce barriers."""
-        restored_at = self._clock.now_utc()
-        for pending_entry in state.pending:
-            coalesce_name = CoalesceName(pending_entry.coalesce_name)
-            if coalesce_name not in self._coalesce_node_ids:
+        # Coalesce hold state ids: the OPEN node_state written at accept()
+        # time at the coalesce node (the executor calls it the PENDING hold).
+        coalesce_state_ids: Mapping[str, str] = {}
+        if coalesce_items:
+            coalesce_state_ids = self._execution.get_open_node_state_ids(
+                self._run_id,
+                node_ids=[str(node_id) for node_id in self._coalesce_node_ids.values()],
+                token_ids=[item.token_id for item in coalesce_items],
+            )
+
+        # ---- Mutate ---------------------------------------------------------
+        # Coalesce first: ONE call for the whole executor (a second call would
+        # discard this one — see CoalesceExecutor.restore_from_journal's caller
+        # obligations). Called whenever a coalesce executor exists so completed
+        # keys are reconstructed from the Landscape even with nothing pending,
+        # and stale lost-branch scalars are dropped-with-log.
+        if self._coalesce_executor is not None:
+            self._coalesce_executor.restore_from_journal(
+                items=coalesce_items,
+                scalars=scalars.coalesce,
+                state_ids=coalesce_state_ids,
+                attempt_offsets=attempt_offsets,
+                resume_checkpoint_id=restore.resume_checkpoint_id,
+                now=now,
+            )
+
+        for plan in agg_plans:
+            self._aggregation_executor.restore_from_journal(
+                node_id=plan.node_id,
+                items=plan.items,
+                member_order=plan.member_order,
+                batch_id=plan.batch_id,
+                accepted_count_total=plan.accepted_count_total,
+                completed_flush_count=plan.completed_flush_count,
+                scalars=plan.scalars,
+                attempt_offsets=attempt_offsets,
+                resume_checkpoint_id=restore.resume_checkpoint_id,
+                now=now,
+            )
+
+    def _derive_restored_batch_id(
+        self,
+        node_id: NodeID,
+        node_items: Sequence[TokenWorkItem],
+        restore: BarrierJournalRestoreContext,
+    ) -> str:
+        """Resolve the in-progress batch id for one aggregation node's BLOCKED rows.
+
+        Source of truth: each buffered token's BUFFERED token_outcome carries
+        the batch_id it was accepted into (same derivation as the live
+        ``_barrier_key_for_buffered_scheduler_result``), read through the
+        ``handle_incomplete_batches`` old->retry remap because the audit
+        outcomes still reference the dead original batch when a crash
+        interrupted a flush.
+
+        Raises:
+            AuditIntegrityError: If any token lacks a BUFFERED outcome with a
+                batch_id, the group's tokens disagree on the (remapped)
+                batch_id, the batch row is missing, or the batch belongs to a
+                different aggregation node.
+        """
+        batch_id: str | None = None
+        first_token_id: str | None = None
+        for item in node_items:
+            outcome = self._data_flow.get_token_outcome(item.token_id)
+            if outcome is None or outcome.batch_id is None or outcome.completed or outcome.path is not TerminalPath.BUFFERED:
                 raise AuditIntegrityError(
-                    f"Cannot restore scheduler blocks for coalesce checkpoint {coalesce_name!r}: "
-                    f"configured coalesces are {sorted(str(name) for name in self._coalesce_node_ids)}."
+                    f"BLOCKED journal row for token {item.token_id!r} at aggregation node {node_id!r} "
+                    f"(run {self._run_id!r}, resume checkpoint {restore.resume_checkpoint_id!r}) has no "
+                    f"matching BUFFERED token_outcome with a batch_id (got {outcome!r}) — the journal "
+                    "and the audit trail disagree about this token being buffered."
                 )
-            coalesce_node_id = self._coalesce_node_ids[coalesce_name]
-            for branch_name, token_checkpoint in pending_entry.branches.items():
-                restored_contract = SchemaContract.from_checkpoint(dict(token_checkpoint.contract))
-                row_data = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
-                self._scheduler.ensure_blocked_barrier_work_item(
-                    run_id=self._run_id,
-                    token_id=token_checkpoint.token_id,
-                    row_id=token_checkpoint.row_id,
-                    node_id=str(coalesce_node_id),
-                    step_index=self._scheduler_step_index(coalesce_node_id),
-                    ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token_checkpoint.row_id),
-                    row_payload_json=self._scheduler.serialize_row_payload(row_data),
-                    barrier_key=str(coalesce_name),
-                    available_at=restored_at,
-                    branch_name=branch_name,
-                    fork_group_id=token_checkpoint.fork_group_id,
-                    join_group_id=token_checkpoint.join_group_id,
-                    expand_group_id=token_checkpoint.expand_group_id,
-                    coalesce_node_id=str(coalesce_node_id),
-                    coalesce_name=str(coalesce_name),
+            resolved = restore.batch_id_remap.get(outcome.batch_id, outcome.batch_id)
+            if batch_id is None:
+                batch_id = resolved
+                first_token_id = item.token_id
+            elif resolved != batch_id:
+                raise AuditIntegrityError(
+                    f"BLOCKED journal rows at aggregation node {node_id!r} (run {self._run_id!r}, resume "
+                    f"checkpoint {restore.resume_checkpoint_id!r}) split across batches: token "
+                    f"{first_token_id!r} resolves batch_id={batch_id!r} but token {item.token_id!r} "
+                    f"resolves batch_id={resolved!r}. One node has exactly one in-progress batch."
                 )
+        if batch_id is None:  # pragma: no cover - callers pass non-empty node_items
+            raise AuditIntegrityError(f"_derive_restored_batch_id called with no journal rows for node {node_id!r}.")
+        batch = self._execution.get_batch(batch_id)
+        if batch is None:
+            raise AuditIntegrityError(
+                f"Restored batch_id {batch_id!r} for aggregation node {node_id!r} (run {self._run_id!r}) "
+                "has no batches row — audit data corruption."
+            )
+        if str(batch.aggregation_node_id) != str(node_id):
+            raise AuditIntegrityError(
+                f"Restored batch_id {batch_id!r} belongs to aggregation node "
+                f"{batch.aggregation_node_id!r}, but the journal BLOCKED rows carry barrier_key "
+                f"{str(node_id)!r} (run {self._run_id!r}) — journal/audit disagreement."
+            )
+        return batch_id
 
     @property
     def run_id(self) -> str:
@@ -816,6 +1021,9 @@ class RowProcessor:
         lost branches — see the executors' ``get_barrier_scalars``), so a
         quiescent pipeline composes an empty BarrierScalars (``has_state``
         False), which the checkpoint manager serializes as NULL.
+
+        On restore a missing aggregation entry means unlatched ``(None, None)``;
+        a missing coalesce key means no recorded losses.
 
         Returns:
             BarrierScalars with aggregation latches keyed by str(node_id) and

@@ -77,6 +77,9 @@ if TYPE_CHECKING:
 _TERMINAL_BATCH_STATUSES = frozenset({BatchStatus.COMPLETED, BatchStatus.FAILED})
 _TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
 _COMPLETABLE_OPERATION_STATUSES = frozenset({"completed", "failed"})
+# IN-clause chunk size for token-id lookups — stays under SQLite's default
+# 999 bound-parameter ceiling with headroom for the fixed predicates.
+_TOKEN_ID_CHUNK_SIZE = 500
 
 
 class _PreparedCallData(NamedTuple):
@@ -607,6 +610,79 @@ class ExecutionRepository:
         if row is None:
             return None
         return self._node_state_loader.load(row)
+
+    def get_max_node_state_attempts(self, run_id: str, token_ids: Sequence[str]) -> dict[str, int]:
+        """Max ``node_states.attempt`` per token (F1 resume attempt-offset derivation).
+
+        The resume restore path stamps every journal-restored token with
+        ``resume_attempt_offset = max_attempt + 1`` so re-driven node_states
+        never collide with attempts already recorded in the audit trail.
+        Tokens with no node_states rows are absent from the result (callers
+        treat absence as max_attempt = -1, i.e. offset 0).
+
+        Args:
+            run_id: Run ID to scope the query.
+            token_ids: Tokens to look up (chunked internally).
+
+        Returns:
+            Mapping of token_id -> max attempt observed in node_states.
+        """
+        result: dict[str, int] = {}
+        for i in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = list(token_ids[i : i + _TOKEN_ID_CHUNK_SIZE])
+            query = (
+                select(node_states_table.c.token_id, func.max(node_states_table.c.attempt).label("max_attempt"))
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.token_id.in_(chunk))
+                .group_by(node_states_table.c.token_id)
+            )
+            for row in self._ops.execute_fetchall(query):
+                result[row.token_id] = int(row.max_attempt)
+        return result
+
+    def get_open_node_state_ids(
+        self,
+        run_id: str,
+        *,
+        node_ids: Sequence[str],
+        token_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Outstanding (OPEN) node_state hold ids per token at the given nodes.
+
+        F1 resume derivation for coalesce ``state_ids``: a held branch's
+        node_state is written by ``begin_node_state`` at accept() time (status
+        OPEN — the "pending hold") and is completed only when the coalesce
+        resolves, so the un-completed OPEN row at the coalesce node IS the
+        hold whose ``state_id`` the restored ``_BranchEntry`` must carry.
+
+        If a token somehow has multiple OPEN states at the queried nodes,
+        the highest attempt wins (rows are scanned in attempt order and the
+        last write per token survives).
+
+        Args:
+            run_id: Run ID to scope the query.
+            node_ids: Node IDs to match (e.g. the coalesce node ids).
+            token_ids: Tokens to look up (chunked internally).
+
+        Returns:
+            Mapping of token_id -> state_id of the outstanding hold.
+        """
+        if not node_ids:
+            return {}
+        result: dict[str, str] = {}
+        for i in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = list(token_ids[i : i + _TOKEN_ID_CHUNK_SIZE])
+            query = (
+                select(node_states_table.c.token_id, node_states_table.c.state_id)
+                .where(node_states_table.c.run_id == run_id)
+                .where(node_states_table.c.node_id.in_(list(node_ids)))
+                .where(node_states_table.c.token_id.in_(chunk))
+                .where(node_states_table.c.status == NodeStateStatus.OPEN.value)
+                .order_by(node_states_table.c.token_id, node_states_table.c.attempt)
+            )
+            for row in self._ops.execute_fetchall(query):
+                result[row.token_id] = row.state_id
+        return result
 
     def get_completed_row_ids_for_nodes(
         self,

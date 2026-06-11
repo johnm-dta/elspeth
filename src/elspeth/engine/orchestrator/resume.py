@@ -86,6 +86,7 @@ from elspeth.engine.orchestrator.validation import (
     validate_source_quarantine_destination,
     validate_transform_error_sinks,
 )
+from elspeth.engine.processor import BarrierJournalRestoreContext
 from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:
@@ -581,12 +582,12 @@ class ResumeCoordinator:
         )
 
         # 1. Handle incomplete batches - call module function directly.
-        # F1 Task 1.2: the returned old→retry batch_id mapping is currently
-        # unconsumed — the checkpoint no longer carries blob state whose
-        # batch_ids needed rebinding (rebind_checkpoint_batch_ids is dead
-        # until Task 3.2 deletes it). Task 3.2's journal-based restore
-        # mechanism takes over batch rebinding.
-        handle_incomplete_batches(factory.execution, run_id)
+        # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py rewire.
+        # The returned old→retry batch_id mapping feeds the processor's
+        # journal-based barrier restore (BUFFERED token_outcomes still carry
+        # the dead original batch ids), threaded through ResumeState.
+        # rebind_checkpoint_batch_ids stays dead until Task 3.2 deletes it.
+        batch_id_remap = handle_incomplete_batches(factory.execution, run_id)
 
         # 2. Update run status to running after validation has succeeded.
         factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
@@ -610,6 +611,7 @@ class ResumeCoordinator:
             schema_contracts_by_source=schema_contracts_by_source,
             source_names_by_source=source_names_by_source,
             source_lifecycle_by_source=source_lifecycle_by_source,
+            batch_id_remap=batch_id_remap,
         )
 
     def resume(
@@ -766,14 +768,21 @@ class ResumeCoordinator:
                 return audit_counters.to_run_result(run_id, terminal_status)
 
             with shutdown_ctx as active_event:
+                # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py
+                # rewire. Bundle the journal-restore inputs (checkpoint
+                # scalars + batch remap) for the processor's restore sweep.
+                barrier_restore = BarrierJournalRestoreContext(
+                    resume_checkpoint_id=resume_checkpoint_id,
+                    barrier_scalars=resume_point.barrier_scalars,
+                    batch_id_remap=state.batch_id_remap,
+                )
                 result = self.process_resumed_rows(
                     factory=factory,
                     run_id=run_id,
                     config=config,
                     graph=graph,
                     unprocessed_rows=unprocessed_rows,
-                    restored_aggregation_state=restored_state,
-                    restored_coalesce_state=restored_coalesce_state,
+                    barrier_restore=barrier_restore,
                     settings=settings,
                     payload_store=payload_store,
                     incomplete_by_row=incomplete_by_row,
@@ -953,8 +962,7 @@ class ResumeCoordinator:
         config: PipelineConfig,
         graph: ExecutionGraph,
         unprocessed_rows: Sequence[ResumedRow],
-        restored_aggregation_state: Mapping[str, AggregationCheckpointState],
-        restored_coalesce_state: CoalesceCheckpointState | None,
+        barrier_restore: BarrierJournalRestoreContext | None,
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
@@ -998,8 +1006,7 @@ class ResumeCoordinator:
             artifacts,
             payload_store,
             include_source_on_start=False,
-            restored_aggregation_state=restored_aggregation_state,
-            restored_coalesce_state=restored_coalesce_state,
+            barrier_restore=barrier_restore,
             shutdown_event=shutdown_event,
         )
 

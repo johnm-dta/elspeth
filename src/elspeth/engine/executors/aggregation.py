@@ -35,7 +35,7 @@ from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.config import AggregationSettings
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
@@ -708,16 +708,9 @@ class AggregationExecutor:
                     "cover every BLOCKED journal row."
                 )
 
-            row_data = TokenSchedulerRepository.deserialize_row_payload(item.row_payload_json)
-            tokens_by_id[item.token_id] = TokenInfo(
-                row_id=item.row_id,
-                token_id=item.token_id,
-                row_data=row_data,
-                branch_name=item.branch_name,
-                fork_group_id=item.fork_group_id,
-                join_group_id=item.join_group_id,
-                expand_group_id=item.expand_group_id,
-                resume_attempt_offset=attempt_offset,
+            tokens_by_id[item.token_id] = token_from_journal_item(
+                item,
+                attempt_offset=attempt_offset,
                 resume_checkpoint_id=resume_checkpoint_id,
             )
             if oldest_blocked_at is None or item.barrier_blocked_at < oldest_blocked_at:

@@ -54,7 +54,7 @@ from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     RunContext,
 )
-from elspeth.engine.processor import RowProcessor, make_step_resolver
+from elspeth.engine.processor import BarrierJournalRestoreContext, RowProcessor, make_step_resolver
 from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:
@@ -64,8 +64,6 @@ if TYPE_CHECKING:
         SinkProtocol,
         TokenInfo,
     )
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.types import (
@@ -265,8 +263,7 @@ class RunExecutionCore:
         config_gate_id_map: dict[GateName, NodeID],
         coalesce_id_map: dict[CoalesceName, NodeID],
         payload_store: PayloadStore,
-        restored_aggregation_state: Mapping[NodeID, AggregationCheckpointState] | None = None,
-        restored_coalesce_state: CoalesceCheckpointState | None = None,
+        barrier_restore: BarrierJournalRestoreContext | None = None,
     ) -> tuple[RowProcessor, dict[CoalesceName, NodeID], CoalesceExecutor | None]:
         """Build a RowProcessor with all supporting infrastructure.
 
@@ -354,8 +351,8 @@ class RunExecutionCore:
                     branch_schemas=branch_schemas,
                     output_schema=output_schema,
                 )
-            if restored_coalesce_state is not None:
-                coalesce_executor.restore_from_checkpoint(restored_coalesce_state)
+            # F1: no blob restore here — on resume the RowProcessor rebuilds
+            # coalesce pendings from journal BLOCKED rows (barrier_restore).
 
         # Derive coalesce on_success from graph's terminal sink map (graph-authoritative),
         # falling back to settings for non-terminal coalesce nodes.
@@ -393,8 +390,7 @@ class RunExecutionCore:
             branch_to_sink=branch_to_sink,
             sink_names=frozenset(config.sinks),
             coalesce_on_success_map=coalesce_on_success_map,
-            restored_aggregation_state=restored_aggregation_state,
-            restored_coalesce_state=restored_coalesce_state,
+            barrier_restore=barrier_restore,
             payload_store=payload_store,
             clock=self._clock,
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,
@@ -415,8 +411,7 @@ class RunExecutionCore:
         payload_store: PayloadStore,
         *,
         include_source_on_start: bool = True,
-        restored_aggregation_state: Mapping[str, AggregationCheckpointState] | None = None,
-        restored_coalesce_state: CoalesceCheckpointState | None = None,
+        barrier_restore: BarrierJournalRestoreContext | None = None,
         shutdown_event: threading.Event | None = None,
     ) -> RunContext:
         """Initialize run context: assign node IDs, create PluginContext, call on_start, build processor.
@@ -424,8 +419,8 @@ class RunExecutionCore:
         Args:
             include_source_on_start: If True, call source.on_start(). False for resume
                 (source was fully consumed in original run).
-            restored_aggregation_state: Map of node_id -> state for resume path.
-            restored_coalesce_state: Pending coalesce state for resume path.
+            barrier_restore: Resume-only journal-restore inputs (F1); None on
+                the normal run path.
 
         Returns:
             RunContext with ctx, processor, coalesce_executor, coalesce_node_map,
@@ -489,10 +484,7 @@ class RunExecutionCore:
                 config_gate_id_map=config_gate_id_map,
                 coalesce_id_map=coalesce_id_map,
                 payload_store=payload_store,
-                restored_aggregation_state={NodeID(k): v for k, v in restored_aggregation_state.items()}
-                if restored_aggregation_state
-                else None,
-                restored_coalesce_state=restored_coalesce_state,
+                barrier_restore=barrier_restore,
             )
         except Exception:
             cleanup_plugins(config, ctx, include_source=include_source_on_start)

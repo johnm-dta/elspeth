@@ -27,9 +27,7 @@ import pytest
 
 # For node registration
 from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState, CoalescePendingCheckpoint, CoalesceTokenCheckpoint
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
     NodeStateStatus,
@@ -62,6 +60,7 @@ from elspeth.engine.executors import GateOutcome
 from elspeth.engine.processor import (
     MAX_WORK_QUEUE_ITERATIONS,
     SCHEDULER_MAINTENANCE_INTERVAL,
+    BarrierJournalRestoreContext,
     DAGTraversalContext,
     RowProcessor,
     _FlushContext,
@@ -202,8 +201,7 @@ def _make_processor(
     node_to_next: dict[NodeID, NodeID | None] | None = None,
     first_transform_node_id: NodeID | None = None,
     node_to_plugin: dict[NodeID, Any] | None = None,
-    restored_aggregation_state: dict[NodeID, AggregationCheckpointState] | None = None,
-    restored_coalesce_state: CoalesceCheckpointState | None = None,
+    barrier_restore: BarrierJournalRestoreContext | None = None,
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
     scheduler: Any = _DEFAULT_SCHEDULER,
@@ -291,8 +289,7 @@ def _make_processor(
         branch_to_coalesce=branch_to_coalesce,
         branch_to_sink={BranchName(k): SinkName(v) for k, v in (branch_to_sink or {}).items()},
         coalesce_on_success_map=coalesce_on_success_map,
-        restored_aggregation_state=restored_aggregation_state,
-        restored_coalesce_state=restored_coalesce_state,
+        barrier_restore=barrier_restore,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
         scheduler=factory.scheduler if scheduler is _DEFAULT_SCHEDULER else scheduler,
@@ -456,16 +453,85 @@ class TestConstructorErrorEdgeMap:
         processor = _make_processor(factory, edge_map=edge_map)
         assert processor._error_edge_ids == {}
 
-    def test_restores_aggregation_state(self) -> None:
-        """Restored aggregation state is passed to AggregationExecutor."""
-        _, factory = _make_factory()
-        # We can't easily verify internal state restoration without exposing
-        # internals, but we can verify the constructor doesn't crash with
-        # restoration data
+    def test_resume_restores_aggregation_buffers_from_blocked_rows(self) -> None:
+        """F1 restore inversion: resume rebuilds aggregation buffers FROM journal BLOCKED rows.
+
+        Seeds the journal (2 BLOCKED rows under barrier_key "agg-1", stamped
+        via the production claim->mark_blocked path) and the audit trail
+        (batch + members, BUFFERED token_outcomes, node_states at attempt 0),
+        then builds a resuming processor and asserts the buffers, batch id,
+        counters, trigger latch and attempt offsets all derive correctly —
+        with NO new journal rows created (the BLOCKED rows are reused as-is).
+        """
+        from sqlalchemy import func, select
+
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        now = datetime.now(UTC)
+        batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        tokens: list[TokenInfo] = []
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            payload = make_row({"value": ordinal})
+            token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+            _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+            tokens.append(token)
+            # Audit: membership + BUFFERED outcome + a node_state at attempt 0.
+            factory.execution.add_batch_member(batch_id=batch.batch_id, token_id=token_id, ordinal=ordinal)
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id="test-run"),
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                batch_id=batch.batch_id,
+            )
+            factory.execution.begin_node_state(
+                token_id=token_id,
+                node_id=str(agg_node),
+                run_id="test-run",
+                step_index=1,
+                input_data=payload.to_dict(),
+                attempt=0,
+            )
+            # Journal: production-shaped BLOCKED row (mark_blocked stamps
+            # barrier_blocked_at; the old ensure_blocked path did not).
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token_id,
+                row_id=token.row_id,
+                node_id=str(agg_node),
+                step_index=1,
+                ingest_sequence=ordinal,
+                row_payload_json=factory.scheduler.serialize_row_payload(payload),
+                available_at=now,
+            )
+            claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+            assert claimed is not None and claimed.token_id == token_id
+            factory.scheduler.mark_blocked(
+                work_item_id=claimed.work_item_id,
+                queue_key=None,
+                barrier_key=str(agg_node),
+                now=now,
+                expected_lease_owner="seeder",
+            )
+
+        with db.connection() as conn:
+            rows_before = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+
         processor = _make_processor(
             factory,
             aggregation_settings={
-                NodeID("agg-1"): AggregationSettings(
+                agg_node: AggregationSettings(
                     name="test-agg",
                     plugin="test-plugin",
                     input="agg_in",
@@ -473,14 +539,128 @@ class TestConstructorErrorEdgeMap:
                     trigger={"count": 3},
                 ),
             },
-            restored_aggregation_state={
-                NodeID("agg-1"): AggregationCheckpointState(
-                    version="5.0",
-                    nodes={},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=BarrierScalars(
+                    aggregation={str(agg_node): AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=None)},
+                    coalesce={},
+                ),
+                batch_id_remap={},
+            ),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert [t.token_id for t in node.tokens] == ["t1", "t2"]
+        assert node.batch_id == batch.batch_id
+        assert node.buffers == [{"value": 0}, {"value": 1}]
+        assert node.accepted_count_total == 2
+        assert node.completed_flush_count == 0
+        assert all(t.resume_attempt_offset == 1 for t in node.tokens)  # max_attempt(0)+1
+        assert all(t.resume_checkpoint_id == "ckpt-resume-1" for t in node.tokens)
+        # Checkpoint scalars (trigger latch) round-trip through the restore.
+        assert node.trigger.get_count_fire_offset() == pytest.approx(1.5)
+        # NO new journal rows: the BLOCKED rows are reused as-is.
+        with db.connection() as conn:
+            rows_after = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+        assert rows_after == rows_before
+
+    def test_resume_restore_raises_on_orphan_barrier_key(self) -> None:
+        """A BLOCKED row whose barrier_key matches no coalesce or aggregation refuses resume."""
+        _, factory = _make_factory()
+        payload = make_row({"value": 7})
+        token = TokenInfo(row_id="row-ghost", token_id="tok-ghost", row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=0)
+        factory.scheduler.ensure_blocked_barrier_work_item(
+            run_id="test-run",
+            token_id="tok-ghost",
+            row_id="row-ghost",
+            node_id=None,
+            step_index=0,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            barrier_key="ghost-barrier",
+            available_at=datetime.now(UTC),
+        )
+
+        with pytest.raises(AuditIntegrityError, match="orphan barrier_key 'ghost-barrier'"):
+            _make_processor(
+                factory,
+                barrier_restore=BarrierJournalRestoreContext(
+                    resume_checkpoint_id="ckpt-resume-1",
+                    barrier_scalars=None,
+                    batch_id_remap={},
+                ),
+            )
+
+    def test_resume_restore_ignores_adr028_queue_hold_rows(self) -> None:
+        """An ADR-028 queue-hold (BLOCKED, queue_key set, barrier_key NULL) is not a barrier member.
+
+        The queue resume path is untouched by F1: the row must be neither
+        restored into a barrier buffer nor counted anywhere, and must stay
+        BLOCKED on its queue_key.
+        """
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        now = datetime.now(UTC)
+        payload = make_row({"value": 9})
+        token = TokenInfo(row_id="row-q", token_id="tok-q", row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=0)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id="tok-q",
+            row_id="row-q",
+            node_id=None,
+            step_index=0,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key="queue-1",
+            barrier_key=None,
+            now=now,
+            expected_lease_owner="seeder",
+        )
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="test-agg",
+                    plugin="test-plugin",
+                    input="agg_in",
+                    on_error="discard",
+                    trigger={"count": 3},
                 ),
             },
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
         )
-        assert processor is not None
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert node.tokens == []
+        assert node.batch_id is None
+        assert node.accepted_count_total == 0
+        assert node.completed_flush_count == 0
+        with db.connection() as conn:
+            status, queue_key, barrier_key = conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.queue_key,
+                    token_work_items_table.c.barrier_key,
+                ).where(token_work_items_table.c.token_id == "tok-q")
+            ).one()
+        assert (status, queue_key, barrier_key) == ("blocked", "queue-1", None)
 
 
 class TestTraversalNextNodeInvariants:
@@ -4428,10 +4608,34 @@ class TestDurableSchedulerResumeDrain:
             ).one()
         assert (status, barrier_key) == ("blocked", "merge")
 
-    def test_resume_materializes_scheduler_blocks_from_coalesce_checkpoint(self) -> None:
-        """Checkpoint-restored coalesce branches must have matching durable scheduler barriers."""
-        db, factory = _make_factory()
-        coalesce_node = NodeID("coalesce::merge")
+    def _make_real_coalesce_executor(self, factory: RecorderFactory, coalesce_node: NodeID) -> Any:
+        """Build a production CoalesceExecutor over the factory's real repositories."""
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        def step_resolver(_node_id: NodeID) -> int:
+            return 1
+
+        executor = CoalesceExecutor(
+            execution=factory.execution,
+            span_factory=SpanFactory(),
+            token_manager=TokenManager(factory.data_flow, step_resolver=step_resolver),
+            run_id="test-run",
+            step_resolver=step_resolver,
+            data_flow=factory.data_flow,
+        )
+        executor.register_coalesce(
+            CoalesceSettings(name="merge", branches=["path_a", "path_b"], policy="require_all", merge="union"),
+            coalesce_node,
+        )
+        return executor
+
+    def _seed_held_coalesce_branch(self, factory: RecorderFactory, coalesce_node: NodeID) -> str:
+        """Register the coalesce node and enqueue a path_a branch token at it.
+
+        Returns the row_id of the forked source row.
+        """
         source_payload = make_row({"value": 45})
         row = factory.data_flow.create_row(
             run_id="test-run",
@@ -4450,155 +4654,138 @@ class TestDurableSchedulerResumeDrain:
             node_id=str(coalesce_node),
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_token(row.row_id, token_id="token-restored-coalesce")
-        restored_state = CoalesceCheckpointState(
-            version="4.0",
-            pending=(
-                CoalescePendingCheckpoint(
-                    coalesce_name="merge",
-                    row_id=row.row_id,
-                    elapsed_age_seconds=1.0,
-                    branches={
-                        "path_a": CoalesceTokenCheckpoint(
-                            token_id="token-restored-coalesce",
-                            row_id=row.row_id,
-                            branch_name="path_a",
-                            fork_group_id="fork-restore",
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data=source_payload.to_dict(),
-                            contract=source_payload.contract.to_checkpoint_format(),
-                            state_id="state-restored-coalesce",
-                            arrival_offset_seconds=0.0,
-                        )
-                    },
-                    lost_branches={},
-                ),
-            ),
-            completed_keys=(),
-        )
-
-        processor = _make_processor(
-            factory,
-            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
-            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
-            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
-            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
-            restored_coalesce_state=restored_state,
-            scheduler=factory.scheduler,
-        )
-
-        from sqlalchemy import select
-
-        from elspeth.core.landscape.schema import token_work_items_table
-
-        with db.connection() as conn:
-            scheduler_row = (
-                conn.execute(
-                    select(
-                        token_work_items_table.c.status,
-                        token_work_items_table.c.node_id,
-                        token_work_items_table.c.barrier_key,
-                        token_work_items_table.c.branch_name,
-                        token_work_items_table.c.fork_group_id,
-                        token_work_items_table.c.coalesce_node_id,
-                        token_work_items_table.c.coalesce_name,
-                    ).where(token_work_items_table.c.token_id == "token-restored-coalesce")
-                )
-                .mappings()
-                .one()
-            )
-        assert dict(scheduler_row) == {
-            "status": "blocked",
-            "node_id": str(coalesce_node),
-            "barrier_key": "merge",
-            "branch_name": "path_a",
-            "fork_group_id": "fork-restore",
-            "coalesce_node_id": str(coalesce_node),
-            "coalesce_name": "merge",
-        }
-
-        assert processor.mark_blocked_barrier_terminal("merge", ("token-restored-coalesce",)) == 1
-        with db.connection() as conn:
-            status = conn.execute(
-                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-restored-coalesce")
-            ).scalar_one()
-        assert status == "terminal"
-
-    def test_coalesce_checkpoint_restore_rejects_stale_scheduler_metadata(self) -> None:
-        """Checkpoint restore must fail when an existing BLOCKED row has stale cursor data."""
-        _db, factory = _make_factory()
-        coalesce_node = NodeID("coalesce::merge")
-        source_payload = make_row({"value": 45})
-        row = factory.data_flow.create_row(
+        factory.data_flow.create_token(row.row_id, token_id="token-held-a", branch_name="path_a", fork_group_id="fork-1")
+        factory.scheduler.enqueue_ready(
             run_id="test-run",
-            source_node_id="source-0",
-            row_index=0,
-            source_row_index=0,
-            ingest_sequence=0,
-            data=source_payload.to_dict(),
-        )
-        factory.data_flow.register_node(
-            run_id="test-run",
-            plugin_name="coalesce:merge",
-            node_type=NodeType.COALESCE,
-            plugin_version="1.0",
-            config={},
-            node_id=str(coalesce_node),
-            schema_config=_DYNAMIC_SCHEMA,
-        )
-        factory.data_flow.create_token(row.row_id, token_id="token-stale-coalesce")
-        factory.scheduler.ensure_blocked_barrier_work_item(
-            run_id="test-run",
-            token_id="token-stale-coalesce",
+            token_id="token-held-a",
             row_id=row.row_id,
             node_id=str(coalesce_node),
             step_index=1,
             ingest_sequence=0,
             row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
-            barrier_key="stale-merge",
             available_at=datetime.now(UTC),
             branch_name="path_a",
-            fork_group_id="fork-restore",
+            fork_group_id="fork-1",
             coalesce_node_id=str(coalesce_node),
             coalesce_name="merge",
         )
-        restored_state = CoalesceCheckpointState(
-            version="4.0",
-            pending=(
-                CoalescePendingCheckpoint(
-                    coalesce_name="merge",
-                    row_id=row.row_id,
-                    elapsed_age_seconds=1.0,
-                    branches={
-                        "path_a": CoalesceTokenCheckpoint(
-                            token_id="token-stale-coalesce",
-                            row_id=row.row_id,
-                            branch_name="path_a",
-                            fork_group_id="fork-restore",
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data=source_payload.to_dict(),
-                            contract=source_payload.contract.to_checkpoint_format(),
-                            state_id="state-stale-coalesce",
-                            arrival_offset_seconds=0.0,
-                        )
-                    },
-                    lost_branches={},
-                ),
+        return str(row.row_id)
+
+    def test_resume_restores_coalesce_pending_from_blocked_rows(self) -> None:
+        """F1 restore inversion: resume rebuilds coalesce pendings FROM journal BLOCKED rows.
+
+        Arrange drives the PRODUCTION hold path (drain -> accept holds ->
+        mark_blocked stamps barrier_blocked_at; accept writes the OPEN
+        node_state hold at attempt 0). Act builds a fresh processor +
+        executor with barrier_restore. The pending entry must carry the
+        journal token, the audit-derived hold state_id, and the
+        max_attempt+1 offset — with no new journal rows.
+        """
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        row_id = self._seed_held_coalesce_branch(factory, coalesce_node)
+        arrange_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        processor_kwargs: dict[str, Any] = {
+            "coalesce_node_ids": {CoalesceName("merge"): coalesce_node},
+            "node_step_map": {NodeID("source-0"): 0, coalesce_node: 1},
+            "node_to_next": {NodeID("source-0"): coalesce_node, coalesce_node: None},
+            "coalesce_on_success_map": {CoalesceName("merge"): "merged_sink"},
+        }
+        processor1 = _make_processor(factory, coalesce_executor=arrange_executor, **processor_kwargs)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor1.drain_scheduled_work(ctx)
+        assert results == []
+        assert ("merge", row_id) in arrange_executor._pending
+
+        # The hold node_state written by accept() — the state_id the restore must rediscover.
+        held_states = [
+            state
+            for state in factory.query.get_node_states_for_token("token-held-a")
+            if str(state.node_id) == str(coalesce_node) and state.status is NodeStateStatus.OPEN
+        ]
+        assert len(held_states) == 1
+        hold_state_id = held_states[0].state_id
+        assert held_states[0].attempt == 0
+
+        with db.connection() as conn:
+            rows_before = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+            status, barrier_key = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.barrier_key).where(
+                    token_work_items_table.c.token_id == "token-held-a"
+                )
+            ).one()
+        assert (status, barrier_key) == ("blocked", "merge")
+
+        # ---- resume: fresh executor + processor rebuild FROM the journal ----
+        resumed_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        _make_processor(
+            factory,
+            coalesce_executor=resumed_executor,
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
             ),
-            completed_keys=(),
+            **processor_kwargs,
         )
 
-        with pytest.raises(AuditIntegrityError, match="incompatible existing work_item"):
+        pending = resumed_executor._pending[("merge", row_id)]
+        assert set(pending.branches) == {"path_a"}
+        entry = pending.branches["path_a"]
+        assert entry.token.token_id == "token-held-a"
+        assert entry.token.branch_name == "path_a"
+        assert entry.token.fork_group_id == "fork-1"
+        assert entry.state_id == hold_state_id  # state_id resolved from the OPEN node_state hold
+        assert entry.token.resume_attempt_offset == 1  # max_attempt(0)+1
+        assert entry.token.resume_checkpoint_id == "ckpt-resume-1"
+        assert pending.lost_branches == {}
+        # NO new journal rows: the BLOCKED row is reused as-is.
+        with db.connection() as conn:
+            rows_after = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+        assert rows_after == rows_before
+
+    def test_resume_restore_rejects_blocked_coalesce_row_without_hold_state(self) -> None:
+        """A BLOCKED coalesce row with no OPEN node_state hold is journal/audit divergence.
+
+        The hold is written at accept() time BEFORE the journal row blocks;
+        its absence at restore means the audit trail and journal disagree —
+        AuditIntegrityError, not a silent default.
+        """
+        _db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        self._seed_held_coalesce_branch(factory, coalesce_node)
+        now = datetime.now(UTC)
+        # Block the row through the production claim path WITHOUT the
+        # accept()-written hold node_state.
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner="seeder",
+        )
+
+        resumed_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        with pytest.raises(AuditIntegrityError, match="No entry in state_ids"):
             _make_processor(
                 factory,
+                coalesce_executor=resumed_executor,
                 coalesce_node_ids={CoalesceName("merge"): coalesce_node},
                 node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
                 node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
                 coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
-                restored_coalesce_state=restored_state,
-                scheduler=factory.scheduler,
+                barrier_restore=BarrierJournalRestoreContext(
+                    resume_checkpoint_id="ckpt-resume-1",
+                    barrier_scalars=None,
+                    batch_id_remap={},
+                ),
             )
 
     def test_aggregation_buffering_leaves_scheduler_work_blocked(self) -> None:

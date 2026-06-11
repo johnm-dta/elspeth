@@ -593,6 +593,11 @@ class ResumeState:
     schema_contracts_by_source: Mapping[NodeID, SchemaContract]
     source_names_by_source: Mapping[NodeID, str]
     source_lifecycle_by_source: Mapping[NodeID, str]
+    # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py rewire.
+    # old->retry batch_id mapping from handle_incomplete_batches; consumed by
+    # the processor's journal restore (BUFFERED token_outcomes still carry the
+    # dead original batch ids after a flush-interrupting crash).
+    batch_id_remap: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Local import to avoid hoisting OrchestrationInvariantError into the
@@ -613,6 +618,7 @@ class ResumeState:
             "schema_contracts_by_source",
             "source_names_by_source",
             "source_lifecycle_by_source",
+            "batch_id_remap",
         )
         # unprocessed_rows is a Sequence of ResumedRow instances. Each
         # ResumedRow is fully deep-frozen in its own __post_init__ (row_data

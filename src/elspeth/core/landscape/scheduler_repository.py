@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import (
+    BarrierEmission,
     BlockedPendingSinkHandoff,
     SchedulerEventType,
     TokenWorkItem,
@@ -1365,27 +1366,99 @@ class TokenSchedulerRepository:
                     )
         return terminalized
 
-    def mark_blocked_barrier_pending_sink_many(
+    def complete_barrier(
         self,
         *,
         run_id: str,
         barrier_key: str,
-        handoffs: Mapping[str, BlockedPendingSinkHandoff],
+        consumed_token_ids: Sequence[str],
+        emitted_pending_sink: Sequence[BarrierEmission],
+        emitted_ready: Sequence[BarrierEmission],
         now: datetime,
+        leased_exclusion_token_id: str | None = None,
+        require_exhaustive_release: bool = True,
     ) -> int:
-        """Move BLOCKED barrier work to PENDING_SINK before external sink writes."""
-        requested_token_ids = tuple(handoffs.keys())
-        if not requested_token_ids:
-            return 0
+        """Complete a barrier atomically: consume BLOCKED inputs and emit outputs.
+
+        ONE journal transaction (F1, elspeth-ae5183307b) performs:
+
+        - validation of the consumed set against the durable BLOCKED set under
+          ``(run_id, barrier_key)`` — both directions: every consumed/handed-off
+          token must hold a BLOCKED row, and every BLOCKED row must be consumed
+          or handed off (``leased_exclusion_token_id`` exempts the in-claim
+          triggering token, matching the processor's ``leased_token_id``
+          exclusions);
+        - consumed rows -> TERMINAL with payload scrub and per-row
+          ``MARK_BLOCKED_BARRIER_TERMINAL`` events (``{"barrier_key"}`` context,
+          the existing event shape);
+        - ``emitted_pending_sink``: buffered passthrough tokens (those with a
+          BLOCKED row under this barrier) transition BLOCKED -> PENDING_SINK in
+          place with the handoff bundle; others INSERT a fresh PENDING_SINK row
+          on the node_id-NULL terminal lane (deterministic work_item_id);
+        - ``emitted_ready``: INSERT READY continuations with ``ENQUEUE`` events;
+        - every emission event's context carries
+          ``{"barrier_key": ..., "consumed_count": N}`` so the atomic completion
+          is reconstructable from scheduler_events alone.
+
+        ``require_exhaustive_release=False`` is the legacy wrapper arm used by
+        ``mark_blocked_barrier_terminal`` / ``mark_blocked_barrier_pending_sink_many``
+        (their partial-release semantics and ``{"barrier_key"}``-only emission
+        context are pinned by existing tests and the lifecycle state machine):
+        BLOCKED rows not named stay BLOCKED, every pending-sink emission must be
+        a passthrough (fresh inserts are refused), and emission events keep the
+        legacy context. New callers must not pass it; Task 3.4 migrates the
+        processor's flush sites onto the strict default.
+
+        Returns the number of consumed rows terminalized.
+        """
+        consumed = tuple(consumed_token_ids)
+        consumed_set = frozenset(consumed)
+        if len(consumed_set) != len(consumed):
+            duplicates = sorted(token_id for token_id in consumed_set if consumed.count(token_id) > 1)
+            raise AuditIntegrityError(
+                f"Scheduler barrier terminalization received duplicate live token_ids for run_id={run_id!r} "
+                f"barrier_key={barrier_key!r}: {duplicates!r}"
+            )
+        pending_token_ids = tuple(emission.token_id for emission in emitted_pending_sink)
+        if len(frozenset(pending_token_ids)) != len(pending_token_ids):
+            duplicates = sorted(token_id for token_id in frozenset(pending_token_ids) if pending_token_ids.count(token_id) > 1)
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion received duplicate pending-sink emissions for run_id={run_id!r} "
+                f"barrier_key={barrier_key!r}: {duplicates!r}"
+            )
+        pending_overlap = consumed_set & frozenset(pending_token_ids)
+        if pending_overlap:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
+                f"token_ids both consumed and emitted to pending-sink: {sorted(pending_overlap)!r}; a BLOCKED row "
+                "cannot be terminalized and handed off in the same completion."
+            )
+        for emission in emitted_pending_sink:
+            if emission.sink_name is None or emission.outcome is None or emission.path is None:
+                raise AuditIntegrityError(
+                    f"Scheduler barrier completion pending-sink emission for run_id={run_id!r} "
+                    f"barrier_key={barrier_key!r} token_id={emission.token_id!r} requires sink_name, outcome and path."
+                )
+        if leased_exclusion_token_id is not None:
+            emitted_token_ids = frozenset(pending_token_ids) | {emission.token_id for emission in emitted_ready}
+            if leased_exclusion_token_id in consumed_set or leased_exclusion_token_id in emitted_token_ids:
+                raise AuditIntegrityError(
+                    f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
+                    f"leased_exclusion_token_id={leased_exclusion_token_id!r} that is itself consumed or emitted; "
+                    "the in-claim triggering token must be excluded, not completed."
+                )
+
+        emission_context: dict[str, object] = {"barrier_key": barrier_key}
+        if require_exhaustive_release:
+            emission_context["consumed_count"] = len(consumed_set)
 
         with self._engine.begin() as conn:
-            rows = (
+            blocked_rows = (
                 conn.execute(
                     select(token_work_items_table)
                     .where(token_work_items_table.c.run_id == run_id)
                     .where(token_work_items_table.c.barrier_key == barrier_key)
                     .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.token_id.in_(requested_token_ids))
                     .order_by(
                         token_work_items_table.c.ingest_sequence,
                         token_work_items_table.c.step_index,
@@ -1395,80 +1468,415 @@ class TokenSchedulerRepository:
                 .mappings()
                 .all()
             )
-            rows_by_token_id: dict[str, list[RowMapping]] = {}
-            for row in rows:
-                row_token_id = row["token_id"]
-                if row_token_id not in rows_by_token_id:
-                    rows_by_token_id[row_token_id] = []
-                rows_by_token_id[row_token_id].append(row)
+            blocked_by_token: dict[str, list[RowMapping]] = {}
+            for row in blocked_rows:
+                blocked_by_token.setdefault(row["token_id"], []).append(row)
+            durable_token_ids = frozenset(blocked_by_token)
 
-            for token_id in requested_token_ids:
-                matching_rows = rows_by_token_id[token_id] if token_id in rows_by_token_id else []
+            missing_token_ids = consumed_set - durable_token_ids
+            if missing_token_ids:
+                matching_count = len(consumed_set & durable_token_ids)
+                raise AuditIntegrityError(
+                    f"Scheduler barrier terminalization mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
+                    f"live consumed {len(consumed_set)} token(s), but durable BLOCKED rows contained "
+                    f"{matching_count} matching token(s) out of {len(durable_token_ids)} blocked token(s). "
+                    f"missing token_ids={sorted(missing_token_ids)!r}; durable token_ids={sorted(durable_token_ids)!r}."
+                )
+
+            passthrough_emissions: list[BarrierEmission] = []
+            fresh_emissions: list[BarrierEmission] = []
+            for emission in emitted_pending_sink:
+                matching_rows = blocked_by_token.get(emission.token_id, [])
                 if not matching_rows:
+                    if require_exhaustive_release:
+                        fresh_emissions.append(emission)
+                        continue
                     raise AuditIntegrityError(
                         f"Scheduler barrier pending-sink handoff for run_id={run_id!r} barrier_key={barrier_key!r} "
-                        f"is missing token_id={token_id!r}; refusing partial sink handoff."
+                        f"is missing token_id={emission.token_id!r}; refusing partial sink handoff."
                     )
                 if len(matching_rows) != 1:
                     raise AuditIntegrityError(
                         f"Scheduler barrier pending-sink handoff for run_id={run_id!r} barrier_key={barrier_key!r} "
-                        f"token_id={token_id!r} found {len(matching_rows)} matching rows; expected exactly one."
+                        f"token_id={emission.token_id!r} found {len(matching_rows)} matching rows; expected exactly one."
+                    )
+                passthrough_emissions.append(emission)
+
+            if require_exhaustive_release:
+                handed_off_token_ids = frozenset(emission.token_id for emission in passthrough_emissions)
+                required_token_ids = durable_token_ids - frozenset(
+                    () if leased_exclusion_token_id is None else (leased_exclusion_token_id,)
+                )
+                uncovered_token_ids = required_token_ids - consumed_set - handed_off_token_ids
+                if uncovered_token_ids:
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier completion mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
+                        f"durable BLOCKED rows hold {len(uncovered_token_ids)} token(s) neither consumed nor handed "
+                        f"off; the completion would orphan them. uncovered token_ids={sorted(uncovered_token_ids)!r}; "
+                        f"consumed token_ids={sorted(consumed_set)!r}; handoff token_ids={sorted(handed_off_token_ids)!r}."
                     )
 
-            transitioned = 0
-            for row in rows:
-                handoff = handoffs[row["token_id"]]
-                result = conn.execute(
-                    update(token_work_items_table)
-                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.barrier_key == barrier_key)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.token_id == row["token_id"])
-                    .values(
-                        status=TokenWorkStatus.PENDING_SINK.value,
-                        row_payload_json=handoff.row_payload_json,
-                        pending_sink_name=handoff.sink_name,
-                        pending_outcome=handoff.outcome,
-                        pending_path=handoff.path,
-                        pending_error_hash=handoff.error_hash,
-                        pending_error_message=handoff.error_message,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        updated_at=now,
-                    )
+            terminalized = self._terminalize_consumed_barrier_rows(
+                conn,
+                run_id=run_id,
+                barrier_key=barrier_key,
+                consumed=consumed,
+                blocked_by_token=blocked_by_token,
+                now=now,
+            )
+            self._transition_passthrough_pending_sink(
+                conn,
+                run_id=run_id,
+                barrier_key=barrier_key,
+                blocked_rows=blocked_rows,
+                passthrough_emissions=passthrough_emissions,
+                emission_context=emission_context,
+                now=now,
+            )
+            for emission in fresh_emissions:
+                self._insert_fresh_pending_sink_emission(
+                    conn,
+                    run_id=run_id,
+                    barrier_key=barrier_key,
+                    emission=emission,
+                    emission_context=emission_context,
+                    now=now,
                 )
-                if result.rowcount == 1:
-                    self._record_scheduler_event(
-                        conn,
-                        event_type=SchedulerEventType.MARK_PENDING_SINK,
-                        run_id=run_id,
-                        token_id=row["token_id"],
-                        work_item_id=row["work_item_id"],
-                        node_id=row["node_id"],
-                        from_status=TokenWorkStatus.BLOCKED,
-                        to_status=TokenWorkStatus.PENDING_SINK,
-                        from_lease_owner=row["lease_owner"],
-                        to_lease_owner=None,
-                        from_attempt=row["attempt"],
-                        to_attempt=row["attempt"],
-                        recorded_at=now,
-                        from_lease_expires_at=row["lease_expires_at"],
-                        to_lease_expires_at=None,
-                        context={"barrier_key": barrier_key},
-                    )
-                    transitioned += 1
-                elif result.rowcount not in (0, None):
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier pending-sink handoff affected {result.rowcount} rows for "
-                        f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
-                    )
-            if transitioned != len(requested_token_ids):
+            for emission in emitted_ready:
+                self._insert_ready_emission(
+                    conn,
+                    run_id=run_id,
+                    barrier_key=barrier_key,
+                    emission=emission,
+                    emission_context=emission_context,
+                    now=now,
+                )
+        return terminalized
+
+    def _terminalize_consumed_barrier_rows(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        barrier_key: str,
+        consumed: tuple[str, ...],
+        blocked_by_token: Mapping[str, list[RowMapping]],
+        now: datetime,
+    ) -> int:
+        """BLOCKED -> TERMINAL for the consumed set (legacy terminalization arm)."""
+        consumed_set = frozenset(consumed)
+        candidate_rows = sorted(
+            (row for token_id in consumed_set for row in blocked_by_token.get(token_id, ())),
+            key=lambda row: (row["token_id"], row["work_item_id"]),
+        )
+        terminalized = 0
+        for row in candidate_rows:
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.barrier_key == barrier_key)
+                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                .where(token_work_items_table.c.token_id.in_(consumed))
+                .values(
+                    status=TokenWorkStatus.TERMINAL.value,
+                    row_payload_json=self._scrubbed_row_payload_json(barrier_key),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 1:
+                self._record_scheduler_event(
+                    conn,
+                    event_type=SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL,
+                    run_id=run_id,
+                    token_id=row["token_id"],
+                    work_item_id=row["work_item_id"],
+                    node_id=row["node_id"],
+                    from_status=TokenWorkStatus.BLOCKED,
+                    to_status=TokenWorkStatus.TERMINAL,
+                    from_lease_owner=row["lease_owner"],
+                    to_lease_owner=None,
+                    from_attempt=row["attempt"],
+                    to_attempt=row["attempt"],
+                    recorded_at=now,
+                    from_lease_expires_at=row["lease_expires_at"],
+                    to_lease_expires_at=None,
+                    context={"barrier_key": barrier_key},
+                )
+                terminalized += 1
+            elif result.rowcount not in (0, None):
                 raise AuditIntegrityError(
-                    f"Scheduler barrier pending-sink handoff mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
-                    f"requested {len(requested_token_ids)} token(s), transitioned {transitioned}."
+                    f"Scheduler barrier terminalization affected {result.rowcount} rows for "
+                    f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
                 )
-        return transitioned
+        if consumed_set and terminalized != len(consumed_set):
+            raise AuditIntegrityError(
+                f"Scheduler barrier terminalization mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
+                f"live consumed {len(consumed_set)} token(s), but durable scheduler terminalized {terminalized}."
+            )
+        return terminalized
+
+    def _transition_passthrough_pending_sink(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        barrier_key: str,
+        blocked_rows: Sequence[RowMapping],
+        passthrough_emissions: Sequence[BarrierEmission],
+        emission_context: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        """BLOCKED -> PENDING_SINK in place for buffered passthrough tokens (legacy handoff arm)."""
+        emission_by_token = {emission.token_id: emission for emission in passthrough_emissions}
+        if not emission_by_token:
+            return
+        transitioned = 0
+        for row in blocked_rows:
+            emission = emission_by_token.get(row["token_id"])
+            if emission is None:
+                continue
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.barrier_key == barrier_key)
+                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                .where(token_work_items_table.c.token_id == row["token_id"])
+                .values(
+                    status=TokenWorkStatus.PENDING_SINK.value,
+                    row_payload_json=emission.row_payload_json,
+                    pending_sink_name=emission.sink_name,
+                    pending_outcome=emission.outcome,
+                    pending_path=emission.path,
+                    pending_error_hash=emission.error_hash,
+                    pending_error_message=emission.error_message,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 1:
+                self._record_scheduler_event(
+                    conn,
+                    event_type=SchedulerEventType.MARK_PENDING_SINK,
+                    run_id=run_id,
+                    token_id=row["token_id"],
+                    work_item_id=row["work_item_id"],
+                    node_id=row["node_id"],
+                    from_status=TokenWorkStatus.BLOCKED,
+                    to_status=TokenWorkStatus.PENDING_SINK,
+                    from_lease_owner=row["lease_owner"],
+                    to_lease_owner=None,
+                    from_attempt=row["attempt"],
+                    to_attempt=row["attempt"],
+                    recorded_at=now,
+                    from_lease_expires_at=row["lease_expires_at"],
+                    to_lease_expires_at=None,
+                    context=emission_context,
+                )
+                transitioned += 1
+            elif result.rowcount not in (0, None):
+                raise AuditIntegrityError(
+                    f"Scheduler barrier pending-sink handoff affected {result.rowcount} rows for "
+                    f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
+                )
+        if transitioned != len(emission_by_token):
+            raise AuditIntegrityError(
+                f"Scheduler barrier pending-sink handoff mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
+                f"requested {len(emission_by_token)} token(s), transitioned {transitioned}."
+            )
+
+    def _insert_fresh_pending_sink_emission(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        barrier_key: str,
+        emission: BarrierEmission,
+        emission_context: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        """INSERT a fresh PENDING_SINK row on the node_id-NULL terminal lane."""
+        if emission.node_id is not None:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} "
+                f"received fresh pending-sink emission token_id={emission.token_id!r} with "
+                f"node_id={emission.node_id!r}; fresh sink-bound emissions live on the node_id-NULL terminal lane."
+            )
+        if emission.row_id is None or emission.step_index is None or emission.ingest_sequence is None:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} "
+                f"fresh pending-sink emission token_id={emission.token_id!r} requires row_id, step_index "
+                "and ingest_sequence; the inserted journal row must be a complete resume cursor."
+            )
+        self._validate_work_item_references(
+            conn,
+            run_id=run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            ingest_sequence=emission.ingest_sequence,
+            node_id=None,
+            coalesce_node_id=emission.coalesce_node_id,
+        )
+        work_item_id = self._work_item_id(run_id, emission.token_id, None, emission.attempt)
+        values: dict[str, object] = {
+            "work_item_id": work_item_id,
+            "run_id": run_id,
+            "token_id": emission.token_id,
+            "row_id": emission.row_id,
+            "node_id": None,
+            "step_index": emission.step_index,
+            "ingest_sequence": emission.ingest_sequence,
+            "row_payload_json": emission.row_payload_json,
+            "status": TokenWorkStatus.PENDING_SINK.value,
+            "queue_key": emission.queue_key,
+            "barrier_key": emission.barrier_key,
+            "on_success_sink": emission.on_success_sink,
+            "pending_sink_name": emission.sink_name,
+            "pending_outcome": emission.outcome,
+            "pending_path": emission.path,
+            "pending_error_hash": emission.error_hash,
+            "pending_error_message": emission.error_message,
+            "branch_name": emission.branch_name,
+            "fork_group_id": emission.fork_group_id,
+            "join_group_id": emission.join_group_id,
+            "expand_group_id": emission.expand_group_id,
+            "coalesce_node_id": emission.coalesce_node_id,
+            "coalesce_name": emission.coalesce_name,
+            "attempt": emission.attempt,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "available_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._insert_work_item(conn, values=values, operation="barrier-completion PENDING_SINK emission")
+        self._record_scheduler_event(
+            conn,
+            event_type=SchedulerEventType.MARK_PENDING_SINK,
+            run_id=run_id,
+            token_id=emission.token_id,
+            work_item_id=work_item_id,
+            node_id=None,
+            from_status=None,
+            to_status=TokenWorkStatus.PENDING_SINK,
+            from_lease_owner=None,
+            to_lease_owner=None,
+            from_attempt=None,
+            to_attempt=emission.attempt,
+            recorded_at=now,
+            context=emission_context,
+        )
+
+    def _insert_ready_emission(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        barrier_key: str,
+        emission: BarrierEmission,
+        emission_context: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        """INSERT a READY continuation emitted by a barrier completion."""
+        if emission.row_id is None or emission.step_index is None or emission.ingest_sequence is None:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} "
+                f"ready emission token_id={emission.token_id!r} requires row_id, step_index "
+                "and ingest_sequence; the inserted journal row must be a complete resume cursor."
+            )
+        self._validate_work_item_references(
+            conn,
+            run_id=run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            ingest_sequence=emission.ingest_sequence,
+            node_id=emission.node_id,
+            coalesce_node_id=emission.coalesce_node_id,
+        )
+        values = self._ready_work_item_values(
+            run_id=run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            node_id=emission.node_id,
+            step_index=emission.step_index,
+            ingest_sequence=emission.ingest_sequence,
+            row_payload_json=emission.row_payload_json,
+            available_at=now,
+            attempt=emission.attempt,
+            queue_key=emission.queue_key,
+            barrier_key=emission.barrier_key,
+            on_success_sink=emission.on_success_sink,
+            branch_name=emission.branch_name,
+            fork_group_id=emission.fork_group_id,
+            join_group_id=emission.join_group_id,
+            expand_group_id=emission.expand_group_id,
+            coalesce_node_id=emission.coalesce_node_id,
+            coalesce_name=emission.coalesce_name,
+        )
+        self._insert_work_item(conn, values=values, operation="barrier-completion READY emission")
+        self._record_scheduler_event(
+            conn,
+            event_type=SchedulerEventType.ENQUEUE,
+            run_id=run_id,
+            token_id=emission.token_id,
+            work_item_id=str(values["work_item_id"]),
+            node_id=emission.node_id,
+            from_status=None,
+            to_status=TokenWorkStatus.READY,
+            from_lease_owner=None,
+            to_lease_owner=None,
+            from_attempt=None,
+            to_attempt=emission.attempt,
+            recorded_at=now,
+            context=emission_context,
+        )
+
+    def mark_blocked_barrier_pending_sink_many(
+        self,
+        *,
+        run_id: str,
+        barrier_key: str,
+        handoffs: Mapping[str, BlockedPendingSinkHandoff],
+        now: datetime,
+    ) -> int:
+        """Move BLOCKED barrier work to PENDING_SINK before external sink writes.
+
+        Delegating wrapper over :meth:`complete_barrier` (F1 Task 2.3). The
+        legacy arm (``require_exhaustive_release=False``) preserves the pinned
+        semantics: BLOCKED rows not named in ``handoffs`` stay BLOCKED, a
+        handoff token without a BLOCKED row is refused (no fresh inserts), and
+        handoff events keep the ``{"barrier_key"}``-only context.
+        """
+        requested_token_ids = tuple(handoffs.keys())
+        if not requested_token_ids:
+            return 0
+        emissions = tuple(
+            BarrierEmission(
+                token_id=token_id,
+                row_payload_json=handoff.row_payload_json,
+                sink_name=handoff.sink_name,
+                outcome=handoff.outcome,
+                path=handoff.path,
+                error_hash=handoff.error_hash,
+                error_message=handoff.error_message,
+            )
+            for token_id, handoff in handoffs.items()
+        )
+        self.complete_barrier(
+            run_id=run_id,
+            barrier_key=barrier_key,
+            consumed_token_ids=(),
+            emitted_pending_sink=emissions,
+            emitted_ready=(),
+            now=now,
+            require_exhaustive_release=False,
+        )
+        # complete_barrier raised unless every requested handoff transitioned.
+        return len(requested_token_ids)
 
     def mark_pending_sink_terminal_many(
         self,
@@ -1672,103 +2080,28 @@ class TokenSchedulerRepository:
         token_ids: tuple[str, ...],
         now: datetime,
     ) -> int:
-        """Mark BLOCKED work consumed by a resolved barrier as terminal."""
-        requested_token_ids = frozenset(token_ids)
+        """Mark BLOCKED work consumed by a resolved barrier as terminal.
+
+        Delegating wrapper over :meth:`complete_barrier` (F1 Task 2.3). The
+        legacy arm (``require_exhaustive_release=False``) preserves the pinned
+        partial-release semantics: BLOCKED rows under the barrier that are not
+        named in ``token_ids`` stay BLOCKED.
+        """
         if not token_ids:
             raise AuditIntegrityError(
                 f"Scheduler barrier terminalization for run_id={run_id!r} barrier_key={barrier_key!r} "
                 "requires at least one live token_id; refusing to terminalize durable BLOCKED rows without "
                 "live barrier evidence."
             )
-        if len(requested_token_ids) != len(token_ids):
-            duplicates = sorted(token_id for token_id in requested_token_ids if token_ids.count(token_id) > 1)
-            raise AuditIntegrityError(
-                f"Scheduler barrier terminalization received duplicate live token_ids for run_id={run_id!r} "
-                f"barrier_key={barrier_key!r}: {duplicates!r}"
-            )
-        with self._engine.begin() as conn:
-            if requested_token_ids:
-                durable_token_ids = frozenset(
-                    conn.execute(
-                        select(token_work_items_table.c.token_id)
-                        .where(token_work_items_table.c.run_id == run_id)
-                        .where(token_work_items_table.c.barrier_key == barrier_key)
-                        .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    )
-                    .scalars()
-                    .all()
-                )
-                missing_token_ids = requested_token_ids - durable_token_ids
-                if missing_token_ids:
-                    matching_count = len(requested_token_ids & durable_token_ids)
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier terminalization mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
-                        f"live consumed {len(requested_token_ids)} token(s), but durable BLOCKED rows contained "
-                        f"{matching_count} matching token(s) out of {len(durable_token_ids)} blocked token(s). "
-                        f"missing token_ids={sorted(missing_token_ids)!r}; durable token_ids={sorted(durable_token_ids)!r}."
-                    )
-            candidate_rows = (
-                conn.execute(
-                    select(token_work_items_table)
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.barrier_key == barrier_key)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.token_id.in_(token_ids))
-                    .order_by(token_work_items_table.c.token_id, token_work_items_table.c.work_item_id)
-                )
-                .mappings()
-                .all()
-            )
-            rowcount = 0
-            for row in candidate_rows:
-                statement = (
-                    update(token_work_items_table)
-                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.barrier_key == barrier_key)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.token_id.in_(token_ids))
-                )
-                result = conn.execute(
-                    statement.values(
-                        status=TokenWorkStatus.TERMINAL.value,
-                        row_payload_json=self._scrubbed_row_payload_json(barrier_key),
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        updated_at=now,
-                    )
-                )
-                if result.rowcount == 1:
-                    self._record_scheduler_event(
-                        conn,
-                        event_type=SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL,
-                        run_id=run_id,
-                        token_id=row["token_id"],
-                        work_item_id=row["work_item_id"],
-                        node_id=row["node_id"],
-                        from_status=TokenWorkStatus.BLOCKED,
-                        to_status=TokenWorkStatus.TERMINAL,
-                        from_lease_owner=row["lease_owner"],
-                        to_lease_owner=None,
-                        from_attempt=row["attempt"],
-                        to_attempt=row["attempt"],
-                        recorded_at=now,
-                        from_lease_expires_at=row["lease_expires_at"],
-                        to_lease_expires_at=None,
-                        context={"barrier_key": barrier_key},
-                    )
-                    rowcount += 1
-                elif result.rowcount not in (0, None):
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier terminalization affected {result.rowcount} rows for "
-                        f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
-                    )
-            if requested_token_ids and rowcount != len(requested_token_ids):
-                raise AuditIntegrityError(
-                    f"Scheduler barrier terminalization mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
-                    f"live consumed {len(requested_token_ids)} token(s), but durable scheduler terminalized {rowcount}."
-                )
-        return int(rowcount)
+        return self.complete_barrier(
+            run_id=run_id,
+            barrier_key=barrier_key,
+            consumed_token_ids=token_ids,
+            emitted_pending_sink=(),
+            emitted_ready=(),
+            now=now,
+            require_exhaustive_release=False,
+        )
 
     def peer_active_leases(
         self,

@@ -85,6 +85,56 @@ class TokenWorkItem:
 
 
 @dataclass(frozen=True, slots=True)
+class BarrierEmission:
+    """One output emitted by an atomic barrier completion (``complete_barrier``).
+
+    Two lanes consume this contract:
+
+    - ``emitted_pending_sink``: a sink-bound output. If the token already has a
+      BLOCKED row under the completing barrier (a buffered passthrough token),
+      that row transitions BLOCKED -> PENDING_SINK in place and only the
+      handoff bundle (``row_payload_json``, ``sink_name``, ``outcome``,
+      ``path``, ``error_hash``, ``error_message``) is read. Otherwise a fresh
+      PENDING_SINK row is inserted on the node_id-NULL terminal lane, which
+      additionally requires ``row_id``, ``step_index`` and ``ingest_sequence``
+      (and ``node_id`` must stay ``None``).
+    - ``emitted_ready``: a READY continuation (an aggregation/coalesce output
+      re-entering the DAG). Requires ``row_id``, ``step_index``,
+      ``ingest_sequence`` and the target ``node_id`` cursor.
+
+    Lineage and coalesce cursor fields mirror ``TokenWorkItem``: they are
+    durable resume metadata for the inserted row.
+    """
+
+    token_id: str
+    row_payload_json: str
+    sink_name: str | None = None
+    outcome: str | None = None
+    path: str | None = None
+    error_hash: str | None = None
+    error_message: str | None = None
+    row_id: str | None = None
+    node_id: str | None = None
+    step_index: int | None = None
+    ingest_sequence: int | None = None
+    queue_key: str | None = None
+    barrier_key: str | None = None
+    on_success_sink: str | None = None
+    branch_name: str | None = None
+    fork_group_id: str | None = None
+    join_group_id: str | None = None
+    expand_group_id: str | None = None
+    coalesce_node_id: str | None = None
+    coalesce_name: str | None = None
+    attempt: int = 1
+
+    def __post_init__(self) -> None:
+        require_int(self.attempt, "attempt", min_value=1)
+        require_int(self.step_index, "step_index", optional=True, min_value=0)
+        require_int(self.ingest_sequence, "ingest_sequence", optional=True, min_value=0)
+
+
+@dataclass(frozen=True, slots=True)
 class BlockedPendingSinkHandoff:
     """Sink handoff metadata for a BLOCKED scheduler row released by a barrier."""
 

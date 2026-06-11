@@ -16,6 +16,20 @@ leaves the run resumable as *source-exhausted engine work*:
 - an INTERRUPTED (non-exhausted) source still fails resume safely with
   ``IncompleteSourceResumeError`` instead of fabricating completion.
 
+Two run paths are covered:
+
+1. ``test_exhausted_source_eof_aggregation_resumes_without_source_replay`` —
+   synthetic (interruption reshaped into the exhausted+crashed state via DB
+   surgery) to prove the resume path accepts exhausted sources and drains the
+   restored EOF work without source replay.
+
+2. ``test_real_eof_flush_crash_resumes_from_journal`` — virgin run that
+   really crashes DURING the EOF flush (F1/D4 sequence-0 checkpoint makes it
+   resumable); asserts the dual-attempt audit trail: a crashed attempt-0
+   (FAILED) node state AND a successful attempt-1 (COMPLETED) node state, both
+   visible in the same run, confirming no UNIQUE violation and full audit
+   provenance for the retry (elspeth-262911c26b acceptance criterion).
+
 Everything below runs the production path: real Orchestrator.run, real
 SQLite LandscapeDB, real CheckpointManager/RecoveryManager, real
 ``get_resume_point()`` + ``Orchestrator.resume()``. No resume seams are
@@ -210,10 +224,10 @@ class TestExhaustedSourceEOFResume:
         (``checkpoint_interrupted_progress``). Two columns are then flipped
         to the exact values the engine writes when it crashes DURING the EOF
         flush instead (source_iteration.py records 'exhausted' BEFORE the
-        flush; the failure ceremony records FAILED): a virgin run cannot
-        reach that state resumable today because no checkpoint writer runs
-        between exhaustion and sink durability — that gap is pinned by
-        test_real_eof_flush_crash_is_not_yet_resumable below.
+        flush; the failure ceremony records FAILED): this synthetic path
+        isolates the resume-path acceptance check from any crash-path
+        checkpoint-writer changes; the corresponding virgin-run crash path
+        is covered by test_real_eof_flush_crash_resumes_from_journal below.
         """
         from elspeth.core.payload_store import FilesystemPayloadStore
 
@@ -306,7 +320,7 @@ class TestExhaustedSourceEOFResume:
         assert set(work_statuses) <= {"terminal"}
         assert checkpoint_mgr.get_latest_checkpoint(run_id) is None
 
-    def test_real_eof_flush_crash_resumes_to_completion(self, tmp_path: Any) -> None:
+    def test_real_eof_flush_crash_resumes_from_journal(self, tmp_path: Any) -> None:
         """A virgin run crashing DURING the EOF flush resumes to completion.
 
         FLIPPED from the old not-yet-resumable characterization (its docstring
@@ -317,8 +331,14 @@ class TestExhaustedSourceEOFResume:
         retries the FAILED batch, re-runs the flush (second batch call
         succeeds), and delivers the one batch covering ALL source rows —
         without re-invoking the source (see elspeth-b2142988b4).
+
+        Acceptance criterion (elspeth-262911c26b): the audit trail shows BOTH
+        flush attempts — attempt 0 (FAILED, the crash) and attempt 1
+        (COMPLETED, the resume's retry) — for the same aggregation node and
+        representative token, confirming no UNIQUE violation occurred and that
+        the dual-attempt provenance is preserved.
         """
-        from elspeth.core.landscape.schema import batch_members_table, batches_table
+        from elspeth.core.landscape.schema import batch_members_table, batches_table, node_states_table
         from elspeth.core.payload_store import FilesystemPayloadStore
 
         db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
@@ -394,6 +414,50 @@ class TestExhaustedSourceEOFResume:
             )
         assert work_statuses
         assert set(work_statuses) <= {"terminal"}
+
+        # Dual-attempt audit assertion (elspeth-262911c26b acceptance criterion):
+        # Both flush attempts must be visible in node_states — attempt 0 (the crash,
+        # FAILED) and attempt 1 (the resume's retry, COMPLETED) — under the same
+        # aggregation node_id and representative token (batch member with ordinal 0).
+        # No UNIQUE violation means the (token_id, node_id, attempt) constraint was
+        # correctly honoured across the run+resume boundary.
+        with db.connection() as conn:
+            # Identify the representative token: ordinal-0 batch member (first accepted).
+            # There may be two batches (failed original + completed retry) sharing the same
+            # members, so LIMIT 1 is correct — both point to the same token_id.
+            rep_token_id = conn.execute(
+                select(batch_members_table.c.token_id)
+                .join(batches_table, batch_members_table.c.batch_id == batches_table.c.batch_id)
+                .where(
+                    batches_table.c.run_id == run_id,
+                    batch_members_table.c.ordinal == 0,
+                )
+                .limit(1)
+            ).scalar_one()
+
+            # Query node_states for the aggregation node's flush executions,
+            # ordered by attempt so the assertion is deterministic.
+            flush_states = conn.execute(
+                select(
+                    node_states_table.c.attempt,
+                    node_states_table.c.status,
+                )
+                .where(
+                    node_states_table.c.run_id == run_id,
+                    node_states_table.c.node_id == str(transform.node_id),
+                    node_states_table.c.token_id == rep_token_id,
+                )
+                .order_by(node_states_table.c.attempt)
+            ).all()
+
+        assert len(flush_states) == 2, (
+            f"Expected 2 node_states for the aggregation flush (attempt 0 + attempt 1), got {len(flush_states)}: {flush_states!r}"
+        )
+        crashed_attempt, resumed_attempt = flush_states
+        assert crashed_attempt.attempt == 0, f"Attempt 0 missing or mis-ordered: {crashed_attempt!r}"
+        assert crashed_attempt.status == "failed", f"Crashed flush (attempt 0) must be FAILED, got {crashed_attempt.status!r}"
+        assert resumed_attempt.attempt == 1, f"Attempt 1 missing or mis-ordered: {resumed_attempt!r}"
+        assert resumed_attempt.status == "completed", f"Resumed flush (attempt 1) must be COMPLETED, got {resumed_attempt.status!r}"
 
     def test_interrupted_source_still_fails_resume_safely(self, tmp_path: Any) -> None:
         """A non-exhausted (interrupted) source refuses resume with IncompleteSourceResumeError.

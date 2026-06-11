@@ -307,6 +307,22 @@ class CoalesceExecutor:
         unchanged from the blob-restore era — see
         ``_reconstruct_completed_keys_from_landscape``.
 
+        Caller obligations (Task 3.1):
+
+        * **Call exactly once per resume.** Unlike the per-node aggregation
+          twin, this method restores the WHOLE executor in one call — it ends
+          by replacing ``_pending`` and ``_completed_keys`` wholesale, so a
+          second call (e.g. looped per barrier key) discards prior restored
+          state. Pass ALL coalesce journal items in one ``items`` sequence.
+        * **Do not re-notify restored losses.** ``lost_branches`` restored
+          from ``scalars`` are already recorded — re-deriving losses from
+          audit and calling ``notify_branch_lost`` for a key that already
+          carries them raises ``OrchestrationInvariantError`` (duplicate
+          loss). For zero-arrival loss-only keys dropped by the stale-scalars
+          arm, re-notification of genuinely-completed keys is safe: the
+          Landscape completed-keys check inside ``notify_branch_lost``
+          returns None for them.
+
         Args:
             items: BLOCKED journal rows for coalesce barriers (all keys).
             scalars: Per-pending-key lost_branches records from the checkpoint
@@ -317,10 +333,11 @@ class CoalesceExecutor:
                 after the checkpoint — a legitimate window under D3's
                 staleness model, since the checkpoint may be older than the
                 journal) and is dropped with a log line rather than rejected.
-            state_ids: Per-token node_state hold id (the PENDING node_state
-                written at accept() time, derived from audit tables). Every
-                journal token must be covered — a BLOCKED row whose hold is
-                absent is an audit inconsistency.
+            state_ids: Per-token node_state hold id — the PENDING node_states
+                at the coalesce node, one per restored token (written at
+                accept() time, derived from audit tables). Every journal
+                token must be covered — a BLOCKED row whose hold is absent
+                is an audit inconsistency.
             attempt_offsets: Per-token resume attempt offset (max_attempt + 1).
             resume_checkpoint_id: Checkpoint id stamped on restored tokens
                 (resume provenance).
@@ -465,15 +482,18 @@ class CoalesceExecutor:
                 lost_branches=dict(scalars[stale_key].lost_branches),
             )
 
-        self._pending.clear()
-        self._completed_keys.clear()
-
         # Reconstruct completed keys from Landscape (source of truth) —
         # unchanged from the blob-restore era. This eliminates:
         # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
         # - Checkpoint-Landscape divergence risk
-        self._reconstruct_completed_keys_from_landscape()
+        # Queried BEFORE any mutation: a Landscape error mid-restore must not
+        # leave the executor cleared-but-unrestored.
+        completed_keys = self._reconstruct_completed_keys_from_landscape()
 
+        self._pending.clear()
+        self._completed_keys.clear()
+        for completed_key in completed_keys:
+            self._completed_keys[completed_key] = None
         self._pending.update(new_pending)
 
         slog.info(
@@ -484,8 +504,8 @@ class CoalesceExecutor:
             resume_checkpoint_id=resume_checkpoint_id,
         )
 
-    def _reconstruct_completed_keys_from_landscape(self) -> None:
-        """Populate _completed_keys from the Landscape audit trail.
+    def _reconstruct_completed_keys_from_landscape(self) -> list[tuple[str, str]]:
+        """Read completed coalesce keys from the Landscape audit trail.
 
         Queries node_states for completed entries at coalesce node IDs, joined
         with tokens to get row_ids. Maps node_id → coalesce_name via the
@@ -494,9 +514,14 @@ class CoalesceExecutor:
         This is the source-of-truth path: the Landscape records ALL completed
         coalesces (no FIFO eviction), so late-arrival detection works correctly
         even for pipelines with >max_completed_keys coalesced rows.
+
+        Returns the keys instead of mutating ``_completed_keys`` so the caller
+        (``restore_from_journal``) can run the Landscape query BEFORE clearing
+        executor state — a Landscape failure mid-restore must not leave the
+        executor cleared-but-unrestored.
         """
         if not self._node_ids:
-            return
+            return []
 
         # Build reverse map: node_id → coalesce_name
         node_id_to_name: dict[str, str] = {str(nid): name for name, nid in self._node_ids.items()}
@@ -506,9 +531,7 @@ class CoalesceExecutor:
             node_ids=frozenset(node_id_to_name.keys()),
         )
 
-        for node_id_str, row_id in completed_pairs:
-            if node_id_str in node_id_to_name:
-                self._completed_keys[(node_id_to_name[node_id_str], row_id)] = None
+        return [(node_id_to_name[node_id_str], row_id) for node_id_str, row_id in completed_pairs if node_id_str in node_id_to_name]
 
     def _check_landscape_for_completion(self, coalesce_name: str, row_id: str) -> bool:
         """Check the Landscape for whether a coalesce key has completed.

@@ -608,18 +608,20 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
 COALESCE_KEY = "coalesce:merge"
 
 
-def _seed_two_coalesce_groups(engine: Tier1Engine, repo) -> str:
+def _seed_two_coalesce_groups(engine: Tier1Engine, repo, *, extra_tokens: list[tuple[str, str]] | None = None) -> str:
     """Two rows' branch groups BLOCKED under ONE shared coalesce barrier_key.
 
     Coalesce barriers key on coalesce_name, shared by ALL row_ids pending at
     the coalesce; fork children inherit their parent's row_id, so each pending
-    group is (run_id, barrier_key, row_id).
+    group is (run_id, barrier_key, row_id). ``extra_tokens`` registers
+    additional (row_id, token_id) pairs without blocking them (e.g. the merged
+    output child of a coalesce fire).
     """
     payload = _seed_run_grouped(
         engine,
         run_id=RUN_ID,
         rows=[("r1", 0), ("r2", 1)],
-        tokens=[("r1", "t1a"), ("r1", "t1b"), ("r2", "t2a"), ("r2", "t2b")],
+        tokens=[("r1", "t1a"), ("r1", "t1b"), ("r2", "t2a"), ("r2", "t2b"), *(extra_tokens or [])],
         now=NOW,
     )
     for token_id, row_id, ingest_sequence in [("t1a", "r1", 0), ("t1b", "r1", 0), ("t2a", "r2", 1), ("t2b", "r2", 1)]:
@@ -665,7 +667,7 @@ def test_complete_barrier_scoped_group_still_catches_cross_group_consumed_token(
     engine, repo = _make_repo()
     _seed_two_coalesce_groups(engine, repo)
 
-    with pytest.raises(AuditIntegrityError, match=r"missing token_ids.*t2a"):
+    with pytest.raises(AuditIntegrityError, match=r"missing token_ids.*t2a.*scope_row_id='r1'"):
         repo.complete_barrier(
             run_id=RUN_ID,
             barrier_key=COALESCE_KEY,
@@ -684,7 +686,7 @@ def test_complete_barrier_scoped_group_still_catches_uncovered_blocked_row() -> 
     engine, repo = _make_repo()
     _seed_two_coalesce_groups(engine, repo)
 
-    with pytest.raises(AuditIntegrityError, match=r"uncovered token_ids.*t1b"):
+    with pytest.raises(AuditIntegrityError, match=r"uncovered token_ids.*t1b.*scope_row_id='r1'"):
         repo.complete_barrier(
             run_id=RUN_ID,
             barrier_key=COALESCE_KEY,
@@ -716,3 +718,214 @@ def test_complete_barrier_scope_row_id_requires_exhaustive_release() -> None:
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_combined_lanes_one_call() -> None:
+    """Consumed + passthrough + fresh pending-sink + ready emissions in ONE atomic call.
+
+    Pins the arm ordering (terminalizations, then passthrough transitions, then
+    fresh inserts, then ready inserts) via the scheduler_events insertion order
+    and the shared emission context on BOTH emission lanes.
+    """
+    engine, repo = _make_repo()
+    payload = _seed_three_blocked(engine, repo, extra_tokens=[("r-agg", "t-agg-out", 3), ("r-next", "t-next", 4)])
+    events_before = len(_events(engine))
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=BARRIER_KEY,
+        consumed_token_ids=["t1", "t2"],
+        emitted_pending_sink=[
+            # Passthrough: t3 holds a BLOCKED row under the barrier.
+            BarrierEmission(token_id="t3", row_payload_json=payload, sink_name="out", outcome="success", path="completed"),
+            # Fresh terminal-lane insert: t-agg-out has no BLOCKED row.
+            BarrierEmission(
+                token_id="t-agg-out",
+                row_id="r-agg",
+                row_payload_json=payload,
+                sink_name="out",
+                outcome="success",
+                path="aggregated",
+                step_index=4,
+                ingest_sequence=3,
+            ),
+        ],
+        emitted_ready=[
+            BarrierEmission(
+                token_id="t-next",
+                row_id="r-next",
+                row_payload_json=payload,
+                node_id="normalize",
+                step_index=4,
+                ingest_sequence=4,
+            )
+        ],
+        now=NOW,
+    )
+
+    assert n == 2
+    assert _statuses(engine, ["t1", "t2"]) == {TokenWorkStatus.TERMINAL.value}
+    assert _statuses(engine, ["t3", "t-agg-out"]) == {TokenWorkStatus.PENDING_SINK.value}
+    assert _row_for_token(engine, "t-agg-out")["node_id"] is None
+    assert _row_for_token(engine, "t-next")["status"] == TokenWorkStatus.READY.value
+
+    new_events = _events(engine)[events_before:]
+    assert [(event["event_type"], event["token_id"]) for event in new_events] == [
+        (SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value, "t1"),
+        (SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value, "t2"),
+        (SchedulerEventType.MARK_PENDING_SINK.value, "t3"),
+        (SchedulerEventType.MARK_PENDING_SINK.value, "t-agg-out"),
+        (SchedulerEventType.ENQUEUE.value, "t-next"),
+    ]
+    # Consumed events keep the legacy context shape; ALL emission events on
+    # BOTH lanes share the atomic-completion context.
+    for event in new_events[:2]:
+        assert json.loads(event["context_json"]) == {"barrier_key": BARRIER_KEY}
+    for event in new_events[2:]:
+        assert json.loads(event["context_json"]) == {"barrier_key": BARRIER_KEY, "consumed_count": 2}
+
+
+def test_complete_barrier_scoped_coalesce_fire_emits_merged_ready_child() -> None:
+    """The Task 3.4 coalesce shape end-to-end: scoped consume + merged READY child.
+
+    The merged child's row_id is the inherited parent row_id (= scope_row_id);
+    the other row's held branches are untouched.
+    """
+    engine, repo = _make_repo()
+    payload = _seed_two_coalesce_groups(engine, repo, extra_tokens=[("r1", "t1-merged")])
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=COALESCE_KEY,
+        consumed_token_ids=["t1a", "t1b"],
+        emitted_pending_sink=[],
+        emitted_ready=[
+            BarrierEmission(
+                token_id="t1-merged",
+                row_id="r1",  # fork children inherit the parent row_id
+                row_payload_json=payload,
+                node_id="normalize",
+                step_index=2,
+                ingest_sequence=0,
+            )
+        ],
+        now=NOW,
+        scope_row_id="r1",
+    )
+
+    assert n == 2
+    assert _statuses(engine, ["t1a", "t1b"]) == {TokenWorkStatus.TERMINAL.value}
+    assert _statuses(engine, ["t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+    merged = _row_for_token(engine, "t1-merged")
+    assert merged["status"] == TokenWorkStatus.READY.value
+    assert merged["row_id"] == "r1"
+    enqueue_events = [
+        event for event in _events(engine) if event["event_type"] == SchedulerEventType.ENQUEUE.value and event["token_id"] == "t1-merged"
+    ]
+    assert len(enqueue_events) == 1
+    assert json.loads(enqueue_events[0]["context_json"]) == {"barrier_key": COALESCE_KEY, "consumed_count": 2}
+    # The merged continuation is claimable like any other.
+    claimed = repo.claim_ready(run_id=RUN_ID, lease_owner="w-merged", lease_seconds=30, now=NOW + timedelta(seconds=3))
+    assert claimed is not None
+    assert claimed.token_id == "t1-merged"
+
+
+def test_complete_barrier_scoped_fire_rejects_emission_outside_scope_group() -> None:
+    """A scoped completion must not emit into another row's pending group."""
+    engine, repo = _make_repo()
+    payload = _seed_two_coalesce_groups(engine, repo, extra_tokens=[("r1", "t1-merged")])
+
+    with pytest.raises(AuditIntegrityError, match="outside the scoped pending group"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=COALESCE_KEY,
+            consumed_token_ids=["t1a", "t1b"],
+            emitted_pending_sink=[],
+            emitted_ready=[
+                BarrierEmission(
+                    token_id="t1-merged",
+                    row_id="r2",  # confused caller: emitting into the OTHER row's group
+                    row_payload_json=payload,
+                    node_id="normalize",
+                    step_index=2,
+                    ingest_sequence=1,
+                )
+            ],
+            now=NOW,
+            scope_row_id="r1",
+        )
+
+    assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_leased_exclusion_requires_exhaustive_release() -> None:
+    """leased_exclusion_token_id only affects the strict exhaustiveness check; the legacy arm refuses it."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match="exclusion only exempts"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            leased_exclusion_token_id="t3",
+            require_exhaustive_release=False,
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_rejects_duplicate_ready_emissions() -> None:
+    engine, repo = _make_repo()
+    payload = _seed_three_blocked(engine, repo, extra_tokens=[("r-next", "t-next", 3)])
+
+    with pytest.raises(AuditIntegrityError, match="duplicate ready emissions"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2", "t3"],
+            emitted_pending_sink=[],
+            emitted_ready=[
+                BarrierEmission(
+                    token_id="t-next",
+                    row_id="r-next",
+                    row_payload_json=payload,
+                    node_id="normalize",
+                    step_index=4,
+                    ingest_sequence=3,
+                ),
+                BarrierEmission(
+                    token_id="t-next",
+                    row_id="r-next",
+                    row_payload_json=payload,
+                    node_id="normalize",
+                    step_index=5,
+                    ingest_sequence=3,
+                ),
+            ],
+            now=NOW,
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_rejects_leased_exclusion_token_in_consumed_set() -> None:
+    """The in-claim trigger must be excluded, not completed: exclusion ∩ consumed raises."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match="must be excluded, not completed"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2", "t3"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            leased_exclusion_token_id="t3",
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}

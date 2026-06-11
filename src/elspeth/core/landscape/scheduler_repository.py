@@ -1430,6 +1430,13 @@ class TokenSchedulerRepository:
                 f"scope_row_id={scope_row_id!r} with require_exhaustive_release=False; row scoping narrows the "
                 "exhaustiveness universe and is meaningless on the legacy partial-release arm."
             )
+        if leased_exclusion_token_id is not None and not require_exhaustive_release:
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
+                f"leased_exclusion_token_id={leased_exclusion_token_id!r} with require_exhaustive_release=False; "
+                "the exclusion only exempts a token from the exhaustiveness check and is meaningless on the "
+                "legacy partial-release arm."
+            )
         consumed = tuple(consumed_token_ids)
         consumed_set = frozenset(consumed)
         if len(consumed_set) != len(consumed):
@@ -1443,6 +1450,13 @@ class TokenSchedulerRepository:
             duplicates = sorted(token_id for token_id in frozenset(pending_token_ids) if pending_token_ids.count(token_id) > 1)
             raise AuditIntegrityError(
                 f"Scheduler barrier completion received duplicate pending-sink emissions for run_id={run_id!r} "
+                f"barrier_key={barrier_key!r}: {duplicates!r}"
+            )
+        ready_token_ids = tuple(emission.token_id for emission in emitted_ready)
+        if len(frozenset(ready_token_ids)) != len(ready_token_ids):
+            duplicates = sorted(token_id for token_id in frozenset(ready_token_ids) if ready_token_ids.count(token_id) > 1)
+            raise AuditIntegrityError(
+                f"Scheduler barrier completion received duplicate ready emissions for run_id={run_id!r} "
                 f"barrier_key={barrier_key!r}: {duplicates!r}"
             )
         pending_overlap = consumed_set & frozenset(pending_token_ids)
@@ -1466,13 +1480,33 @@ class TokenSchedulerRepository:
                     f"leased_exclusion_token_id={leased_exclusion_token_id!r} that is itself consumed or emitted; "
                     "the in-claim triggering token must be excluded, not completed."
                 )
+        if scope_row_id is not None:
+            for emission in (*emitted_pending_sink, *emitted_ready):
+                if emission.row_id is not None and emission.row_id != scope_row_id:
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
+                        f"emission token_id={emission.token_id!r} with row_id={emission.row_id!r} outside the scoped "
+                        f"pending group scope_row_id={scope_row_id!r}; a scoped completion must not emit into "
+                        "another row's group."
+                    )
 
         emission_context: dict[str, object] = {"barrier_key": barrier_key}
         if require_exhaustive_release:
             emission_context["consumed_count"] = len(consumed_set)
 
+        # Narrowed column set: no arm reads the blocked rows' row_payload_json
+        # (terminalization scrubs it, passthrough overwrites it with the
+        # handoff payload), so fetching it would drag every held row's full
+        # payload into memory on large barrier sets for nothing.
         blocked_select = (
-            select(token_work_items_table)
+            select(
+                token_work_items_table.c.work_item_id,
+                token_work_items_table.c.token_id,
+                token_work_items_table.c.node_id,
+                token_work_items_table.c.attempt,
+                token_work_items_table.c.lease_owner,
+                token_work_items_table.c.lease_expires_at,
+            )
             .where(token_work_items_table.c.run_id == run_id)
             .where(token_work_items_table.c.barrier_key == barrier_key)
             .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
@@ -1497,6 +1531,7 @@ class TokenSchedulerRepository:
                 blocked_by_token.setdefault(row["token_id"], []).append(row)
             durable_token_ids = frozenset(blocked_by_token)
 
+            scope_note = "" if scope_row_id is None else f" scope_row_id={scope_row_id!r}."
             missing_token_ids = consumed_set - durable_token_ids
             if missing_token_ids:
                 matching_count = len(consumed_set & durable_token_ids)
@@ -1505,6 +1540,7 @@ class TokenSchedulerRepository:
                     f"live consumed {len(consumed_set)} token(s), but durable BLOCKED rows contained "
                     f"{matching_count} matching token(s) out of {len(durable_token_ids)} blocked token(s). "
                     f"missing token_ids={sorted(missing_token_ids)!r}; durable token_ids={sorted(durable_token_ids)!r}."
+                    f"{scope_note}"
                 )
 
             passthrough_emissions: list[BarrierEmission] = []
@@ -1512,6 +1548,11 @@ class TokenSchedulerRepository:
             for emission in emitted_pending_sink:
                 matching_rows = blocked_by_token.get(emission.token_id, [])
                 if not matching_rows:
+                    # Strict/legacy partition: on the strict arm (the F1 verb)
+                    # an unbuffered sink-bound emission is a fresh terminal-lane
+                    # INSERT; on the legacy wrapper arm it is a refused partial
+                    # handoff (mark_blocked_barrier_pending_sink_many's pinned
+                    # behavior).
                     if require_exhaustive_release:
                         fresh_emissions.append(emission)
                         continue
@@ -1538,6 +1579,7 @@ class TokenSchedulerRepository:
                         f"durable BLOCKED rows hold {len(uncovered_token_ids)} token(s) neither consumed nor handed "
                         f"off; the completion would orphan them. uncovered token_ids={sorted(uncovered_token_ids)!r}; "
                         f"consumed token_ids={sorted(consumed_set)!r}; handoff token_ids={sorted(handed_off_token_ids)!r}."
+                        f"{scope_note}"
                     )
 
             terminalized = self._terminalize_consumed_barrier_rows(

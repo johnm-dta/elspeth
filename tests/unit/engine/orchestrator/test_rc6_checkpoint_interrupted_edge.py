@@ -6,16 +6,18 @@ History: the original RC6 edge here was the token-anchor selection chain
 The anchor itself was deleted as vestigial (F2, 2026-06-10) — the entire
 fallback chain is gone, so the crash surface no longer exists. F1 Task 1.2
 then retired the blob persistence (checkpoint carries only BarrierScalars;
-counters derive from audit tables at restore, design D3), and Task 2.1
-retired the executor blob state entirely: the processor now surfaces live
-trigger-latch scalars via ``get_aggregation_barrier_scalars()`` — only nodes
-with at least one latched fire offset are emitted. What these tests pin:
+counters derive from audit tables at restore, design D3), Task 2.1 retired
+the executor blob state, and Task 2.4 unified the write path: the processor
+surfaces ONE composed ``get_barrier_scalars() -> BarrierScalars`` and the
+coordinator hands it to ``create_checkpoint`` unconditionally (the manager
+serializes NULL when ``has_state`` is False). What these tests pin:
 
 - unlatched / counter-only aggregation nodes contribute NO persisted scalars
   (their counters are derivable; their fire offsets are None);
 - latched nodes contribute per-node trigger-latch scalars;
 - a shutdown with no latched barriers anywhere still writes a recovery
-  checkpoint (the former no-anchor skip arm is gone) with barrier_scalars=None.
+  checkpoint (the former no-anchor skip arm is gone) whose empty
+  BarrierScalars persists as NULL.
 """
 
 from __future__ import annotations
@@ -41,8 +43,10 @@ def _loop_ctx(
     pending_tokens: dict[str, list] | None = None,
 ) -> Mock:
     processor = Mock()
-    processor.get_aggregation_barrier_scalars.return_value = aggregation_scalars
-    processor.get_coalesce_barrier_scalars.return_value = {}
+    processor.get_barrier_scalars.return_value = BarrierScalars(
+        aggregation={str(node_id): scalars for node_id, scalars in aggregation_scalars.items()},
+        coalesce={},
+    )
 
     loop_ctx = Mock()
     loop_ctx.processor = processor
@@ -59,7 +63,8 @@ class TestFlushEmptiedAggregationCheckpoints:
         F1 design D3: durable counters (flush_index / rows_seen_total
         provenance) derive from audit tables at restore, and unlatched
         triggers have no fire offsets — the executor emits no entry for such
-        nodes, so the checkpoint is still written with barrier_scalars=None.
+        nodes, so the checkpoint is still written with an empty BarrierScalars
+        (``has_state`` False → the manager persists NULL).
         """
         coordinator = _make_coordinator()
         loop_ctx = _loop_ctx({})  # executor emitted nothing — no latched nodes
@@ -71,7 +76,8 @@ class TestFlushEmptiedAggregationCheckpoints:
 
         coordinator._checkpoint_manager.create_checkpoint.assert_called_once()
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
-        assert kwargs["barrier_scalars"] is None
+        assert isinstance(kwargs["barrier_scalars"], BarrierScalars)
+        assert kwargs["barrier_scalars"].has_state is False
 
     def test_latched_nodes_persist_their_scalars(self) -> None:
         """Latched aggregation nodes surface as per-node BarrierScalars entries.
@@ -111,4 +117,4 @@ class TestFlushEmptiedAggregationCheckpoints:
         coordinator._checkpoint_manager.create_checkpoint.assert_called_once()
         kwargs = coordinator._checkpoint_manager.create_checkpoint.call_args.kwargs
         assert kwargs["run_id"] == "run-no-anchor"
-        assert kwargs["barrier_scalars"] is None
+        assert kwargs["barrier_scalars"].has_state is False

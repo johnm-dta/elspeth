@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeIs, cast
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.barrier_scalars import AggregationNodeScalars, CoalescePendingScalars
+from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
@@ -806,27 +806,28 @@ class RowProcessor:
         """
         return self._aggregation_executor.get_buffer_count(node_id)
 
-    def get_aggregation_barrier_scalars(self) -> dict[NodeID, AggregationNodeScalars]:
-        """Get the underivable trigger-latch scalars for the checkpoint row.
+    def get_barrier_scalars(self) -> BarrierScalars:
+        """Compose the underivable barrier scalars for the checkpoint row.
 
         F1 design D3: the checkpoint persists only scalar barrier metadata —
-        buffered tokens live in journal BLOCKED rows; counters derive from
-        audit tables at restore. Only nodes with a latched trigger fire
-        offset are emitted (see AggregationExecutor.get_barrier_scalars).
-        """
-        return self._aggregation_executor.get_barrier_scalars()
+        buffered tokens live in journal BLOCKED rows; counters and state ids
+        derive from audit tables at restore. The live executors each emit only
+        nodes/keys with actual state (latched trigger fire offsets, recorded
+        lost branches — see the executors' ``get_barrier_scalars``), so a
+        quiescent pipeline composes an empty BarrierScalars (``has_state``
+        False), which the checkpoint manager serializes as NULL.
 
-    def get_coalesce_barrier_scalars(self) -> dict[tuple[str, str], CoalescePendingScalars]:
-        """Get the underivable lost-branch scalars for the checkpoint row.
-
-        F1 design D3: the checkpoint persists only scalar barrier metadata —
-        arrived-branch token payloads live in journal BLOCKED rows; state ids
-        derive from audit tables at restore. Only pending keys with recorded
-        losses are emitted (see CoalesceExecutor.get_barrier_scalars).
+        Returns:
+            BarrierScalars with aggregation latches keyed by str(node_id) and
+            coalesce lost-branch records keyed by (coalesce_name, row_id).
         """
-        if self._coalesce_executor is None:
-            return {}
-        return self._coalesce_executor.get_barrier_scalars()
+        coalesce: dict[tuple[str, str], CoalescePendingScalars] = (
+            dict(self._coalesce_executor.get_barrier_scalars()) if self._coalesce_executor is not None else {}
+        )
+        return BarrierScalars(
+            aggregation={str(node_id): scalars for node_id, scalars in self._aggregation_executor.get_barrier_scalars().items()},
+            coalesce=coalesce,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Aggregation flush helpers (shared by handle_timeout_flush and

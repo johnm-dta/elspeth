@@ -31,7 +31,7 @@ from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.barrier_scalars import AggregationNodeScalars, CoalescePendingScalars
+    from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.checkpoint import ResumedRow
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
@@ -125,10 +125,8 @@ class RowProcessorHandle(Protocol):
         """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
         ...
 
-    def get_aggregation_barrier_scalars(self) -> dict[NodeID, AggregationNodeScalars]:
-        raise NotImplementedError
-
-    def get_coalesce_barrier_scalars(self) -> dict[tuple[str, str], CoalescePendingScalars]:
+    def get_barrier_scalars(self) -> BarrierScalars:
+        """Compose the underivable barrier scalars from the live executors (F1)."""
         raise NotImplementedError
 
     def resume_incomplete_token(

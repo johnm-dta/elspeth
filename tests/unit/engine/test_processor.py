@@ -6142,22 +6142,49 @@ class TestAggregationFacades:
 
         assert count == 5
 
-    def test_get_aggregation_barrier_scalars_delegates(self) -> None:
-        """get_aggregation_barrier_scalars delegates to aggregation_executor (F1 Task 2.1)."""
-        from elspeth.contracts.barrier_scalars import AggregationNodeScalars
+    def test_get_barrier_scalars_composes_aggregation_executor(self) -> None:
+        """get_barrier_scalars composes the aggregation executor's latches (F1 Task 2.4).
+
+        Aggregation entries are re-keyed by str(node_id); with no coalesce
+        executor wired, the coalesce side is empty.
+        """
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
 
         _, factory = _make_factory()
         processor = _make_processor(factory)
 
-        scalars = {NodeID("agg-1"): AggregationNodeScalars(count_fire_offset=0.5, condition_fire_offset=None)}
+        node_scalars = AggregationNodeScalars(count_fire_offset=0.5, condition_fire_offset=None)
         with patch.object(
             processor._aggregation_executor,
             "get_barrier_scalars",
-            return_value=scalars,
+            return_value={NodeID("agg-1"): node_scalars},
         ):
-            result = processor.get_aggregation_barrier_scalars()
+            result = processor.get_barrier_scalars()
 
-        assert result == scalars
+        assert isinstance(result, BarrierScalars)
+        assert dict(result.aggregation) == {"agg-1": node_scalars}
+        assert dict(result.coalesce) == {}  # no coalesce executor → empty
+
+    def test_get_barrier_scalars_composes_coalesce_executor(self) -> None:
+        """get_barrier_scalars folds in the coalesce executor's lost-branch scalars."""
+        from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
+
+        _, factory = _make_factory()
+        coalesce_executor = Mock()
+        pending_scalars = CoalescePendingScalars(lost_branches={"branch_b": "transform_failed"})
+        coalesce_executor.get_barrier_scalars.return_value = {("merge", "row-1"): pending_scalars}
+        processor = _make_processor(factory, coalesce_executor=coalesce_executor)
+
+        with patch.object(
+            processor._aggregation_executor,
+            "get_barrier_scalars",
+            return_value={},
+        ):
+            result = processor.get_barrier_scalars()
+
+        assert isinstance(result, BarrierScalars)
+        assert dict(result.aggregation) == {}
+        assert dict(result.coalesce) == {("merge", "row-1"): pending_scalars}
 
 
 # =============================================================================

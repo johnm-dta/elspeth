@@ -32,6 +32,7 @@ from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import Tier1Engine
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import (
+    blocked_barrier_hold_clause,
     nodes_table,
     rows_table,
     scheduler_events_table,
@@ -2287,11 +2288,8 @@ class TokenSchedulerRepository:
     def list_blocked_barrier_items(self, *, run_id: str) -> list[TokenWorkItem]:
         """Return BLOCKED barrier holds for a run in deterministic order.
 
-        BLOCKED rows are dual-use (D1): barrier holds carry a non-NULL
-        ``barrier_key`` (coalesce_name for coalesce, str(node_id) for
-        aggregation) while ADR-028 queue-holds carry only a ``queue_key``.
-        The ``barrier_key IS NOT NULL`` filter is what keeps queue-holds out
-        of barrier-restore sweeps.
+        The dual-use BLOCKED partition (D1) lives in the shared
+        ``blocked_barrier_hold_clause`` predicate — see its docstring.
 
         Iteration order is ``(barrier_key, ingest_sequence, work_item_id)``
         for determinism only; buffer ORDER at restore comes from
@@ -2303,8 +2301,7 @@ class TokenSchedulerRepository:
                 conn.execute(
                     select(token_work_items_table)
                     .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.barrier_key.is_not(None))
+                    .where(blocked_barrier_hold_clause())
                     .order_by(
                         token_work_items_table.c.barrier_key,
                         token_work_items_table.c.ingest_sequence,

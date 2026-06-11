@@ -341,6 +341,9 @@ class AggregationExecutor:
         # If any post-processing step (output hashing, batch completion) raises
         # before the state is explicitly completed, the guard auto-completes
         # it as FAILED.  Batch lifecycle cleanup is handled separately below.
+        # Attempt honors the token's resume offset: a journal-restored flush
+        # re-run (the original flush crashed and wrote a FAILED node_state at
+        # the prior attempt) must not collide with audited history (F1).
         with NodeStateGuard(
             self._execution,
             token_id=representative_token.token_id,
@@ -348,7 +351,8 @@ class AggregationExecutor:
             run_id=ctx.run_id,
             step_index=step,
             input_data=batch_input,
-            attempt=0,
+            attempt=representative_token.resume_attempt_offset,
+            resume_checkpoint_id=representative_token.resume_checkpoint_id,
         ) as guard:
             # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id

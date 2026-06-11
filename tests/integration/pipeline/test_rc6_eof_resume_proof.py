@@ -246,10 +246,22 @@ class TestExhaustedSourceEOFResume:
         assert transform.batch_calls == 0, "count-100 trigger must not fire in-run; EOF work stays buffered"
         assert output_sink.results == []
 
-        # Production wrote the buffered-aggregation checkpoint on shutdown.
+        # Production wrote a resumable checkpoint on shutdown; the buffered
+        # payloads themselves live in journal BLOCKED rows (F1), not in a blob.
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert checkpoint is not None
-        assert checkpoint.aggregation_state_json is not None
+        with db.connection() as conn:
+            blocked_count = (
+                conn.execute(
+                    select(token_work_items_table.c.token_id).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(blocked_count) == 3
 
         # Reshape the interruption into the exhausted-then-crashed-EOF-flush
         # state: 'exhausted' is exactly what finalize_source_iteration records
@@ -269,7 +281,6 @@ class TestExhaustedSourceEOFResume:
         assert check.can_resume, f"Expected resumable exhausted-source run, got: {check.reason}"
         resume_point = recovery.get_resume_point(run_id, graph)
         assert resume_point is not None
-        assert resume_point.aggregation_state is not None
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -295,20 +306,17 @@ class TestExhaustedSourceEOFResume:
         assert set(work_statuses) <= {"terminal"}
         assert checkpoint_mgr.get_latest_checkpoint(run_id) is None
 
-    def test_real_eof_flush_crash_is_not_yet_resumable(self, tmp_path: Any) -> None:
-        """CHARACTERIZATION of a production gap (flip when fixed, do not delete).
+    def test_real_eof_flush_crash_resumes_to_completion(self, tmp_path: Any) -> None:
+        """A virgin run crashing DURING the EOF flush resumes to completion.
 
-        A virgin run that crashes DURING the EOF aggregation flush — after
-        source exhaustion — durably records ``lifecycle_state='exhausted'``
-        (the engine's own crash-classification write) and leaves the batch
-        membership and BLOCKED scheduler work in the audit DB, but it leaves
-        NO checkpoint: production checkpoints are written only after sink
-        durability or by the graceful-shutdown handler, both of which run
-        AFTER the EOF flush. ``can_resume`` therefore refuses the very state
-        resume.py's exhausted-source acceptance was built for. When a
-        checkpoint writer is added at the EOF-flush boundary, this test must
-        be flipped into a full crash->resume roundtrip (see
-        elspeth-b2142988b4).
+        FLIPPED from the old not-yet-resumable characterization (its docstring
+        demanded the flip once a checkpoint writer covered the gap): the
+        sequence-0 run-start checkpoint (F1/D4) makes the crashed state
+        resumable, and the journal (BLOCKED barrier rows + batch membership)
+        carries the EOF work. The resume rebuilds the buffer from the journal,
+        retries the FAILED batch, re-runs the flush (second batch call
+        succeeds), and delivers the one batch covering ALL source rows —
+        without re-invoking the source (see elspeth-b2142988b4).
         """
         from elspeth.core.landscape.schema import batch_members_table, batches_table
         from elspeth.core.payload_store import FilesystemPayloadStore
@@ -361,10 +369,31 @@ class TestExhaustedSourceEOFResume:
         assert len(member_count) == 3
         assert len(blocked) == 3
 
-        # THE GAP: no checkpoint exists, so the public resume path refuses.
-        check = RecoveryManager(db, checkpoint_mgr).can_resume(run_id, graph)
-        assert not check.can_resume
-        assert check.reason == "No checkpoint found for recovery"
+        # The sequence-0 run-start checkpoint (F1/D4) makes this resumable.
+        recovery = RecoveryManager(db, checkpoint_mgr)
+        check = recovery.can_resume(run_id, graph)
+        assert check.can_resume, f"Expected resumable EOF-flush-crashed run, got: {check.reason}"
+        resume_point = recovery.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert output_sink.results == [{"value": 60, "count": 3}]
+        assert transform.batch_calls == 2, "the resume re-runs the crashed flush exactly once"
+        assert source.load_invocations == 1, "resume must not re-invoke the source plugin"
+
+        with db.connection() as conn:
+            work_statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+            )
+        assert work_statuses
+        assert set(work_statuses) <= {"terminal"}
 
     def test_interrupted_source_still_fails_resume_safely(self, tmp_path: Any) -> None:
         """A non-exhausted (interrupted) source refuses resume with IncompleteSourceResumeError.

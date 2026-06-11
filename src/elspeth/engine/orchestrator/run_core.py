@@ -214,10 +214,11 @@ class RunExecutionCore:
                 pending_outcome = group_pairs[0][1]
                 group_tokens = [token for token, _pending in group_pairs]
                 # Only tokens with a proven durable PENDING_SINK handoff are
-                # terminalized after sink durability. Generated terminal
-                # outputs (aggregation/coalesce flushes) and source-quarantine
-                # rows still need checkpoints but have no scheduler row to
-                # close.
+                # terminalized after sink durability. Aggregation flush
+                # outputs carry that handoff since F1/D6 (the atomic barrier
+                # completion inserts their PENDING_SINK rows); terminal
+                # coalesce merges and source-quarantine rows still need
+                # checkpoints but have no scheduler row to close.
                 terminalize_scheduler = bool(pending_outcome is not None and pending_outcome.scheduler_pending_sink)
                 on_token_written: CheckpointAfterSinkCallback | None = None
                 if on_token_written_factory is not None:

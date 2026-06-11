@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    ColumnElement,
     DateTime,
     Float,
     ForeignKey,
@@ -22,6 +23,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 
@@ -491,6 +493,29 @@ Index(
     sqlite_where=token_work_items_table.c.node_id.is_(None),
     postgresql_where=token_work_items_table.c.node_id.is_(None),
 )
+
+
+def blocked_barrier_hold_clause() -> ColumnElement[bool]:
+    """Predicate selecting journal BLOCKED rows that are BARRIER holds.
+
+    BLOCKED rows are dual-use (F1 design D1): barrier holds carry a non-NULL
+    ``barrier_key`` (coalesce_name for coalesce, str(node_id) for
+    aggregation), while ADR-028 queue-holds carry only a ``queue_key``. The
+    ``barrier_key IS NOT NULL`` filter is what keeps queue-holds out of
+    barrier sweeps (restore, resume work-set exclusion, quiescence counting).
+
+    Single source of truth for the dual-use predicate — shared by
+    ``TokenSchedulerRepository.list_blocked_barrier_items`` and
+    ``RecoveryManager._get_buffered_journal_token_ids`` /
+    ``count_blocked_barrier_items``. The literal ``'blocked'`` MUST match
+    ``TokenWorkStatus.BLOCKED.value`` (a lowercase ``StrEnum``), consistent
+    with the status literals in this module's CHECK constraints.
+    """
+    return and_(
+        token_work_items_table.c.status == "blocked",
+        token_work_items_table.c.barrier_key.is_not(None),
+    )
+
 
 scheduler_events_table = Table(
     "scheduler_events",

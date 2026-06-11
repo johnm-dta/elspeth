@@ -32,7 +32,6 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
-from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
@@ -40,6 +39,7 @@ from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
+    blocked_barrier_hold_clause,
     node_states_table,
     rows_table,
     runs_table,
@@ -806,17 +806,17 @@ class RecoveryManager:
         payloads; resume restores them into executor buffers at processor
         construction, so they are excluded from the re-drive work set.
 
-        The ``barrier_key IS NOT NULL`` filter keeps ADR-028 queue-holds IN
-        the re-drive work set — a queue-held token is throttled, not waiting
-        at a barrier, and nothing restores it if resume skips it.
+        The shared ``blocked_barrier_hold_clause`` predicate keeps ADR-028
+        queue-holds IN the re-drive work set — a queue-held token is
+        throttled, not waiting at a barrier, and nothing restores it if
+        resume skips it.
         """
         with self._db.engine.connect() as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table.c.token_id)
                     .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                    .where(token_work_items_table.c.barrier_key.is_not(None))
+                    .where(blocked_barrier_hold_clause())
                 )
                 .scalars()
                 .all()
@@ -837,8 +837,7 @@ class RecoveryManager:
                 select(func.count())
                 .select_from(token_work_items_table)
                 .where(token_work_items_table.c.run_id == run_id)
-                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                .where(token_work_items_table.c.barrier_key.is_not(None))
+                .where(blocked_barrier_hold_clause())
             ).scalar_one()
         return int(result)
 

@@ -1,43 +1,54 @@
 # tests/integration/pipeline/test_aggregation_recovery.py
-"""Integration test for aggregation crash recovery.
+"""Integration tests for aggregation crash recovery — journal era (F1).
 
-End-to-end test simulating:
-1. Run starts, processes rows, creates batch
-2. Checkpoint created with aggregation state
-3. Crash during batch flush
-4. Recovery: restore state, retry batch, continue
+The recovery SCENARIOS predate F1 and are preserved; the SURFACES are the
+scheduler journal (token_work_items BLOCKED/PENDING_SINK rows) instead of the
+deleted checkpoint aggregation-state blob:
 
-Migrated from tests/integration/test_aggregation_recovery.py.
+1. A flush output crash window (sink write fails AFTER the flush consumed its
+   inputs) leaves the output journal-durable — the F1/D6 atomic
+   ``complete_barrier`` guarantee — and resume delivers it WITHOUT re-running
+   the batch transform or the source.
+2. Crash-during-flush machinery: incomplete batches are found, EXECUTING
+   batches fail-then-retry, member ordinals survive retry, and only failed
+   batches may be retried.
+3. Trigger-timeout SLA preservation (Bug #6): the journal restore derives
+   batch age from ``barrier_blocked_at`` of the oldest BLOCKED row, so a
+   60s-timeout batch that crashed 30s in fires after 30 more seconds, not 60.
 
-NOTE: Manual ExecutionGraph construction is intentional here. These tests
-verify checkpoint/recovery logic for aggregation nodes and need specific
-node IDs matching stored checkpoint records. These IDs must be deterministic
-and match what's in the database, which makes from_plugin_instances()
-inappropriate (it generates hash-based IDs). See
-tests/integration/checkpoint/conftest.py for the same rationale.
+NOTE: Manual node registration (raw SQL) is intentional in the synthetic
+batch-machinery tests. The real-path tests use ``from_plugin_instances``.
 """
 
-from datetime import UTC, datetime
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
-from elspeth.contracts.enums import BatchStatus, Determinism, NodeType, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus
+from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+from elspeth.contracts.enums import BatchStatus, NodeType
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.results import SourceRow
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.contracts.types import NodeID
+from elspeth.contracts.types import AggregationName, NodeID
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+from elspeth.core.config import AggregationSettings, CheckpointSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from tests.fixtures.base_classes import create_observed_contract
+from elspeth.core.landscape.schema import batch_members_table, batches_table, token_work_items_table
+from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+from elspeth.plugins.infrastructure.base import BaseTransform
+from elspeth.plugins.infrastructure.results import TransformResult
+from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
+from tests.fixtures.plugins import CollectSink, ListSource
 
 
 def _create_test_schema_contract() -> SchemaContract:
@@ -54,8 +65,251 @@ def _create_test_schema_contract() -> SchemaContract:
     return SchemaContract(fields=field_contracts, mode="FIXED", locked=True)
 
 
+# =============================================================================
+# Real-path fixtures (crash-window proof)
+# =============================================================================
+
+
+class _LoadCountingSource(_TestSourceBase):
+    """Source that counts load() invocations — the source-replay tripwire."""
+
+    name = "load_counting_source"
+    output_schema = ListSource.output_schema
+
+    def __init__(self, rows: list[dict[str, int]], *, on_success: str) -> None:
+        super().__init__()
+        self._rows = rows
+        self.on_success = on_success
+        self.load_invocations = 0
+
+    def load(self, ctx: Any) -> Iterator[SourceRow]:
+        self.load_invocations += 1
+        for source_row_index, row in enumerate(self._rows):
+            fields = tuple(
+                FieldContract(
+                    normalized_name=key,
+                    original_name=key,
+                    python_type=object,
+                    required=False,
+                    source="inferred",
+                )
+                for key in row
+            )
+            contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
+            self._schema_contract = contract
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
+
+
+class _SumBatchTransform(BaseTransform):
+    """Batch transform that sums its EOF batch; counts batch invocations."""
+
+    name = "sum_batch"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+    is_batch_aware = True
+    on_success = "output"
+    on_error = "discard"
+
+    def __init__(self) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        self.batch_calls = 0
+
+    def process(self, row: PipelineRow | list[PipelineRow], ctx: Any) -> TransformResult:
+        if isinstance(row, list):
+            self.batch_calls += 1
+            total = sum(r.get("value", 0) for r in row)
+            contract = SchemaContract(
+                mode="OBSERVED",
+                fields=(
+                    FieldContract(normalized_name="value", original_name="value", python_type=int, required=False, source="inferred"),
+                    FieldContract(normalized_name="count", original_name="count", python_type=int, required=False, source="inferred"),
+                ),
+                locked=True,
+            )
+            return TransformResult.success(
+                PipelineRow({"value": total, "count": len(row)}, contract),
+                success_reason={"action": "batch_sum"},
+            )
+        return TransformResult.success(row, success_reason={"action": "buffer"})
+
+
+class _FailOnceSink(CollectSink):
+    """Sink whose FIRST write crashes — the post-flush, pre-durability window.
+
+    The crash is injected in the SINK (not a repository mock): the aggregation
+    flush has fully completed and consumed its inputs by the time write() runs,
+    so the raise lands exactly in the out-of-claim flush crash window (NOT the
+    accept-then-crash-before-mark_blocked window — D7 guard).
+    """
+
+    def __init__(self, name: str = "output") -> None:
+        super().__init__(name)
+        self._fail_next_write = True
+
+    def write(self, rows: Any, ctx: Any) -> Any:
+        if self._fail_next_write:
+            self._fail_next_write = False
+            raise RuntimeError("injected sink write crash")
+        return super().write(rows, ctx)
+
+
+def _build_eof_aggregation_pipeline(
+    source: Any,
+    transform: _SumBatchTransform,
+    output_sink: CollectSink,
+) -> tuple[PipelineConfig, ExecutionGraph]:
+    """Count-triggered transform-mode aggregation whose flush only fires at EOF."""
+    agg_settings = AggregationSettings(
+        name="eof_sum",
+        plugin=transform.name,
+        input="batch_in",
+        on_success="output",
+        on_error="discard",
+        trigger=TriggerConfig(count=100, timeout_seconds=3600),
+        output_mode="transform",
+    )
+
+    graph = ExecutionGraph.from_plugin_instances(
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="batch_in", options={})},
+        transforms=[],
+        sinks={"output": as_sink(output_sink)},
+        aggregations={"eof_sum": (as_transform(transform), agg_settings)},
+        gates=[],
+    )
+    agg_node_id = graph.get_aggregation_id_map()[AggregationName("eof_sum")]
+    transform.node_id = agg_node_id
+
+    config = PipelineConfig(
+        sources={"primary": as_source(source)},
+        transforms=[as_transform(transform)],
+        sinks={"output": as_sink(output_sink)},
+        aggregation_settings={agg_node_id: agg_settings},
+    )
+    return config, graph
+
+
+@pytest.mark.timeout(120)
+class TestFlushOutputJournalDurability:
+    """F1/D6: the out-of-claim flush output is journal-durable before the sink write."""
+
+    def test_timeout_flush_output_is_journal_durable_before_sink_write(self, tmp_path: Any) -> None:
+        """A timeout/EOF flush output survives a sink-write crash via its PENDING_SINK row.
+
+        Drives the out-of-claim flush arm (``handle_timeout_flush``, trigger
+        END_OF_SOURCE — the same arm TIMEOUT flushes take) through a sink
+        write that crashes. The atomic ``complete_barrier`` transition must
+        have left, in ONE journal transaction:
+
+        - every consumed input token's BLOCKED row TERMINAL, and
+        - the emitted aggregate token's PENDING_SINK row on the node_id-NULL
+          terminal lane, under the emitted token's REAL token_id —
+
+        so there is no observable state where the inputs are consumed and the
+        output is absent. Resume then delivers the output from the journal
+        WITHOUT re-running the batch transform or re-invoking the source.
+        """
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        checkpoint_mgr = CheckpointManager(db)
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+
+        source = _LoadCountingSource([{"value": 10}, {"value": 20}, {"value": 30}], on_success="batch_in")
+        transform = _SumBatchTransform()
+        output_sink = _FailOnceSink("output")
+        config, graph = _build_eof_aggregation_pipeline(source, transform, output_sink)
+
+        orchestrator = Orchestrator(
+            db=db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        with pytest.raises(RuntimeError, match="injected sink write crash"):
+            orchestrator.run(config, graph=graph, payload_store=payload_store)
+
+        # The flush ran exactly once and nothing reached the sink.
+        assert transform.batch_calls == 1
+        assert output_sink.results == []
+
+        with db.connection() as conn:
+            run_id = str(conn.execute(select(batches_table.c.run_id)).scalars().first())
+            consumed_token_ids = set(
+                conn.execute(
+                    select(batch_members_table.c.token_id)
+                    .join(batches_table, batch_members_table.c.batch_id == batches_table.c.batch_id)
+                    .where(batches_table.c.run_id == run_id)
+                )
+                .scalars()
+                .all()
+            )
+            journal = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.node_id,
+                    token_work_items_table.c.pending_sink_name,
+                ).where(token_work_items_table.c.run_id == run_id)
+            ).all()
+
+        assert len(consumed_token_ids) == 3
+        statuses_by_token = {row.token_id: row.status for row in journal}
+
+        # Consumed inputs: TERMINAL — and emphatically NOT still blocked.
+        for token_id in consumed_token_ids:
+            assert statuses_by_token[token_id] == "terminal", f"consumed input {token_id} is {statuses_by_token[token_id]!r}"
+
+        # The emitted aggregate: exactly one PENDING_SINK row, node_id-NULL
+        # terminal lane, real (new) token_id, sink-handoff metadata present.
+        pending_rows = [row for row in journal if row.status == "pending_sink"]
+        assert len(pending_rows) == 1, f"expected exactly one durable flush output, got {pending_rows!r}"
+        emitted = pending_rows[0]
+        assert emitted.node_id is None
+        assert emitted.pending_sink_name == "output"
+        assert emitted.token_id not in consumed_token_ids
+
+        # No state where inputs are consumed and the output is absent:
+        # nothing remains blocked at the barrier.
+        assert not [row for row in journal if row.status == "blocked"]
+
+        # ── Resume: the journal-durable output reaches the sink without
+        # re-running the transform or the source.
+        recovery = RecoveryManager(db, checkpoint_mgr)
+        check = recovery.can_resume(run_id, graph)
+        assert check.can_resume, f"Expected resumable run, got: {check.reason}"
+        resume_point = recovery.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert output_sink.results == [{"value": 60, "count": 3}]
+        assert transform.batch_calls == 1, "resume must deliver the journal-durable output, not re-run the flush"
+        assert source.load_invocations == 1, "resume must not re-invoke the source plugin"
+
+        with db.connection() as conn:
+            work_statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+            )
+        assert work_statuses
+        assert set(work_statuses) <= {"terminal"}
+
+
+# =============================================================================
+# Batch-machinery recovery (synthetic, journal-era signatures)
+# =============================================================================
+
+
 class TestAggregationRecoveryIntegration:
-    """End-to-end test for aggregation crash recovery."""
+    """Crash-recovery batch machinery: find, fail, retry, preserve order."""
 
     @pytest.fixture
     def test_env(self, tmp_path: Path) -> dict[str, Any]:
@@ -89,7 +343,15 @@ class TestAggregationRecoveryIntegration:
         return graph
 
     def test_full_recovery_cycle(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
-        """Simulate crash during flush and verify recovery works."""
+        """Simulate crash during flush and verify recovery works.
+
+        Journal era: the checkpoint row carries NO aggregation blob — buffered
+        token payloads live in journal BLOCKED rows and batch membership in
+        the audit tables. This test pins the batch-machinery half of recovery:
+        the interrupted EXECUTING batch is found, failed, and retried with its
+        members intact, and the run is resumable from the (blob-free)
+        checkpoint row.
+        """
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
@@ -127,38 +389,12 @@ class TestAggregationRecoveryIntegration:
         for i, token in enumerate(tokens):
             factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
 
-        # Simulate checkpoint before flush — construct typed DTO
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "sum_aggregator": AggregationNodeCheckpoint(
-                    tokens=tuple(
-                        AggregationTokenCheckpoint(
-                            token_id=t.token_id,
-                            row_id=t.row_id,
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": i, "value": i * 100},
-                            contract_version="test",
-                            contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
-                        )
-                        for i, t in enumerate(tokens)
-                    ),
-                    batch_id=batch.batch_id,
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=len(tokens),
-                    completed_flush_count=0,
-                ),
-            },
-        )
+        # Checkpoint before flush — journal era: scalar-only checkpoint row
+        # (buffered payloads live in journal BLOCKED rows, not in a blob).
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=2,
-            aggregation_state=agg_state,
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -173,8 +409,7 @@ class TestAggregationRecoveryIntegration:
 
         resume_point = recovery_mgr.get_resume_point(run.run_id, mock_graph)
         assert resume_point is not None
-        assert resume_point.aggregation_state is not None
-        assert "sum_aggregator" in resume_point.aggregation_state.nodes
+        assert resume_point.checkpoint.sequence_number == 2
 
         # === PHASE 3: Execute recovery steps ===
 
@@ -264,37 +499,11 @@ class TestAggregationRecoveryIntegration:
             factory.execution.add_batch_member(count_batch.batch_id, token.token_id, ordinal=i)
         factory.execution.update_batch_status(count_batch.batch_id, BatchStatus.EXECUTING)
 
-        # Checkpoint at last processed token — typed DTO
+        # Checkpoint at last processed token — journal era: scalar-only row.
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=3,
-            aggregation_state=AggregationCheckpointState(
-                version="5.0",
-                nodes={
-                    "count_aggregator": AggregationNodeCheckpoint(
-                        tokens=tuple(
-                            AggregationTokenCheckpoint(
-                                token_id=t.token_id,
-                                row_id=t.row_id,
-                                branch_name=None,
-                                fork_group_id=None,
-                                join_group_id=None,
-                                expand_group_id=None,
-                                row_data={},
-                                contract_version="test",
-                                contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
-                            )
-                            for t in tokens[2:]
-                        ),
-                        batch_id=count_batch.batch_id,
-                        elapsed_age_seconds=0.0,
-                        count_fire_offset=None,
-                        condition_fire_offset=None,
-                        accepted_count_total=len(tokens[2:]),
-                        completed_flush_count=0,
-                    ),
-                },
-            ),
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -349,10 +558,11 @@ class TestAggregationRecoveryIntegration:
         # Mark as failed for retry
         factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
 
-        # Checkpoint
+        # Checkpoint (journal era: scalar-only row)
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=4,
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -499,26 +709,29 @@ class TestAggregationRecoveryIntegration:
 
             conn.commit()
 
-    def test_timeout_preservation_on_resume(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
+    def test_timeout_preservation_on_resume(self, test_env: dict[str, Any]) -> None:
         """Verify aggregation timeout window doesn't reset on resume (Bug #6).
 
-        Scenario:
-        1. Create aggregation with 60s timeout
-        2. Accept rows, simulate 30s elapsed
-        3. Create checkpoint (should store elapsed_age_seconds=30.0)
-        4. Crash and resume
-        5. Verify timeout triggers after 30 more seconds (not 60s)
+        Journal era: the restore derives batch age from the absolute
+        ``barrier_blocked_at`` stamp of the OLDEST BLOCKED journal row —
+        ``restore_from_journal(now=...)`` computes ``now - min(blocked_at)``.
 
-        This is Bug #6 fix: timeout windows must preserve SLA across resume.
+        Scenario (SLA preserved across resume):
+        1. 60s-timeout aggregation; 3 rows blocked at the barrier, the oldest
+           30 seconds before the crash.
+        2. Crash and resume: journal restore rebuilds the buffer.
+        3. The restored trigger thinks ~30s have already elapsed — it must NOT
+           fire immediately, and it must fire after 30 MORE seconds (60s
+           total), not after a fresh 60s window.
         """
         import time
 
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars
         from elspeth.core.config import TriggerConfig
         from elspeth.engine.executors import AggregationExecutor
-        from elspeth.engine.triggers import TriggerEvaluator
+        from elspeth.engine.spans import SpanFactory
 
         db = test_env["db"]
-        checkpoint_mgr = test_env["checkpoint_manager"]
         factory: RecorderFactory = test_env["factory"]
 
         # === PHASE 1: Original run with timeout trigger ===
@@ -530,12 +743,17 @@ class TestAggregationRecoveryIntegration:
 
         self._register_nodes_raw(db, run.run_id)
 
-        # Create trigger evaluator with 60s timeout
-        trigger_config = TriggerConfig(timeout_seconds=60.0)
-        evaluator = TriggerEvaluator(trigger_config)
+        now = datetime.now(UTC)
+        first_blocked_at = now - timedelta(seconds=30.0)
 
-        # Simulate accepting 3 rows over time
+        # 3 rows accepted into one in-progress batch; their tokens are
+        # BLOCKED at the barrier through the production scheduler verbs
+        # (mark_blocked stamps barrier_blocked_at — the restore's age source).
         tokens = []
+        batch = factory.execution.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="sum_aggregator",
+        )
         for i in range(3):
             row_obj = factory.data_flow.create_row(
                 run_id=run.run_id,
@@ -547,84 +765,35 @@ class TestAggregationRecoveryIntegration:
             )
             token = factory.data_flow.create_token(row_id=row_obj.row_id)
             tokens.append(token)
-            evaluator.record_accept()
-
-        batch = factory.execution.create_batch(
-            run_id=run.run_id,
-            aggregation_node_id="sum_aggregator",
-        )
-        for ordinal, token in enumerate(tokens):
-            factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=ordinal)
-
-        # Verify initial state: 3 rows accepted, no trigger yet
-        assert evaluator.batch_count == 3
-        assert evaluator.should_trigger() is False  # Only 0 seconds elapsed so far
-
-        # Simulate 30 seconds passing by mocking time.monotonic()
-        # Store the original first_accept_time, then adjust it backward
-        original_monotonic = time.monotonic()
-        elapsed_seconds = 30.0
-        evaluator._first_accept_time = original_monotonic - elapsed_seconds
-
-        # Verify elapsed time is now 30s
-        assert 29.0 <= evaluator.batch_age_seconds <= 31.0  # Allow small timing variance
-
-        # Should NOT trigger yet (need 60s total)
-        assert evaluator.should_trigger() is False
-
-        # Create checkpoint with aggregation state — typed DTO
-        contract = create_observed_contract({"id": 0, "value": 0})
-        contract_version = contract.version_hash()
-        elapsed = evaluator.get_age_seconds()
-        sum_agg_node = AggregationNodeCheckpoint(
-            tokens=tuple(
-                AggregationTokenCheckpoint(
-                    token_id=t.token_id,
-                    row_id=t.row_id,
-                    branch_name=None,
-                    fork_group_id=None,
-                    join_group_id=None,
-                    expand_group_id=None,
-                    row_data={},
-                    contract_version=contract_version,
-                    contract=contract.to_checkpoint_format(),
-                )
-                for t in tokens
-            ),
-            batch_id=batch.batch_id,
-            elapsed_age_seconds=elapsed,  # Bug #6 fix: store elapsed time
-            count_fire_offset=evaluator.get_count_fire_offset(),  # P2-2026-02-01
-            condition_fire_offset=evaluator.get_condition_fire_offset(),  # P2-2026-02-01
-            accepted_count_total=len(tokens),
-            completed_flush_count=0,
-        )
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={"sum_aggregator": sum_agg_node},
-        )
-
-        # Verify elapsed time is stored in checkpoint state
-        assert 29.0 <= elapsed <= 31.0
-
-        checkpoint_mgr.create_checkpoint(
-            run_id=run.run_id,
-            sequence_number=2,
-            aggregation_state=agg_state,
-            graph=mock_graph,
-        )
-
-        # Simulate crash
+            factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
+            payload = PipelineRow({"id": i, "value": i * 100}, _create_test_schema_contract())
+            factory.scheduler.enqueue_ready(
+                run_id=run.run_id,
+                token_id=token.token_id,
+                row_id=token.row_id,
+                node_id="sum_aggregator",
+                step_index=1,
+                ingest_sequence=i,
+                row_payload_json=factory.scheduler.serialize_row_payload(payload),
+                available_at=now,
+            )
+            claimed = factory.scheduler.claim_ready(run_id=run.run_id, lease_owner="seeder", lease_seconds=60, now=now)
+            assert claimed is not None and claimed.token_id == token.token_id
+            blocked_at = first_blocked_at + timedelta(seconds=i)  # oldest row anchors the age
+            factory.scheduler.mark_blocked(
+                work_item_id=claimed.work_item_id,
+                queue_key=None,
+                barrier_key="sum_aggregator",
+                now=blocked_at,
+                expected_lease_owner="seeder",
+            )
         factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
         # === PHASE 2: Resume and verify timeout preservation ===
 
-        # Create new aggregation executor to simulate resume
-        from elspeth.core.config import AggregationSettings
-        from elspeth.engine.spans import SpanFactory
-
+        trigger_config = TriggerConfig(timeout_seconds=60.0)
         span_factory = SpanFactory()  # No tracer = no-op spans
 
-        # Create aggregation settings with timeout trigger
         agg_settings = {
             NodeID("sum_aggregator"): AggregationSettings(
                 name="sum_aggregator",
@@ -645,8 +814,20 @@ class TestAggregationRecoveryIntegration:
             aggregation_settings=agg_settings,
         )
 
-        # Restore state from checkpoint
-        executor.restore_from_checkpoint(agg_state)
+        items = factory.scheduler.list_blocked_barrier_items(run_id=run.run_id)
+        assert len(items) == 3
+        executor.restore_from_journal(
+            node_id=NodeID("sum_aggregator"),
+            items=items,
+            member_order=[t.token_id for t in tokens],
+            batch_id=batch.batch_id,
+            accepted_count_total=3,
+            completed_flush_count=0,
+            scalars=AggregationNodeScalars(None, None),
+            attempt_offsets={t.token_id: 0 for t in tokens},
+            resume_checkpoint_id="ckpt-resume-1",
+            now=now,
+        )
 
         # Verify buffer was restored
         assert executor.get_buffer_count(NodeID("sum_aggregator")) == 3
@@ -659,8 +840,8 @@ class TestAggregationRecoveryIntegration:
         # Verify batch count was restored
         assert restored_evaluator.batch_count == 3
 
-        # Verify timeout age was restored (Bug #6 fix)
-        # The restored evaluator should think 30s have already elapsed
+        # Verify timeout age was restored from barrier_blocked_at (Bug #6 fix):
+        # the restored evaluator should think ~30s have already elapsed.
         restored_age = restored_evaluator.batch_age_seconds
         assert 29.0 <= restored_age <= 31.0, f"Expected ~30s, got {restored_age}s"
 
@@ -675,6 +856,5 @@ class TestAggregationRecoveryIntegration:
         assert restored_evaluator.which_triggered() == "timeout"
 
         # Verify it triggers at ~60s, not at ~90s (which would be 30s stored + 60s new timeout)
-        # If Bug #6 wasn't fixed, timeout would reset and need another 60s (90s total)
         final_age = restored_evaluator.batch_age_seconds
         assert 59.0 <= final_age <= 61.0, f"Timeout should trigger at ~60s, got {final_age}s"

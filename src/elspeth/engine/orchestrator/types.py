@@ -115,6 +115,18 @@ class RowProcessorHandle(Protocol):
         """Mark durable scheduler work consumed by a barrier as terminal."""
         ...
 
+    def complete_coalesce_merge(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        merged_token: TokenInfo,
+        coalesce_node_id: NodeID,
+        ctx: PluginContext,
+    ) -> list[RowResult]:
+        """Atomically complete an out-of-claim coalesce fire and drive the merged token (F1/D6)."""
+        raise NotImplementedError
+
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Mark scheduler sink handoff complete after sink outcome durability."""
         ...

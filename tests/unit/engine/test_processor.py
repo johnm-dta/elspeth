@@ -5043,8 +5043,15 @@ class TestDurableSchedulerResumeDrain:
             ).one()
         assert (status, barrier_key) == ("blocked", str(agg_node))
 
-    def test_aggregation_flush_terminalizes_only_consumed_blocked_work(self) -> None:
-        """Flush completion consumes its buffered tokens without sweeping unrelated barrier work."""
+    def test_aggregation_flush_refuses_to_orphan_unconsumed_blocked_work(self) -> None:
+        """Flush completion REFUSES when a BLOCKED row under the barrier is not in the buffer.
+
+        F1/D6 strict exhaustiveness: an aggregation flush is ONE atomic
+        ``complete_barrier`` transition over the WHOLE barrier key (one node =
+        one in-progress batch), so a durable BLOCKED row the live buffer does
+        not account for is journal/buffer divergence — the completion must
+        refuse loudly instead of silently leaving (or sweeping) the orphan.
+        """
         db, factory = _make_factory()
         source_node = NodeID("source-0")
         agg_node = NodeID("agg-1")
@@ -5129,20 +5136,21 @@ class TestDurableSchedulerResumeDrain:
             expected_lease_owner="test-worker",
         )
 
-        second_results = processor.process_row(
-            row_index=1,
-            source_row=_make_source_row({"value": 2}),
-            transforms=[transform],
-            ctx=ctx,
-            source_row_index=1,
-            ingest_sequence=1,
-        )
-        triggering_token_id = next(result.token.token_id for result in second_results if result.path is TerminalPath.BATCH_CONSUMED)
+        with pytest.raises(AuditIntegrityError, match=rf"orphan.*{stray_token.token_id}|{stray_token.token_id}.*orphan"):
+            processor.process_row(
+                row_index=1,
+                source_row=_make_source_row({"value": 2}),
+                transforms=[transform],
+                ctx=ctx,
+                source_row_index=1,
+                ingest_sequence=1,
+            )
 
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
 
+        # The refused completion mutated nothing: buffered and stray rows stay BLOCKED.
         with db.connection() as conn:
             statuses = dict(
                 conn.execute(
@@ -5150,7 +5158,6 @@ class TestDurableSchedulerResumeDrain:
                         token_work_items_table.c.token_id.in_(
                             [
                                 first_token_id,
-                                triggering_token_id,
                                 stray_token.token_id,
                             ]
                         )
@@ -5158,8 +5165,7 @@ class TestDurableSchedulerResumeDrain:
                 ).all()
             )
         assert statuses == {
-            first_token_id: "terminal",
-            triggering_token_id: "terminal",
+            first_token_id: "blocked",
             stray_token.token_id: "blocked",
         }
 
@@ -6112,9 +6118,32 @@ class TestMaybeCoalesceToken:
             )
 
     def test_coalesce_merged_at_non_terminal_queues_work(self) -> None:
-        """Merged at non-terminal step → child work item added, no result."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
+        """Merged at non-terminal step → child work item added, no result.
+
+        F1/D6: the merged child's READY continuation is journal-durable the
+        moment the coalesce fires (inserted by the atomic barrier completion),
+        so the merged token and its row must exist in the audit DB.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id="coalesce::merge",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         coalesce = Mock()
         coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
         processor = _make_processor(
@@ -6125,7 +6154,7 @@ class TestMaybeCoalesceToken:
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-5")},
         )
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
@@ -6144,6 +6173,18 @@ class TestMaybeCoalesceToken:
         assert result is None
         assert len(child_items) == 1
         assert child_items[0].current_node_id == NodeID("coalesce::merge")
+        # The merged child's continuation is already journal-durable (F1/D6).
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, node_id = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.node_id).where(
+                    token_work_items_table.c.token_id == "merged-1"
+                )
+            ).one()
+        assert (status, node_id) == ("ready", "coalesce::merge")
 
     def test_invalid_coalesce_outcome_state_raises_invariant(self) -> None:
         """CoalesceOutcome must be held, merged, or failed; empty state is invalid."""
@@ -6359,9 +6400,32 @@ class TestNotifyCoalesceOfLostBranch:
             )
 
     def test_lost_branch_triggers_nonterminal_merge_queues_work(self) -> None:
-        """Branch loss triggers merge at non-terminal step → queues work."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
+        """Branch loss triggers merge at non-terminal step → queues work.
+
+        F1/D6: the merged child's READY continuation is journal-durable the
+        moment the merge fires, so the merged token and its row must exist
+        in the audit DB.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id="coalesce::merge",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         coalesce = Mock()
         coalesce.notify_branch_lost.return_value = Mock(
             merged_token=merged_token,
@@ -6378,7 +6442,7 @@ class TestNotifyCoalesceOfLostBranch:
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-4")},
         )
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
@@ -6393,6 +6457,18 @@ class TestNotifyCoalesceOfLostBranch:
         assert results == []
         assert len(child_items) == 1
         assert child_items[0].current_node_id == NodeID("coalesce::merge")
+        # The merged child's continuation is already journal-durable (F1/D6).
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, node_id = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.node_id).where(
+                    token_work_items_table.c.token_id == "merged-1"
+                )
+            ).one()
+        assert (status, node_id) == ("ready", "coalesce::merge")
 
 
 # =============================================================================

@@ -73,7 +73,7 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
-from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import BarrierEmission, TokenWorkItem, TokenWorkStatus
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -549,6 +549,11 @@ class RowProcessor:
         # FROM journal BLOCKED rows + audit tables. The old direction —
         # materializing journal rows from checkpoint blobs — is gone; the
         # checkpoint contributes only scalars (via barrier_restore).
+        # The checkpoint id is retained for re-drive provenance: a PENDING_SINK
+        # re-drive whose token already has node_states (the original run's
+        # crashed sink attempt) must stamp resume_attempt_offset/-checkpoint_id
+        # so the re-driven sink node_state does not collide at attempt 0.
+        self._resume_checkpoint_id: str | None = barrier_restore.resume_checkpoint_id if barrier_restore is not None else None
         if barrier_restore is not None:
             self._restore_barriers_from_journal(barrier_restore)
 
@@ -1734,20 +1739,19 @@ class RowProcessor:
         for token in buffered_tokens:
             self._emit_transform_completed(token=token, transform=transform, transform_result=result)
 
+        # Out-of-claim (timeout/EOF) flush: ONE atomic journal transition
+        # consumes the buffered BLOCKED rows and makes every sink-bound flush
+        # output journal-durable (PENDING_SINK) before the in-process sink
+        # write runs (F1/D6). ``pending_tokens`` keeps feeding the in-process
+        # sink write; the post-sink callback terminalizes the emitted rows.
         if settings.output_mode == OutputMode.PASSTHROUGH:
             flush_results, child_items = self._route_passthrough_results(fctx, result)
-            flush_results, pending_sink_token_ids = self._mark_blocked_sink_results_pending(node_id, flush_results)
-            self._mark_buffered_scheduler_work_terminal(
-                node_id,
-                tuple(buffered_tokens),
-                exclude_token_ids=pending_sink_token_ids,
-            )
-            routed = (flush_results, child_items)
-            return routed
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            return flush_results, child_items
         if settings.output_mode == OutputMode.TRANSFORM:
-            routed = self._route_transform_results(fctx, result)
-            self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens))
-            return routed
+            flush_results, child_items = self._route_transform_results(fctx, result)
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            return flush_results, child_items
         raise OrchestrationInvariantError(f"Unknown output_mode: {settings.output_mode}")
 
     def _process_batch_aggregation_node(
@@ -1857,25 +1861,31 @@ class RowProcessor:
             for token in buffered_tokens:
                 self._emit_transform_completed(token=token, transform=transform, transform_result=result)
 
+            # In-claim (count-trigger) flush: ONE atomic journal transition.
+            # The LEASED triggering token is excluded — its handoff/terminal
+            # transition rides the claim in ``_drain_scheduler_claims``.
             if output_mode == OutputMode.PASSTHROUGH:
                 flush_results, flush_child_items = self._route_passthrough_results(fctx, result)
                 child_items.extend(flush_child_items)
-                flush_results, pending_sink_token_ids = self._mark_blocked_sink_results_pending(
+                flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(
                     node_id,
                     flush_results,
+                    buffered_tokens,
                     leased_token_id=current_token.token_id,
-                )
-                self._mark_buffered_scheduler_work_terminal(
-                    node_id,
-                    tuple(buffered_tokens),
-                    leased_token_id=current_token.token_id,
-                    exclude_token_ids=pending_sink_token_ids,
                 )
                 return flush_results, child_items
             if output_mode == OutputMode.TRANSFORM:
+                # Consumption only: the emitted aggregate rides the LEASED
+                # claim/continuation path, matching pre-F1 semantics.
                 flush_results, flush_child_items = self._route_transform_results(fctx, result)
                 child_items.extend(flush_child_items)
-                self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens), leased_token_id=current_token.token_id)
+                self._complete_aggregation_flush(
+                    node_id,
+                    flush_results,
+                    buffered_tokens,
+                    leased_token_id=current_token.token_id,
+                    emit_sink_outputs=False,
+                )
                 return flush_results, child_items
             raise OrchestrationInvariantError(f"Unknown output_mode: {output_mode}")
 
@@ -2630,14 +2640,15 @@ class RowProcessor:
             return True, None
 
         if coalesce_outcome.merged_token is not None:
-            self._mark_coalesce_consumed_scheduler_work_terminal(
-                coalesce_name=coalesce_name,
-                consumed_tokens=tuple(coalesce_outcome.consumed_tokens),
-                active_token_id=current_token.token_id,
-            )
             if self._nav.resolve_next_node(coalesce_node_id) is None:
                 if coalesce_name is None:
                     raise OrchestrationInvariantError("Terminal coalesce outcome missing coalesce_name")
+                self._complete_coalesce_fire(
+                    coalesce_name=coalesce_name,
+                    consumed_tokens=tuple(coalesce_outcome.consumed_tokens),
+                    scope_row_id=current_token.row_id,
+                    active_token_id=current_token.token_id,
+                )
                 return (
                     True,
                     self._terminal_coalesce_row_result(
@@ -2647,13 +2658,24 @@ class RowProcessor:
                     ),
                 )
 
+            # Non-terminal merge: consume the held sibling branches and emit
+            # the merged child's READY continuation in ONE atomic journal
+            # transition (F1/D6). The in-memory child_items hop remains for
+            # liveness; the drain's enqueue reconciles idempotently against
+            # the READY row inserted here.
             coalesce_node_id = self._coalesce_node_ids[coalesce_name]
-            child_items.append(
-                self._nav.create_work_item(
-                    token=coalesce_outcome.merged_token,
-                    current_node_id=coalesce_node_id,
-                )
+            merged_item = self._nav.create_work_item(
+                token=coalesce_outcome.merged_token,
+                current_node_id=coalesce_node_id,
             )
+            self._complete_coalesce_fire(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(coalesce_outcome.consumed_tokens),
+                scope_row_id=current_token.row_id,
+                active_token_id=current_token.token_id,
+                merged_item=merged_item,
+            )
+            child_items.append(merged_item)
             return True, None
 
         if coalesce_outcome.failure_reason:
@@ -2744,12 +2766,13 @@ class RowProcessor:
             return []
 
         if outcome.merged_token is not None:
-            self._mark_coalesce_consumed_scheduler_work_terminal(
-                coalesce_name=coalesce_name,
-                consumed_tokens=tuple(outcome.consumed_tokens),
-                active_token_id=current_token.token_id,
-            )
             if self._nav.resolve_next_node(coalesce_node_id) is None:
+                self._complete_coalesce_fire(
+                    coalesce_name=coalesce_name,
+                    consumed_tokens=tuple(outcome.consumed_tokens),
+                    scope_row_id=current_token.row_id,
+                    active_token_id=current_token.token_id,
+                )
                 # Terminal coalesce — no downstream transforms.
                 # Do NOT emit TokenCompleted here: the merged token still
                 # needs to flow through the sink write for durable recording.
@@ -2761,13 +2784,21 @@ class RowProcessor:
                         context=f"branch-loss notification for row '{current_token.row_id}'",
                     ),
                 ]
-            # Non-terminal — resume merged token at coalesce step
-            child_items.append(
-                self._nav.create_work_item(
-                    token=outcome.merged_token,
-                    current_node_id=coalesce_node_id,
-                )
+            # Non-terminal — consume held siblings and emit the merged child's
+            # READY continuation in ONE atomic journal transition (F1/D6),
+            # then resume the merged token at the coalesce step.
+            merged_item = self._nav.create_work_item(
+                token=outcome.merged_token,
+                current_node_id=coalesce_node_id,
             )
+            self._complete_coalesce_fire(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(outcome.consumed_tokens),
+                scope_row_id=current_token.row_id,
+                active_token_id=current_token.token_id,
+                merged_item=merged_item,
+            )
+            child_items.append(merged_item)
             return []
 
         if outcome.failure_reason:
@@ -2908,6 +2939,12 @@ class RowProcessor:
     ) -> None:
         """Terminalize scheduler rows for coalesce siblings held before this token.
 
+        FAILURE arms only (merge failed / branch loss without a merged
+        output): no emission accompanies the consumption, and the legacy
+        partial-release wrapper semantics are kept. Successful coalesce fires
+        go through ``_complete_coalesce_fire`` — ONE atomic journal
+        transition (F1/D6).
+
         During ordinary token advancement, the token that completes the
         coalesce is currently LEASED and will be marked TERMINAL by
         ``_drain_scheduler_claims``. Older sibling branches are BLOCKED at the
@@ -2924,13 +2961,14 @@ class RowProcessor:
         tokens: Sequence[TokenInfo],
         *,
         leased_token_id: str | None = None,
-        exclude_token_ids: frozenset[str] | None = None,
     ) -> None:
-        """Mark scheduler work for aggregation-buffered tokens consumed by a flush."""
-        excluded_token_ids = exclude_token_ids or frozenset()
-        blocked_token_ids = tuple(
-            token.token_id for token in tokens if token.token_id != leased_token_id and token.token_id not in excluded_token_ids
-        )
+        """Mark scheduler work for aggregation-buffered tokens consumed by a FAILED flush.
+
+        Failure arm only (the flush produced no outputs to emit). Successful
+        flush completions go through ``_complete_aggregation_flush`` — ONE
+        atomic journal transition per barrier completion (F1/D6).
+        """
+        blocked_token_ids = tuple(token.token_id for token in tokens if token.token_id != leased_token_id)
         if not blocked_token_ids:
             return
         self.mark_blocked_barrier_terminal(
@@ -2938,55 +2976,213 @@ class RowProcessor:
             blocked_token_ids,
         )
 
-    def _mark_blocked_sink_results_pending(
+    def _sink_emission_from_result(self, result: RowResult) -> BarrierEmission:
+        """Build the sink-bound barrier emission for one flush output result.
+
+        Carries the full insert bundle: for a buffered passthrough token only
+        the handoff fields are read (BLOCKED -> PENDING_SINK in place); for a
+        generated output (transform-mode aggregate, with NO blocked row) the
+        cursor fields (``row_id``/``step_index``/``ingest_sequence``,
+        ``node_id=None``) drive a fresh PENDING_SINK insert on the terminal
+        lane. The emission's ``token_id`` is the result token's REAL token_id,
+        so the post-sink callback (``mark_sink_bound_scheduler_terminal_many``)
+        terminalizes exactly the rows inserted here.
+        """
+        token = result.token
+        return BarrierEmission(
+            token_id=token.token_id,
+            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
+            sink_name=self._require_scheduler_sink_name(result),
+            outcome=self._require_scheduler_outcome(result).value,
+            path=result.path.value,
+            error_hash=self._scheduler_error_hash(result),
+            error_message=self._scheduler_error_message(result),
+            row_id=token.row_id,
+            node_id=None,
+            step_index=self._scheduler_step_index(None),
+            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token.row_id),
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id,
+            join_group_id=token.join_group_id,
+            expand_group_id=token.expand_group_id,
+        )
+
+    def _complete_aggregation_flush(
         self,
         node_id: NodeID,
         results: tuple[RowResult, ...],
+        buffered_tokens: Sequence[TokenInfo],
         *,
         leased_token_id: str | None = None,
+        emit_sink_outputs: bool = True,
     ) -> tuple[tuple[RowResult, ...], frozenset[str]]:
-        """Move sink-bound BLOCKED aggregation flush outputs to PENDING_SINK."""
-        handoffs: dict[str, BlockedPendingSinkHandoff] = {}
-        for result in results:
-            token_id = result.token.token_id
-            if token_id == leased_token_id:
-                continue
-            if not self._is_scheduler_sink_bound_result(result):
-                continue
-            if token_id in handoffs:
-                raise AuditIntegrityError(
-                    f"Aggregation flush for node {node_id!r} produced duplicate sink-bound result for token_id={token_id!r}; "
-                    "cannot create an unambiguous scheduler pending-sink handoff."
-                )
-            handoffs[token_id] = BlockedPendingSinkHandoff(
-                row_payload_json=self._scheduler.serialize_row_payload(result.token.row_data),
-                sink_name=self._require_scheduler_sink_name(result),
-                outcome=self._require_scheduler_outcome(result).value,
-                path=result.path.value,
-                error_hash=self._scheduler_error_hash(result),
-                error_message=self._scheduler_error_message(result),
-            )
+        """Complete a successful aggregation flush as ONE atomic journal transition.
 
-        if not handoffs:
-            return results, frozenset()
+        Consumes the buffered tokens' BLOCKED rows and emits every sink-bound
+        flush output as a durable PENDING_SINK row in the same transaction
+        (F1/D6): the moment the inputs are consumed, the outputs are journal-
+        durable, so a crash before the sink write can no longer strand a
+        flush output in memory while its inputs are TERMINAL.
 
-        pending_sink_token_ids = frozenset(handoffs)
-        transitioned = self._scheduler.mark_blocked_barrier_pending_sink_many(
+        ORDERING vs batch status: ``execute_flush`` finalizes the batches row
+        (``complete_batch`` -> COMPLETED) BEFORE this journal transition. A
+        crash in that window leaves BLOCKED rows with a COMPLETED batch:
+        transform-mode flushes have already recorded terminal token_outcomes
+        (BATCH_CONSUMED), so the journal restore REFUSES loudly
+        (``_derive_restored_batch_id`` requires a live BUFFERED outcome);
+        passthrough flushes still carry BUFFERED outcomes and re-flush from
+        the rebuilt buffer. Do not reorder the two writes without re-deriving
+        the restore arms.
+
+        ``leased_token_id`` (in-claim flushes) is the LEASED triggering token:
+        excluded from consumption (its row is not BLOCKED) and threaded as the
+        ``complete_barrier`` exhaustiveness exclusion. When
+        ``emit_sink_outputs`` is False (in-claim TRANSFORM mode, where the
+        emitted aggregate rides the leased claim) only consumption happens.
+
+        Returns the results (sink-handoff results tagged
+        ``scheduler_pending_sink=True``) and the emitted token_ids.
+        """
+        emissions: list[BarrierEmission] = []
+        emitted_token_ids: set[str] = set()
+        if emit_sink_outputs:
+            for result in results:
+                token_id = result.token.token_id
+                if token_id == leased_token_id:
+                    continue
+                if not self._is_scheduler_sink_bound_result(result):
+                    continue
+                if token_id in emitted_token_ids:
+                    raise AuditIntegrityError(
+                        f"Aggregation flush for node {node_id!r} produced duplicate sink-bound result for token_id={token_id!r}; "
+                        "cannot create an unambiguous scheduler pending-sink handoff."
+                    )
+                emissions.append(self._sink_emission_from_result(result))
+                emitted_token_ids.add(token_id)
+
+        consumed_token_ids = tuple(
+            token.token_id for token in buffered_tokens if token.token_id != leased_token_id and token.token_id not in emitted_token_ids
+        )
+
+        self._scheduler.complete_barrier(
             run_id=self._run_id,
             barrier_key=str(node_id),
-            handoffs=handoffs,
+            consumed_token_ids=consumed_token_ids,
+            emitted_pending_sink=tuple(emissions),
+            emitted_ready=(),
             now=self._clock.now_utc(),
+            leased_exclusion_token_id=leased_token_id,
         )
-        if transitioned != len(pending_sink_token_ids):
-            raise AuditIntegrityError(
-                f"Aggregation flush pending-sink handoff for run_id={self._run_id!r} node_id={node_id!r} "
-                f"transitioned {transitioned} rows for {len(pending_sink_token_ids)} sink-bound blocked token(s)."
-            )
+
+        if not emitted_token_ids:
+            return results, frozenset()
+        pending_sink_token_ids = frozenset(emitted_token_ids)
         tagged_results = cast(
             tuple[RowResult, ...],
             self._with_scheduler_pending_sink_handoffs(results, pending_sink_token_ids),
         )
         return tagged_results, pending_sink_token_ids
+
+    def _ready_emission_from_work_item(self, item: WorkItem) -> BarrierEmission:
+        """Build the READY continuation emission for a merged-coalesce work item.
+
+        Field derivation MUST mirror ``_enqueue_scheduler_work_item`` exactly:
+        the drain loop (or ``_drain_work_queue``'s initial claim) later runs
+        the idempotent enqueue for the same WorkItem, which reconciles against
+        the row inserted here by deterministic ``work_item_id`` and strict
+        field equality.
+        """
+        token = item.token
+        return BarrierEmission(
+            token_id=token.token_id,
+            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
+            row_id=token.row_id,
+            node_id=self._scheduler_node_id(item.current_node_id),
+            step_index=self._scheduler_step_index(item.current_node_id),
+            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token.row_id),
+            queue_key=self._queue_key_for_blocked_item(item),
+            barrier_key=self._barrier_key_for_blocked_item(item),
+            on_success_sink=item.on_success_sink,
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id,
+            join_group_id=token.join_group_id,
+            expand_group_id=token.expand_group_id,
+            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
+            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
+        )
+
+    def _complete_coalesce_fire(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        scope_row_id: str,
+        active_token_id: str | None = None,
+        merged_item: WorkItem | None = None,
+    ) -> None:
+        """Complete a fired coalesce barrier as ONE atomic journal transition.
+
+        Consumes the held sibling branches' BLOCKED rows and (for non-terminal
+        coalesces) emits the merged child's READY continuation in the same
+        transaction (F1/D6) — a crash after the siblings are consumed can no
+        longer lose the merged output.
+
+        COALESCE barriers share ONE ``barrier_key`` (the coalesce_name) across
+        every row pending at the coalesce, so ``scope_row_id`` (the firing
+        group's row_id) is mandatory: it narrows both the membership and
+        exhaustiveness checks to this row's pending group.
+
+        ``active_token_id`` is the LEASED triggering token during in-claim
+        advancement (its row is not BLOCKED — ``_drain_scheduler_claims``
+        terminalizes the claim): excluded from consumption and threaded as the
+        ``complete_barrier`` exhaustiveness exclusion. Out-of-claim fires
+        (timeout/EOF, via ``complete_coalesce_merge``) pass None.
+        """
+        consumed_token_ids = tuple(token.token_id for token in consumed_tokens if token.token_id != active_token_id)
+        if not consumed_token_ids and merged_item is None:
+            return
+        self._scheduler.complete_barrier(
+            run_id=self._run_id,
+            barrier_key=str(coalesce_name),
+            consumed_token_ids=consumed_token_ids,
+            emitted_pending_sink=(),
+            emitted_ready=() if merged_item is None else (self._ready_emission_from_work_item(merged_item),),
+            now=self._clock.now_utc(),
+            leased_exclusion_token_id=active_token_id,
+            scope_row_id=scope_row_id,
+        )
+
+    def complete_coalesce_merge(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        merged_token: TokenInfo,
+        coalesce_node_id: NodeID,
+        ctx: PluginContext,
+    ) -> list[RowResult]:
+        """Atomically complete an out-of-claim coalesce fire and drive the merged token.
+
+        Orchestrator-facing verb for timeout/EOF coalesce fires (outcomes.py):
+        the consumed branches' BLOCKED rows and the merged child's READY row
+        transition in ONE ``complete_barrier`` call, then the merged token is
+        processed from the coalesce node. The drain's initial enqueue
+        reconciles idempotently against the READY row inserted here (same
+        deterministic work_item_id and field derivation).
+        """
+        merged_item = self._nav.create_work_item(
+            token=merged_token,
+            current_node_id=coalesce_node_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
+        )
+        self._complete_coalesce_fire(
+            coalesce_name=coalesce_name,
+            consumed_tokens=consumed_tokens,
+            scope_row_id=merged_token.row_id,
+            merged_item=merged_item,
+        )
+        return self._drain_work_queue(merged_item, ctx)
 
     def _drain_durable_work_queue(
         self,
@@ -3313,6 +3509,24 @@ class RowProcessor:
         """Rebuild a sink-bound row result without re-running its producer node."""
         if scheduled.pending_sink_name is None or scheduled.pending_outcome is None or scheduled.pending_path is None:
             raise AuditIntegrityError(f"Scheduler pending sink work_item_id={scheduled.work_item_id!r} is missing sink outcome metadata.")
+        # Attempt-offset derivation: if the original run already opened a SINK
+        # node_state for this token (the sink write itself crashed after
+        # opening attempt 0), the re-driven sink write must run at the bumped
+        # attempt or its node_state insert collides with audited history.
+        # Scoped to the sink step — the only step a pending-sink re-drive
+        # writes; producer-node attempts must not inflate the offset.
+        max_attempts = self._execution.get_max_node_state_attempts(
+            self._run_id,
+            [scheduled.token_id],
+            step_index=self.resolve_sink_step(),
+        )
+        attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1
+        if attempt_offset > 0 and self._resume_checkpoint_id is None:
+            raise AuditIntegrityError(
+                f"Scheduler pending sink token {scheduled.token_id!r} (run {self._run_id!r}) already has "
+                f"node_states up to attempt {attempt_offset - 1} but this processor has no resume checkpoint "
+                "provenance; re-driving without a resume_checkpoint_id would write an unattributed retry attempt."
+            )
         token = TokenInfo(
             row_id=scheduled.row_id,
             token_id=scheduled.token_id,
@@ -3321,6 +3535,8 @@ class RowProcessor:
             fork_group_id=scheduled.fork_group_id,
             join_group_id=scheduled.join_group_id,
             expand_group_id=scheduled.expand_group_id,
+            resume_attempt_offset=attempt_offset,
+            resume_checkpoint_id=self._resume_checkpoint_id if attempt_offset > 0 else None,
         )
         return RowResult(
             token=token,

@@ -95,7 +95,13 @@ def _mark_barrier_tokens_terminal(
     barrier_key: str,
     consumed_tokens: tuple[TokenInfo, ...],
 ) -> None:
-    """Reconcile a live coalesce merge with durable scheduler terminalization."""
+    """Reconcile a FAILED coalesce outcome with durable scheduler terminalization.
+
+    Failure arms only (merge failed at timeout/EOF): consumption without an
+    emission, on the legacy partial-release wrapper. Successful merges go
+    through ``processor.complete_coalesce_merge`` — ONE atomic journal
+    transition that consumes the branches and emits the merged child (F1/D6).
+    """
     token_ids = tuple(token.token_id for token in consumed_tokens)
     if not token_ids:
         raise AuditIntegrityError(f"Coalesce barrier {barrier_key!r} cannot terminalize scheduler work without live consumed token_ids.")
@@ -440,18 +446,16 @@ def _process_merged_coalesce_outcome(
             f"CoalesceOutcome for {coalesce_name!r} has a merged token but no coalesce node mapping. "
             f"Configured coalesce names: {configured_names}."
         ) from exc
-    _mark_barrier_tokens_terminal(
-        processor,
-        barrier_key=str(coalesce_name),
-        consumed_tokens=tuple(outcome.consumed_tokens),
-    )
+    # ONE atomic journal transition (F1/D6): the consumed branches'
+    # BLOCKED rows and the merged child's READY continuation transition
+    # together, then the merged token is driven downstream.
     continuation_results: list[RowResult] = list(
-        processor.process_token(
-            token=merged_token,
-            ctx=ctx,
-            current_node_id=coalesce_node_id,
-            coalesce_node_id=coalesce_node_id,
+        processor.complete_coalesce_merge(
             coalesce_name=coalesce_name,
+            consumed_tokens=tuple(outcome.consumed_tokens),
+            merged_token=merged_token,
+            coalesce_node_id=coalesce_node_id,
+            ctx=ctx,
         )
     )
     accumulate_row_outcomes(

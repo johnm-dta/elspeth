@@ -611,7 +611,7 @@ class ExecutionRepository:
             return None
         return self._node_state_loader.load(row)
 
-    def get_max_node_state_attempts(self, run_id: str, token_ids: Sequence[str]) -> dict[str, int]:
+    def get_max_node_state_attempts(self, run_id: str, token_ids: Sequence[str], *, step_index: int | None = None) -> dict[str, int]:
         """Max ``node_states.attempt`` per token (F1 resume attempt-offset derivation).
 
         The resume restore path stamps every journal-restored token with
@@ -623,6 +623,12 @@ class ExecutionRepository:
         Args:
             run_id: Run ID to scope the query.
             token_ids: Tokens to look up (chunked internally).
+            step_index: Optional step scope. The node_states uniqueness key is
+                ``(token_id, step_index, attempt)``, so a re-drive that only
+                writes ONE step (the PENDING_SINK sink write) derives its
+                offset from that step alone — a max over all steps would
+                over-bump for tokens whose earlier transform steps recorded
+                attempts the sink step never saw.
 
         Returns:
             Mapping of token_id -> max attempt observed in node_states.
@@ -636,6 +642,8 @@ class ExecutionRepository:
                 .where(node_states_table.c.token_id.in_(chunk))
                 .group_by(node_states_table.c.token_id)
             )
+            if step_index is not None:
+                query = query.where(node_states_table.c.step_index == step_index)
             for row in self._ops.execute_fetchall(query):
                 result[row.token_id] = int(row.max_attempt)
         return result

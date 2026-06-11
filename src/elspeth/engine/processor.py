@@ -632,10 +632,10 @@ class RowProcessor:
         # ---- Audit derivations (no mutation yet) ---------------------------
         # Attempt offsets: max node_states attempt per journal token, + 1.
         # Derived here with ONE focused query rather than plumbed from
-        # recovery's incomplete_by_row map: that map's exclusion set is being
-        # repointed at the journal in Task 3.2 (so the resume loop stops
-        # re-driving blocked tokens), which would exclude exactly the tokens
-        # this restore needs offsets for.
+        # recovery's incomplete_by_row map: that map's exclusion set reads
+        # journal BLOCKED rows (so the resume loop does not re-drive blocked
+        # tokens), which excludes exactly the tokens this restore needs
+        # offsets for.
         token_ids = [item.token_id for item in items]
         max_attempts = self._execution.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
         attempt_offsets: dict[str, int] = {token_id: max_attempts.get(token_id, -1) + 1 for token_id in token_ids}

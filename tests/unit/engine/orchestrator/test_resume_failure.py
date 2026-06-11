@@ -18,9 +18,7 @@ import pytest
 from pydantic import BaseModel
 
 from elspeth.contracts import Checkpoint, NodeID, ResumedRow, ResumePoint, RoutingMode, RunStatus
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
-from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.payload_store import PayloadStore
@@ -208,12 +206,19 @@ class TestResumeFinalizesAsFailed:
                 schema_contract=MagicMock(spec=SchemaContract, name="contract"),
             ),
         }
+        mock_factory.run_lifecycle.get_run_source_lifecycle_records.return_value = {
+            NodeID("source-node"): SimpleNamespace(source_name="source", lifecycle_state="loaded"),
+        }
+        mock_factory.execution.get_incomplete_batches.return_value = []
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 
-        # Mock RecoveryManager
+        # Mock RecoveryManager. The unprocessed row keeps the resume on the
+        # processing path (non-quiescent), where the injected RuntimeError fires.
         mock_recovery = MagicMock(spec=RecoveryManager)
-        mock_recovery.get_unprocessed_row_data.return_value = [
+        mock_recovery.get_incomplete_tokens_by_row.return_value = {}
+        mock_recovery.count_blocked_barrier_items.return_value = 0
+        mock_recovery.get_unprocessed_row_data_by_source.return_value = [
             ResumedRow(
                 row_id="row-1",
                 row_index=0,
@@ -831,6 +836,7 @@ class TestResumeFinalizesAsFailed:
             ),
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        mock_recovery.count_blocked_barrier_items.return_value = 0
         mock_recovery.get_unprocessed_row_data_by_source.return_value = (
             ResumedRow(
                 row_id="row-orders",
@@ -914,6 +920,9 @@ class TestResumeFinalizesAsFailed:
             )
         }
         mock_recovery = MagicMock(spec=RecoveryManager)
+        # F1: a non-zero journal BLOCKED barrier count must surface on the
+        # ResumeState as has_restored_barrier_work=True (quiescence-gate input).
+        mock_recovery.count_blocked_barrier_items.return_value = 3
         mock_recovery.get_unprocessed_row_data_by_source.return_value = ()
         source_schema = MagicMock(spec=SchemaContract, name="PrimarySchema")
 
@@ -926,20 +935,29 @@ class TestResumeFinalizesAsFailed:
 
         assert state.source_lifecycle_by_source == {NodeID("source-primary"): "exhausted"}
         assert state.schema_contracts_by_source == {NodeID("source-primary"): source_contract}
+        mock_recovery.count_blocked_barrier_items.assert_called_once_with(run_id)
+        assert state.has_restored_barrier_work is True
 
-    def test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed(self) -> None:
-        """Empty restored coalesce state must not force a resume processing pass."""
+    def test_resume_treats_empty_journal_as_all_rows_processed(self) -> None:
+        """No unprocessed rows + no journal BLOCKED barrier work -> early completion.
+
+        F1 journal semantics (rewritten from the blob-era "empty restored
+        coalesce checkpoint" test): the quiescence gate reads the scheduler
+        journal. An empty journal (no BLOCKED barrier rows) with zero
+        unprocessed rows means the run genuinely finished all work before
+        crashing — resume must finalize from audit truth without forcing a
+        processing pass.
+        """
         db = make_landscape_db()
         orch = _make_orchestrator(db)
-        run_id = "run-empty-coalesce-state"
+        run_id = "run-empty-journal"
         _insert_failed_run(db, run_id)
-        empty_coalesce_state = CoalesceCheckpointState(version="4.0", pending=(), completed_keys=())
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=object)
         mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
 
         checkpoint = Checkpoint(
-            checkpoint_id="cp-empty-coalesce-state",
+            checkpoint_id="cp-empty-journal",
             run_id=run_id,
             sequence_number=1,
             created_at=datetime.now(UTC),
@@ -949,26 +967,22 @@ class TestResumeFinalizesAsFailed:
         resume_point = ResumePoint(
             checkpoint=checkpoint,
             sequence_number=checkpoint.sequence_number,
-            coalesce_state=empty_coalesce_state,
         )
         resume_state = ResumeState(
             factory=mock_factory,
             run_id=run_id,
-            restored_aggregation_state={},
-            restored_coalesce_state=empty_coalesce_state,
             unprocessed_rows=(),
             incomplete_by_row={},
             recovery_manager=MagicMock(spec=RecoveryManager),
             schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "loaded"},
+            has_restored_barrier_work=False,
         )
 
         with (
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
-            patch.object(
-                orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")
-            ),
+            patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty journal should early-exit")),
             patch(
                 "elspeth.engine.orchestrator.resume.derive_resume_terminal_status_from_audit",
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
@@ -986,6 +1000,93 @@ class TestResumeFinalizesAsFailed:
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 3
         mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED)
+
+    def test_resume_with_only_journal_barrier_work_does_not_early_complete(self) -> None:
+        """THE F1 TASK 3.2 TRAP: fully-buffered crashed run must not early-complete.
+
+        Journal BLOCKED barrier rows are EXCLUDED from unprocessed_rows
+        (restored, not re-driven), so a run whose entire remaining work sits
+        at barriers presents zero unprocessed rows. If the quiescence gate
+        ignored the journal, resume would finalize the run and delete its
+        checkpoints WITHOUT building the BarrierJournalRestoreContext — the
+        buffered batch would never flush. The gate must route through the
+        processing path, handing the restore context (carrying the
+        checkpoint's barrier scalars) to processor construction.
+        """
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-buffered-only"
+        _insert_failed_run(db, run_id)
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
+        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        scalars = BarrierScalars(
+            aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=1.0, condition_fire_offset=None)},
+            coalesce={},
+        )
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-buffered-only",
+            run_id=run_id,
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            sequence_number=checkpoint.sequence_number,
+            barrier_scalars=scalars,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            unprocessed_rows=(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "exhausted"},
+            has_restored_barrier_work=True,
+            batch_id_remap={"batch-dead": "batch-retry"},
+        )
+        resumed_result = RunResult(
+            run_id=run_id,
+            status=RunStatus.RUNNING,
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        with (
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
+            patch.object(orch._ceremony, "emit_telemetry"),
+            patch.object(orch._checkpoints, "delete_checkpoints") as delete_checkpoints,
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(spec=PipelineConfig),
+                MagicMock(spec=ExecutionGraph),
+                payload_store=MockPayloadStore(),
+            )
+
+        # The processing path ran (no early-complete) and the journal-restore
+        # context was built from the resume point + reconstructed state.
+        process_resumed.assert_called_once()
+        barrier_restore = process_resumed.call_args.kwargs["barrier_restore"]
+        assert barrier_restore is not None
+        assert barrier_restore.resume_checkpoint_id == "cp-buffered-only"
+        assert barrier_restore.barrier_scalars is scalars
+        assert dict(barrier_restore.batch_id_remap) == {"batch-dead": "batch-retry"}
+        # Checkpoints are deleted only AFTER the processing path completed.
+        delete_checkpoints.assert_called_once_with(run_id)
+        assert result.status == RunStatus.EMPTY
 
     def test_all_rows_processed_resume_replays_structural_counters_from_audit(self) -> None:
         """All-terminal resume must not fabricate structural counters as zero."""
@@ -1075,14 +1176,13 @@ class TestResumeFinalizesAsFailed:
         resume_state = ResumeState(
             factory=mock_factory,
             run_id=run_id,
-            restored_aggregation_state={},
-            restored_coalesce_state=None,
             unprocessed_rows=(),
             incomplete_by_row={},
             recovery_manager=MagicMock(spec=RecoveryManager),
             schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "exhausted"},
+            has_restored_barrier_work=False,
         )
 
         with (
@@ -1111,7 +1211,11 @@ class TestResumeFinalizesAsFailed:
         assert result.rows_diverted == 1
 
     def test_resume_allows_exhausted_source_with_restored_engine_work(self) -> None:
-        """Resume must not reject exhausted sources before engine-only work drains."""
+        """Resume must not reject exhausted sources before engine-only work drains.
+
+        F1: "restored engine work" is journal BLOCKED barrier rows
+        (has_restored_barrier_work), no longer blob aggregation state.
+        """
         db = make_landscape_db()
         orch = _make_orchestrator(db)
         run_id = "run-exhausted-source-engine-work"
@@ -1134,14 +1238,13 @@ class TestResumeFinalizesAsFailed:
         resume_state = ResumeState(
             factory=mock_factory,
             run_id=run_id,
-            restored_aggregation_state={"agg-node": MagicMock(spec=AggregationCheckpointState)},
-            restored_coalesce_state=None,
             unprocessed_rows=(),
             incomplete_by_row={},
             recovery_manager=MagicMock(spec=RecoveryManager),
             schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "exhausted"},
+            has_restored_barrier_work=True,
         )
         resumed_result = RunResult(
             run_id=run_id,

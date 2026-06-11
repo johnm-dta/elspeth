@@ -91,8 +91,6 @@ from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:
     from elspeth.contracts import ResumePoint, SchemaContract
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
@@ -582,37 +580,34 @@ class ResumeCoordinator:
         )
 
         # 1. Handle incomplete batches - call module function directly.
-        # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py rewire.
         # The returned old→retry batch_id mapping feeds the processor's
         # journal-based barrier restore (BUFFERED token_outcomes still carry
-        # the dead original batch ids), threaded through ResumeState.
-        # rebind_checkpoint_batch_ids stays dead until Task 3.2 deletes it.
+        # the dead original batch ids after a flush-interrupting crash),
+        # threaded through ResumeState.
         batch_id_remap = handle_incomplete_batches(factory.execution, run_id)
 
         # 2. Update run status to running after validation has succeeded.
         factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
-        # 3. F1 Task 3.1: barrier restore now runs in PROCESSOR CONSTRUCTION —
-        # resume() bundles a BarrierJournalRestoreContext (checkpoint scalars +
-        # the batch_id_remap captured above) and RowProcessor.__init__ rebuilds
-        # the executors from journal BLOCKED rows + audit tables. Task 3.2
-        # still owes: repointing recovery's buffered-token exclusion set (and
-        # the quiescence gate it shares) at the journal, and deleting these
-        # always-empty restored_*_state carriers.
-        restored_state: dict[str, AggregationCheckpointState] = {}
-        restored_coalesce_state: CoalesceCheckpointState | None = None
+        # 3. F1: barrier restore runs in PROCESSOR CONSTRUCTION — resume()
+        # bundles a BarrierJournalRestoreContext (checkpoint scalars + the
+        # batch_id_remap captured above) and RowProcessor.__init__ rebuilds
+        # the executors from journal BLOCKED rows + audit tables. The
+        # quiescence gate in resume() therefore consults the JOURNAL: a run
+        # whose remaining work all sits at barriers has zero unprocessed rows
+        # but must still run the processing path so the restored buffers flush.
+        has_restored_barrier_work = recovery.count_blocked_barrier_items(run_id) > 0
 
         return ResumeState(
             factory=factory,
             run_id=run_id,
-            restored_aggregation_state=restored_state,
-            restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
             incomplete_by_row=incomplete_by_row,
             recovery_manager=recovery,
             schema_contracts_by_source=schema_contracts_by_source,
             source_names_by_source=source_names_by_source,
             source_lifecycle_by_source=source_lifecycle_by_source,
+            has_restored_barrier_work=has_restored_barrier_work,
             batch_id_remap=batch_id_remap,
         )
 
@@ -695,10 +690,6 @@ class ResumeCoordinator:
         state = self.reconstruct_resume_state(resume_point, payload_store)
         run_id = state.run_id
         factory = state.factory
-        restored_state = state.restored_aggregation_state
-        restored_coalesce_state = state.restored_coalesce_state
-        if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
-            restored_coalesce_state = None
         schema_contracts_by_source = state.schema_contracts_by_source
         unprocessed_rows = state.unprocessed_rows
         # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
@@ -722,7 +713,17 @@ class ResumeCoordinator:
             if incomplete_sources:
                 raise IncompleteSourceResumeError(run_id, incomplete_sources)
 
-            if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
+            # F1 QUIESCENCE GATE (co-repointed with the buffered-token
+            # exclusion, Task 3.2): journal BLOCKED barrier rows are excluded
+            # from ``unprocessed_rows`` because they are RESTORED at processor
+            # construction — so a fully-buffered crashed run (all remaining
+            # work sitting at barriers) legitimately has zero unprocessed
+            # rows. Early-completing here would finalize the run and delete
+            # checkpoints WITHOUT ever constructing the
+            # BarrierJournalRestoreContext, silently dropping the buffered
+            # batch. The no-work arm therefore also requires the journal to
+            # carry no restored barrier work.
+            if not unprocessed_rows and not state.has_restored_barrier_work:
                 factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
 
                 # All rows were processed - complete the run.
@@ -770,9 +771,9 @@ class ResumeCoordinator:
                 return audit_counters.to_run_result(run_id, terminal_status)
 
             with shutdown_ctx as active_event:
-                # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py
-                # rewire. Bundle the journal-restore inputs (checkpoint
-                # scalars + batch remap) for the processor's restore sweep.
+                # F1: bundle the journal-restore inputs (checkpoint scalars +
+                # batch remap) for the processor's construction-time restore
+                # sweep (RowProcessor._restore_barriers_from_journal).
                 barrier_restore = BarrierJournalRestoreContext(
                     resume_checkpoint_id=resume_checkpoint_id,
                     barrier_scalars=resume_point.barrier_scalars,

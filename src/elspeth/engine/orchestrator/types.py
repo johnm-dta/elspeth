@@ -30,10 +30,8 @@ from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.checkpoint import ResumedRow
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -581,8 +579,6 @@ class ResumeState:
 
     factory: RecorderFactory
     run_id: str
-    restored_aggregation_state: Mapping[str, AggregationCheckpointState]
-    restored_coalesce_state: CoalesceCheckpointState | None
     unprocessed_rows: Sequence[ResumedRow]
     # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
     # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
@@ -593,10 +589,16 @@ class ResumeState:
     schema_contracts_by_source: Mapping[NodeID, SchemaContract]
     source_names_by_source: Mapping[NodeID, str]
     source_lifecycle_by_source: Mapping[NodeID, str]
-    # F1 Task 3.1 transitional — Task 3.2 finishes the resume.py rewire.
-    # old->retry batch_id mapping from handle_incomplete_batches; consumed by
-    # the processor's journal restore (BUFFERED token_outcomes still carry the
-    # dead original batch ids after a flush-interrupting crash).
+    # F1: True when the scheduler journal carries BLOCKED barrier rows for the
+    # run. Those tokens are EXCLUDED from unprocessed_rows (they are restored
+    # into executor buffers at processor construction, not re-driven), so the
+    # resume quiescence gate must consult this flag — a fully-buffered crashed
+    # run has zero unprocessed rows but must still run the processing path so
+    # the restored buffers flush.
+    has_restored_barrier_work: bool = False
+    # F1: old->retry batch_id mapping from handle_incomplete_batches; consumed
+    # by the processor's journal restore (BUFFERED token_outcomes still carry
+    # the dead original batch ids after a flush-interrupting crash).
     batch_id_remap: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -613,7 +615,6 @@ class ResumeState:
         # recovery_manager is a live service object (not a container) — NOT frozen here.
         freeze_fields(
             self,
-            "restored_aggregation_state",
             "incomplete_by_row",
             "schema_contracts_by_source",
             "source_names_by_source",

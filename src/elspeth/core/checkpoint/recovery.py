@@ -32,6 +32,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.barrier_scalars import BarrierScalars
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
+from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
@@ -43,6 +44,7 @@ from elspeth.core.landscape.schema import (
     rows_table,
     runs_table,
     token_outcomes_table,
+    token_work_items_table,
     tokens_table,
 )
 
@@ -239,7 +241,14 @@ class RecoveryManager:
             # Return ResumeCheck instead of propagating exception (API contract)
             return ResumeCheck(can_resume=False, reason=str(e))
         if checkpoint is None:
-            return ResumeCheck(can_resume=False, reason="No checkpoint found for recovery")
+            # F1 Task 3.2: journal-flavoured refuse — the checkpoint row is the
+            # run's resume BASELINE (scalars + topology anchor); buffered work
+            # itself lives in journal BLOCKED rows. D4 (Task 3.3) guarantees a
+            # sequence-0 baseline exists for every checkpointing-enabled run.
+            return ResumeCheck(
+                can_resume=False,
+                reason="Run has no resume baseline (run predates run-start checkpointing or checkpointing was disabled)",
+            )
 
         # Validate topological compatibility
         validator = CheckpointCompatibilityValidator()
@@ -565,12 +574,12 @@ class RecoveryManager:
         if checkpoint is None:
             return []
 
-        # Buffered-token exclusion: tokens restored from barrier buffers must not
-        # trigger duplicate reprocessing, but row-level exclusion is unsafe when a row
-        # has mixed buffered and non-buffered incomplete tokens.
-        # F1 Task 1.2: checkpoint blobs no longer carry buffered tokens, so this set
-        # is empty until Phase 2 sources it from journal BLOCKED rows.
-        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint)
+        # Buffered-token exclusion: tokens held at barriers are RESTORED from
+        # journal BLOCKED rows at processor construction (F1), not re-driven
+        # from source, so they must not trigger duplicate reprocessing. Row-level
+        # exclusion is unsafe when a row has mixed buffered and non-buffered
+        # incomplete tokens, hence the all-incomplete-tokens-buffered filter below.
+        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
 
         with self._db.engine.connect() as conn:
             # CORRECT SEMANTICS FOR FORK/AGGREGATION/COALESCE RECOVERY:
@@ -695,12 +704,12 @@ class RecoveryManager:
         """Return incomplete non-delegation child tokens, grouped by row_id.
 
         A token is incomplete when it is not a delegation marker and has no
-        completed terminal outcome. Tokens restored from checkpoint aggregation
-        or coalesce state are excluded because those are flushed from restored
-        executor state rather than re-driven from source.
+        completed terminal outcome. Tokens held at barriers (journal BLOCKED
+        rows with a barrier_key) are excluded because those are flushed from
+        executor state restored from the journal rather than re-driven from
+        source (F1).
         """
-        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
-        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
+        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
 
         with self._db.engine.connect() as conn:
             delegation_tokens = (
@@ -789,16 +798,48 @@ class RecoveryManager:
         contract = SchemaContract.from_checkpoint(envelope["contract"])
         return PipelineRow(envelope["data"], contract)
 
-    def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
-        """Collect token IDs restored from checkpoint state.
+    def _get_buffered_journal_token_ids(self, run_id: str) -> set[str]:
+        """Collect token IDs held at barriers in the scheduler journal.
 
-        F1 Task 1.2: the checkpoint no longer carries buffered token payloads —
-        journal BLOCKED rows (token_work_items) own them. Until Phase 2 rewires
-        this exclusion onto the journal, no token is checkpoint-buffered, so
-        the exclusion set is empty.
+        F1: journal BLOCKED rows (token_work_items) own buffered token
+        payloads; resume restores them into executor buffers at processor
+        construction, so they are excluded from the re-drive work set.
+
+        The ``barrier_key IS NOT NULL`` filter keeps ADR-028 queue-holds IN
+        the re-drive work set — a queue-held token is throttled, not waiting
+        at a barrier, and nothing restores it if resume skips it.
         """
-        del checkpoint
-        return set()
+        with self._db.engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(token_work_items_table.c.token_id)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.barrier_key.is_not(None))
+                )
+                .scalars()
+                .all()
+            )
+        return set(rows)
+
+    def count_blocked_barrier_items(self, run_id: str) -> int:
+        """Count journal BLOCKED barrier holds for a run.
+
+        Public resume-inspection surface (F1): "what will be restored rather
+        than re-driven" is the journal's BLOCKED rows with a non-NULL
+        ``barrier_key``. Used by the resume coordinator's quiescence gate
+        (a run with zero unprocessed rows but blocked barrier work must NOT
+        early-complete) and by the CLI resume preflight display.
+        """
+        with self._db.engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                .where(token_work_items_table.c.barrier_key.is_not(None))
+            ).scalar_one()
+        return int(result)
 
     def _restore_barrier_scalars(self, checkpoint: Checkpoint) -> BarrierScalars | None:
         """Deserialize barrier scalar metadata once per observed checkpoint payload."""

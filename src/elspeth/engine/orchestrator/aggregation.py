@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from elspeth.contracts import TransformProtocol
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.results import RowResult
     from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -116,51 +115,6 @@ def handle_incomplete_batches(
         # DRAFT batches continue normally (collection resumes)
 
     return batch_id_mapping
-
-
-def rebind_checkpoint_batch_ids(
-    state: AggregationCheckpointState,
-    batch_id_mapping: dict[str, str],
-) -> AggregationCheckpointState:
-    """Create a new checkpoint state with batch_ids rebound to retry batches.
-
-    F1 Task 1.2: dead until Task 3.2 deletes it — checkpoints no longer carry
-    blob aggregation state, so the resume path (its only production caller)
-    severed its call site. Task 3.2's journal-based restore replaces the
-    mechanism.
-
-    When ``handle_incomplete_batches()`` retries failed/executing batches, the
-    checkpoint still references the dead original batch_ids. This function
-    produces a new ``AggregationCheckpointState`` where each node's batch_id
-    is replaced with the corresponding retry batch_id from the mapping.
-
-    Nodes whose batch_id is not in the mapping are left unchanged (e.g. DRAFT
-    batches that were not retried).
-
-    Args:
-        state: Original checkpoint state from the resume point.
-        batch_id_mapping: old_batch_id -> new_batch_id from ``handle_incomplete_batches()``.
-
-    Returns:
-        New ``AggregationCheckpointState`` with rebound batch_ids.
-    """
-    from dataclasses import replace
-
-    from elspeth.contracts.aggregation_checkpoint import (
-        AggregationNodeCheckpoint,
-    )
-
-    if not batch_id_mapping:
-        return state
-
-    rebound_nodes: dict[str, AggregationNodeCheckpoint] = {}
-    for node_id, node_ckpt in state.nodes.items():
-        if node_ckpt.batch_id in batch_id_mapping:
-            rebound_nodes[node_id] = replace(node_ckpt, batch_id=batch_id_mapping[node_ckpt.batch_id])
-        else:
-            rebound_nodes[node_id] = node_ckpt
-
-    return replace(state, nodes=rebound_nodes)
 
 
 def _process_flush_results(

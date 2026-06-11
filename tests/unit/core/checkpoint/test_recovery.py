@@ -20,18 +20,10 @@ from elspeth.contracts import (
     TerminalOutcome,
     TerminalPath,
 )
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
-from elspeth.contracts.coalesce_checkpoint import (
-    CoalesceCheckpointState,
-    CoalescePendingCheckpoint,
-    CoalesceTokenCheckpoint,
-)
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError, OrchestrationInvariantError
+from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
@@ -46,6 +38,7 @@ from elspeth.core.landscape.schema import (
     run_sources_table,
     runs_table,
     token_outcomes_table,
+    token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_landscape_db
@@ -231,6 +224,45 @@ def _insert_terminal_outcome(
     )
 
 
+def _insert_blocked_work_item(
+    conn: Connection,
+    run_id: str,
+    token_id: str,
+    row_id: str,
+    *,
+    barrier_key: str | None,
+    queue_key: str | None = None,
+    status: TokenWorkStatus = TokenWorkStatus.BLOCKED,
+) -> None:
+    """Insert a scheduler-journal work item (F1: journal owns buffered tokens).
+
+    ``barrier_key`` non-NULL marks a barrier hold (aggregation node_id or
+    coalesce name); ``barrier_key=None`` with a ``queue_key`` models an
+    ADR-028 queue-hold, which must stay IN the re-drive work set.
+    """
+    now = datetime.now(UTC)
+    conn.execute(
+        token_work_items_table.insert().values(
+            work_item_id=f"wi-{token_id}",
+            run_id=run_id,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=None,
+            step_index=0,
+            ingest_sequence=0,
+            row_payload_json="{}",
+            status=status.value,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            attempt=0,
+            available_at=now,
+            barrier_blocked_at=now if barrier_key is not None else None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
 def _create_failed_run_with_checkpoint(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
@@ -239,8 +271,7 @@ def _create_failed_run_with_checkpoint(
     status: RunStatus | str = RunStatus.FAILED,
     checkpoint_node_id: str = "checkpoint-node",
     with_contract: bool = True,
-    aggregation_state: AggregationCheckpointState | None = None,
-    coalesce_state: CoalesceCheckpointState | None = None,
+    barrier_scalars: BarrierScalars | None = None,
     graph: ExecutionGraph | None = None,
 ) -> ExecutionGraph:
     active_graph = graph or _create_graph(node_id=checkpoint_node_id)
@@ -258,9 +289,8 @@ def _create_failed_run_with_checkpoint(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=barrier_scalars,
         graph=active_graph,
-        aggregation_state=aggregation_state,
-        coalesce_state=coalesce_state,
     )
     return active_graph
 
@@ -326,7 +356,24 @@ def test_can_resume_rejects_failed_run_without_checkpoint(db: LandscapeDB, recov
 
     check = recovery_manager.can_resume("run-no-checkpoint", _create_graph())
     assert check.can_resume is False
-    assert check.reason == "No checkpoint found for recovery"
+    assert check.reason == "Run has no resume baseline (run predates run-start checkpointing or checkpointing was disabled)"
+
+
+def test_can_resume_reason_for_missing_baseline_is_journal_flavoured(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
+    """F1 Task 3.2: the missing-checkpoint refuse speaks journal semantics.
+
+    Post-F1 the checkpoint row is only the resume BASELINE (scalars +
+    topology anchor); buffered work lives in journal BLOCKED rows. The
+    refuse reason must not present the checkpoint as the recovery store —
+    if it mentions checkpointing at all, it is in the baseline framing.
+    """
+    with db.connection() as conn:
+        _insert_run(conn, "run-no-baseline", status=RunStatus.FAILED)
+
+    check = recovery_manager.can_resume("run-no-baseline", _create_graph())
+    assert not check.can_resume
+    assert check.reason is not None
+    assert "checkpoint" not in check.reason.lower() or "baseline" in check.reason.lower()
 
 
 def test_can_resume_returns_reason_when_checkpoint_format_is_incompatible(
@@ -393,92 +440,49 @@ def test_get_resume_point_returns_none_if_checkpoint_missing_after_can_resume(
     assert recovery_manager.get_resume_point("run-race", _create_graph()) is None
 
 
-def test_get_resume_point_restores_aggregation_state(
+def test_get_resume_point_restores_barrier_scalars(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
 ) -> None:
+    """F1: the checkpoint contributes only the underivable barrier scalars."""
     run_id = "run-resume-point"
     graph = _create_failed_run_with_checkpoint(
         db,
         checkpoint_manager,
         run_id,
-        aggregation_state=AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg-node": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-buffered",
-                            row_id="row-buffered",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 5},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
+        barrier_scalars=BarrierScalars(
+            aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=None)},
+            coalesce={},
         ),
     )
 
     resume_point = recovery_manager.get_resume_point(run_id, graph)
     assert resume_point is not None
     assert resume_point.sequence_number == 1
-    assert resume_point.aggregation_state is not None
-    assert "agg-node" in resume_point.aggregation_state.nodes
+    assert resume_point.barrier_scalars is not None
+    assert resume_point.barrier_scalars.aggregation["agg-node"].count_fire_offset == 1.5
 
 
-def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
+def test_get_resume_point_caches_barrier_scalars_parse(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Resume inspection should not parse the same aggregation checkpoint twice."""
+    """Resume inspection should not parse the same barrier-scalars payload twice."""
     import importlib
 
     recovery_module: Any = importlib.import_module("elspeth.core.checkpoint.recovery")
 
-    run_id = "run-buffered-state-parse"
+    run_id = "run-scalars-parse"
     graph = _create_failed_run_with_checkpoint(
         db,
         checkpoint_manager,
         run_id,
-        aggregation_state=AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg-node": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-buffered",
-                            row_id="row-buffered",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 5},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
+        barrier_scalars=BarrierScalars(
+            aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=2.0, condition_fire_offset=None)},
+            coalesce={},
         ),
     )
 
@@ -491,11 +495,13 @@ def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
 
     monkeypatch.setattr(recovery_module, "checkpoint_loads", counting_checkpoint_loads)
 
-    resume_point = recovery_manager.get_resume_point(run_id, graph)
-    assert resume_point is not None
-    assert resume_point.aggregation_state is not None
+    first = recovery_manager.get_resume_point(run_id, graph)
+    second = recovery_manager.get_resume_point(run_id, graph)
+    assert first is not None
+    assert second is not None
+    assert first.barrier_scalars is not None
     assert recovery_manager.get_unprocessed_rows(run_id) == ["row-0"]
-    assert parsed_payloads == [resume_point.checkpoint.aggregation_state_json]
+    assert parsed_payloads == [first.checkpoint.barrier_scalars_json]
 
 
 def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager: RecoveryManager) -> None:
@@ -522,6 +528,7 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
     )
 
@@ -560,6 +567,7 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
     )
 
@@ -571,6 +579,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
 ) -> None:
+    """F1: buffered = journal BLOCKED rows with a barrier_key, not checkpoint blobs."""
     run_id = "run-unprocessed-complex"
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
@@ -593,58 +602,24 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         _insert_terminal_outcome(conn, run_id, "tok-child-ok", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
         _insert_token(conn, run_id, "tok-child-pending", "row-child-pending")
 
-        # row-buffered: appears incomplete but all incomplete tokens are buffered
-        # in checkpoint state -> excluded.
+        # row-buffered: appears incomplete but all incomplete tokens are held
+        # at a barrier in the journal -> excluded (restored, not re-driven).
         _insert_row(conn, run_id, "row-buffered", row_index=3, source_data_ref=None)
         _insert_token(conn, run_id, "tok-buffered", "row-buffered")
+        _insert_blocked_work_item(conn, run_id, "tok-buffered", "row-buffered", barrier_key="agg-node")
 
         # row-mixed-buffering: one incomplete token buffered + one incomplete token
         # not buffered -> must remain unprocessed.
         _insert_row(conn, run_id, "row-mixed-buffering", row_index=4, source_data_ref=None)
         _insert_token(conn, run_id, "tok-mixed-buffered", "row-mixed-buffering")
         _insert_token(conn, run_id, "tok-mixed-pending", "row-mixed-buffering")
+        _insert_blocked_work_item(conn, run_id, "tok-mixed-buffered", "row-mixed-buffering", barrier_key="agg-node")
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=10,
+        barrier_scalars=None,
         graph=graph,
-        aggregation_state=AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg-node": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-buffered",
-                            row_id="row-buffered",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                        AggregationTokenCheckpoint(
-                            token_id="tok-mixed-buffered",
-                            row_id="row-mixed-buffering",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
-        ),
     )
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
@@ -671,59 +646,25 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
-        # row-a: incomplete token is buffered -> excluded
+        # row-a: incomplete token is buffered (journal BLOCKED) -> excluded
         _insert_row(conn, run_id, "row-a", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-a", "row-a")
+        _insert_blocked_work_item(conn, run_id, "tok-a", "row-a", barrier_key="agg-node")
 
         # row-b: incomplete token is NOT buffered -> included
         _insert_row(conn, run_id, "row-b", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-b", "row-b")
 
-        # row-c: incomplete token is buffered -> excluded
+        # row-c: incomplete token is buffered (journal BLOCKED) -> excluded
         _insert_row(conn, run_id, "row-c", row_index=2, source_data_ref=None)
         _insert_token(conn, run_id, "tok-c", "row-c")
+        _insert_blocked_work_item(conn, run_id, "tok-c", "row-c", barrier_key="agg-node")
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
-        aggregation_state=AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg-node": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-a",
-                            row_id="row-a",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                        AggregationTokenCheckpoint(
-                            token_id="tok-c",
-                            row_id="row-c",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
-        ),
     )
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
@@ -731,46 +672,23 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
     assert unprocessed == ["row-b"]
 
 
-def _make_coalesce_token(token_id: str, row_id: str, branch_name: str) -> CoalesceTokenCheckpoint:
-    """Build a minimal CoalesceTokenCheckpoint for testing."""
-    return CoalesceTokenCheckpoint(
-        token_id=token_id,
-        row_id=row_id,
-        branch_name=branch_name,
-        fork_group_id=None,
-        join_group_id=None,
-        expand_group_id=None,
-        row_data={},
-        contract={},
-        state_id="state-1",
-        arrival_offset_seconds=0.0,
-    )
-
-
-def _make_coalesce_state(*pendings: CoalescePendingCheckpoint) -> CoalesceCheckpointState:
-    """Build a CoalesceCheckpointState with the given pending entries."""
-    return CoalesceCheckpointState(
-        version="1.0",
-        pending=pendings,
-        completed_keys=(),
-    )
-
-
 def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
 ) -> None:
-    """Rows whose only incomplete tokens are buffered in coalesce state should be excluded."""
+    """Rows whose only incomplete tokens are held at a coalesce barrier are excluded."""
     run_id = "run-coalesce-buffered"
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
-        # row-coalesce-buffered: incomplete token buffered in coalesce -> excluded
+        # row-coalesce-buffered: incomplete token held at a coalesce barrier
+        # (journal BLOCKED row, barrier_key = coalesce name) -> excluded
         _insert_row(conn, run_id, "row-coalesce-buffered", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-coalesce-buf", "row-coalesce-buffered")
+        _insert_blocked_work_item(conn, run_id, "tok-coalesce-buf", "row-coalesce-buffered", barrier_key="merge1")
 
         # row-pending: incomplete token NOT buffered anywhere -> included
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
@@ -779,16 +697,8 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
-        coalesce_state=_make_coalesce_state(
-            CoalescePendingCheckpoint(
-                coalesce_name="merge1",
-                row_id="row-coalesce-buffered",
-                elapsed_age_seconds=0.0,
-                branches={"path_a": _make_coalesce_token("tok-coalesce-buf", "row-coalesce-buffered", "path_a")},
-                lost_branches={},
-            ),
-        ),
     )
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
@@ -800,20 +710,22 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
 ) -> None:
-    """Buffered token IDs from both aggregation and coalesce state should be merged."""
+    """BLOCKED barrier holds for aggregation nodes and coalesce names both exclude."""
     run_id = "run-combined-buffered"
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
-        # row-agg: buffered in aggregation -> excluded
+        # row-agg: held at an aggregation barrier (barrier_key = node_id) -> excluded
         _insert_row(conn, run_id, "row-agg", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-agg", "row-agg")
+        _insert_blocked_work_item(conn, run_id, "tok-agg", "row-agg", barrier_key="agg-node")
 
-        # row-coal: buffered in coalesce -> excluded
+        # row-coal: held at a coalesce barrier (barrier_key = coalesce name) -> excluded
         _insert_row(conn, run_id, "row-coal", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-coal", "row-coal")
+        _insert_blocked_work_item(conn, run_id, "tok-coal", "row-coal", barrier_key="merge1")
 
         # row-free: not buffered -> included
         _insert_row(conn, run_id, "row-free", row_index=2, source_data_ref=None)
@@ -822,42 +734,8 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
-        aggregation_state=AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "agg-node": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-agg",
-                            row_id="row-agg",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
-        ),
-        coalesce_state=_make_coalesce_state(
-            CoalescePendingCheckpoint(
-                coalesce_name="merge1",
-                row_id="row-coal",
-                elapsed_age_seconds=0.0,
-                branches={"path_a": _make_coalesce_token("tok-coal", "row-coal", "path_a")},
-                lost_branches={},
-            ),
-        ),
     )
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
@@ -869,38 +747,184 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
     checkpoint_manager: CheckpointManager,
     recovery_manager: RecoveryManager,
 ) -> None:
-    """All branch tokens from a coalesce pending entry should be recognized as buffered."""
+    """All branch tokens held at the same coalesce barrier are recognized as buffered."""
     run_id = "run-coalesce-multi"
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
-        # row with two tokens, both buffered in different coalesce branches -> excluded
+        # row with two tokens, both held at the coalesce barrier -> excluded
         _insert_row(conn, run_id, "row-multi", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-branch-a", "row-multi")
         _insert_token(conn, run_id, "tok-branch-b", "row-multi")
+        _insert_blocked_work_item(conn, run_id, "tok-branch-a", "row-multi", barrier_key="merge1")
+        _insert_blocked_work_item(conn, run_id, "tok-branch-b", "row-multi", barrier_key="merge1")
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
-        coalesce_state=_make_coalesce_state(
-            CoalescePendingCheckpoint(
-                coalesce_name="merge1",
-                row_id="row-multi",
-                elapsed_age_seconds=0.0,
-                branches={
-                    "path_a": _make_coalesce_token("tok-branch-a", "row-multi", "path_a"),
-                    "path_b": _make_coalesce_token("tok-branch-b", "row-multi", "path_b"),
-                },
-                lost_branches={},
-            ),
-        ),
     )
 
     unprocessed = recovery_manager.get_unprocessed_rows(run_id)
     assert unprocessed == []
+
+
+def test_buffered_exclusion_reads_journal_not_blob(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """F1 Task 3.2: the exclusion set is sourced from journal BLOCKED rows.
+
+    Token t1 is BLOCKED at a barrier in the journal and incomplete in
+    token_outcomes -> its row r1 is NOT in get_unprocessed_rows (buffered
+    work is restored at processor construction, not re-driven). The
+    checkpoint row carries no buffered-token blob at all.
+    """
+    run_id = "run-journal-exclusion"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "r1", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "t1", "r1")
+        _insert_blocked_work_item(conn, run_id, "t1", "r1", barrier_key="agg-node")
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+
+    assert "r1" not in set(recovery_manager.get_unprocessed_rows(run_id))
+
+
+def test_queue_held_token_stays_in_redrive_work_set(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """ADR-028 queue-holds (BLOCKED, barrier_key NULL) are NOT barrier-buffered.
+
+    A queue-held token is throttled, not waiting at a barrier — nothing
+    restores it into an executor buffer on resume, so excluding it from the
+    re-drive work set would silently drop the row.
+    """
+    run_id = "run-queue-hold"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-queued", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-queued", "row-queued")
+        _insert_blocked_work_item(conn, run_id, "tok-queued", "row-queued", barrier_key=None, queue_key="llm-rate-limit")
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+
+    assert "row-queued" in recovery_manager.get_unprocessed_rows(run_id)
+    incomplete = recovery_manager.get_incomplete_tokens_by_row(run_id)
+    assert "tok-queued" in {spec.token_id for spec in incomplete.get("row-queued", [])}
+
+
+def test_post_checkpoint_buffered_token_is_restored_not_redriven(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """A BLOCKED journal row written AFTER the latest checkpoint still excludes.
+
+    The checkpoint contributes only scalars (a resume baseline); journal
+    BLOCKED rows are authoritative for buffered membership regardless of
+    whether they pre- or post-date the checkpoint sequence.
+    """
+    run_id = "run-post-checkpoint-buffer"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-late-buffer", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-late-buffer", "row-late-buffer")
+
+    # Checkpoint (the resume baseline, with scalars) predates the BLOCKED row.
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=BarrierScalars(
+            aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=None, condition_fire_offset=None)},
+            coalesce={},
+        ),
+        graph=graph,
+    )
+
+    with db.connection() as conn:
+        _insert_blocked_work_item(conn, run_id, "tok-late-buffer", "row-late-buffer", barrier_key="agg-node")
+
+    assert recovery_manager.get_unprocessed_rows(run_id) == []
+    assert recovery_manager.get_incomplete_tokens_by_row(run_id) == {}
+
+
+def test_get_incomplete_tokens_by_row_excludes_journal_blocked_tokens(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """The mid-DAG continuation index must not re-drive barrier-held tokens."""
+    run_id = "run-incomplete-journal"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-mixed", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-held", "row-mixed")
+        _insert_token(conn, run_id, "tok-live", "row-mixed")
+        _insert_blocked_work_item(conn, run_id, "tok-held", "row-mixed", barrier_key="merge1")
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+
+    by_row = recovery_manager.get_incomplete_tokens_by_row(run_id)
+    token_ids = {spec.token_id for spec in by_row.get("row-mixed", [])}
+    assert "tok-held" not in token_ids
+    assert "tok-live" in token_ids
+
+
+def test_count_blocked_barrier_items_counts_only_barrier_holds(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """Public journal-count surface: barrier holds in, queue-holds and READY out.
+
+    Consumed by the resume coordinator's quiescence gate and the CLI resume
+    preflight (the inline CLI query was absorbed here in F1 Task 3.2).
+    """
+    run_id = "run-blocked-count"
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_row(conn, run_id, "row-1", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-barrier-1", "row-1")
+        _insert_token(conn, run_id, "tok-barrier-2", "row-1")
+        _insert_token(conn, run_id, "tok-queue", "row-1")
+        _insert_token(conn, run_id, "tok-ready", "row-1")
+        _insert_blocked_work_item(conn, run_id, "tok-barrier-1", "row-1", barrier_key="agg-node")
+        _insert_blocked_work_item(conn, run_id, "tok-barrier-2", "row-1", barrier_key="merge1")
+        _insert_blocked_work_item(conn, run_id, "tok-queue", "row-1", barrier_key=None, queue_key="llm-rate-limit")
+        _insert_blocked_work_item(conn, run_id, "tok-ready", "row-1", barrier_key=None, status=TokenWorkStatus.READY)
+
+    assert recovery_manager.count_blocked_barrier_items(run_id) == 2
+    assert recovery_manager.count_blocked_barrier_items("other-run") == 0
 
 
 class _SimpleSchema(PluginSchema):
@@ -1148,6 +1172,7 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
     )
 
@@ -1213,6 +1238,7 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=99,
+        barrier_scalars=None,
         graph=graph,
     )
 
@@ -1282,6 +1308,7 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
     )
 

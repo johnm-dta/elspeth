@@ -1524,10 +1524,13 @@ Input tokens T1, T2, T3 → terminal state: CONSUMED_IN_BATCH
 
 #### Crash Recovery
 
-The engine persists buffer state in checkpoints:
-- `get_checkpoint_state()` serializes buffered rows and batch metadata
-- `restore_from_checkpoint()` restores buffers after crash
-- Trigger evaluators resume from correct count
+The engine keeps buffered tokens durable in the scheduler journal (ADR-029):
+- Every buffered token is a BLOCKED `token_work_items` row, written at
+  buffer time
+- `restore_from_journal()` rebuilds buffers from those rows after a crash;
+  batch membership derives from the audit trail
+- Trigger evaluators resume from the journal's `barrier_blocked_at`
+  timestamps plus the checkpoint's `barrier_scalars_json` trigger latches
 
 This means in-progress batches survive crashes and can be resumed.
 

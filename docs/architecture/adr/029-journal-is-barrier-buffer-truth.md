@@ -207,7 +207,7 @@ transaction:
 4. Continuation emissions → `READY` inserts.
 
 `mark_blocked_barrier_terminal` and `mark_blocked_barrier_pending_sink_many`
-become internal arms of `complete_barrier`. This closes the out-of-claim flush
+become delegating wrappers over `complete_barrier`. This closes the out-of-claim flush
 window: a timeout/EOF flush output is journal-durable (`PENDING_SINK`) the
 moment its inputs are consumed. A crash before sink write recovers via the
 existing `PENDING_SINK` re-drive. In-claim flush keeps the `LEASED`
@@ -369,16 +369,16 @@ bumps for D2 anyway; adding one nullable column is negligible cost.
   `ensure_blocked_barrier_work_item` callers (:514-554, :556-586),
   `PENDING_SINK` re-drive (:3098-3121), barrier discriminator
   (:3460-3466).
-- `src/elspeth/engine/orchestrator/recovery.py` —
+- `src/elspeth/core/checkpoint/recovery.py` —
   `get_incomplete_tokens_by_row` attempt derivation (:722-728),
   buffered-row exclusion (:574-578, :668-679, :797-812).
 - `src/elspeth/engine/executors/aggregation.py` —
   `restore_from_checkpoint` (:729-739, deleted under D5).
-- `src/elspeth/engine/executors/coalesce_executor.py` —
+- `src/elspeth/engine/coalesce_executor.py` —
   `_completed_keys` Landscape reconstruction (:328-385).
 - `src/elspeth/engine/triggers.py` — conservative count re-latch
   (:300-304).
-- `src/elspeth/engine/outcomes.py:385` — live `rows_buffered` counter
+- `src/elspeth/engine/orchestrator/outcomes.py:385` — live `rows_buffered` counter
   (N−1 pre-F1; unified to N post-F1 per D3/I.4 item 3).
 - `src/elspeth/contracts/barrier_scalars.py` — new module replacing both
   blob families under D3.

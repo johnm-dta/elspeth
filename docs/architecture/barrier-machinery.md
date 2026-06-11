@@ -14,19 +14,20 @@ the merge policy is satisfied, then emit one merged token). Both were born
 in the same change on 2026-01-12 and were split into separate files on
 2026-02-12. They have never been re-unified: each carries its own complete,
 parallel implementation of the same barrier shape — in-memory pending
-state, checkpoint-state contract, restore path, post-completion arrival
-handling, failure arm, and counter bookkeeping.
+state, barrier-scalars contract, journal-restore path, post-completion
+arrival handling, failure arm, and counter bookkeeping.
 
 The practical consequence is that **every barrier-class fix must be made
-twice**, and the two halves drift when it is made once. A current example:
-`AggregationExecutor.restore_from_checkpoint` rebuilds restored tokens with
-the default `resume_attempt_offset=0`, while the incomplete-token resume
-path learned to derive `max_attempt + 1` (`processor.py:2323`) — see the
-worked example below. The assessment's bug-family evidence includes
+twice**, and the two halves drift when it is made once. A worked example
+(since fixed by F1 — see below): `AggregationExecutor.restore_from_checkpoint`
+rebuilt restored tokens with the default `resume_attempt_offset=0`, while
+the incomplete-token resume path had learned to derive `max_attempt + 1`
+(`processor.py:2323`). The assessment's bug-family evidence includes
 elspeth-262911c26b (that drift), elspeth-7294de558e (`rows_coalesce_failed`
-has no audit re-derivation arm), elspeth-e1dd5e1303 (`rows_buffered`
+had no audit re-derivation arm), elspeth-e1dd5e1303 (`rows_buffered`
 live-vs-derive off-by-one) and elspeth-ce3adfb7b7 (resume-only FAILED
-counters).
+counters) — the first three were dissolved by F1's journal-as-truth
+restore and audit-derived counters ([ADR-029](adr/029-journal-is-barrier-buffer-truth.md)).
 
 This document is the near-term mitigation: a map of the paired surfaces and
 a checklist, so a change to one half is checked against the other half by
@@ -45,15 +46,15 @@ before you ship. File paths are relative to `src/elspeth/`.
 | Buffer/accept entry point | `AggregationExecutor.buffer_row` | `CoalesceExecutor.accept` |
 | Release decision | `should_flush` / `check_flush_status` (trigger evaluator) | `_should_merge` (merge policy / quorum) |
 | Release execution | `execute_flush` | `_execute_merge` (driven from `accept`) and `_resolve_pending` |
-| Time-based release state | trigger timing offsets restored in `restore_from_checkpoint` (`elapsed_age_seconds`, `count_fire_offset`, `condition_fire_offset`) | `check_timeouts` |
+| Time-based release state | trigger timing restored in `restore_from_journal` (`first_accept_time` ← min journal `barrier_blocked_at`; `count_fire_offset`/`condition_fire_offset` latches from checkpoint scalars) | `check_timeouts`; per-branch `arrival_time` ← journal `barrier_blocked_at` on restore |
 | End-of-source drain | end-of-source flush via `execute_flush` (orchestrator-driven; post-flush assertion in `finalize_source_iteration`, `engine/orchestrator/source_iteration.py`) | `flush_pending` |
-| Checkpoint-state contract | `contracts/aggregation_checkpoint.py` — `AggregationTokenCheckpoint`, `AggregationNodeCheckpoint`, `AggregationCheckpointState` | `contracts/coalesce_checkpoint.py` — `CoalesceTokenCheckpoint`, `CoalescePendingCheckpoint`, `CoalesceCheckpointState` |
-| Checkpoint write | `AggregationExecutor.get_checkpoint_state` | `CoalesceExecutor.get_checkpoint_state` |
-| Checkpoint restore | `AggregationExecutor.restore_from_checkpoint` (plus `restore_state`, `get_restored_state`, `restore_batch`) | `CoalesceExecutor.restore_from_checkpoint` |
-| Scheduler-journal re-derivation on resume | `engine/processor.py` — `_restore_scheduler_blocks_from_aggregation_checkpoint` (currently `:514-554`) | `engine/processor.py` — `_restore_scheduler_blocks_from_coalesce_checkpoint` (currently `:556-586`) |
-| Post-completion arrival handling | `_reconcile_checkpoint_batch_members` (audit trail advanced beyond the restored checkpoint) | late-arrival rejection in `accept`, backed by `_completed_keys`, `_mark_completed`, `_reconstruct_completed_keys_from_landscape`, `_check_landscape_for_completion` |
+| Barrier-scalars contract | `contracts/barrier_scalars.py` — `AggregationNodeScalars` (the two trigger latches) | same module — `CoalescePendingScalars` (`lost_branches`); shared top-level `BarrierScalars` |
+| Scalar write (checkpoint) | `AggregationExecutor.get_barrier_scalars` | `CoalesceExecutor.get_barrier_scalars` |
+| Journal restore | `AggregationExecutor.restore_from_journal` (plus `restore_batch`) | `CoalesceExecutor.restore_from_journal` |
+| Journal read on resume | `engine/processor.py` — `_restore_barriers_from_journal` partitions BLOCKED rows on `barrier_key` (aggregation node-id keys) | the same method — coalesce-name keys; one read, both halves restored |
+| Post-completion arrival handling | `_reconcile_journal_batch_members` (audit trail advanced beyond the restored journal rows) | late-arrival rejection in `accept`, backed by `_completed_keys`, `_mark_completed`, `_reconstruct_completed_keys_from_landscape`, `_check_landscape_for_completion` |
 | Failure arm | flush failure paths inside `execute_flush` | `_fail_pending`, `notify_branch_lost`, `_evaluate_after_loss` |
-| Counter bookkeeping | `rows_buffered` — incremented in `engine/orchestrator/outcomes.py` (the `(None, BUFFERED)` arm), re-derived in `engine/orchestrator/run_status.py` | `rows_coalesce_failed` — incremented in `engine/orchestrator/outcomes.py`, grafted on resume in `engine/orchestrator/resume.py` |
+| Counter bookkeeping | `rows_buffered` — incremented once per accepted member (audit value N) in `engine/orchestrator/outcomes.py`, re-derived in `engine/orchestrator/run_status.py` | `rows_coalesce_failed` — incremented in `engine/orchestrator/outcomes.py`, re-derived from audit in `run_status.py` (`count_failed_coalesce_barrier_rows`) |
 
 Line numbers are given only where the method name alone is not enough;
 verify them against HEAD — the methods are the stable handles, the lines
@@ -74,33 +75,42 @@ token-anchor (finding F2), so it no longer appears above.
 3. If the fix genuinely applies to one half only, say why in the commit
    message or ticket. "The other side does it differently" is a drift
    finding, not a reason to skip it.
-4. Changing the shape of buffered state? That is four sites, not one: both
-   checkpoint contracts **and** both `_restore_scheduler_blocks_from_*`
-   methods in `processor.py` (the resume path manufactures BLOCKED
-   scheduler rows from blob contents).
+4. Changing the shape of buffered state? The buffered payload IS the
+   journal row (`row_payload_json`, round-tripped through
+   `deserialize_row_payload`), so the sites are: both executors'
+   `restore_from_journal`, the `_restore_barriers_from_journal` partition
+   in `processor.py`, and — for underivable scalars only — both contract
+   families in `contracts/barrier_scalars.py`.
 5. Attempt-offset discipline: any path that re-drives a restored token must
    derive `resume_attempt_offset` from the existing `node_states` rows
    (`max_attempt + 1`, as at `processor.py:2323`), never the default `0`.
+   The journal restore path does this for both halves
+   (`_restore_barriers_from_journal`; ADR-029 D5) — keep any new restore or
+   re-drive path consistent with it.
 6. Touching a counter (`rows_buffered`, `rows_coalesce_failed`,
    `rows_aggregated` family)? Update both the live increment **and** the
-   resume/derive arm (`run_status.py` re-derivation, `resume.py` graft), or
-   the two bookkeepers will disagree after a resume.
+   audit re-derivation arm in `run_status.py`
+   (`derive_resume_terminal_status_from_audit`), or the two bookkeepers
+   will disagree after a resume. There is no resume-time graft any more —
+   resume counters come from audit.
 7. Add or extend tests on both sides, including a resume-path test if the
    change touches checkpoint or restore code.
 
-## Worked example: elspeth-262911c26b (a drift bug)
+## Worked example: elspeth-262911c26b (a drift bug, since fixed)
 
-`AggregationExecutor.restore_from_checkpoint`
-(`engine/executors/aggregation.py:684`) rebuilds `TokenInfo` objects with
-the default `resume_attempt_offset=0`. But a crashed run has already
-written `node_states` rows for those tokens at attempt 0, so the resumed
-flush re-opens attempt 0 and fails with a UNIQUE constraint violation on
-`(token_id, step_index, attempt)`. The incomplete-token resume path
-already learned this lesson: `resume_incomplete_token` sets
-`resume_attempt_offset=spec.max_attempt + 1` (`processor.py:2323`). The
-fix existed; it was applied to one barrier path and not the other. That is
-the twin-drift failure mode this document exists to prevent, and item 5 of
-the checklist is its generalisation.
+`AggregationExecutor.restore_from_checkpoint` (deleted by F1) rebuilt
+`TokenInfo` objects with the default `resume_attempt_offset=0`. But a
+crashed run has already written `node_states` rows for those tokens at
+attempt 0, so the resumed flush re-opened attempt 0 and failed with a
+UNIQUE constraint violation on `(token_id, step_index, attempt)`. The
+incomplete-token resume path had already learned this lesson:
+`resume_incomplete_token` sets `resume_attempt_offset=spec.max_attempt + 1`
+(`processor.py:2323`). The fix existed; it was applied to one barrier path
+and not the other. That is the twin-drift failure mode this document exists
+to prevent, and item 5 of the checklist is its generalisation. F1 fixed
+the bug by construction (ADR-029 D5): the `restore_from_journal`
+replacements on **both** executors derive the offset from `node_states`
+`max_attempt + 1`.
 
 ## Schema-merge duplication (resolved alongside this document)
 
@@ -123,24 +133,28 @@ duplicate.
 
 ## Forward note
 
-This map is expected to shrink. Finding F1 of the assessment
-(journal-as-truth durability unification — a buffered token becomes a
-durable BLOCKED scheduler row, and the checkpoint blob shrinks to scalar
-barrier metadata) removes most of the checkpoint/restore rows above, and
-the longer-term Barrier abstraction (F3-long-term) would collapse the
-remaining executor pairs into one machinery. Both are separate, sequenced
-efforts — see
-`notes/fork-coalesce-architecture-assessment-2026-06-10.md` for the
-recommended ordering (F1 lands first; never F1 and the Barrier
-abstraction together). Until then, the table and checklist above are the
-contract.
+Finding F1 of the assessment (journal-as-truth durability unification) has
+**landed** —
+[ADR-029](adr/029-journal-is-barrier-buffer-truth.md): a buffered token is
+a durable BLOCKED scheduler row, the checkpoint blob layer is deleted, and
+the checkpoint carries only scalar barrier metadata
+(`barrier_scalars_json`). The table and checklist above already reflect
+the post-F1 surfaces. The remaining shrink is the longer-term Barrier
+abstraction (F3-long-term), which would collapse the executor pairs into
+one machinery — a separate, sequenced effort (see
+`notes/fork-coalesce-architecture-assessment-2026-06-10.md`; F1 landed
+first by design, never together with the Barrier abstraction). Until that
+work happens, the table and checklist above are the contract.
 
 ## Related
 
+- [ADR-029](adr/029-journal-is-barrier-buffer-truth.md) — the scheduler
+  journal is the single source of barrier-buffer truth (F1, landed); the
+  decision behind the journal-restore surfaces in the table above.
 - [ADR-028](adr/028-queue-vs-coalesce-not-duplicates.md) — QUEUE and
   COALESCE are *not* twins; do not unify that pair when the Barrier
   abstraction work happens.
 - [ADR-026](adr/026-durable-token-scheduler.md) — the durable token
-  scheduler whose journal F1 promotes to the single source of truth.
+  scheduler whose journal F1 promoted to the single source of truth.
 - `notes/fork-coalesce-architecture-assessment-2026-06-10.md` — the
   assessment this document implements the near-term recommendation of.

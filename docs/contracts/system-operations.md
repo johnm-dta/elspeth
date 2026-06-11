@@ -694,11 +694,13 @@ AggregationExecutor.accept(token, node_id)
 
 ### Crash Recovery
 
-Aggregation buffers are persisted in checkpoints:
+Aggregation buffers are durable in the scheduler journal (ADR-029): every
+buffered token is a BLOCKED `token_work_items` row, written at buffer time.
 
-- `get_checkpoint_state()` serializes buffered rows and batch metadata
-- `restore_from_checkpoint()` restores buffers after crash
-- Trigger evaluators resume from correct count
+- `restore_from_journal()` rebuilds buffers from BLOCKED journal rows after
+  a crash; batch membership and counters derive from the audit trail
+- Trigger evaluators resume from the journal's `barrier_blocked_at`
+  timestamps plus the checkpoint's `barrier_scalars_json` trigger latches
 - In-progress batches survive crashes and can be resumed
 
 ### Timeout Behavior

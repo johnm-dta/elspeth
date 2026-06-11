@@ -3675,15 +3675,15 @@ class TestForkRecoveryInvariant:
         #
         # SCOPE CAVEAT — rows_coalesce_failed (F2 review item A/D): this fixture
         # has rows_coalesce_failed == 0 on BOTH sides, so that field reconciles
-        # vacuously here. The audit trail does NOT record a queryable signal for
-        # coalesce-operation failures (telemetry-only roll-up), so derive() can
-        # only ever return 0 for it; the with-rows branch grafts the live
-        # re-drive counter back over that 0 (see resume() in core.py). The
-        # reconciliation loop's rows_coalesce_failed assertion is therefore only
-        # meaningful for coalesce failures that occur DURING THIS RESUME's
-        # re-drive — run-1 (pre-interrupt) coalesce failures were live-counter-
-        # only, are never re-driven, and are OUT of reconciliation scope (operator
-        # follow-up: make rows_coalesce_failed a queryable terminal audit signal).
+        # vacuously here. The field IS audit-derived now (the old resume-graft
+        # over a derive-time 0 was deleted with F1):
+        # derive_resume_terminal_status_from_audit sets rows_coalesce_failed
+        # from query.count_failed_coalesce_barrier_rows — DISTINCT
+        # (coalesce node, row_id) pairs with FAILED node_states, the
+        # _fail_pending writes — which is cumulative over run-1 AND resume
+        # re-drives (elspeth-7294de558e). A non-vacuous reconciliation of this
+        # field needs a fixture that actually fails a coalesce barrier; this
+        # test only proves the zero case.
         counter_fields = (
             "rows_processed",
             "rows_succeeded",
@@ -3759,10 +3759,11 @@ class TestForkRecoveryInvariant:
         ``derive_resume_terminal_status_from_audit`` reconstructs the cumulative
         counters from the audit trail.
 
-        ``rows_coalesced`` is reconstructed purely by ``derive`` (line 124 of
-        run_status.py — it is NOT grafted from the live re-drive counter; only
-        ``rows_coalesce_failed`` is grafted, see ``resume()`` in core.py).  So
-        the line-124 lever bites the RESUMED run B (derive-reconstructed) while
+        ``rows_coalesced`` is reconstructed purely by ``derive`` (the
+        ``(SUCCESS, COALESCED)`` arm of run_status.py — nothing is grafted
+        from live re-drive counters; ``rows_coalesce_failed`` is likewise
+        audit-derived, via ``count_failed_coalesce_barrier_rows``).  So the
+        derive-arm lever bites the RESUMED run B (derive-reconstructed) while
         run A's value comes from the live accumulator.
 
         OBSERVED RED (lever: delete the ``counters.rows_coalesced += 1`` line
@@ -4080,13 +4081,15 @@ class TestForkRecoveryInvariant:
         BUFFERED records — and the run finalizes COMPLETED.
 
         ``rows_buffered`` is reconstructed purely by derive's ``(None, BUFFERED)``
-        arm (line ~113 of run_status.py — NOT grafted; only ``rows_coalesce_failed``
-        is grafted).  So the line-113 lever bites the RESUMED run B
-        (derive-reconstructed) while run A's value comes from the live accumulator.
+        arm in run_status.py (nothing is grafted from live counters;
+        ``rows_coalesce_failed`` is likewise audit-derived, via
+        ``count_failed_coalesce_barrier_rows``).  So the derive-arm lever bites
+        the RESUMED run B (derive-reconstructed) while run A's value comes from
+        the live accumulator.
 
         OBSERVED RED (lever: delete ``counters.rows_buffered += 1`` from the
-        ``(None, BUFFERED)`` arm in run_status.py — the non-completed branch near
-        line 113, leaving the ``continue``; run
+        ``(None, BUFFERED)`` arm in run_status.py — the non-completed branch,
+        leaving the ``continue``; run
         ``-k test_resume_buffered_counter_reconciles_with_uninterrupted_run``):
             AssertionError: Resumed aggregation run must record at least one
             BUFFERED record (non-vacuous); got rows_buffered=0. ...

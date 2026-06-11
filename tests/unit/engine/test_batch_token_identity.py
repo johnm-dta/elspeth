@@ -363,8 +363,12 @@ class TestBatchTokenIdentity:
                 if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
-        # Verify we got all 3 batch member tokens
-        assert len(input_token_ids) == 3, f"Expected 3 batch member tokens, got {len(input_token_ids)}"
+        # Verify we got all 3 batch member tokens. F1 rows_buffered unification:
+        # the triggering token emits BOTH a synthetic BUFFERED result (live
+        # counter == audit value N) and its BATCH_CONSUMED result, so the raw
+        # list can carry it twice — membership is about UNIQUE tokens.
+        unique_input_token_ids = set(input_token_ids)
+        assert len(unique_input_token_ids) == 3, f"Expected 3 unique batch member tokens, got {len(unique_input_token_ids)}"
 
         # Verify batch_members table records all input tokens
         from sqlalchemy import select

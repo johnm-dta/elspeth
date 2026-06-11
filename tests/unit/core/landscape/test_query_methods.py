@@ -8,6 +8,7 @@ import pytest
 from elspeth.contracts import (
     CallStatus,
     CallType,
+    NodeStateStatus,
     NodeType,
     RoutingMode,
     TerminalOutcome,
@@ -15,7 +16,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, CoalesceFailureReason
 from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
@@ -1960,3 +1961,99 @@ class TestGetAllTokenOutcomesForRun:
         assert outcomes[0].token_id == "tok-1"
         assert outcomes[0].outcome == TerminalOutcome.TRANSIENT
         assert outcomes[0].path == TerminalPath.FORK_PARENT
+
+
+def _coalesce_failure(reason: str = "quorum_not_met_at_timeout") -> CoalesceFailureReason:
+    return CoalesceFailureReason(
+        failure_reason=reason,
+        expected_branches=("branch_a", "branch_b"),
+        branches_arrived=("branch_a",),
+        merge_policy="nested",
+    )
+
+
+class TestCountFailedCoalesceBarrierRows:
+    """Pin the anchor for ``rows_coalesce_failed`` audit derivation (elspeth-7294de558e).
+
+    The counter is per failed BARRIER — one pending key ``(coalesce_name,
+    row_id)`` — reconstructed as DISTINCT ``(node_id, row_id)`` pairs over
+    FAILED node_states at nodes registered with ``node_type='coalesce'``
+    (the structural, indexed anchor), with the single
+    ``late_arrival_after_merge`` reason excluded (a straggler rejected after
+    the barrier resolved is not itself a barrier failure).
+    """
+
+    def _setup_coalesce(self, *, run_id: str = "run-1"):
+        db, factory = _setup(run_id=run_id)
+        register_test_node(factory.data_flow, run_id, "coalesce-1", node_type=NodeType.COALESCE, plugin_name="coalesce")
+        factory.data_flow.create_row(run_id, "source-0", 0, {"value": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        return db, factory
+
+    def _fail_state(
+        self, factory, *, token_id: str, node_id: str, state_id: str, reason: str = "quorum_not_met_at_timeout", run_id: str = "run-1"
+    ) -> None:
+        factory.execution.begin_node_state(token_id, node_id, run_id, 0, {"value": 1}, state_id=state_id)
+        factory.execution.complete_node_state(
+            state_id=state_id,
+            status=NodeStateStatus.FAILED,
+            error=_coalesce_failure(reason),
+            duration_ms=0.0,
+        )
+
+    def test_granularity_one_barrier_per_node_row_pair_not_per_branch_token(self):
+        """A 2-branch barrier failure writes 2 FAILED states (one per arrived
+        branch token, same row) but counts as ONE failed barrier — the naive
+        per-state (or per-token-outcome) tally over-reports it as 2."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-branch-a")
+        factory.data_flow.create_token("row-1", token_id="tok-branch-b")
+        self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
+        self._fail_state(factory, token_id="tok-branch-b", node_id="coalesce-1", state_id="cs-b")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+
+    def test_attribution_failed_states_at_non_coalesce_nodes_do_not_count(self):
+        """The anchor is nodes.node_type='coalesce': an ordinary transform
+        failure must not register as a coalesce barrier failure."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        self._fail_state(factory, token_id="tok-1", node_id="transform-1", state_id="ts-1")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+
+    def test_distinct_rows_count_as_distinct_barriers(self):
+        """Two rows failing at the same coalesce node are two failed barriers."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_row("run-1", "source-0", 1, {"value": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        factory.data_flow.create_token("row-1", token_id="tok-r1")
+        factory.data_flow.create_token("row-2", token_id="tok-r2")
+        self._fail_state(factory, token_id="tok-r1", node_id="coalesce-1", state_id="cs-r1")
+        self._fail_state(factory, token_id="tok-r2", node_id="coalesce-1", state_id="cs-r2")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 2
+
+    def test_late_arrival_after_merge_is_excluded(self):
+        """A straggler rejected AFTER the barrier resolved (e.g. after a
+        successful quorum merge) is not a barrier failure: counting it would
+        report a coalesce-failure for a row whose coalesce SUCCEEDED."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-late")
+        self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+
+    def test_late_arrival_does_not_mask_a_real_barrier_failure_on_same_pair(self):
+        """A failed barrier followed by a late straggler still counts exactly
+        once — the DISTINCT pair collapse absorbs the straggler state."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-branch-a")
+        factory.data_flow.create_token("row-1", token_id="tok-late")
+        self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
+        self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+
+    def test_zero_when_no_coalesce_failures(self):
+        _db, factory = self._setup_coalesce()
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0

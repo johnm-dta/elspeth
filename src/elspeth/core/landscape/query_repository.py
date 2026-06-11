@@ -15,6 +15,8 @@ from sqlalchemy import func, select
 from elspeth.contracts import (
     Call,
     NodeState,
+    NodeStateStatus,
+    NodeType,
     RoutingEvent,
     Row,
     RowLineage,
@@ -41,6 +43,7 @@ from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
     calls_table,
     node_states_table,
+    nodes_table,
     routing_events_table,
     rows_table,
     scheduler_events_table,
@@ -643,6 +646,105 @@ class QueryRepository:
                 f"audit-database integrity violation."
             )
         return int(r[0])
+
+    def count_failed_coalesce_barrier_rows(self, run_id: str) -> int:
+        """Count distinct (coalesce node, source row) join barriers that FAILED.
+
+        ``rows_coalesce_failed`` semantics (elspeth-7294de558e): the counter is
+        per failed *barrier* — one pending key ``(coalesce_name, row_id)`` that
+        failed to merge — NOT per branch token.  The durable evidence is the
+        family of FAILED ``node_states`` that
+        ``CoalesceExecutor._fail_pending`` writes at the coalesce node: one
+        FAILED state per *arrived branch token*, all sharing the same
+        ``(node_id, row_id)``.  A naive count of FAILED states (or of the
+        per-branch ``(FAILURE, UNROUTED)`` ``token_outcomes``, which carry no
+        node attribution at all) over-reports a 2-branch barrier failure as 2;
+        the faithful reconstruction is the count of DISTINCT
+        ``(node_id, row_id)`` pairs.
+
+        ANCHOR CHOICE (pinned by
+        ``tests/unit/core/landscape/test_query_methods.py::TestCountFailedCoalesceBarrierRows``):
+        the query anchors on ``node_states.status = 'failed'`` joined to
+        ``nodes.node_type = 'coalesce'`` — both indexed, structural columns —
+        rather than on the ``failure_reason`` strings inside ``error_json``
+        (stringly, unindexed, and ambiguous: ``all_branches_lost`` is written
+        by two different resolution paths).  ``row_id`` comes from the
+        ``tokens`` join (branch tokens of one barrier inherit the same source
+        ``row_id`` — the pending key IS ``(coalesce_name, row_id)``).
+
+        ONE exclusion, applied Python-side on the parsed error payload: a
+        ``late_arrival_after_merge`` state is a straggler token rejected AFTER
+        the barrier already resolved — it is not itself a barrier failure.
+        After a *failed* merge the pair is already counted via the barrier's
+        own ``_fail_pending`` states (the DISTINCT collapse absorbs the
+        straggler); after a *successful* merge the pair must not be counted at
+        all, which only the reason exclusion guarantees.
+
+        DELIBERATE breadth: arrival-time barrier failures (branch-lost
+        cascades via ``_evaluate_after_loss``, immediate merge failures such
+        as ``select_branch_not_arrived``) ARE counted here even though the
+        live accumulator only increments ``rows_coalesce_failed`` for barriers
+        resolved by the timeout/flush sweeps (``outcomes.py``) — those
+        arrival-time failures are real failed barriers and the durable record
+        is the broader truth.  Conversely a zero-arrival best-effort timeout
+        (``best_effort_timeout_no_arrivals``) consumed no tokens and leaves no
+        node_states, so it is invisible here by construction.
+
+        Cumulativity: resume re-drives record under the SAME ``run_id``
+        (resume provenance lives in ``resume_checkpoint_id``), so a single
+        run-scoped query covers run-1 failures AND resumed-run failures, and
+        the DISTINCT collapse dedupes a barrier that recorded states in both.
+
+        Args:
+            run_id: Run ID
+
+        Returns:
+            Distinct failed-barrier count for the run (run-1 + all resumes).
+
+        Raises:
+            AuditIntegrityError: If a FAILED coalesce node_state carries no
+                parseable ``error_json`` — the write side requires an error
+                payload for FAILED states, so its absence is Tier-1
+                audit-database corruption.
+        """
+        query = (
+            select(
+                node_states_table.c.node_id,
+                tokens_table.c.row_id,
+                node_states_table.c.error_json,
+            )
+            .select_from(
+                node_states_table.join(
+                    nodes_table,
+                    (node_states_table.c.node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
+                ).join(
+                    tokens_table,
+                    (node_states_table.c.token_id == tokens_table.c.token_id) & (node_states_table.c.run_id == tokens_table.c.run_id),
+                )
+            )
+            .where(node_states_table.c.run_id == run_id)
+            .where(node_states_table.c.status == NodeStateStatus.FAILED.value)
+            .where(nodes_table.c.node_type == NodeType.COALESCE.value)
+        )
+        failed_barriers: set[tuple[str, str]] = set()
+        for db_row in self._ops.execute_fetchall(query):
+            if db_row.error_json is None:
+                raise AuditIntegrityError(
+                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
+                    f"{run_id!r} has no error_json — the write side requires an error payload for FAILED "
+                    f"states, so this is a Tier-1 audit-database integrity violation."
+                )
+            try:
+                error_payload = json.loads(db_row.error_json)
+            except json.JSONDecodeError as exc:
+                raise AuditIntegrityError(
+                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
+                    f"{run_id!r} has unparseable error_json — Tier-1 audit-database integrity violation: {exc}"
+                ) from exc
+            if isinstance(error_payload, dict) and error_payload.get("failure_reason") == "late_arrival_after_merge":
+                continue
+            failed_barriers.add((db_row.node_id, db_row.row_id))
+        return len(failed_barriers)
 
     # === Explain Methods (Graceful Degradation) ===
 

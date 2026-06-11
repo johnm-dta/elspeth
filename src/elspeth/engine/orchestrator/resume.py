@@ -42,7 +42,6 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
 )
 from elspeth.contracts.events import RunFinished, RunSummary
-from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.types import NodeID
 from elspeth.core.canonical import canonical_json
@@ -781,7 +780,10 @@ class ResumeCoordinator:
                     barrier_scalars=resume_point.barrier_scalars,
                     batch_id_remap=state.batch_id_remap,
                 )
-                result = self.process_resumed_rows(
+                # Return value (the loop's resume-local counters) is deliberately
+                # unused: finalization derives everything from the audit trail
+                # below (single bookkeeper, elspeth-7294de558e).
+                self.process_resumed_rows(
                     factory=factory,
                     run_id=run_id,
                     config=config,
@@ -820,84 +822,24 @@ class ResumeCoordinator:
             # diversions, and after sweep_deferred_invariants_or_crash — so every
             # outcome this resume wrote is committed and visible to the derive
             # query.  Deriving before those flushes commit would undercount.
-            # The status returned here is computed from the audit-only counters
-            # (rows_coalesce_failed == 0, see graft below); it is intentionally
-            # discarded and RECOMPUTED post-graft so terminal_status stays a pure
-            # function of the FINAL reconciled counters — the same set the
-            # uninterrupted path derives from. This is correctness-by-symmetry,
-            # NOT crash-prevention: a coalesce failure always co-increments
-            # rows_failed (outcomes.py flush_coalesce_pending does both, and the
-            # consumed branches land in audit as UNROUTED), so derive's audit-only
-            # rows_failed is already > 0 → failure_indicator already True → the
-            # pre-graft status is already COMPLETED_WITH_FAILURES, never COMPLETED.
-            # So grafting rows_coalesce_failed does not flip the status in any
-            # real flow and the RunResult biconditional's COMPLETED+failure arm
-            # cannot fire here. Recomputing is still the honest, future-proof
-            # construction (status derived from the same final counters as the
-            # uninterrupted path) and guards against a future counter whose graft
-            # WOULD be status-bearing.
-            _audit_only_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-
-            # F2 — per-field "best available source" graft.
             #
-            # Each counter field is taken from its best available source. For
-            # the 11 fields the audit trail records per-token, that source is
-            # derive_resume_terminal_status_from_audit (cumulative, queryable
-            # from token_outcomes). rows_coalesce_failed is the LONE field the
-            # audit trail does NOT record: a failed coalesce records per-branch
-            # FAILURE/UNROUTED outcomes (so rows_failed reconstructs) but the
-            # coalesce-operation roll-up is emitted to TELEMETRY ONLY
-            # (outcomes.py flush_coalesce_pending → _emit_failed_coalesce_telemetry;
-            # there is no queryable token_outcomes signal for it). derive()
-            # therefore has no match arm for it and returns 0. For the with-rows
-            # branch its best source is the live re-drive counter captured by
-            # flush_coalesce_pending into the resume loop's `result`, so graft it
-            # back over the audit-derived 0.
-            #
-            # NOTE (scope + reachability): this recovers only coalesce failures
-            # that occurred DURING THIS RESUME's re-drive. Coalesce failures from
-            # run-1 (before the interrupt) were live-counter-only — never
-            # persisted as a queryable signal — and are unrecoverable here.
-            # Making rows_coalesce_failed reconstructable cumulatively (incl.
-            # run-1) is a schema/epoch change tracked as an operator follow-up;
-            # the no-rows branch already ships the 0 for the same structural
-            # reason.
-            #
-            # This graft is a LIVE REGRESSION FIX, not future-proofing. The
-            # during-re-drive coalesce failure is CONFIRMED reachable: the resume
-            # loop calls handle_coalesce_timeouts → CoalesceExecutor.check_timeouts
-            # PER-ROW (resume.py:268-276), and a coalesce that times out before
-            # quorum during re-drive increments rows_coalesce_failed
-            # (outcomes.py:447/462, "quorum_not_met_at_timeout") in the live
-            # `result`. Pre-F2 that count was reported; F2 (pre-graft) discarded it
-            # by replacing `result` with audit-derived counters; this graft
-            # restores it. End-to-end regression test (with observed removed-graft
-            # red / restored-graft green):
-            # test_adr_019_resume_counter_parity.py::
-            #   test_resume_grafts_rows_coalesce_failed_from_timeout_redrive.
-            #
-            # The other increment site — flush_pending (end-of-source,
-            # "incomplete_branches") — does NOT produce a during-re-drive failure
-            # in deterministic flows (lost branches fail immediately via
-            # notify_branch_lost without touching this counter; buffered branches
-            # are restored-to-completion by restore_from_checkpoint; an unproduced
-            # coalesce branch is DAG-rejected), so on that path the graft copies
-            # 0-over-0 and is a no-op. The timeout path is where it earns its keep.
-            audit_counters.rows_coalesce_failed = result.rows_coalesce_failed
-
-            # Recompute terminal_status from the final reconciled counters (now
-            # carrying the grafted rows_coalesce_failed) via the pure L0 function
-            # — NOT by re-calling derive_resume_terminal_status_from_audit, which
-            # would re-query token_outcomes and silently re-zero the graft.
-            terminal_status = derive_terminal_run_status(
-                rows_processed=audit_counters.rows_processed,
-                rows_succeeded=audit_counters.rows_succeeded,
-                rows_failed=audit_counters.rows_failed,
-                rows_routed_success=audit_counters.rows_routed_success,
-                rows_routed_failure=audit_counters.rows_routed_failure,
-                rows_quarantined=audit_counters.rows_quarantined,
-                rows_coalesce_failed=audit_counters.rows_coalesce_failed,
-            )
+            # SINGLE BOOKKEEPER (elspeth-7294de558e): every counter field —
+            # including rows_coalesce_failed — is now derived from the durable
+            # audit trail. rows_coalesce_failed historically had no audit arm
+            # (the coalesce-operation roll-up went to telemetry only) and was
+            # GRAFTED here from the resume loop's live `result` counter, which
+            # only saw failures during THIS resume's re-drive and forgot run-1
+            # failures consumed before the interrupt. derive() now reconstructs
+            # it cumulatively from the FAILED node_states _fail_pending writes
+            # at the run's coalesce nodes (one barrier == one DISTINCT
+            # (node, row) pair; see QueryRepository.count_failed_coalesce_
+            # barrier_rows), so the audit-derived value IS the final value and
+            # the terminal status is already a pure function of the final
+            # counters — same construction as the uninterrupted path. Parity
+            # pin: test_adr_019_resume_counter_parity.py::
+            # test_resume_derives_rows_coalesce_failed_from_durable_audit
+            # (resumed run_B == uninterrupted oracle run_A).
+            terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
 
             factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
             result = audit_counters.to_run_result(run_id, terminal_status)

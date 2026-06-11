@@ -107,6 +107,17 @@ def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: s
     # OTHER counters below are genuine per-terminal-token tallies and stay
     # per-case.
     counters.rows_processed = factory.query.count_distinct_source_rows_with_terminal_outcome(run_id)
+    # ``rows_coalesce_failed`` has no token_outcomes arm: a failed coalesce
+    # records per-branch (FAILURE, UNROUTED) outcomes (so ``rows_failed``
+    # reconstructs below) but those carry no node attribution, and a naive
+    # per-outcome tally would over-report a multi-branch barrier failure.
+    # The durable evidence is the FAILED node_states ``_fail_pending`` writes
+    # at the run's coalesce nodes; one failed barrier == one DISTINCT
+    # (coalesce node, row_id) pair regardless of branch fan-in.  This is THE
+    # value (elspeth-7294de558e) — it is cumulative over run-1 AND resume
+    # re-drives (same run_id), replacing the resume-only live-counter graft
+    # that forgot run-1 failures.
+    counters.rows_coalesce_failed = factory.query.count_failed_coalesce_barrier_rows(run_id)
     for outcome_record in outcomes:
         if not outcome_record.completed:
             if (outcome_record.outcome, outcome_record.path) == (None, TerminalPath.BUFFERED):

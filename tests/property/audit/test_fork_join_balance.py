@@ -3795,7 +3795,7 @@ class TestForkRecoveryInvariant:
         ``rows_coalesce_failed == 0`` on both sides (reconciled vacuously here,
         which is correct — that field's non-vacuous resume coverage lives in
         ``test_adr_019_resume_counter_parity.py::
-        test_resume_grafts_rows_coalesce_failed_from_timeout_redrive``).
+        test_resume_derives_rows_coalesce_failed_from_durable_audit``).
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus

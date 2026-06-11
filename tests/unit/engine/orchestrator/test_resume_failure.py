@@ -1022,6 +1022,7 @@ class TestResumeFinalizesAsFailed:
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
         scalars = BarrierScalars(
             aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=1.0, condition_fire_offset=None)},
             coalesce={},
@@ -1106,6 +1107,9 @@ class TestResumeFinalizesAsFailed:
         # the real QueryRepository computes it via COUNT(DISTINCT row_id) over a
         # tokens-table JOIN, which a pure-outcome-list mock cannot reproduce.
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 3
+        # rows_coalesce_failed likewise derives from a dedicated query (DISTINCT
+        # failed-barrier pairs over node_states); no coalesce failures here.
+        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
         mock_factory.query.get_all_token_outcomes_for_run.return_value = [
             _make_token_outcome(
                 run_id=run_id,
@@ -1222,6 +1226,7 @@ class TestResumeFinalizesAsFailed:
         _insert_failed_run(db, run_id)
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
+        mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-engine-work",

@@ -1419,13 +1419,13 @@ class TestAggregationRecovery:
         return graph
 
     def test_aggregation_barrier_scalars_recover_after_crash(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
-        """Create run with partial aggregation (3 rows buffered, trigger at 5).
+        """Checkpoint with barrier scalars, simulate crash, verify recovery.
 
-        Checkpoint with barrier scalars, simulate crash, verify recovery
-        restores the exact scalar trigger metadata. F1: the buffered tokens
-        themselves persist as journal BLOCKED rows (proven by the journal
-        restore suites); the checkpoint round-trips only the underivable
-        trigger latches.
+        The recovery must restore the exact scalar trigger metadata. F1: the
+        buffered tokens themselves persist as journal BLOCKED rows (proven by
+        the journal restore suites); the checkpoint round-trips only the
+        underivable trigger latches, so this pin needs no fabricated
+        rows/tokens at all.
         """
         db: LandscapeDB = test_env["db"]
         checkpoint_mgr: CheckpointManager = test_env["checkpoint_manager"]
@@ -1495,20 +1495,6 @@ class TestAggregationRecovery:
             source_schema_json='{"properties": {"test_field": {"type": "string"}}, "required": ["test_field"]}',
             schema_contract=test_contract,
         )
-
-        # Create 3 rows (partial aggregation -- trigger is at 5)
-        tokens = []
-        for i in range(3):
-            row = factory.data_flow.create_row(
-                run_id=run.run_id,
-                source_node_id="source",
-                row_index=i,
-                data={"id": i, "value": (i + 1) * 100},
-                source_row_index=i,
-                ingest_sequence=i,
-            )
-            token = factory.data_flow.create_token(row_id=row.row_id)
-            tokens.append(token)
 
         # Create the scalar barrier metadata for the in-flight aggregation —
         # the only checkpoint-borne barrier state post-F1.

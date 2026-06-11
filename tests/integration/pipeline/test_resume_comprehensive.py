@@ -233,6 +233,7 @@ def _build_two_source_failed_run(
     checkpoint_mgr.create_checkpoint(
         run_id=run_id,
         sequence_number=1,
+        barrier_scalars=None,
         graph=graph,
     )
     return graph, orders_contract_hash, refunds_contract_hash, row_payloads
@@ -513,6 +514,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -597,6 +599,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
         factory = make_factory(db)
@@ -757,6 +760,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -993,6 +997,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1232,6 +1237,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1456,6 +1462,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1680,6 +1687,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1884,6 +1892,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1994,6 +2003,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=4,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -2177,6 +2187,7 @@ class TestResumeComprehensive:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=4,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -2620,6 +2631,7 @@ class TestMultiSourceResumeContractDispatch:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 

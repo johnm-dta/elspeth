@@ -263,9 +263,9 @@ class TestExplicitSinkRouting:
         Setup: source → aggregation(count=2, on_success=output) → output
         Verify: Flushed batch results arrive at on_success sink.
 
-        Uses the same wiring pattern as test_aggregation_checkpoint_bug: the
-        transform is a regular transform in the graph with on_success set,
-        and aggregation_settings tells the Orchestrator to batch it.
+        Uses the standard aggregation wiring pattern: the transform is a
+        regular transform in the graph with on_success set, and
+        aggregation_settings tells the Orchestrator to batch it.
         """
         from elspeth.core.dag import ExecutionGraph
 

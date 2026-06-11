@@ -313,7 +313,7 @@ class TestResumeGuardrails:
 
         The genuine "early-exit on empty rows" success path is
         exercised in
-        ``tests/unit/engine/orchestrator/test_resume_failure.py::test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed``,
+        ``tests/unit/engine/orchestrator/test_resume_failure.py::test_resume_treats_empty_journal_as_all_rows_processed``,
         which constructs ``ResumeState`` directly with a non-empty
         contract map (the RC6 shape: run_sources records present,
         unprocessed_rows empty).

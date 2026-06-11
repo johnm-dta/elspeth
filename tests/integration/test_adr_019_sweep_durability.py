@@ -359,9 +359,14 @@ def _setup_adr019_failed_resume_run(
         )
 
     if processed_count > 0:
+        # ADR-029 (F1): checkpoints no longer carry a blob layer; the only
+        # checkpoint-borne state is scalar barrier metadata. This linear
+        # fixture has no in-flight aggregation/coalesce barriers, so None
+        # (persisted as NULL) is the truthful value.
         CheckpointManager(db).create_checkpoint(
             run_id=run_id,
             sequence_number=processed_count - 1,
+            barrier_scalars=None,
             graph=graph,
         )
 

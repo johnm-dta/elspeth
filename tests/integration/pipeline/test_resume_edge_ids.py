@@ -232,6 +232,7 @@ class TestResumeEdgeIDs:
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=gate_graph,
         )
 

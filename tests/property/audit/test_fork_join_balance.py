@@ -752,6 +752,7 @@ class TestForkRecoveryInvariant:
         checkpoint_manager.create_checkpoint(
             run_id=run.run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -892,6 +893,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1053,6 +1055,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -2214,6 +2217,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -2244,7 +2248,7 @@ class TestForkRecoveryInvariant:
         assert post_stats["total_fork_groups"] == 1, f"Fork-group count must remain 1 (one row, one fork); got {post_stats}"
 
     def test_resume_coalesce_held_branch_not_redriven(self) -> None:
-        """A branch HELD at a coalesce barrier (checkpointed into coalesce pending) must
+        """A branch HELD at a coalesce barrier (a journal BLOCKED row) must
         NOT be re-driven on resume — it is restored into the executor's _pending and
         flushes there. Re-driving it re-arrives at the barrier and crashes the
         duplicate-arrival guard. Only the genuinely-incomplete (not-yet-arrived) sibling
@@ -2263,29 +2267,31 @@ class TestForkRecoveryInvariant:
             terminal outcome (pre-merge state).
           - HELD branch: its coalesce-node node_state is reverted to the held/open state
             (status='open', completed_at = NULL — the state CoalesceExecutor.accept's
-            begin_node_state writes on arrival) and its real state_id is captured. It is
-            then placed into a genuine CoalesceCheckpointState (pending.branches) carrying
-            its real row_data + contract + state_id, passed to
-            create_checkpoint(coalesce_state=). On resume, restore_from_checkpoint
-            repopulates _pending with this branch — it is "already arrived", awaiting the
-            sibling. The HELD branch is chosen as the one with the smaller token_id so it
-            is dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
+            begin_node_state writes on arrival). Its durable scheduler work item is
+            re-created in the crash-faithful BLOCKED state through the PRODUCTION
+            journal verbs (enqueue_ready_claimed + mark_blocked with
+            barrier_key='merge', the coalesce name) carrying its real row payload —
+            F1: the journal BLOCKED row is the ONLY barrier-buffer truth. On resume,
+            processor._restore_barriers_from_journal repopulates _pending with this
+            branch — it is "already arrived", awaiting the sibling. The HELD branch is
+            chosen as the one with the smaller token_id so a buggy re-drive would be
+            dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
             makes the duplicate-arrival the deterministic RED (it re-arrives while it is the
             only _pending entry, before any merge could complete).
           - SIBLING branch: ALL its node_states are DELETED (genuinely not-yet-started)
-            and it is NOT in the checkpoint pending. Its durable scheduler work item is
+            and it has NO BLOCKED journal row. Its durable scheduler work item is
             restored to the crash-faithful state: READY at its branch-first node with
             its coalesce cursor, enqueued by the fork but never claimed (RC6: the fork
             enqueues both branch continuations before either is processed, so by the
             time one branch is HELD at the barrier the sibling's work item exists).
 
-        After this, _get_buffered_checkpoint_token_ids returns the held branch token
-        (asserted as a precondition: proof the coalesce-pending arm is live), and
-        restore_from_checkpoint re-creates the held branch's BLOCKED scheduler work
-        item on resume.
+        After this, _get_buffered_journal_token_ids returns the held branch token
+        (asserted as a precondition: proof the journal barrier-hold arm is live), so
+        resume excludes it from the re-drive work set and restores it from the
+        journal instead.
 
         Invariant proven: the HELD branch is NOT re-driven — it is restored into the
-        executor's _pending (and as durable BLOCKED scheduler work) and flushes there;
+        executor's _pending from its durable BLOCKED journal row and flushes there;
         re-driving it would re-arrive at the barrier and crash the duplicate-arrival
         guard. Only the genuinely not-yet-started sibling is processed (via resume's
         scheduler drain of its READY work item); it arrives at the barrier where the
@@ -2296,18 +2302,12 @@ class TestForkRecoveryInvariant:
         """
         from datetime import datetime
 
-        from elspeth.contracts.coalesce_checkpoint import (
-            CoalesceCheckpointState,
-            CoalescePendingCheckpoint,
-            CoalesceTokenCheckpoint,
-        )
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
         from elspeth.contracts.schema_contract import PipelineRow
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
-        from elspeth.engine.coalesce_executor import COALESCE_CHECKPOINT_VERSION
 
         db, payload_store, config, graph, settings_obj, run_id, _run1 = self._setup_coalesce_pipeline()
 
@@ -2376,8 +2376,9 @@ class TestForkRecoveryInvariant:
         row_id = held_branch.row_id
 
         # ── Capture the held branch's coalesce-node state_id (real node_state) ─────
-        # restore_from_checkpoint requires a valid state_id for the held branch's pending
-        # node_state — reuse the genuine run-1 coalesce-node node_state for path_a.
+        # The journal restore derives the held branch's PENDING hold from the OPEN
+        # node_state at the coalesce node (get_open_node_state_ids) — reuse the
+        # genuine run-1 coalesce-node node_state for the held branch.
         with db.engine.connect() as conn:
             held_state_row = conn.execute(
                 text("""
@@ -2393,11 +2394,10 @@ class TestForkRecoveryInvariant:
         )
         held_state_id = held_state_row.state_id
 
-        # ── The contract the row was produced under (for the held branch's checkpoint) ──
+        # ── The contract the row was produced under (for the journal row payloads) ──
         checkpoint_mgr = CheckpointManager(db)
         recovery_for_contract = RecoveryManager(db, checkpoint_mgr)
         source_contract = recovery_for_contract.verify_contract_integrity(run_id)
-        contract_dict = source_contract.to_checkpoint_format()
 
         # ── Interrupt: undo the barrier; revert path_a to PENDING, drop path_b's arrival ──
         with db.engine.connect() as conn:
@@ -2434,10 +2434,11 @@ class TestForkRecoveryInvariant:
 
         # ── Restore the SIBLING's durable scheduler work item (crash-faithful) ────
         # In a real RC6 crash at this point the fork had already enqueued BOTH branch
-        # continuations; the held branch's item went BLOCKED at the barrier (recreated
-        # below by checkpoint restore) while the sibling's item sat READY, never
-        # claimed. Re-enqueue the sibling at its branch-first node with its coalesce
-        # cursor so resume's scheduler drain re-drives it into the restored barrier.
+        # continuations; the held branch's item went BLOCKED at the barrier (re-seeded
+        # below through the production journal verbs) while the sibling's item sat
+        # READY, never claimed. Re-enqueue the sibling at its branch-first node with
+        # its coalesce cursor so resume's scheduler drain re-drives it into the
+        # restored barrier.
         branch_index_by_name = {"path_a": 0, "path_b": 1}
         sibling_first_node = str(graph.get_transform_id_map()[branch_index_by_name[incomplete_branch.branch_name]])
         with db.engine.connect() as conn:
@@ -2460,39 +2461,46 @@ class TestForkRecoveryInvariant:
             coalesce_node_id=coalesce_node_id,
             coalesce_name="merge",
         )
-        # ── Build a GENUINE CoalesceCheckpointState holding path_a at the barrier ──
-        held_token_ckpt = CoalesceTokenCheckpoint(
+        # ── Re-seed the HELD branch's BLOCKED journal row (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live barrier hold is recorded: the
+        # fork enqueued the branch continuation at its branch-first node, a worker
+        # claimed it, the branch arrived at the coalesce and accept() held it →
+        # mark_blocked(barrier_key='merge') stamped barrier_blocked_at. The BLOCKED
+        # row carries the branch's row payload — resume restores _pending from it
+        # (processor._restore_barriers_from_journal ← list_blocked_barrier_items).
+        held_first_node = str(graph.get_transform_id_map()[branch_index_by_name[held_branch_name]])
+        seed_now = datetime.now(UTC)
+        held_item = scheduler_repo.enqueue_ready_claimed(
+            run_id=run_id,
             token_id=held_branch.token_id,
             row_id=row_id,
+            node_id=held_first_node,
+            step_index=1,
+            ingest_sequence=sibling_ingest_sequence,
+            row_payload_json=scheduler_repo.serialize_row_payload(PipelineRow(data={"value": 1}, contract=source_contract)),
+            available_at=seed_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=seed_now,
             branch_name=held_branch_name,
             fork_group_id=held_branch.fork_group_id,
-            join_group_id=None,
-            expand_group_id=None,
-            row_data={"value": 1},
-            contract=contract_dict,
-            state_id=held_state_id,
-            arrival_offset_seconds=0.0,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name="merge",
         )
-        coalesce_state = CoalesceCheckpointState(
-            version=COALESCE_CHECKPOINT_VERSION,
-            pending=(
-                CoalescePendingCheckpoint(
-                    coalesce_name="merge",
-                    row_id=row_id,
-                    elapsed_age_seconds=0.5,
-                    branches={held_branch_name: held_token_ckpt},
-                    lost_branches={},
-                ),
-            ),
-            completed_keys=(),
+        scheduler_repo.mark_blocked(
+            work_item_id=held_item.work_item_id,
+            queue_key=None,
+            barrier_key="merge",  # coalesce barrier_key == coalesce NAME (restore partition D1)
+            now=seed_now,
+            expected_lease_owner="test-harness",
         )
 
-        # ── Create the checkpoint WITH the genuine coalesce pending state ──
+        # ── Create the checkpoint (F1: scalars only — no barrier blob) ──
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
-            coalesce_state=coalesce_state,
         )
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
@@ -2500,13 +2508,11 @@ class TestForkRecoveryInvariant:
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
-        # ── PRECONDITION: the coalesce-pending arm is genuinely live ──
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # ── PRECONDITION: the journal barrier-hold arm is genuinely live ──
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert held_branch.token_id in buffered_ids, (
-            f"PRECONDITION FAILED: the held path_a token must be in the checkpoint coalesce-pending "
-            f"buffered set (else the held-branch exclusion path is skipped). buffered_ids={buffered_ids}"
+            f"PRECONDITION FAILED: the held path_a token must be in the journal BLOCKED barrier-hold "
+            f"set (else the held-branch exclusion path is skipped). buffered_ids={buffered_ids}"
         )
         assert incomplete_branch.token_id not in buffered_ids, (
             f"path_b must NOT be buffered (it is the not-yet-arrived sibling); buffered_ids={buffered_ids}"
@@ -2699,6 +2705,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -2981,6 +2988,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -3307,6 +3315,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -3568,6 +3577,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph_b,
         )
         with db_b.engine.connect() as conn:
@@ -3861,6 +3871,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -4120,6 +4131,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -4183,33 +4195,29 @@ class TestForkRecoveryInvariant:
             f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
         )
 
-    def test_count_equals_n_rows_buffered_divergence_is_pinned(self) -> None:
-        """CHARACTERIZATION PIN — known F2 parity break (filigree elspeth-e1dd5e1303).
+    def test_rows_buffered_live_equals_derive_after_unification(self) -> None:
+        """rows_buffered parity on the count==N mid-stream trigger (elspeth-e1dd5e1303 FIXED).
 
         For a batch aggregation with a ``count == N`` trigger (fires mid-stream on
-        the Nth row, NOT at end-of-source), the live accumulator and derive disagree
-        on ``rows_buffered``:
+        the Nth row, NOT at end-of-source), the live accumulator historically
+        under-counted ``rows_buffered`` by one (N-1): the count-trigger's own token
+        was consumed by the flush without ever yielding a ``(None, BUFFERED)``
+        RowResult, while derive (which reconstructs the counter from the BUFFERED
+        audit records — one per accepted row) reported N.  This test pinned that
+        exact +1 divergence as a characterization test
+        (``test_count_equals_n_rows_buffered_divergence_is_pinned``).
 
-            uninterrupted oracle (live):  rows_buffered == N - 1
+        F1 Task 4.3 Step 2 unified the two: every buffer-accept now yields exactly
+        one ``(None, BUFFERED)`` RowResult — the flush-triggering token gets a
+        synthetic BUFFERED result emitted by the drain — so the live counter equals
+        the audit-derived value:
+
+            uninterrupted oracle (live):  rows_buffered == N
             resumed (derive):             rows_buffered == N
 
-        So a RESUMED run reports ``rows_buffered`` exactly one higher than the
-        uninterrupted oracle.  Every OTHER counter field reconciles — this is the
-        sole divergent field.  The canonical end-of-source-flush topology
-        (``count > N``) does not exhibit it (live == derive == N), which is why
-        ``test_resume_buffered_counter_reconciles_with_uninterrupted_run`` uses
-        ``count > N`` and the F2 reconciliation suite sidesteps this case.
-
-        WHY A CHARACTERIZATION PIN, NOT AN xfail: the follow-up note asked for an
-        "xfail-style pinning test so the divergence can't silently widen."  A strict
-        xfail asserting the ideal (resumed == oracle) catches an accidental *fix*
-        (xpass → fail) but a *widening* divergence (gap → 2) still just fails → stays
-        xfail → green, silently violating the stated goal.  This pin asserts the
-        EXACT current values, so it goes RED on widening, narrowing, OR a fix in
-        either direction — strictly stronger for "can't silently widen."  This is
-        NOT an endorsement of either value: elspeth-e1dd5e1303 tracks the decision
-        of which (N-1 or N) is authoritative; resolving it requires updating this
-        pin to the chosen value.
+        INVARIANT (same strength as the old pin, flipped to the unified value):
+        live == derive == N exactly, and EVERY other counter field reconciles too —
+        any re-divergence in either direction goes RED here.
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
@@ -4230,7 +4238,7 @@ class TestForkRecoveryInvariant:
         run_id = run_b1.run_id
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, graph=graph)
+        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
             conn.commit()
@@ -4243,26 +4251,27 @@ class TestForkRecoveryInvariant:
         run_b_resume = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
         assert run_b_resume.status == RunStatus.COMPLETED, run_b_resume.status
 
-        # ── Pin the EXACT divergence (elspeth-e1dd5e1303) ─────────────────────
-        assert run_a.rows_buffered == n - 1, (
-            f"PIN: uninterrupted oracle (live accumulator) must report rows_buffered == N-1 == {n - 1} "
-            f"on a count==N mid-stream trigger; got {run_a.rows_buffered}. If this changed, the live "
-            f"buffered-accounting semantics moved — update elspeth-e1dd5e1303 and this pin."
+        # ── Unified value: live == derive == N exactly (elspeth-e1dd5e1303 fix) ──
+        assert run_a.rows_buffered == n, (
+            f"UNIFICATION: uninterrupted oracle (live accumulator) must report rows_buffered == N == {n} "
+            f"on a count==N mid-stream trigger — every buffer-accept (including the flush-triggering "
+            f"token) yields exactly one (None, BUFFERED) RowResult; got {run_a.rows_buffered}. "
+            f"An N-1 here means the count-trigger token's synthetic BUFFERED emission regressed "
+            f"(F1 Task 4.3 Step 2, elspeth-e1dd5e1303)."
         )
         assert run_b_resume.rows_buffered == n, (
-            f"PIN: resumed run (derive) must report rows_buffered == N == {n} (one BUFFERED audit record "
-            f"per input row); got {run_b_resume.rows_buffered}. If this changed, derive's (None, BUFFERED) "
-            f"arm moved — update elspeth-e1dd5e1303 and this pin."
+            f"UNIFICATION: resumed run (derive) must report rows_buffered == N == {n} (one BUFFERED audit "
+            f"record per input row); got {run_b_resume.rows_buffered}. If this changed, derive's "
+            f"(None, BUFFERED) arm moved — see elspeth-e1dd5e1303."
         )
-        assert run_b_resume.rows_buffered == run_a.rows_buffered + 1, (
-            f"PIN: the known F2 parity break is exactly +1 (resumed over oracle). "
-            f"oracle={run_a.rows_buffered}, resumed={run_b_resume.rows_buffered}, "
-            f"delta={run_b_resume.rows_buffered - run_a.rows_buffered}. A delta != 1 means the divergence "
-            f"WIDENED or was fixed — neither may land silently. See elspeth-e1dd5e1303."
+        assert run_b_resume.rows_buffered == run_a.rows_buffered, (
+            f"UNIFICATION: live and derive must agree on rows_buffered for the count==N topology. "
+            f"oracle={run_a.rows_buffered}, resumed={run_b_resume.rows_buffered}. ANY delta is a "
+            f"re-divergence of the unified counter (elspeth-e1dd5e1303) and may not land silently."
         )
 
-        # ── rows_buffered must be the SOLE divergent field ────────────────────
-        other_fields = (
+        # ── EVERY counter field must reconcile (no divergent field remains) ────
+        all_fields = (
             "rows_processed",
             "rows_succeeded",
             "rows_failed",
@@ -4273,15 +4282,15 @@ class TestForkRecoveryInvariant:
             "rows_coalesced",
             "rows_coalesce_failed",
             "rows_expanded",
+            "rows_buffered",
             "rows_diverted",
         )
-        for field in other_fields:
+        for field in all_fields:
             a_val = getattr(run_a, field)
             b_val = getattr(run_b_resume, field)
             assert b_val == a_val, (
-                f"PIN: '{field}' must reconcile on the count==N topology (only rows_buffered is known to "
-                f"diverge). uninterrupted={a_val}, resumed={b_val}. A NEW divergent field is a regression "
-                f"beyond the tracked elspeth-e1dd5e1303 limitation."
+                f"'{field}' must reconcile on the count==N topology (live/derive unification, "
+                f"elspeth-e1dd5e1303). uninterrupted={a_val}, resumed={b_val}."
             )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -4416,6 +4425,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -5159,6 +5169,7 @@ class TestForkRecoveryInvariant:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -5233,23 +5244,24 @@ class TestForkRecoveryInvariant:
         """matrix #5: a row with MIXED buffered + incomplete fork children is NOT excluded.
 
         get_unprocessed_rows (recovery.py) excludes a row from reprocessing ONLY when
-        ALL its incomplete leaf tokens are buffered in checkpoint aggregation state
-        (lines 474-501).  The bug this guards is row-level exclusion: dropping a row
+        ALL its incomplete leaf tokens are held at barriers in the scheduler journal
+        (BLOCKED rows with a barrier_key — F1: the journal is the only barrier-buffer
+        truth).  The bug this guards is row-level exclusion: dropping a row
         because it has ANY buffered token, which would silently orphan a sibling
         non-buffered incomplete token.
 
-        Construction (genuine buffered state, NOT hand-crafted JSON):
+        Construction (genuine buffered state, via the production journal verbs):
         - One source row forks to sink_a + sink_b (real fork run via production paths).
         - BOTH branches' terminal outcomes are deleted so both are INCOMPLETE leaves
           (a "buffered" token is by definition pending — it has no terminal outcome yet;
           leaving sink_a's outcome in place would make it terminal, not buffered, and the
           mixed-state arithmetic would not engage).
-        - The (now-incomplete) sink_a fork-child is placed into a genuine
-          AggregationCheckpointState (typed dataclass) carrying its REAL row_data +
-          contract, passed to CheckpointManager.create_checkpoint — so
-          _get_buffered_checkpoint_token_ids returns the sink_a token (asserted as a
+        - The (now-incomplete) sink_a fork-child is marked held-at-barrier through the
+          PRODUCTION journal verbs (enqueue_ready_claimed + mark_blocked with a
+          barrier_key) carrying its REAL row payload — so
+          _get_buffered_journal_token_ids returns the sink_a token (asserted as a
           precondition: proof the mixed-state path is live, not skipped).
-        - sink_b is left incomplete and NON-buffered.
+        - sink_b is left incomplete and NON-buffered (no BLOCKED journal row).
 
         The row therefore has one buffered-incomplete (sink_a) + one non-buffered
         incomplete (sink_b) token.  row_incomplete={sink_a, sink_b}; buffered={sink_a}.
@@ -5267,11 +5279,9 @@ class TestForkRecoveryInvariant:
         AssertionError — "mixed-state row must NOT be excluded ...: unprocessed=[]"
         (the row is silently dropped → sink_b would be orphaned).
         """
-        from elspeth.contracts.aggregation_checkpoint import (
-            AggregationCheckpointState,
-            AggregationNodeCheckpoint,
-            AggregationTokenCheckpoint,
-        )
+        from datetime import datetime
+
+        from elspeth.contracts.schema_contract import PipelineRow
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.landscape.schema import token_outcomes_table
 
@@ -5298,44 +5308,20 @@ class TestForkRecoveryInvariant:
         row_id = buffered_child.row_id
 
         # The run's stored schema contract is what the row was produced under — reuse it
-        # for the buffered token's checkpoint entry (genuine, not fabricated).
+        # for the buffered token's journal row payload (genuine, not fabricated).
         checkpoint_mgr = CheckpointManager(db)
         recovery_for_contract = RecoveryManager(db, checkpoint_mgr)
         source_contract = recovery_for_contract.verify_contract_integrity(run_id)
-        contract_dict = source_contract.to_checkpoint_format()
 
-        # ── Build a GENUINE AggregationCheckpointState buffering the sink_a token ──
-        # The node_id key is opaque to _get_buffered_checkpoint_token_ids (it only reads
-        # nodes.values() → tokens → token_id); key the buffered state on a real node id
-        # (the source node).
+        # The barrier_key is opaque to recovery's journal arm:
+        # _get_buffered_journal_token_ids reads only "BLOCKED + barrier_key IS NOT
+        # NULL" (blocked_barrier_hold_clause); the key is validated against the
+        # pipeline's barriers only at processor restore time, which this
+        # function-level test never reaches.  Use a real node id (the source node)
+        # as the key, mirroring the old opaque-node-id convention.
         source_node_ids = graph.get_sources()
         assert source_node_ids, "expected at least one source node in fork recovery test graph"
-        agg_node_key = str(source_node_ids[0])
-        buffered_token_ckpt = AggregationTokenCheckpoint(
-            token_id=buffered_child.token_id,
-            row_id=row_id,
-            branch_name="sink_a",
-            fork_group_id=buffered_child.fork_group_id,
-            join_group_id=None,
-            expand_group_id=None,
-            row_data={"value": 0},
-            contract_version=source_contract.version_hash(),
-            contract=contract_dict,
-        )
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                agg_node_key: AggregationNodeCheckpoint(
-                    tokens=(buffered_token_ckpt,),
-                    batch_id="batch-mixed-state-test",
-                    elapsed_age_seconds=0.5,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=1,
-                    completed_flush_count=0,
-                )
-            },
-        )
+        barrier_key_for_seed = str(source_node_ids[0])
 
         # ── Interrupt: delete BOTH branches' terminal outcomes ──
         # sink_a → buffered-incomplete (restored from checkpoint state, not reprocessed);
@@ -5359,25 +5345,58 @@ class TestForkRecoveryInvariant:
             conn.commit()
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
-        # ── Create the checkpoint WITH the genuine aggregation state ──
+        # ── Seed the sink_a token's BLOCKED journal row (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live barrier hold is recorded:
+        # enqueue+claim, then mark_blocked stamps barrier_blocked_at.
+        with db.engine.connect() as conn:
+            row_ingest_sequence = conn.execute(
+                text("SELECT ingest_sequence FROM rows WHERE row_id = :rid"),
+                {"rid": row_id},
+            ).scalar_one()
+        scheduler_repo = RecorderFactory(db).scheduler
+        seed_now = datetime.now(UTC)
+        seeded_item = scheduler_repo.enqueue_ready_claimed(
+            run_id=run_id,
+            token_id=buffered_child.token_id,
+            row_id=row_id,
+            node_id=barrier_key_for_seed,
+            step_index=1,
+            ingest_sequence=row_ingest_sequence,
+            row_payload_json=scheduler_repo.serialize_row_payload(PipelineRow(data={"value": 0}, contract=source_contract)),
+            available_at=seed_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=seed_now,
+            branch_name="sink_a",
+            fork_group_id=buffered_child.fork_group_id,
+        )
+        scheduler_repo.mark_blocked(
+            work_item_id=seeded_item.work_item_id,
+            queue_key=None,
+            barrier_key=barrier_key_for_seed,
+            now=seed_now,
+            expected_lease_owner="test-harness",
+        )
+
+        # A checkpoint is the resume precondition (get_unprocessed_rows returns []
+        # for a run with no checkpoint). F1: it carries scalars only — no blob.
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
-            aggregation_state=agg_state,
         )
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
         # ── PRECONDITION: the mixed-state path is genuinely live ──
-        # _get_buffered_checkpoint_token_ids must return the sink_a token (proof the
-        # exclusion logic at lines 474-501 actually executes — `if buffered_token_ids
-        # and unprocessed:`).  Without this, the test would pass vacuously.
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # _get_buffered_journal_token_ids must return the sink_a token (proof the
+        # exclusion logic in get_unprocessed_rows actually executes — `if
+        # buffered_token_ids and unprocessed:`).  Without this, the test would pass
+        # vacuously.
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert buffered_child.token_id in buffered_ids, (
-            f"PRECONDITION FAILED: the sink_a token must be in the checkpoint buffered set "
+            f"PRECONDITION FAILED: the sink_a token must be in the journal BLOCKED barrier-hold set "
             f"(else the mixed-state exclusion path is skipped and the test is vacuous). "
             f"buffered_ids={buffered_ids}"
         )
@@ -5398,7 +5417,7 @@ class TestForkRecoveryInvariant:
         # The incomplete (non-buffered) sink_b child must surface as a resume spec; the
         # buffered (sink_a) child must NOT (it is restored-and-flushed from the aggregation
         # buffer, not re-driven — get_incomplete_tokens_by_row excludes buffered tokens at
-        # the token level via _get_buffered_checkpoint_token_ids' aggregation_state arm).
+        # the token level via _get_buffered_journal_token_ids' BLOCKED barrier-hold set).
         # This is the function-level guard for the aggregation arm; the full-resume
         # double-emit guard is test_resume_aggregation_buffered_fork_branch_not_redriven.
         by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
@@ -5449,10 +5468,12 @@ class TestForkRecoveryInvariant:
             the 2 exploded children → both BUFFERED in the same batch) → sink 'output'
 
         Construction: run to completion, delete BOTH expand-child leaves' terminal outcomes
-        (both become incomplete), and place BOTH into a genuine AggregationCheckpointState
-        keyed on the real aggregation node id (all-buffered). Assert:
-        - _get_buffered_checkpoint_token_ids returns BOTH leaves (precondition: the
-          aggregation arm is live).
+        (both become incomplete), and re-seed BOTH as BLOCKED journal rows through the
+        production scheduler verbs (enqueue_ready_claimed + mark_blocked with
+        barrier_key = the real aggregation node id — F1: the journal is the only
+        barrier-buffer truth; all-buffered). Assert:
+        - _get_buffered_journal_token_ids returns BOTH leaves (precondition: the
+          journal barrier-hold arm is live).
         - get_unprocessed_rows EXCLUDES the row (all its incomplete leaves are buffered).
         - get_incomplete_tokens_by_row returns NOTHING for the row (token-level exclusion;
           mirrors the row-level exclusion so the resume loop never dispatches them).
@@ -5470,20 +5491,60 @@ class TestForkRecoveryInvariant:
         re-drivable resume specs.
         """
         import datetime
+        from typing import Any as _Any
 
-        from elspeth.contracts.aggregation_checkpoint import (
-            AggregationCheckpointState,
-            AggregationNodeCheckpoint,
-            AggregationTokenCheckpoint,
-        )
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
+        from elspeth.contracts.schema_contract import FieldContract as _FieldContract
+        from elspeth.contracts.schema_contract import PipelineRow as _PipelineRow
         from elspeth.contracts.schema_contract import SchemaContract as _SchemaContract
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import AggregationSettings, CheckpointSettings, SinkSettings, TriggerConfig
         from elspeth.core.landscape.schema import token_outcomes_table
+        from elspeth.plugins.infrastructure.base import BaseTransform
+        from elspeth.plugins.infrastructure.results import TransformResult
         from elspeth.plugins.transforms.json_explode import JSONExplode
-        from tests.integration.pipeline.test_aggregation_checkpoint_bug import BatchCollectorTransform
+        from elspeth.testing import make_pipeline_row
+        from tests.fixtures.base_classes import _TestSchema
+
+        class BatchCollectorTransform(BaseTransform):
+            """Batch-aware transform that collects rows until flush.
+
+            Minimal equivalent re-homed from the DELETED module
+            tests.integration.pipeline.test_aggregation_checkpoint_bug: in batch
+            mode it sums 'value' across the buffered rows; single rows pass
+            through unchanged.
+            """
+
+            name = "batch_collector"
+            determinism = Determinism.DETERMINISTIC
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            on_success: str | None = "output"
+
+            def __init__(self) -> None:
+                super().__init__({"schema": {"mode": "observed"}})
+
+            def process(self, row: _PipelineRow | list[_PipelineRow], ctx: _Any) -> TransformResult:
+                if isinstance(row, list):
+                    total = sum(r.get("value", 0) for r in row)
+                    output = {"id": row[0].get("id"), "value": total, "count": len(row)}
+                    contract = _SchemaContract(
+                        mode="OBSERVED",
+                        fields=(
+                            _FieldContract(normalized_name="id", original_name="id", python_type=int, required=False, source="inferred"),
+                            _FieldContract(
+                                normalized_name="value", original_name="value", python_type=int, required=False, source="inferred"
+                            ),
+                            _FieldContract(
+                                normalized_name="count", original_name="count", python_type=int, required=False, source="inferred"
+                            ),
+                        ),
+                        locked=True,
+                    )
+                    return TransformResult.success(_PipelineRow(output, contract), success_reason={"action": "batch"})
+                return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "single"})
 
         db = make_landscape_db()
         payload_store = MockPayloadStore()
@@ -5580,53 +5641,61 @@ class TestForkRecoveryInvariant:
             conn.commit()
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
-        # ── Build a GENUINE all-buffered AggregationCheckpointState (both leaves) ──
-        token_ckpts = []
+        # The scrub keys on "no outcome rows at all", but these leaves keep their
+        # genuine incomplete (None, BUFFERED) outcomes — which a real crash-state
+        # WOULD carry — so their run-1 TERMINAL journal rows survive the scrub.
+        # Delete them explicitly: a crash before the flush would never have
+        # terminalized these rows, and the re-seed below replaces them with the
+        # crash-faithful BLOCKED state.
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("DELETE FROM token_work_items WHERE run_id = :rid AND token_id IN (:a, :b)"),
+                {"rid": run_id, "a": children[0].token_id, "b": children[1].token_id},
+            )
+            conn.commit()
+        # ── Re-seed BOTH leaves as BLOCKED journal rows (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live aggregation barrier hold is
+        # recorded: enqueue+claim at the aggregation node, then mark_blocked with
+        # barrier_key = str(aggregation node_id) stamps barrier_blocked_at. Each
+        # row carries the leaf's REAL payload (from its token_data_ref envelope).
+        with db.engine.connect() as conn:
+            row_ingest_sequence = conn.execute(
+                text("SELECT ingest_sequence FROM rows WHERE row_id = :rid"),
+                {"rid": row_id},
+            ).scalar_one()
+        scheduler_repo = RecorderFactory(db).scheduler
+        seed_now = datetime.datetime.now(datetime.UTC)
         for c in children:
             env = _envelope(c.token_data_ref)
-            token_ckpts.append(
-                AggregationTokenCheckpoint(
-                    token_id=c.token_id,
-                    row_id=row_id,
-                    branch_name=None,
-                    fork_group_id=None,
-                    join_group_id=None,
-                    expand_group_id=c.expand_group_id,
-                    row_data=env["data"],
-                    contract_version=_SchemaContract.from_checkpoint(dict(env["contract"])).version_hash(),
-                    contract=env["contract"],
-                )
+            leaf_payload = _PipelineRow(dict(env["data"]), _SchemaContract.from_checkpoint(dict(env["contract"])))
+            seeded_item = scheduler_repo.enqueue_ready_claimed(
+                run_id=run_id,
+                token_id=c.token_id,
+                row_id=row_id,
+                node_id=str(agg_node_id),
+                step_index=2,
+                ingest_sequence=row_ingest_sequence,
+                row_payload_json=scheduler_repo.serialize_row_payload(leaf_payload),
+                available_at=seed_now,
+                lease_owner="test-harness",
+                lease_seconds=60,
+                now=seed_now,
+                expand_group_id=c.expand_group_id,
             )
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                str(agg_node_id): AggregationNodeCheckpoint(
-                    tokens=tuple(token_ckpts),
-                    batch_id="batch-all-buffered-test",
-                    elapsed_age_seconds=0.5,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=len(token_ckpts),
-                    completed_flush_count=0,
-                )
-            },
-        )
-
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            sequence_number=1,
-            graph=graph,
-            aggregation_state=agg_state,
-        )
+            scheduler_repo.mark_blocked(
+                work_item_id=seeded_item.work_item_id,
+                queue_key=None,
+                barrier_key=str(agg_node_id),
+                now=seed_now,
+                expected_lease_owner="test-harness",
+            )
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
-        # ── PRECONDITION: the aggregation arm is live — both leaves are buffered ──
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # ── PRECONDITION: the journal barrier-hold arm is live — both leaves buffered ──
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert {children[0].token_id, children[1].token_id}.issubset(buffered_ids), (
-            f"PRECONDITION FAILED: both expand leaves must be in the checkpoint aggregation buffered set; buffered_ids={buffered_ids}"
+            f"PRECONDITION FAILED: both expand leaves must be in the journal BLOCKED barrier-hold set; buffered_ids={buffered_ids}"
         )
 
         # ── ROW-level exclusion: the all-buffered row is NOT in unprocessed_rows ──

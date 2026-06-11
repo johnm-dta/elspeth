@@ -545,6 +545,21 @@ class RowProcessor:
         self._last_heartbeat_at: datetime | None = None
         self._scheduler_drains_since_maintenance = 0
 
+        # F1 Task 4.3 (rows_buffered unification): in-claim buffer-accept tally.
+        # An in-claim (count-trigger) aggregation flush gives the LEASED
+        # triggering token a BUFFERED audit record (it was accepted into the
+        # batch) but NO (None, BUFFERED) RowResult — its returned result is the
+        # flush output riding the claim. The live rows_buffered counter is fed
+        # exclusively by BUFFERED RowResults (outcomes.accumulate_row_outcomes),
+        # so it undercounted each count-triggered batch by exactly 1 vs the
+        # audit-derived value (run_status.derive counts every BUFFERED record).
+        # `_process_batch_aggregation_node` pushes the triggering token here at
+        # flush time; `_drain_scheduler_claims` drains it into the claim's
+        # results as a synthetic (None, BUFFERED) RowResult AFTER the
+        # claim-state decision, so journal/lease transitions never see it.
+        # RowProcessor is single-threaded per row, so no concurrent access.
+        self._in_claim_buffer_accepts: list[TokenInfo] = []
+
         # F1 (THE RESTORE INVERSION): on resume, barrier buffers are rebuilt
         # FROM journal BLOCKED rows + audit tables. The old direction —
         # materializing journal rows from checkpoint blobs — is gone; the
@@ -1823,6 +1838,16 @@ class RowProcessor:
 
         # Check if we should flush
         if self._aggregation_executor.should_flush(node_id):
+            # F1 Task 4.3 (rows_buffered unification): the triggering token was
+            # just accepted into the batch (BUFFERED audit record above) but
+            # will return the flush output instead of a (None, BUFFERED)
+            # RowResult. Tally it so the drain emits a synthetic BUFFERED
+            # result and the live rows_buffered counter matches the audit
+            # value (N accepted members, not N-1). Pushed before execute_flush
+            # so the FAILED-flush arm is covered too (the audit BUFFERED
+            # record exists either way); an exception mid-flush discards the
+            # tally with the abandoned claim result.
+            self._in_claim_buffer_accepts.append(current_token)
             trigger_type = self._aggregation_executor.get_trigger_type(node_id)
             if trigger_type is None:
                 trigger_type = TriggerType.COUNT
@@ -3361,6 +3386,21 @@ class RowProcessor:
             finally:
                 self._active_claim_work_item_id = None
                 self._last_heartbeat_at = None
+                # F1 Task 4.3 (rows_buffered unification): take-and-clear the
+                # in-claim buffer-accept tally on EVERY exit. On the exception
+                # and lease-lost arms the take discards it together with the
+                # abandoned claim result; on the success arm the local is
+                # appended to ``results`` below.
+                in_claim_buffer_accepts = self._take_in_claim_buffer_accepts()
+
+            # Synthetic (None, BUFFERED) results for in-claim flush triggering
+            # tokens. Appended OUTSIDE the claim-state decision below: the
+            # ``result`` driving journal/lease transitions is untouched (a
+            # mixed buffered+terminal tuple must not flip
+            # ``_is_buffered_scheduler_result`` or per-token claim matching),
+            # while accumulate_row_outcomes still counts one rows_buffered per
+            # accepted batch member — live == audit by construction.
+            results.extend(in_claim_buffer_accepts)
 
             for child_item in child_items:
                 self._enqueue_scheduler_work_item(child_item, pending_items)
@@ -3586,6 +3626,34 @@ class RowProcessor:
                 "cannot perform an owner-fenced state transition."
             )
         return claimed.lease_owner
+
+    def _take_in_claim_buffer_accepts(self) -> list[RowResult]:
+        """Drain the in-claim buffer-accept tally as synthetic BUFFERED results.
+
+        F1 Task 4.3 (rows_buffered unification). Each token here was accepted
+        into an aggregation batch during the current claim and then consumed by
+        the in-claim flush it triggered, so it never produced the
+        (None, BUFFERED) RowResult that every other accepted member produced.
+        The synthetic result mirrors the non-flush buffering return shape
+        exactly (``_process_batch_aggregation_node``); its ONLY consumer effect
+        is the rows_buffered increment in ``accumulate_row_outcomes`` — the
+        BUFFERED arm there routes nothing, touches no pending tokens, and
+        emits no telemetry. The caller appends these AFTER the claim-state
+        decision so journal/lease handling never sees them.
+        """
+        if not self._in_claim_buffer_accepts:
+            return []
+        accepted = self._in_claim_buffer_accepts
+        self._in_claim_buffer_accepts = []
+        return [
+            RowResult(
+                token=token,
+                final_data=token.row_data,
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+            )
+            for token in accepted
+        ]
 
     def _heartbeat_active_claim(self) -> None:
         """Refresh the active scheduler lease if heartbeat interval has elapsed.

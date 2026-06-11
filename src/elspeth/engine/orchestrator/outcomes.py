@@ -385,9 +385,19 @@ def accumulate_row_outcomes(
             # Deaggregation parent token - children counted separately
             counters.rows_expanded += 1
         elif pair == (None, TerminalPath.BUFFERED):
-            # Non-terminal: token held in aggregation buffer (passthrough or transform mode).
-            # Terminal outcome deferred to flush time (count trigger, timeout, or end-of-source).
-            # Post-flush assertion in _post_source_iteration_work verifies no tokens remain buffered.
+            # Non-terminal: token accepted into an aggregation buffer
+            # (passthrough or transform mode). Terminal outcome deferred to
+            # flush time (count trigger, timeout, or end-of-source).
+            #
+            # F1 Task 4.3 (rows_buffered unification): this is the SINGLE live
+            # increment site for rows_buffered, and it fires once per accepted
+            # batch member — INCLUDING the count-trigger flush's triggering
+            # token, whose synthetic BUFFERED result is emitted by the
+            # processor drain (RowProcessor._take_in_claim_buffer_accepts)
+            # because its returned result is the flush output riding the
+            # LEASED claim. Live therefore equals the audit value (one
+            # BUFFERED token_outcome per accepted member; run_status.derive
+            # counts the same records on the resume path).
             counters.rows_buffered += 1
         else:
             raise OrchestrationInvariantError(

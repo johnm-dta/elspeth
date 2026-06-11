@@ -2210,9 +2210,15 @@ class TestAggregationFailureMatrix:
                 ingest_sequence=0,
             )
 
-        assert len(results) == 1
-        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        # F1 Task 4.3 (rows_buffered unification): the triggering token's
+        # buffer-accept surfaces as a synthetic (None, BUFFERED) result ahead
+        # of the flush outcome — its BUFFERED audit record exists even though
+        # the flush failed, so live rows_buffered matches the audit value.
+        assert len(results) == 2
+        _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
+        _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         # BUFFERED is always recorded before the flush check, then FAILED on flush error.
+        # The synthetic BUFFERED RowResult records NOTHING extra in the audit trail.
         assert [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list] == [
             (None, TerminalPath.BUFFERED),
             (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
@@ -2257,10 +2263,16 @@ class TestAggregationFailureMatrix:
                 ingest_sequence=0,
             )
 
-        assert len(results) == 1
-        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        # F1 Task 4.3 (rows_buffered unification): the triggering token's
+        # buffer-accept surfaces as a synthetic (None, BUFFERED) result ahead
+        # of the flush outcome — its BUFFERED audit record exists even though
+        # the flush failed, so live rows_buffered matches the audit value.
+        assert len(results) == 2
+        _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
+        _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         outcomes = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
         # BUFFERED is always recorded before the flush check, then FAILED on flush error.
+        # The synthetic BUFFERED RowResult records NOTHING extra in the audit trail.
         assert outcomes == [(None, TerminalPath.BUFFERED), (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
     def test_passthrough_success_with_rows_none_raises(self) -> None:
@@ -5253,12 +5265,23 @@ class TestDurableSchedulerResumeDrain:
             ingest_sequence=1,
         )
 
-        assert len(second_results) == 2
-        flushed_token_ids = tuple(result.token.token_id for result in second_results)
+        # F1 Task 4.3 (rows_buffered unification): the triggering token's
+        # buffer-accept surfaces as a synthetic (None, BUFFERED) result
+        # alongside the two terminal flush outputs, so every accepted batch
+        # member contributes exactly one BUFFERED result to the live counter.
+        assert len(second_results) == 3
+        buffered_results = [result for result in second_results if result.path is TerminalPath.BUFFERED]
+        assert len(buffered_results) == 1
+        assert buffered_results[0].outcome is None
+        flush_results = [result for result in second_results if result.path is not TerminalPath.BUFFERED]
+        assert len(flush_results) == 2
+        flushed_token_ids = tuple(result.token.token_id for result in flush_results)
+        # The triggering token both buffers (synthetic) and flushes (terminal).
+        assert buffered_results[0].token.token_id in flushed_token_ids
         assert first_results[0].token.token_id in flushed_token_ids
         assert len(frozenset(flushed_token_ids)) == 2
-        assert all(result.sink_name == "agg_sink" for result in second_results)
-        assert all(result.scheduler_pending_sink for result in second_results)
+        assert all(result.sink_name == "agg_sink" for result in flush_results)
+        assert all(result.scheduler_pending_sink for result in flush_results)
 
         from sqlalchemy import select
 
@@ -7855,3 +7878,260 @@ class TestHandleTransformErrorStatusRoutedOnError:
         # str() of the whole reason dict, not literal "unknown_error".
         assert "transform_failed_for_reasons" in result.error.message
         assert result.error.message != "unknown_error"
+
+
+# =============================================================================
+# F1 derivation-parity pins (Task 3.4 review follow-ups)
+# =============================================================================
+
+
+class TestReadyEmissionEnqueueParity:
+    """Pin: ``_ready_emission_from_work_item`` mirrors ``_enqueue_scheduler_work_item``.
+
+    The merged-coalesce READY emission (inserted atomically by
+    ``complete_barrier`` via ``_insert_ready_emission``) and the drain loop's
+    idempotent ``enqueue_ready`` for the SAME WorkItem must derive identical
+    field values: the enqueue reconciles against the emission-inserted row by
+    deterministic ``work_item_id`` + strict field equality, so any derivation
+    drift between the two processor builders fails in production at
+    reconciliation time. This pin makes that drift fail in CI instead.
+
+    The test lives processor-side because BOTH builders under comparison are
+    ``RowProcessor`` methods; the repository mapper
+    (``_ready_work_item_values``) is shared by construction and is used here
+    as the common projection onto the full journal-row column set.
+    """
+
+    @pytest.mark.parametrize(
+        "flavor",
+        [
+            # Maximal coalesce-cursor item: full fork/join/expand lineage +
+            # coalesce fields set (queue_key derives None — queue blocking and
+            # coalesce barriers are mutually exclusive by derivation).
+            "coalesce_cursor",
+            # Structural-queue item: full lineage, no coalesce fields, current
+            # node structural (in node_to_next, no plugin) so queue_key derives
+            # the node id.
+            "structural_queue",
+        ],
+    )
+    def test_ready_emission_mirrors_enqueue_work_item_fields(self, flavor: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        continue_node = NodeID("after-merge")
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1, continue_node: 2},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: continue_node, continue_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+        )
+
+        # Lineage note: the audit trail enforces fork_group_id XOR
+        # join_group_id at token creation, so the two flavors split the
+        # lineage fields between them — together they pin every lineage
+        # column non-None at least once.
+        if flavor == "coalesce_cursor":
+            token = TokenInfo(
+                row_id="row-1",
+                token_id="token-merged-1",
+                row_data=make_pipeline_row({"value": 42}),
+                branch_name="path_a",
+                fork_group_id="fork-1",
+                expand_group_id="expand-1",
+            )
+            _persist_token_for_scheduler(factory, token)
+            item = WorkItem(
+                token=token,
+                current_node_id=continue_node,
+                coalesce_node_id=coalesce_node,
+                coalesce_name=CoalesceName("merge"),
+                on_success_sink="merged_sink",
+            )
+        else:
+            token = TokenInfo(
+                row_id="row-1",
+                token_id="token-merged-1",
+                row_data=make_pipeline_row({"value": 42}),
+                join_group_id="join-1",
+                expand_group_id="expand-1",
+            )
+            _persist_token_for_scheduler(factory, token)
+            item = WorkItem(
+                token=token,
+                current_node_id=continue_node,
+                on_success_sink="merged_sink",
+            )
+
+        emission = processor._ready_emission_from_work_item(item)
+
+        captured: dict[str, Any] = {}
+        real_enqueue = factory.scheduler.enqueue_ready
+
+        def _capturing_enqueue(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return real_enqueue(**kwargs)
+
+        monkeypatch.setattr(factory.scheduler, "enqueue_ready", _capturing_enqueue)
+        scheduled = processor._enqueue_scheduler_work_item(item, {})
+        assert captured, "enqueue_ready was not invoked"
+
+        # Project BOTH derivations through the production journal-row mapper
+        # (_ready_work_item_values — the single mapper used by enqueue_ready
+        # AND complete_barrier's _insert_ready_emission) with a pinned clock,
+        # then require strict equality across the FULL column set.
+        pinned_now = datetime(2026, 1, 1, tzinfo=UTC)
+        enqueue_kwargs = dict(captured)
+        enqueue_kwargs["available_at"] = pinned_now
+        enqueue_kwargs.setdefault("attempt", 1)
+        values_from_enqueue = factory.scheduler._ready_work_item_values(**enqueue_kwargs)
+
+        # Mirror _insert_ready_emission's emission -> values mapping exactly.
+        values_from_emission = factory.scheduler._ready_work_item_values(
+            run_id=processor.run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            node_id=emission.node_id,
+            step_index=emission.step_index,
+            ingest_sequence=emission.ingest_sequence,
+            row_payload_json=emission.row_payload_json,
+            available_at=pinned_now,
+            attempt=emission.attempt,
+            queue_key=emission.queue_key,
+            barrier_key=emission.barrier_key,
+            on_success_sink=emission.on_success_sink,
+            branch_name=emission.branch_name,
+            fork_group_id=emission.fork_group_id,
+            join_group_id=emission.join_group_id,
+            expand_group_id=emission.expand_group_id,
+            coalesce_node_id=emission.coalesce_node_id,
+            coalesce_name=emission.coalesce_name,
+        )
+
+        assert values_from_emission == values_from_enqueue
+        # Pin the projected column count: adding a journal column to ONE of
+        # the two builders (or to the mapper) must force this pin to be
+        # revisited rather than silently desync the reconciliation contract.
+        assert len(values_from_emission) == 29
+
+        # Spot-check the per-flavor derived keys so a failure localizes.
+        if flavor == "coalesce_cursor":
+            assert values_from_emission["queue_key"] is None
+            assert values_from_emission["barrier_key"] == "merge"
+            assert values_from_emission["coalesce_node_id"] == str(coalesce_node)
+            assert values_from_emission["coalesce_name"] == "merge"
+            assert values_from_emission["branch_name"] == "path_a"
+            assert values_from_emission["fork_group_id"] == "fork-1"
+        else:
+            assert values_from_emission["queue_key"] == str(continue_node)
+            assert values_from_emission["barrier_key"] is None
+            assert values_from_emission["coalesce_node_id"] is None
+            assert values_from_emission["coalesce_name"] is None
+            assert values_from_emission["join_group_id"] == "join-1"
+        assert values_from_emission["expand_group_id"] == "expand-1"
+        assert values_from_emission["step_index"] == 2
+
+        # And the live reconciliation accepted the enqueue against the same
+        # deterministic work_item_id (no drift at the idempotent insert).
+        assert scheduled.work_item_id == values_from_emission["work_item_id"]
+
+
+class TestPendingSinkAttemptOffsetSinkStepScoping:
+    """Pin: PENDING_SINK re-drive attempt offsets are SINK-step scoped.
+
+    A re-driven PENDING_SINK token only ever writes ONE further node_state —
+    the sink write. Its attempt offset must therefore derive from
+    ``get_max_node_state_attempts(..., step_index=sink_step)``: attempts
+    recorded at PRODUCER steps (e.g. a transform retried twice before the
+    crash) must not inflate the sink-write attempt number.
+    """
+
+    def test_producer_attempts_do_not_inflate_pending_sink_redrive_offset(self) -> None:
+        from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
+
+        _, factory = _make_factory()
+        producer_node = NodeID("transform-1")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, producer_node: 1},
+            node_to_next={NodeID("source-0"): producer_node, producer_node: None},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
+        )
+        sink_step = processor.resolve_sink_step()
+        assert sink_step == 2
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-redrive-1",
+            row_data=make_pipeline_row({"value": 42}),
+        )
+        _persist_token_for_scheduler(factory, token)
+
+        # Register a sink node so sink-step node_states satisfy the FK.
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="collect-sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        # Audited history: the PRODUCER step retried twice (attempts 0..2)...
+        for attempt in range(3):
+            factory.execution.begin_node_state(
+                token_id=token.token_id,
+                node_id=str(producer_node),
+                run_id="test-run",
+                step_index=1,
+                input_data={"value": 42},
+                attempt=attempt,
+            )
+        # ...while the SINK step only opened attempt 0 (the crashed write).
+        factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="sink-1",
+            run_id="test-run",
+            step_index=sink_step,
+            input_data={"value": 42},
+            attempt=0,
+        )
+
+        # Discriminator precondition: an UNSCOPED max over all steps WOULD
+        # see the producer's attempt 2 and over-bump the offset to 3.
+        unscoped = factory.execution.get_max_node_state_attempts("test-run", [token.token_id])
+        assert unscoped[token.token_id] == 2
+
+        now = datetime.now(UTC)
+        scheduled = TokenWorkItem(
+            work_item_id="wi-redrive-1",
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=token.row_id,
+            node_id=None,
+            step_index=sink_step,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(token.row_data),
+            status=TokenWorkStatus.PENDING_SINK,
+            attempt=1,
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+            pending_sink_name="default",
+            pending_outcome=TerminalOutcome.SUCCESS.value,
+            pending_path=TerminalPath.DEFAULT_FLOW.value,
+        )
+
+        result = processor._row_result_from_pending_sink(scheduled)
+
+        # Sink-step scoped: max sink attempt 0 -> offset 1. NOT the
+        # producer-inflated 3.
+        assert result.token.resume_attempt_offset == 1
+        assert result.token.resume_checkpoint_id == "ckpt-resume-1"
+        assert result.scheduler_pending_sink is True
+        assert result.sink_name == "default"

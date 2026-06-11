@@ -464,7 +464,8 @@ class CoalesceExecutor:
         # for pending membership; if a branch later arrives for such a row, a
         # fresh pending entry forms without the loss record and resolves via
         # timeout/flush instead of early loss-accounting (degraded latency,
-        # not corruption). Loss re-notification on resume is Task 3.1's caller.
+        # not corruption). The resume restore path must not re-notify losses
+        # restored from scalars; see this method's "Caller obligations".
         for stale_key in scalars.keys() - grouped.keys():
             slog.info(
                 "coalesce_journal_restore_dropped_stale_scalars",

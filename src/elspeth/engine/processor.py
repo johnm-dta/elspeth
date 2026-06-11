@@ -694,11 +694,13 @@ class RowProcessor:
                             scalars=node_scalars,
                         )
                     )
-                elif completed_flush_count > 0 or str(node_id) in scalars.aggregation:
-                    # Counter-only node: nothing buffered, but completed
-                    # flushes (or a stale scalars entry) exist — restore the
-                    # derived counters so post-flush pagination metadata
-                    # survives the resume.
+                elif completed_flush_count > 0 or accepted_count_total > 0 or str(node_id) in scalars.aggregation:
+                    # Counter-only node: nothing buffered, but the audit trail
+                    # shows prior activity — completed flushes, accepted rows
+                    # (a node whose flushes all FAILED has accepted > 0 with
+                    # zero COMPLETED batches and an empty buffer), or a stale
+                    # scalars entry. Restore the derived counters so post-flush
+                    # pagination metadata survives the resume.
                     agg_plans.append(
                         _AggregationRestorePlan(
                             node_id=node_id,
@@ -3058,7 +3060,8 @@ class RowProcessor:
         (``_derive_restored_batch_id`` requires a live BUFFERED outcome);
         passthrough flushes still carry BUFFERED outcomes and re-flush from
         the rebuilt buffer. Do not reorder the two writes without re-deriving
-        the restore arms.
+        the restore arms. This residual crash window is tracked:
+        elspeth-3977d8ab60.
 
         ``leased_token_id`` (in-claim flushes) is the LEASED triggering token:
         excluded from consumption (its row is not BLOCKED) and threaded as the

@@ -810,6 +810,37 @@ class TestConstructorErrorEdgeMap:
         assert node.accepted_count_total == 2
         assert node.completed_flush_count == 0
 
+    def test_resume_restore_preserves_counters_when_all_flushes_failed(self) -> None:
+        """A node whose flushes all FAILED is still counter-only restored.
+
+        Crash right after a failed flush consumed the batch: accepted rows > 0
+        but zero COMPLETED batches, empty buffer, no BLOCKED rows, no scalars
+        entry. The accepted counter must survive the resume (it drives
+        AggregationBatchContext pagination metadata), not silently reset to 0.
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        failed_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            payload = make_row({"value": ordinal})
+            token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+            _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+            factory.execution.add_batch_member(batch_id=failed_batch.batch_id, token_id=token_id, ordinal=ordinal)
+        factory.execution.update_batch_status(failed_batch.batch_id, BatchStatus.FAILED)
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings=self._agg_settings(agg_node),
+            barrier_restore=self._restore_ctx(),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert node.tokens == []
+        assert node.batch_id is None
+        assert node.accepted_count_total == 2  # pagination metadata survives
+        assert node.completed_flush_count == 0
+
     def test_resume_restore_rejects_barrier_group_split_across_batches(self) -> None:
         """Two BLOCKED tokens in one barrier group resolving DIFFERENT batch ids is corruption."""
         _db, factory = _make_factory()

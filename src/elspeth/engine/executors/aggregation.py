@@ -617,8 +617,9 @@ class AggregationExecutor:
         emitted. The checkpoint writer serializes None when no scalars exist
         (``BarrierScalars.has_state``), and restore treats a missing entry as
         ``(None, None)`` — so emitting unlatched/counter-only nodes would add
-        bytes without information. This matches the Task 1.2 transitional
-        projection, which skipped counter-only nodes.
+        bytes without information. This is design D3 applied to emission:
+        everything restorable about a counter-only node derives from audit
+        tables at restore time, so the checkpoint has nothing to say about it.
 
         Returns:
             Mapping of node_id -> AggregationNodeScalars for latched nodes only.

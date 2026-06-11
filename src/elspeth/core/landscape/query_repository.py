@@ -688,7 +688,9 @@ class QueryRepository:
         arrival-time failures are real failed barriers and the durable record
         is the broader truth.  Conversely a zero-arrival best-effort timeout
         (``best_effort_timeout_no_arrivals``) consumed no tokens and leaves no
-        node_states, so it is invisible here by construction.
+        node_states, so it is invisible here by construction.  Reconciling the
+        live accumulator with this durable breadth is tracked:
+        elspeth-ff6d48c180.
 
         Cumulativity: resume re-drives record under the SAME ``run_id``
         (resume provenance lives in ``resume_checkpoint_id``), so a single

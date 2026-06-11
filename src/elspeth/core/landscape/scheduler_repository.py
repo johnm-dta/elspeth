@@ -1305,8 +1305,8 @@ class TokenSchedulerRepository:
         context are pinned by existing tests and the lifecycle state machine):
         BLOCKED rows not named stay BLOCKED, every pending-sink emission must be
         a passthrough (fresh inserts are refused), and emission events keep the
-        legacy context. New callers must not pass it; Task 3.4 migrates the
-        processor's flush sites onto the strict default.
+        legacy context. New callers must not pass it; the processor's flush
+        sites were migrated onto the strict default (Task 3.4, landed).
 
         Returns the number of consumed rows terminalized.
         """

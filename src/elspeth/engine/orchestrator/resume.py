@@ -592,11 +592,13 @@ class ResumeCoordinator:
         # 2. Update run status to running after validation has succeeded.
         factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
-        # 3. F1 Task 1.2: barrier buffer truth moves to journal BLOCKED rows
-        # (token_work_items); the checkpoint carries only scalar barrier
-        # metadata (resume_point.barrier_scalars). Tasks 2.4/3.2 rewire the
-        # restore path onto the journal + scalars; until then no executor
-        # state is restored here (planned mid-chain red window).
+        # 3. F1 Task 3.1: barrier restore now runs in PROCESSOR CONSTRUCTION —
+        # resume() bundles a BarrierJournalRestoreContext (checkpoint scalars +
+        # the batch_id_remap captured above) and RowProcessor.__init__ rebuilds
+        # the executors from journal BLOCKED rows + audit tables. Task 3.2
+        # still owes: repointing recovery's buffered-token exclusion set (and
+        # the quiescence gate it shares) at the journal, and deleting these
+        # always-empty restored_*_state carriers.
         restored_state: dict[str, AggregationCheckpointState] = {}
         restored_coalesce_state: CoalesceCheckpointState | None = None
 

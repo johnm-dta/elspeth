@@ -30,6 +30,7 @@ from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, 
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
+    BatchStatus,
     NodeStateStatus,
     RoutingKind,
     TerminalOutcome,
@@ -661,6 +662,204 @@ class TestConstructorErrorEdgeMap:
                 ).where(token_work_items_table.c.token_id == "tok-q")
             ).one()
         assert (status, queue_key, barrier_key) == ("blocked", "queue-1", None)
+
+    # -- shared seeding for the batch_id-derivation arms ---------------------
+
+    @staticmethod
+    def _agg_settings(agg_node: NodeID) -> dict[NodeID, AggregationSettings]:
+        return {
+            agg_node: AggregationSettings(
+                name="test-agg",
+                plugin="test-plugin",
+                input="agg_in",
+                on_error="discard",
+                trigger={"count": 3},
+            ),
+        }
+
+    @staticmethod
+    def _restore_ctx(batch_id_remap: dict[str, str] | None = None) -> BarrierJournalRestoreContext:
+        return BarrierJournalRestoreContext(
+            resume_checkpoint_id="ckpt-resume-1",
+            barrier_scalars=None,
+            batch_id_remap=batch_id_remap or {},
+        )
+
+    @staticmethod
+    def _register_aggregation_node(factory: RecorderFactory, agg_node: NodeID) -> None:
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+    @staticmethod
+    def _seed_blocked_agg_row(factory: RecorderFactory, *, token_id: str, ordinal: int, agg_node: NodeID) -> TokenInfo:
+        """Token + production-shaped BLOCKED journal row under the agg barrier.
+
+        Goes through enqueue -> claim -> mark_blocked so barrier_blocked_at is
+        stamped exactly as the live buffering path stamps it.
+        """
+        payload = make_row({"value": ordinal})
+        token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+        now = datetime.now(UTC)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token_id,
+            row_id=token.row_id,
+            node_id=str(agg_node),
+            step_index=1,
+            ingest_sequence=ordinal,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None and claimed.token_id == token_id
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key=str(agg_node),
+            now=now,
+            expected_lease_owner="seeder",
+        )
+        return token
+
+    def _seed_buffered_member(
+        self,
+        factory: RecorderFactory,
+        *,
+        token_id: str,
+        ordinal: int,
+        agg_node: NodeID,
+        batch_id: str,
+    ) -> TokenInfo:
+        """BLOCKED journal row + batch membership + BUFFERED outcome carrying batch_id."""
+        token = self._seed_blocked_agg_row(factory, token_id=token_id, ordinal=ordinal, agg_node=agg_node)
+        factory.execution.add_batch_member(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id="test-run"),
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            batch_id=batch_id,
+        )
+        return token
+
+    def test_resume_restore_reads_batch_id_through_incomplete_batch_remap(self) -> None:
+        """A flush-interrupting crash: BUFFERED outcomes carry the DEAD batch id.
+
+        handle_incomplete_batches retries the failed batch (members copied) and
+        returns the old->retry mapping; the restore must read each group's
+        batch_id THROUGH that remap, land on the retry batch, and count
+        accepted tokens DISTINCT-ly (the retry copies would double-count).
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        old_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            self._seed_buffered_member(factory, token_id=token_id, ordinal=ordinal, agg_node=agg_node, batch_id=old_batch.batch_id)
+        # Crash shape: flush died -> batch FAILED; resume's
+        # handle_incomplete_batches creates the retry batch (members COPIED).
+        factory.execution.update_batch_status(old_batch.batch_id, BatchStatus.FAILED)
+        retry_batch = factory.execution.retry_batch(old_batch.batch_id)
+        assert retry_batch.batch_id != old_batch.batch_id
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings=self._agg_settings(agg_node),
+            barrier_restore=self._restore_ctx(batch_id_remap={old_batch.batch_id: retry_batch.batch_id}),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        # Headline: the BUFFERED outcomes still say old_batch; the restored
+        # in-progress batch is the RETRY batch via the remap.
+        assert node.batch_id == retry_batch.batch_id
+        assert [t.token_id for t in node.tokens] == ["t1", "t2"]
+        # DISTINCT discipline: members exist in BOTH the dead original and the
+        # retry copy; a raw count would say 4.
+        assert node.accepted_count_total == 2
+        assert node.completed_flush_count == 0
+
+    def test_resume_restore_rejects_barrier_group_split_across_batches(self) -> None:
+        """Two BLOCKED tokens in one barrier group resolving DIFFERENT batch ids is corruption."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        batch_a = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        batch_b = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=batch_a.batch_id)
+        self._seed_buffered_member(factory, token_id="t2", ordinal=1, agg_node=agg_node, batch_id=batch_b.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="split across batches"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(),
+            )
+
+    def test_resume_restore_rejects_blocked_row_with_terminal_outcome(self) -> None:
+        """A BLOCKED row whose token already flushed (terminal outcome) is journal/audit divergence.
+
+        Flushed-before-crash shape: the flush recorded BUFFERED -> BATCH_CONSUMED
+        but died before terminalizing the journal row. Restoring it would
+        double-process the token, so the restore refuses.
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=batch.batch_id)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t1", run_id="test-run"),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
+            batch_id=batch.batch_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="disagree about this token being buffered"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(),
+            )
+
+    def test_resume_restore_rejects_remapped_batch_without_batches_row(self) -> None:
+        """A remap target with no batches row is audit corruption, not a default."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        old_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=old_batch.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="has no batches row"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(batch_id_remap={old_batch.batch_id: "batch-that-does-not-exist"}),
+            )
+
+    def test_resume_restore_rejects_batch_owned_by_foreign_aggregation_node(self) -> None:
+        """A group's resolved batch must belong to the barrier_key's own aggregation node."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        other_node = NodeID("agg-2")
+        self._register_aggregation_node(factory, agg_node)
+        self._register_aggregation_node(factory, other_node)
+        own_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        foreign_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(other_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=own_batch.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="belongs to aggregation node"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(batch_id_remap={own_batch.batch_id: foreign_batch.batch_id}),
+            )
 
 
 class TestTraversalNextNodeInvariants:

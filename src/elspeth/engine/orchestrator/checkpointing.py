@@ -46,6 +46,39 @@ class CheckpointCoordinator:
         """Continue checkpoint ordering from a previously persisted checkpoint."""
         self._sequence_number = sequence_number
 
+    def checkpoint_run_start(self, run_id: str) -> None:
+        """Write the sequence-0 run-start checkpoint (F1 design D4).
+
+        Called once per fresh run, before source iteration. Every
+        checkpointing-enabled run therefore has a baseline checkpoint row,
+        so resume topology validation is unconditional and ``can_resume``'s
+        missing-baseline arm is a genuine "run predates run-start
+        checkpointing or checkpointing was disabled" refusal.
+
+        Sequencing: the post-sink and shutdown paths PRE-increment
+        ``_sequence_number`` (0 -> 1 on first fire), so the baseline's
+        sequence 0 never collides; the manager's duplicate-sequence guard
+        is the backstop. The resume path must NOT call this — it rebases
+        onto the persisted sequence via :meth:`rebase_sequence`.
+
+        Errors propagate deliberately: a run that cannot persist its
+        baseline cannot checkpoint at all, so it crashes before any source
+        row is processed rather than running un-resumable.
+        """
+        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+            return
+        if self._checkpoint_manager is None:
+            return
+        if self._active_graph is None:
+            raise OrchestrationInvariantError("Cannot create run-start checkpoint: execution graph not available")
+
+        self._checkpoint_manager.create_checkpoint(
+            run_id=run_id,
+            sequence_number=0,
+            barrier_scalars=None,
+            graph=self._active_graph,
+        )
+
     def maybe_checkpoint(
         self,
         run_id: str,

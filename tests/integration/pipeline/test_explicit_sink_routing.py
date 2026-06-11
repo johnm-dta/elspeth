@@ -383,8 +383,8 @@ class TestExplicitSinkRouting:
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 3
 
-        # Checkpoints were created (one per row)
-        assert len(checkpoint_calls) == 3, f"Expected 3 checkpoint calls, got {len(checkpoint_calls)}"
+        # Checkpoints were created (run-start baseline + one per row, F1/D4)
+        assert len(checkpoint_calls) == 4, f"Expected 4 checkpoint calls (run-start baseline + one per row), got {len(checkpoint_calls)}"
 
         # All results routed to the correct on_success sink
         assert len(sink.results) == 3

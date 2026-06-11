@@ -963,6 +963,16 @@ class Orchestrator:
         """
         self._checkpoints.set_active_graph(graph)
 
+        # F1 design D4: sequence-0 run-start checkpoint. Written before any
+        # source iteration so every checkpointing-enabled run carries a
+        # topology baseline; a run with NO checkpoint row then genuinely
+        # predates run-start checkpointing or ran with checkpointing
+        # disabled (can_resume's missing-baseline refusal, Task 3.2).
+        # The resume path does NOT write this — it rebases onto the
+        # persisted sequence (ResumeCoordinator.resume -> rebase_sequence).
+        # Failures propagate: no baseline means the run cannot checkpoint.
+        self._checkpoints.checkpoint_run_start(run_id)
+
         # 1. Register graph nodes and edges
         artifacts = self._register_graph_nodes_and_edges(factory, run_id, config, graph)
 

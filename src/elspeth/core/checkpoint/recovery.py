@@ -555,8 +555,9 @@ class RecoveryManager:
         Uses token outcomes to determine which rows need processing:
         - Rows with non-delegation terminal outcomes are done
         - Rows whose tokens lack terminal outcomes need reprocessing
-        - Rows already buffered in checkpoint aggregation state are excluded
-          (they will be restored from checkpoint, not reprocessed)
+        - Rows whose incomplete tokens are all buffered at barriers are
+          excluded (they are restored from journal BLOCKED rows at processor
+          construction, not reprocessed)
 
         This correctly handles multi-sink scenarios where rows are routed to
         different sinks in interleaved order. The previous row_index boundary

@@ -480,9 +480,11 @@ class ResumeCoordinator:
     ) -> ResumeState:
         """Reconstruct state needed to process resumed rows.
 
-        Creates a fresh factory, handles incomplete batches, restores aggregation state,
-        deserializes the source schema for type fidelity, validates the schema contract,
-        and retrieves unprocessed rows from the payload store.
+        Creates a fresh factory, handles incomplete batches, deserializes the
+        source schema for type fidelity, validates the schema contract, and
+        retrieves unprocessed rows from the payload store. (Barrier state is
+        NOT restored here — that happens at processor construction, which
+        rebuilds executors from journal BLOCKED rows plus checkpoint scalars.)
 
         Args:
             resume_point: ResumePoint from RecoveryManager.get_resume_point()

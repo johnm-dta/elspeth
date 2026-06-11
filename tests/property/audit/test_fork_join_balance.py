@@ -2161,7 +2161,13 @@ class TestForkRecoveryInvariant:
             # and its dependents in a single connection without a strict topological order.
             # All rows being deleted are barrier artifacts from this specific run; the
             # connection is committed before FKs are re-enabled to keep the DB consistent.
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
 
             # 1. merged token outcomes (COMPLETED at sink)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
@@ -2189,7 +2195,7 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Oracle: incomplete specs must be the TWO branch children (Case 2) ────
@@ -2401,7 +2407,13 @@ class TestForkRecoveryInvariant:
 
         # ── Interrupt: undo the barrier; revert path_a to PENDING, drop path_b's arrival ──
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # Merged token artifacts (the barrier's output)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             conn.execute(text("DELETE FROM node_states WHERE token_id = :tid"), {"tid": merged_token_id})
@@ -2428,7 +2440,7 @@ class TestForkRecoveryInvariant:
                 {"tid": incomplete_branch.token_id, "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
 
@@ -3287,7 +3299,13 @@ class TestForkRecoveryInvariant:
 
         # ── Interrupt: undo the barrier (same pattern as test_resume_fork_to_coalesce_before_barrier) ──
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # 1. merged token outcomes
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             # 2. merged token node_states
@@ -3307,7 +3325,7 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
@@ -3843,7 +3861,13 @@ class TestForkRecoveryInvariant:
         coalesce_node_id_for_deletion = graph.get_coalesce_id_map()[CoalesceName("merge")]
 
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # 1. merged token outcomes (COMPLETED at sink)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             # 2. merged token node_states
@@ -3863,7 +3887,7 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
         _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Resume ────────────────────────────────────────────────────────────

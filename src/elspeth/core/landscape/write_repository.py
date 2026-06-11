@@ -82,7 +82,7 @@ class LandscapeWriteRepository:
         source_node_id = self._node_id(run_id, 0)
 
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 conn.execute(
                     runs_table.insert().values(
                         run_id=run_id,

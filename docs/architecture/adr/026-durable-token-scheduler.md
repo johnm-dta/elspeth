@@ -2,9 +2,9 @@
 
 **Date:** 2026-05-23
 **Status:** Accepted with stated preconditions (see *RC6
-Preconditions*; an N>1 deployment additionally requires the
-separate deployment-shape ADR per Precondition #9, which is
-not yet authored)
+Preconditions*; the separate deployment-shape ADR required by
+Precondition #9 is now authored as ADR-030 — proposed at slice
+0 of its landing plan, → Accepted at slice 5)
 **Deciders:** John Morrissey, Claude Opus
 **Tags:** scheduler, checkpoint, resume, leases, cas, audit-integrity,
           embedded-database, rc6, multi-source-token-scheduler
@@ -90,13 +90,17 @@ discharges that obligation.
 ### Lifecycle
 
 ```
-READY → LEASED → (WAITING | BLOCKED | PENDING_SINK) → TERMINAL | FAILED
+READY → LEASED → (BLOCKED | PENDING_SINK) → TERMINAL | FAILED
 ```
 
-- `READY`: enqueued, awaiting claim.
+- `READY`: enqueued, awaiting claim. Delayed retry is not a distinct
+  status: a `READY` row with a future `available_at` is simply held
+  off until that time. (A `WAITING` status existed in earlier
+  revisions of this ADR; the lane was dead code and was deleted in
+  the F4 dead-lanes cleanup, commit `80d8baff2` — it does not exist
+  in `contracts/scheduler.py`.)
 - `LEASED`: a worker holds the row for `lease_seconds`; CAS-gated by
   `lease_owner`.
-- `WAITING`: held off until `available_at` (delayed retry).
 - `BLOCKED`: durable barrier — a join/coalesce row that won't proceed
   until its sibling rows complete.
 - `PENDING_SINK`: transform work durable; sink write is the remaining
@@ -139,7 +143,7 @@ READY → LEASED → (WAITING | BLOCKED | PENDING_SINK) → TERMINAL | FAILED
 Every state transition that consumes a lease takes an
 `expected_lease_owner: str` keyword argument and rejects the
 transition if the row's `lease_owner` does not match. `mark_terminal`,
-`mark_pending_sink`, `mark_blocked`, `mark_waiting`, and `mark_failed`
+`mark_pending_sink`, `mark_blocked`, and `mark_failed`
 all enforce this. `recover_expired_leases` filters by `lease_owner !=
 caller_owner` so a worker can never reap its own still-running lease.
 The CAS pattern is what makes "two workers, same row" impossible to
@@ -402,7 +406,8 @@ it.
   under multi-worker the two-phase shape is a *correctness*
   concern, not just a trade-off: another worker can
   transition the row in the window between SELECT and
-  UPDATE. G27 collapses the pair into a single CAS UPDATE.
+  UPDATE. G27 collapsed the pair into a single CAS UPDATE
+  (closed, commit `f79332aa8`; see Precondition #4).
 
 ### RC6 Preconditions
 
@@ -443,7 +448,7 @@ this list.
    worker count.
 
 4. **CAS race fix on `claim_ready` and `claim_pending_sink`
-   (G27 / elspeth-4678a5aa73). Required.** The
+   (G27 / elspeth-4678a5aa73). Done.** The
    SELECT-then-UPDATE pattern across separate
    statements/transactions is racy under SQLite WAL even
    at N=1 if the engine pool serves a second connection.
@@ -451,7 +456,11 @@ this list.
    UPDATE (UPDATE … RETURNING `work_item_id` with a
    single-row predicate, or the two-statement form inside
    `BEGIN IMMEDIATE`). Genuinely sharper under N>1, but
-   the *correctness* claim does not depend on N.
+   the *correctness* claim does not depend on N. Closed by
+   commit `f79332aa8` (a lost claim race surfaces as "no
+   work", never a stale write); the cross-process residual
+   is closed by ADR-030's write-intent `BEGIN IMMEDIATE`
+   discipline on every scheduler/coordination write path.
 
 5. **PRAGMA discipline on scheduler-bearing connections
    (G28 / elspeth-8536552dcb). Required.** Probe-and-
@@ -469,18 +478,21 @@ this list.
    status, attempt, lease owner, and `lease_expires_at`
    evidence. The landed schema records worker identity as the
    opaque `lease_owner` / `caller_owner` strings
-   (`row-processor:<run_id>:<uuid>`); if Precondition #9
-   settles a richer worker-identity shape for N>1, the column
-   semantics extend rather than change.
+   (`row-processor:<run_id>:<uuid>`); ADR-030 (Precondition
+   #9) settles the N>1 identity as `worker:<run_id>:<uuid>`
+   owner strings — extending, not changing, those semantics.
 
 7. **Runbook for lease recovery (G19 /
-   elspeth-559bce3459). Required for publish.** First-
-   operator-incident artifact: stuck lease, over-aggressive
-   expiry, crashed worker. Required at N=1 (every "did the
-   worker crash or is the LLM slow?" question lands here).
-   Authoring is *blocked on Precondition #9* — the incident
-   surface differs between single-binary co-tenants and
-   separate `elspeth run --worker` processes.
+   elspeth-559bce3459). Authored for N=1; N>1 rewrite
+   pending.** First-operator-incident artifact: stuck
+   lease, over-aggressive expiry, crashed worker. Required
+   at N=1 (every "did the worker crash or is the LLM slow?"
+   question lands here). The runbook exists at
+   `docs/runbooks/scheduler-lease-recovery.md`. The N>1
+   incident surface is now fixed by ADR-030 (Precondition
+   #9); the runbook's N>1 rewrite (including the
+   kill-the-wedged-incumbent step) rides slice 6 of
+   ADR-030's landing plan and remains the RC6 publish gate.
 
 #### B. Multi-worker-specific preconditions (required only if N>1 ships)
 
@@ -501,9 +513,10 @@ correctness from multi-worker capability.
    existing single-worker suite.
 
 9. **Deployment-shape decision (worker process
-   lifecycle). Required if N>1; required as a separate
-   ADR.** The *shape* of multi-worker deployment is not
-   decided — co-tenants inside a single-binary
+   lifecycle). Required if N>1; satisfied by ADR-030
+   (proposed).** As originally accepted, the *shape* of
+   multi-worker deployment was not decided — co-tenants
+   inside a single-binary
    `elspeth run`, separate `elspeth run --worker`
    invocations on the same host, or both. Each option
    implies a different spawn/supervise pattern, a
@@ -550,10 +563,19 @@ correctness from multi-worker capability.
     is the honest record of what this ADR's RC6
     multi-worker claim actually depends on.
 
-    **Until this ADR exists, RC6 cannot ship N>1.** The
-    scheduler primitive is sound for multi-worker by
-    construction; what is undecided is how multiple
-    workers come to exist in the operator's deployment.
+    **That ADR now exists: ADR-030 (One-Host WAL Pack,
+    proposed 2026-06-11).** It fixes the deployment shape
+    (one elected leader plus claim-only followers on a
+    single host over the WAL-mode audit DB), worker
+    identity (`worker:<run_id>:<uuid>` registered in a
+    worker registry and doubling as the scheduler
+    `lease_owner`), shutdown semantics, and the
+    `pending_items` cross-worker question (per-process
+    caches always backed by durable rows — unchanged
+    invariant). This precondition is discharged when
+    ADR-030 is accepted (slice 5 of its landing plan); no
+    invariant in this ADR changes as a result. RC6 still
+    cannot ship N>1 before that acceptance.
 
 ## Alternatives Considered
 
@@ -696,6 +718,9 @@ the §A / §B split in *RC6 Preconditions* above.
   `claim_pending_sink` SELECT-then-UPDATE CAS-race fix.
   Correctness claim under WAL regardless of worker count;
   sharper at N>1 but the gate is not multi-worker-specific.
+  **Closed** (commit `f79332aa8`; cross-process residual
+  closed by ADR-030's write-intent `BEGIN IMMEDIATE`
+  discipline — see Precondition #4).
 - **G28 / elspeth-8536552dcb** — PRAGMA discipline on
   scheduler-bearing connections (probe-and-assert
   elspeth-97f8509b35, test coverage elspeth-addd3dc41f,
@@ -705,10 +730,11 @@ the §A / §B split in *RC6 Preconditions* above.
   into Landscape audit trail. **Implemented (2026-06)** as the
   `scheduler_events` table, schema epochs 16–17; see
   Precondition #6.
-- **G19 / elspeth-559bce3459** — runbook for lease recovery.
-  Required at N=1; incident surface broadens at N>1.
-  Authoring blocked on Precondition #9. (Also listed under
-  *Documentation / governance* — same ticket.)
+- **G19 / elspeth-559bce3459** — runbook for lease recovery,
+  authored at `docs/runbooks/scheduler-lease-recovery.md`.
+  Required at N=1; incident surface broadens at N>1 — the
+  N>1 rewrite rides slice 6 of ADR-030's landing plan. (Also
+  listed under *Documentation / governance* — same ticket.)
 
 **§B — multi-worker-specific (required only if N>1 ships):**
 
@@ -717,12 +743,12 @@ the §A / §B split in *RC6 Preconditions* above.
   terminalization under N>1).
 - **G25h / elspeth-7bb7124e8f** — chaos fixtures (ChaosLLM,
   ChaosWeb, ChaosEngine) wired against the scheduler under N>1.
-- **Deployment-shape ADR (Precondition #9) — ticket not yet
-  filed.** Required artifact before RC6 ships N>1. Defines
-  worker process lifecycle, worker identity, shutdown
-  semantics, and `pending_items` cross-worker behaviour.
-  Filing this ticket is itself an action item out of this
-  ADR revision; surfaced here rather than buried.
+- **Deployment-shape ADR (Precondition #9) — authored as
+  ADR-030 (elspeth-1396d3f790).** Required artifact before
+  RC6 ships N>1. Defines worker process lifecycle, worker
+  identity, shutdown semantics, and `pending_items`
+  cross-worker behaviour. Proposed at slice 0 of its
+  landing plan; → Accepted at slice 5.
 
 ### Architecturally anchors (post-RC6 follow-up)
 
@@ -745,10 +771,12 @@ the §A / §B split in *RC6 Preconditions* above.
 
 - **G18 / elspeth-06aecb78a0** — `docs/architecture/
   landscape.md` missing `token_work_items` schema.
-- **G19 / elspeth-559bce3459** — no runbook covers
-  `TokenWorkItem` lease recovery. The intended audience is
-  the first operator hit by a lease-expiry incident;
-  runbook is RC6 publish gate.
+- **G19 / elspeth-559bce3459** — `TokenWorkItem` lease
+  recovery runbook, authored at
+  `docs/runbooks/scheduler-lease-recovery.md`. The intended
+  audience is the first operator hit by a lease-expiry
+  incident; the N>1 rewrite (slice 6 of ADR-030's landing
+  plan) is the RC6 publish gate.
 - **G22 / elspeth-7f3ac1ac65** — *"Do not fabricate
   source_row_index / ingest_sequence"* lives only in an
   exception string; lift to doc + lint rule (cross-cut
@@ -783,9 +811,9 @@ for the move.
 - **Scheduler-event audit table schema shape.** *Resolved
   2026-06:* the dedicated `scheduler_events` table shape
   shipped (schema epochs 16–17) with worker identity as
-  opaque owner strings. The only residue rides with
-  Precondition #9: an N>1 worker-identity decision extends
-  the owner-string semantics.
+  opaque owner strings. The residue is settled by ADR-030
+  (Precondition #9): `worker:<run_id>:<uuid>` identities
+  extend the owner-string semantics.
 - **Still-active prior-worker lease semantics — comment
   audit.** The G3 fix's `processor.py` comment documents
   a "stranded prior worker lease" case framed for
@@ -895,6 +923,34 @@ for the move.
       loop, the PRAGMA listener, and the resume entry point
       (now `ResumeCoordinator.reconstruct_resume_state`,
       `orchestrator/resume.py`).
+- **2026-06-12** — Stale-text reconciliation against ADR-030
+  (slice 0 of the One-Host WAL Pack landing plan,
+  elspeth-1396d3f790). Four changes:
+    - *WAITING / `mark_waiting` removed from prose.* The
+      lifecycle diagram, state list, and CAS-discipline list
+      named a `WAITING` status and a `mark_waiting` verb that
+      no longer exist: the lane was dead code deleted in the
+      F4 dead-lanes cleanup (commit `80d8baff2`) and is absent
+      from `contracts/scheduler.py`. Delayed retry is a
+      `READY` row with a future `available_at`, not a status.
+    - *G27 (Precondition #4) marked Done.* The single-CAS
+      claim fix landed as commit `f79332aa8` (a lost claim
+      race surfaces as "no work"); the cross-process residual
+      is closed by ADR-030's write-intent `BEGIN IMMEDIATE`
+      discipline. The "Required" markers here and in the §A
+      ticket list were stale.
+    - *G19 runbook pointer added.* The lease-recovery runbook
+      exists at `docs/runbooks/scheduler-lease-recovery.md`
+      (authored for N=1); "authoring blocked on Precondition
+      #9" was stale. The N>1 rewrite rides slice 6 of
+      ADR-030's landing plan and remains the RC6 publish gate.
+    - *Precondition #9 marked satisfied by ADR-030* (proposed
+      at slice 0, → Accepted at slice 5): deployment shape,
+      worker identity, shutdown semantics, and the
+      `pending_items` cross-worker question are fixed there.
+      Status line, §B item 9, the §B ticket entry ("ticket not
+      yet filed" was stale), and the *Open questions* residue
+      updated; *Related Decisions* gained the ADR-030 entry.
 
 ## Related Decisions
 
@@ -942,6 +998,15 @@ for the move.
   records *what* the source surface looks like and *why*
   it's plural; ADR-026 records *how* tokens produced by
   that surface survive crash and resume.
+- **ADR-030** (multi-worker deployment shape — One-Host WAL
+  Pack) — satisfies Precondition #9: deployment shape,
+  worker identity (`worker:<run_id>:<uuid>`, extending the
+  opaque `lease_owner` scheme this ADR requires), shutdown
+  semantics, and the `pending_items` cross-worker question.
+  Its write-intent `BEGIN IMMEDIATE` discipline also closes
+  the cross-process half of G27 (Precondition #4). Proposed
+  at slice 0 of its landing plan; this ADR's N>1 claim
+  becomes shippable when ADR-030 is accepted (slice 5).
 
 ## References
 

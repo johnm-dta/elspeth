@@ -40,7 +40,6 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.schema import nodes_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
 from elspeth.mcp.analyzers.queries import (
@@ -1047,14 +1046,24 @@ class TestListRuns:
 def _delete_node(db: Any, run_id: str, node_id: str) -> None:
     """Directly delete a node row to simulate Tier 1 audit corruption.
 
-    Disables FK enforcement temporarily — real corruption doesn't follow FK rules.
+    Disables FK enforcement temporarily — real corruption doesn't follow FK
+    rules. Operates at the raw driver level: ``PRAGMA foreign_keys`` is a
+    silent no-op inside a transaction, and under the write-intent begin
+    discipline every ``db.connection()`` transaction begins explicitly, so the
+    toggle must run in driver autocommit.
     """
-    from sqlalchemy import text
-
-    with db.connection() as conn:
-        conn.execute(text("PRAGMA foreign_keys = OFF"))
-        conn.execute(nodes_table.delete().where((nodes_table.c.node_id == node_id) & (nodes_table.c.run_id == run_id)))
-        conn.execute(text("PRAGMA foreign_keys = ON"))
+    raw = db.engine.raw_connection()
+    try:
+        driver = raw.driver_connection
+        assert driver is not None
+        driver.execute("PRAGMA foreign_keys = OFF")
+        try:
+            driver.execute("DELETE FROM nodes WHERE node_id = ? AND run_id = ?", (node_id, run_id))
+            driver.commit()
+        finally:
+            driver.execute("PRAGMA foreign_keys = ON")
+    finally:
+        raw.close()
 
 
 class TestFailureContextCorruptionGuards:
@@ -1724,13 +1733,17 @@ class TestListCollisions:
             token = factory.data_flow.create_token(row.row_id)
             rows_and_tokens.append((row, token))
 
-        # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older)
+        # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older).
+        # begin_node_state opens its own write transaction — it must run BEFORE
+        # the db.connection() block (nesting a repo write inside an open
+        # connection on the in-memory StaticPool nests transactions under the
+        # write-intent begin discipline).
+        node_states = [
+            factory.execution.begin_node_state(token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i})
+            for i, (_row, token) in enumerate(rows_and_tokens)
+        ]
         with db.connection() as conn:
-            for i, (_row, token) in enumerate(rows_and_tokens):
-                ns = factory.execution.begin_node_state(
-                    token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i}
-                )
-
+            for i, ns in enumerate(node_states):
                 if i < 2:
                     # Overlap-only: same value on both branches (NOT a real collision)
                     context = json.dumps(

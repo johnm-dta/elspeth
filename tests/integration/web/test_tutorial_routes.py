@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import structlog
 from fastapi import FastAPI
 from pydantic import SecretBytes
@@ -20,6 +21,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT, TutorialCache, TutorialCacheEntry, tutorial_cache_key
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes import create_session_router
@@ -171,6 +173,40 @@ def test_post_run_cache_hit_creates_current_session_run_and_audit_story(tmp_path
     assert story_body["llm_call_count"] == 0
     assert story_body["seeded_from_cache"] is True
     assert story_body["cache_key"] == cache_key
+
+
+def test_audit_story_missing_audit_db_raises_without_creating_file(tmp_path: Path) -> None:
+    """A recorded landscape_run_id with no audit DB on disk is a named
+    Tier-1 breach — and the read path must not create the database.
+
+    Pins the slice-1 behavior change: the old bare ``LandscapeDB(...)``
+    writer constructor silently CREATED an empty audit DB (create_all +
+    epoch stamp) and then 500'd with "run not found". Now the route raises
+    ``AuditStoryIntegrityError`` before touching disk.
+    """
+    app = _app(tmp_path)
+    _seed_canonical_cache(app)
+    session_id = _seed_session_with_state(app, match_canonical_cache=True)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tutorial/run",
+        json={"session_id": str(session_id), "prompt": CANONICAL_SEED_PROMPT},
+    )
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+
+    audit_db = tmp_path / "runs" / "audit.db"
+    assert audit_db.exists()
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{audit_db}{suffix}").unlink(missing_ok=True)
+
+    # The bare test app registers no exception handlers, so the named error
+    # propagates to the client (production maps it to a structured 500 with
+    # the ``error_type`` discriminator via the app.py handler).
+    with pytest.raises(AuditStoryIntegrityError, match="audit database does not exist"):
+        client.get(f"/api/sessions/{session_id}/runs/{run_id}/audit-story")
+    assert not audit_db.exists(), "read path must not recreate the audit DB"
 
 
 def test_post_run_cache_topology_mismatch_does_not_replay_cache(tmp_path: Path) -> None:

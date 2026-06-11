@@ -568,8 +568,16 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
                 ).fetchone()
 
                 if result is not None and result[0] is not None:
-                    # This is a merged token - verify it has parent links
-                    parent_ids = get_token_parent_ids(self.db, token_id)
+                    # This is a merged token - verify it has parent links.
+                    # Query on the SAME connection: opening a second
+                    # db.connection() here would nest transactions on the
+                    # in-memory StaticPool under the write-intent begin
+                    # discipline (one DBAPI connection, explicit BEGINs).
+                    parent_rows = conn.execute(
+                        text("SELECT parent_token_id FROM token_parents WHERE token_id = :token_id"),
+                        {"token_id": token_id},
+                    ).fetchall()
+                    parent_ids = [r[0] for r in parent_rows]
                     assert len(parent_ids) >= 2, f"Merged token {token_id} should have at least 2 parents, got {len(parent_ids)}"
 
     @invariant()

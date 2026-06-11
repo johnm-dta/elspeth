@@ -69,10 +69,12 @@ def get_outcome_counts(db: LandscapeDB, run_id: str) -> dict[tuple[str | None, s
 
 def get_fork_coalesce_stats(db: LandscapeDB, run_id: str) -> dict[str, Any]:
     """Get detailed fork/coalesce statistics for verification."""
-    with db.connection() as conn:
-        # Count tokens by outcome
-        outcome_counts = get_outcome_counts(db, run_id)
+    # Count tokens by outcome BEFORE opening the connection below: the helper
+    # opens its own db.connection(), and nesting connections on the in-memory
+    # StaticPool nests transactions under the write-intent begin discipline.
+    outcome_counts = get_outcome_counts(db, run_id)
 
+    with db.connection() as conn:
         # Count unique fork groups
         fork_groups = (
             conn.execute(

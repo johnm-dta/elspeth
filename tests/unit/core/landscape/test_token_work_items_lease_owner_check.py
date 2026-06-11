@@ -68,7 +68,13 @@ class TestLeaseOwnerCheckConstraint:
         """
         db = LandscapeDB("sqlite:///:memory:")
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline (option-c slice 1) autobegins an
+            # explicit BEGIN on the first conn.execute(), so issue the PRAGMA
+            # at the driver level while the connection is still autocommit.
+            driver_conn = conn.connection.driver_connection
+            assert driver_conn is not None
+            driver_conn.execute("PRAGMA foreign_keys = OFF")
             row = _base_row("wi-leased-null")
             row["status"] = TokenWorkStatus.LEASED.value
             row["lease_owner"] = None
@@ -86,7 +92,13 @@ class TestLeaseOwnerCheckConstraint:
         """
         db = LandscapeDB("sqlite:///:memory:")
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline (option-c slice 1) autobegins an
+            # explicit BEGIN on the first conn.execute(), so issue the PRAGMA
+            # at the driver level while the connection is still autocommit.
+            driver_conn = conn.connection.driver_connection
+            assert driver_conn is not None
+            driver_conn.execute("PRAGMA foreign_keys = OFF")
             row = _base_row("wi-leased-empty")
             row["status"] = TokenWorkStatus.LEASED.value
             row["lease_owner"] = ""
@@ -103,7 +115,13 @@ class TestLeaseOwnerCheckConstraint:
         """
         db = LandscapeDB("sqlite:///:memory:")
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline (option-c slice 1) autobegins an
+            # explicit BEGIN on the first conn.execute(), so issue the PRAGMA
+            # at the driver level while the connection is still autocommit.
+            driver_conn = conn.connection.driver_connection
+            assert driver_conn is not None
+            driver_conn.execute("PRAGMA foreign_keys = OFF")
             row = _base_row("wi-leased-ok")
             row["status"] = TokenWorkStatus.LEASED.value
             row["lease_owner"] = "worker-1"
@@ -119,7 +137,13 @@ class TestLeaseOwnerCheckConstraint:
         """
         db = LandscapeDB("sqlite:///:memory:")
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline (option-c slice 1) autobegins an
+            # explicit BEGIN on the first conn.execute(), so issue the PRAGMA
+            # at the driver level while the connection is still autocommit.
+            driver_conn = conn.connection.driver_connection
+            assert driver_conn is not None
+            driver_conn.execute("PRAGMA foreign_keys = OFF")
             row = _base_row("wi-ready-null")
             row["status"] = TokenWorkStatus.READY.value
             row["lease_owner"] = None

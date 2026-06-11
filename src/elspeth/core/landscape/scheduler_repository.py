@@ -29,7 +29,7 @@ from elspeth.contracts.scheduler import (
 )
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
-from elspeth.core.landscape.database import Tier1Engine
+from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import (
     blocked_barrier_hold_clause,
@@ -166,7 +166,7 @@ class TokenSchedulerRepository:
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             self._validate_work_item_references(
                 conn,
                 run_id=run_id,
@@ -243,7 +243,7 @@ class TokenSchedulerRepository:
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             self._validate_work_item_references(
                 conn,
                 run_id=run_id,
@@ -614,7 +614,7 @@ class TokenSchedulerRepository:
         now: datetime,
     ) -> TokenWorkItem | None:
         """Claim the next available READY work item for a bounded lease."""
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             row = (
                 conn.execute(
                     select(token_work_items_table)
@@ -731,7 +731,7 @@ class TokenSchedulerRepository:
     ) -> TokenWorkItem | None:
         """Claim a sink-bound token whose transform work is already durable."""
         lease_expires_at = now + timedelta(seconds=lease_seconds)
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             row = (
                 conn.execute(
                     select(token_work_items_table)
@@ -860,7 +860,7 @@ class TokenSchedulerRepository:
             token_work_items_table.c.lease_owner.is_(None),
             token_work_items_table.c.lease_owner != caller_owner,
         )
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             expired = conn.execute(
                 select(token_work_items_table)
                 .where(token_work_items_table.c.run_id == run_id)
@@ -1009,6 +1009,9 @@ class TokenSchedulerRepository:
         new_expires_at = now + timedelta(seconds=lease_seconds)
         lease_lost = False
         with self._engine.connect() as conn:
+            # Write intent must be declared BEFORE conn.begin() — the begin
+            # event reads the execution option to choose BEGIN IMMEDIATE.
+            conn.execution_options(**{WRITE_INTENT_OPTION: True})
             transaction = conn.begin()
             try:
                 result = conn.execute(
@@ -1205,7 +1208,7 @@ class TokenSchedulerRepository:
             predicates.append(
                 (token_work_items_table.c.lease_owner.is_(None)) | (token_work_items_table.c.lease_owner == expected_lease_owner)
             )
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             rows = (
                 conn.execute(select(token_work_items_table).where(and_(*predicates)).order_by(token_work_items_table.c.work_item_id))
                 .mappings()
@@ -1400,7 +1403,7 @@ class TokenSchedulerRepository:
         if scope_row_id is not None:
             blocked_select = blocked_select.where(token_work_items_table.c.row_id == scope_row_id)
 
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             blocked_rows = (
                 conn.execute(
                     blocked_select.order_by(
@@ -1861,7 +1864,7 @@ class TokenSchedulerRepository:
             token_work_items_table.c.status.in_((TokenWorkStatus.PENDING_SINK.value, TokenWorkStatus.LEASED.value)),
             token_work_items_table.c.pending_sink_name.is_not(None),
         ]
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table)
@@ -1964,7 +1967,7 @@ class TokenSchedulerRepository:
             .where(token_outcomes_table.c.completed == 1)
             .exists()
         )
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table)
@@ -2287,7 +2290,7 @@ class TokenSchedulerRepository:
         ]
         if expected_lease_owner is not None:
             predicates.append(token_work_items_table.c.lease_owner == expected_lease_owner)
-        with self._engine.begin() as conn:
+        with begin_write(self._engine) as conn:
             before = (
                 conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
                 .mappings()

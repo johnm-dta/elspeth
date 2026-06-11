@@ -22,6 +22,9 @@ class LandscapeConnectionProvider(Protocol):
     def connection(self) -> AbstractContextManager[Connection]:
         raise NotImplementedError
 
+    def write_connection(self) -> AbstractContextManager[Connection]:
+        raise NotImplementedError
+
 
 class ReadOnlyDatabaseOps:
     """Helper for read-only database operations.
@@ -81,7 +84,7 @@ class DatabaseOps(ReadOnlyDatabaseOps):
         """
         detail = f" ({context})" if context else ""
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(stmt)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
@@ -104,7 +107,7 @@ class DatabaseOps(ReadOnlyDatabaseOps):
         """
         detail = f" ({context})" if context else ""
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(stmt)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(

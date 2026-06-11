@@ -132,15 +132,31 @@ def register_run_routes(router: APIRouter) -> None:
         settings = request.app.state.settings
 
         def _load_story() -> RunAuditStoryResponse:
-            db = LandscapeDB(
-                connection_string=settings.get_landscape_url(),
+            from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
+
+            landscape_url = settings.get_landscape_url()
+            if _sqlite_database_file_missing(landscape_url):
+                # A run row carrying a non-None ``landscape_run_id`` with no
+                # audit database on disk is the same Tier-1 invariant breach
+                # as a missing run row inside ``AuditStoryService`` — surface
+                # it through the named error type instead of (as the previous
+                # bare ``LandscapeDB(...)`` writer constructor did) silently
+                # CREATING an empty audit database and then failing with
+                # "run not found".
+                raise AuditStoryIntegrityError(
+                    f"Landscape run {landscape_run_id} is recorded for run {run.id} but the audit database does not exist"
+                )
+            with LandscapeDB.from_url(
+                landscape_url,
                 passphrase=settings.landscape_passphrase,
-            )
-            return AuditStoryService(db).get_run_audit_story(
-                landscape_run_id,
-                public_run_id=str(run.id),
-                session_id=str(session.id),
-            )
+                create_tables=False,
+                read_only=True,
+            ) as db:
+                return AuditStoryService(db).get_run_audit_story(
+                    landscape_run_id,
+                    public_run_id=str(run.id),
+                    session_id=str(session.id),
+                )
 
         # Let ``AuditStoryIntegrityError`` propagate unflattened — the FastAPI
         # exception handler in ``app.py`` matches on the named type and

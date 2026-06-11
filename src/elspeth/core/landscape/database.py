@@ -36,6 +36,21 @@ from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 # to pass a bare :class:`Engine` will be caught by mypy.
 Tier1Engine = NewType("Tier1Engine", Engine)
 
+# Execution-option key that marks a connection's next transaction as carrying
+# WRITE INTENT.  On writable SQLite engines the engine-level ``begin`` event
+# (installed by :meth:`LandscapeDB._configure_sqlite`) inspects this option and
+# begins the transaction with ``BEGIN IMMEDIATE`` — taking the single WAL write
+# lock at BEGIN — instead of the default DEFERRED ``BEGIN``.  This closes the
+# cross-process read-then-write hazard where a transaction that starts as a
+# reader and later upgrades to a writer aborts with the non-retryable
+# ``SQLITE_BUSY_SNAPSHOT`` (ADR-030 §D5; option-c design F10).
+#
+# Only engine-side write verbs set this option (via
+# :func:`begin_write` / :meth:`LandscapeDB.write_connection`); read and
+# dashboard connections never carry it, so they never contend for the write
+# lock at BEGIN.
+WRITE_INTENT_OPTION = "elspeth_write_intent"
+
 # Canonical SQLite PRAGMA invariants for the Landscape audit DB.
 #
 # Tier-1 doctrine: the audit DB is the legal record. If SQLite doesn't accept
@@ -79,6 +94,33 @@ class SchemaCompatibilityError(Exception):
 
 
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+
+@contextmanager
+def begin_write(engine: Engine) -> Iterator[Connection]:
+    """Drop-in replacement for ``engine.begin()`` that carries write intent.
+
+    On writable Landscape SQLite engines the transaction begins with
+    ``BEGIN IMMEDIATE``, taking the WAL write lock at BEGIN so cross-process
+    read-then-write transactions cannot abort with the non-retryable
+    ``SQLITE_BUSY_SNAPSHOT`` (the lock is held from transaction start, so the
+    snapshot can never go stale under a concurrent writer).  Under contention
+    the BEGIN itself polls for up to ``busy_timeout`` (5000 ms) before raising
+    a retryable ``OperationalError`` ("database is locked").
+
+    Commit/rollback semantics are identical to ``engine.begin()``: commit on
+    successful block exit, rollback on exception.  On non-SQLite engines the
+    write-intent option is inert.
+
+    Exists as a module-level helper because some callers hold a bare
+    :class:`Engine` / :data:`Tier1Engine` rather than a :class:`LandscapeDB`
+    (e.g. ``TokenSchedulerRepository``); LandscapeDB holders should prefer
+    :meth:`LandscapeDB.write_connection`.
+    """
+    with engine.connect() as conn:
+        conn.execution_options(**{WRITE_INTENT_OPTION: True})
+        with conn.begin():
+            yield conn
 
 
 # Required columns that have been added since initial schema.
@@ -428,6 +470,14 @@ class LandscapeDB:
         - PRAGMA busy_timeout=5000 (contention tolerance)
         - PRAGMA query_only=ON (read-only engines only)
 
+        For writable engines it additionally takes manual control of
+        transaction begin (pysqlite ``isolation_level = None`` plus an
+        engine-level ``begin`` listener) so that transactions carrying the
+        :data:`WRITE_INTENT_OPTION` execution option begin with
+        ``BEGIN IMMEDIATE`` and all others with a plain DEFERRED ``BEGIN``.
+        Read-only engines keep stock pysqlite autocommit-read behaviour and
+        never emit any BEGIN.
+
         For SQLCipher engines, these PRAGMAs execute AFTER the creator callback
         returns (where PRAGMA key is issued), preserving the required ordering.
 
@@ -456,6 +506,49 @@ class LandscapeDB:
             # Set busy timeout to avoid immediate SQLITE_BUSY errors under contention
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
+
+        if read_only:
+            # Read-only engines keep stock pysqlite behaviour: SELECTs run in
+            # autocommit and no BEGIN of any kind is ever emitted, so
+            # dashboards / inspectors provably never contend for the WAL
+            # write lock (option-c design F10 closure).
+            return
+
+        @event.listens_for(engine, "connect")
+        def _disable_pysqlite_implicit_begin(dbapi_connection: object, connection_record: object) -> None:
+            # pysqlite emits its own lazy BEGIN before the first DML and never
+            # before SELECT.  Take manual control of transaction start so the
+            # engine-level "begin" event below is the single place the begin
+            # mode (DEFERRED vs IMMEDIATE) is decided — the documented
+            # SQLAlchemy pysqlite recipe.  Without this, pysqlite would emit
+            # its own BEGIN after our BEGIN IMMEDIATE ("cannot start a
+            # transaction within a transaction").  The takeover is global per
+            # writable engine rather than toggled per-transaction: a pooled
+            # connection can never be checked in with surprising isolation
+            # state, so ``engine.begin()`` rollback always undoes audit
+            # writes.  sqlcipher3 mirrors the pysqlite ``isolation_level``
+            # attribute, and PRAGMA key runs in the creator callback BEFORE
+            # this event, so SQLCipher ordering is preserved.
+            dbapi_connection.isolation_level = None  # type: ignore[attr-defined]  # SQLAlchemy event passes DBAPI connection typed as object
+
+        @event.listens_for(engine, "begin")
+        def _emit_begin(conn: Connection) -> None:
+            # Belt: _configure_sqlite is only ever called for sqlite URLs, so
+            # this listener is dialect-keyed by construction; guard anyway.
+            if conn.dialect.name != "sqlite":
+                return
+            if conn.get_execution_options().get(WRITE_INTENT_OPTION, False):
+                # Write intent declared (begin_write()/write_connection()):
+                # take the WAL write lock at BEGIN so read-then-write
+                # transactions cannot hit SQLITE_BUSY_SNAPSHOT mid-flight.
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                # Plain transactions keep DEFERRED semantics.  Owned
+                # behaviour delta vs stock pysqlite: read transactions now
+                # emit an explicit (lock-free) BEGIN where the driver
+                # previously emitted nothing, making multi-SELECT blocks
+                # snapshot-consistent.
+                conn.exec_driver_sql("BEGIN")
 
     @staticmethod
     def _verify_sqlite_pragmas(engine: Engine, connection_string: str) -> None:
@@ -640,11 +733,15 @@ class LandscapeDB:
             return int(conn.exec_driver_sql("PRAGMA user_version").scalar_one())
 
     def _set_sqlite_schema_epoch(self, epoch: int) -> None:
-        """Persist the SQLite schema epoch in PRAGMA user_version."""
+        """Persist the SQLite schema epoch in PRAGMA user_version.
+
+        ``PRAGMA user_version`` is a transactional write in SQLite; carry
+        write intent for uniformity with every other engine-side write.
+        """
         if not self.connection_string.startswith("sqlite"):
             return
 
-        with self.engine.begin() as conn:
+        with begin_write(self.engine) as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {int(epoch)}")
 
     def _sync_sqlite_schema_epoch(self) -> None:
@@ -1060,6 +1157,18 @@ class LandscapeDB:
             instance._sync_sqlite_schema_epoch()
         return instance
 
+    @property
+    def is_read_only(self) -> bool:
+        """Whether this handle was opened ``read_only=True`` (inspection only).
+
+        Read-only handles route :meth:`connection` through
+        :meth:`read_only_connection`, refuse :meth:`write_connection`, and
+        must never be handed to write repositories (e.g.
+        ``RecorderFactory`` skips ``TokenSchedulerRepository`` construction
+        for them).
+        """
+        return self._read_only
+
     @staticmethod
     def _derive_journal_path(connection_string: str) -> str:
         """Derive a default JSONL journal path from the connection string."""
@@ -1093,13 +1202,38 @@ class LandscapeDB:
             yield conn
 
     @contextmanager
+    def write_connection(self) -> Iterator[Connection]:
+        """Transaction-scoped connection carrying WRITE INTENT.
+
+        Sibling of :meth:`connection` for write transactions.  On SQLite the
+        transaction begins with ``BEGIN IMMEDIATE``, taking the WAL write
+        lock at BEGIN so cross-process read-then-write shapes cannot abort
+        with the non-retryable ``SQLITE_BUSY_SNAPSHOT`` (ADR-030 §D5).
+        Commit/rollback semantics are identical to :meth:`connection`:
+        auto-commit on successful block exit, auto-rollback on exception.
+
+        Raises:
+            RuntimeError: If this handle was opened ``read_only=True`` —
+                write intent on a read-only audit handle is a programming
+                error, not a recoverable condition.
+        """
+        if self._read_only:
+            raise RuntimeError("write_connection() is not available on a read-only LandscapeDB handle")
+
+        with begin_write(self.engine) as conn:
+            yield conn
+
+    @contextmanager
     def read_only_connection(self) -> Iterator[Connection]:
         """Get a database connection that rejects all write operations.
 
         Defense-in-depth for untrusted SQL execution (e.g., MCP query tool).
-        For SQLite, sets PRAGMA query_only = ON at the connection level and
-        resets it to OFF in the finally block so the pooled DBAPI connection
-        is returned in a writable state. For PostgreSQL, marks the current
+        For SQLite, sets PRAGMA query_only = ON at the connection level and,
+        on writable engines only, resets it to OFF in the finally block so the
+        pooled DBAPI connection is returned in a writable state. Read-only
+        engines (``from_url(read_only=True)``) keep query_only armed: it is
+        the only write barrier on SQLCipher read-only opens, which have no
+        mode=ro file-level backstop. For PostgreSQL, marks the current
         transaction READ ONLY. Unsupported backends fail closed instead of
         yielding a writable transaction.
         """
@@ -1114,5 +1248,5 @@ class LandscapeDB:
             try:
                 yield conn
             finally:
-                if dialect_name == "sqlite":
+                if dialect_name == "sqlite" and not self._read_only:
                     conn.execute(text("PRAGMA query_only = OFF"))

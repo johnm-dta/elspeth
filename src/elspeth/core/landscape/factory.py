@@ -340,7 +340,13 @@ class RecorderFactory:
             scheduler_event_loader=scheduler_event_loader,
             payload_store=payload_store,
         )
-        self._scheduler = TokenSchedulerRepository(db.engine)
+        # The scheduler repository is a pure write surface (its constructor
+        # runs a Tier-1 WAL probe that writer engines must satisfy).  On a
+        # read-only handle — MCP analyzer, web read surfaces, immutable
+        # snapshot opens whose journal_mode legitimately reads ``delete`` —
+        # there is nothing it could ever do, so skip construction entirely
+        # and fail loudly on access instead.
+        self._scheduler: TokenSchedulerRepository | None = None if db.is_read_only else TokenSchedulerRepository(db.engine)
 
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
@@ -364,6 +370,8 @@ class RecorderFactory:
 
     @property
     def scheduler(self) -> TokenSchedulerRepository:
+        if self._scheduler is None:
+            raise RuntimeError("scheduler repository is not available on a read-only LandscapeDB handle")
         return self._scheduler
 
     @property

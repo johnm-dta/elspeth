@@ -1186,7 +1186,7 @@ class TestForkTokenAtomicity:
         parents_before = _count_token_parents(db)
 
         # Inject failure: patch _db.connection to raise after child inserts
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
         call_count = 0
 
         @contextmanager
@@ -1208,7 +1208,7 @@ class TestForkTokenAtomicity:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = failing_connection  # type: ignore[method-assign]
+        repo._db.write_connection = failing_connection  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="Injected failure"):
             repo.fork_token(
@@ -1242,7 +1242,7 @@ class TestCoalesceTokensAtomicity:
         parents_before = _count_token_parents(db)
 
         # Inject failure: raise after merged token insert but before parent links
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
         call_count = 0
 
         @contextmanager
@@ -1263,7 +1263,7 @@ class TestCoalesceTokensAtomicity:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = failing_connection  # type: ignore[method-assign]
+        repo._db.write_connection = failing_connection  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="Injected failure"):
             repo.coalesce_tokens(
@@ -1289,7 +1289,7 @@ class TestExpandTokenAtomicity:
         parents_before = _count_token_parents(db)
 
         # Inject failure: raise after child inserts but before parent outcome
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
         call_count = 0
 
         @contextmanager
@@ -1311,7 +1311,7 @@ class TestExpandTokenAtomicity:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = failing_connection  # type: ignore[method-assign]
+        repo._db.write_connection = failing_connection  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match="Injected failure"):
             repo.expand_token(
@@ -1335,7 +1335,7 @@ class TestForkTokenRowcountValidation:
         """If a token insert silently affects zero rows, AuditIntegrityError is raised."""
         _db, repo, _fac, row_id, tok_id = _make_repo_with_token()
 
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         @contextmanager
         def zero_rowcount_connection():
@@ -1359,7 +1359,7 @@ class TestForkTokenRowcountValidation:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = zero_rowcount_connection  # type: ignore[method-assign]
+        repo._db.write_connection = zero_rowcount_connection  # type: ignore[method-assign]
 
         with pytest.raises(AuditIntegrityError, match="zero rows"):
             repo.fork_token(
@@ -1384,7 +1384,7 @@ class TestCoalesceTokensRowcountValidation:
         )
         child_ids = [c.token_id for c in children]
 
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         @contextmanager
         def zero_rowcount_connection():
@@ -1406,7 +1406,7 @@ class TestCoalesceTokensRowcountValidation:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = zero_rowcount_connection  # type: ignore[method-assign]
+        repo._db.write_connection = zero_rowcount_connection  # type: ignore[method-assign]
 
         with pytest.raises(AuditIntegrityError, match="zero rows"):
             repo.coalesce_tokens(
@@ -1424,7 +1424,7 @@ class TestExpandTokenRowcountValidation:
         """If child token insert affects zero rows, AuditIntegrityError is raised."""
         _db, repo, _fac, row_id, tok_id = _make_repo_with_token()
 
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         @contextmanager
         def zero_rowcount_connection():
@@ -1446,7 +1446,7 @@ class TestExpandTokenRowcountValidation:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = zero_rowcount_connection  # type: ignore[method-assign]
+        repo._db.write_connection = zero_rowcount_connection  # type: ignore[method-assign]
 
         with pytest.raises(AuditIntegrityError, match="zero rows"):
             repo.expand_token(

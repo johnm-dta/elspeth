@@ -12,7 +12,7 @@ from elspeth.contracts import Checkpoint
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, begin_write
 from elspeth.core.landscape.schema import checkpoints_table
 
 _MAX_BARRIER_SCALARS_BYTES = 10_000_000
@@ -106,7 +106,7 @@ class CheckpointManager:
             raise ValueError("graph parameter is required for checkpoint creation")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
-        with self._db.engine.begin() as conn:
+        with begin_write(self._db.engine) as conn:
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
                 .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
@@ -253,7 +253,7 @@ class CheckpointManager:
         Returns:
             Number of checkpoints deleted
         """
-        with self._db.engine.begin() as conn:
+        with begin_write(self._db.engine) as conn:
             result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount

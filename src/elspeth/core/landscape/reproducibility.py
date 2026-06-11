@@ -124,7 +124,9 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
         run_id: Run ID to potentially degrade
         deleted_refs: Payload refs actually removed by the purge operation.
     """
-    with db.connection() as conn:
+    # Read-then-write in one transaction: carry write intent so the WAL write
+    # lock is taken at BEGIN (no BUSY_SNAPSHOT upgrade hazard under peers).
+    with db.write_connection() as conn:
         # Tier 1 validation: verify audit data integrity before mutation
         query = select(runs_table.c.reproducibility_grade).where(runs_table.c.run_id == run_id)
         result = conn.execute(query)

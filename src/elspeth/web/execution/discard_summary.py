@@ -44,6 +44,7 @@ def load_discard_summaries_for_settings(
         landscape_url,
         passphrase=settings.landscape_passphrase,
         create_tables=False,
+        read_only=True,
     ) as db:
         return load_discard_summaries_from_db(db, run_ids)
 

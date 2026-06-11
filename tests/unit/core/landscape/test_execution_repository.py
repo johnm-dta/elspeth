@@ -298,7 +298,7 @@ class TestCompleteNodeStateCrashPaths:
         db, repo, fac, tok = _make_repo_with_token()
         fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         fac.data_flow.create_token("row-2", token_id="tok-2")
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         from contextlib import contextmanager
 
@@ -318,7 +318,7 @@ class TestCompleteNodeStateCrashPaths:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = rowcount_mismatch_connection  # type: ignore[method-assign]
+        repo._db.write_connection = rowcount_mismatch_connection  # type: ignore[method-assign]
 
         with pytest.raises(LandscapeRecordError, match="affected 1 rows for 2 states"):
             repo.begin_node_states_many(
@@ -496,7 +496,7 @@ class TestRecordRoutingEventsRowcount:
         routes = [RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)]
 
         # Mock the connection's execute to return rowcount=0 for INSERTs
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         from contextlib import contextmanager
 
@@ -517,7 +517,7 @@ class TestRecordRoutingEventsRowcount:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = mock_connection  # type: ignore[method-assign]
+        repo._db.write_connection = mock_connection  # type: ignore[method-assign]
 
         with pytest.raises(AuditIntegrityError, match="zero rows affected"):
             repo.record_routing_events(state.state_id, routes)

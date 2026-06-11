@@ -19,8 +19,12 @@ elspeth-addd3dc41f):
    declares no DEFERRABLE constraints and ``defer_foreign_keys`` stays 0, so
    an orphan work item is rejected at statement time, not commit time.
 3. G27: ``claim_ready``'s SELECT + CAS-UPDATE transaction cannot double-lease
-   under a second writer connection — the CAS WHERE re-verifies READY, so a
-   lost race surfaces as ``None`` (graceful), never as two live leases.
+   under a second writer connection.  A committed lease is refused via the
+   READY filter (returns ``None``); a rival attempting to claim INSIDE the
+   open SELECT→UPDATE window is excluded at its own ``BEGIN IMMEDIATE``
+   (option-c slice-1 write-intent discipline holds the write lock from
+   BEGIN), so the window in which the CAS rowcount-0 path used to be the
+   only guard no longer exists — never two live leases either way.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import insert, select, text
 from sqlalchemy.engine import Connection, RowMapping
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, TokenWorkStatus
@@ -216,19 +220,21 @@ class TestSchedulerConnectionPragmaDiscipline:
 
 
 class _RivalInterposingRepository(TokenSchedulerRepository):
-    """Test seam: a rival connection claims between our SELECT and CAS-UPDATE.
+    """Test seam: a rival connection tries to claim between our SELECT and CAS-UPDATE.
 
     ``claim_ready`` SELECTs the next READY row, then ``_claim_ready_row``
     issues the CAS-UPDATE.  Overriding the seam lets a second writer
-    connection complete a full claim in exactly that window, then delegates
-    to the real production code — the SQL under test is unchanged.
+    connection attempt a full claim in exactly that window, then delegates
+    to the real production code — the SQL under test is unchanged.  Under
+    the write-intent discipline (option-c slice 1) the rival is excluded at
+    its own ``BEGIN IMMEDIATE``; the seam records the outcome either way.
     """
 
     def __init__(self, engine: object, rival: TokenSchedulerRepository, *, now: datetime) -> None:
         super().__init__(engine)  # type: ignore[arg-type]  # branded engine forwarded verbatim
         self._rival = rival
         self._now = now
-        self.rival_claim: TokenWorkItem | None = None
+        self.rival_outcome: TokenWorkItem | OperationalError | None = None
 
     def _claim_ready_row(
         self,
@@ -240,12 +246,15 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
         lease_seconds: int,
         now: datetime,
     ) -> RowMapping | None:
-        self.rival_claim = self._rival.claim_ready(
-            run_id=run_id,
-            lease_owner="owner-rival",
-            lease_seconds=300,
-            now=self._now,
-        )
+        try:
+            self.rival_outcome = self._rival.claim_ready(
+                run_id=run_id,
+                lease_owner="owner-rival",
+                lease_seconds=300,
+                now=self._now,
+            )
+        except OperationalError as exc:
+            self.rival_outcome = exc
         return super()._claim_ready_row(
             conn,
             row=row,
@@ -302,15 +311,18 @@ class TestClaimReadyUnderSecondWriterConnection:
         finally:
             db_a.close()
 
-    def test_rival_claim_between_select_and_cas_update_loses_gracefully(self, tmp_path: Path) -> None:
-        """A rival commit inside the SELECT→UPDATE window yields ``None``, not a double lease.
+    def test_rival_claim_between_select_and_cas_update_is_lock_excluded(self, tmp_path: Path) -> None:
+        """A rival claim inside the SELECT→UPDATE window is excluded at BEGIN — never a double lease.
 
-        The CAS-UPDATE re-verifies ``status == READY`` in its WHERE clause, so
-        even though ``engine.begin()`` opens a DEFERRED transaction (pysqlite
-        emits BEGIN lazily, so the SELECT holds no read lock), the stolen row
-        matches zero rows and the loser backs off.  Exactly one lease and one
-        CLAIM_READY event exist afterward — the work item is never executed
-        twice and never wedged.
+        Write-intent discipline (option-c slice 1): ``claim_ready`` begins
+        with ``BEGIN IMMEDIATE``, holding the WAL write lock from BEGIN.  The
+        rival's own ``BEGIN IMMEDIATE`` inside the window polls busy_timeout
+        and raises the retryable "database is locked" ``OperationalError`` —
+        the "rival commits in the window" interleaving the CAS rowcount-0
+        path used to absorb can no longer occur.  The caller's claim wins;
+        exactly one lease and one CLAIM_READY event exist afterward — the
+        work item is never executed twice and never wedged.  (The CAS WHERE
+        still re-verifies ``status == READY`` as belt-and-braces.)
         """
         now = datetime.now(UTC)
         db_a = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
@@ -322,11 +334,26 @@ class TestClaimReadyUnderSecondWriterConnection:
                 repo_a = _RivalInterposingRepository(db_a.engine, rival, now=now)
                 _enqueue_one_ready(repo_a, now=now)
 
+                # Shrink the rival's busy_timeout so its lock exclusion fails
+                # fast instead of polling the production 5000 ms window.
+                raw = db_b.engine.raw_connection()
+                try:
+                    driver = raw.driver_connection
+                    assert driver is not None
+                    driver.execute("PRAGMA busy_timeout=100")
+                finally:
+                    raw.close()
+
                 claimed_a = repo_a.claim_ready(run_id=RUN_ID, lease_owner="owner-a", lease_seconds=300, now=now)
 
-                assert claimed_a is None
-                assert repo_a.rival_claim is not None
-                assert repo_a.rival_claim.lease_owner == "owner-rival"
+                assert claimed_a is not None
+                assert claimed_a.lease_owner == "owner-a"
+                assert isinstance(repo_a.rival_outcome, OperationalError)
+                assert "database is locked" in str(repo_a.rival_outcome)
+
+                # Serialized retry after the commit: refused via the READY
+                # filter — clean None, single owner.
+                assert rival.claim_ready(run_id=RUN_ID, lease_owner="owner-rival", lease_seconds=300, now=now) is None
 
                 with db_a.engine.connect() as conn:
                     item = conn.execute(select(token_work_items_table).where(token_work_items_table.c.run_id == RUN_ID)).mappings().one()
@@ -336,11 +363,11 @@ class TestClaimReadyUnderSecondWriterConnection:
                         )
                     ).all()
                 assert item["status"] == TokenWorkStatus.LEASED.value
-                assert item["lease_owner"] == "owner-rival"
+                assert item["lease_owner"] == "owner-a"
                 assert item["attempt"] == 1
                 claim_events = [event for event in events if event.event_type == SchedulerEventType.CLAIM_READY.value]
                 assert len(claim_events) == 1
-                assert claim_events[0].to_lease_owner == "owner-rival"
+                assert claim_events[0].to_lease_owner == "owner-a"
             finally:
                 db_b.close()
         finally:

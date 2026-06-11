@@ -298,12 +298,19 @@ async def _wait_for_terminal_run(session_service: SessionServiceProtocol, run_id
 
 
 def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landscape_run_id: str) -> _LiveTutorialProjection:
+    # Despite the read-shaped name this is a WRITER surface: it stamps
+    # ``llm_call_count`` / ``seeded_from_cache`` / ``cache_key`` onto the run
+    # row (Tier-1 contract assertion below) in the same transaction as its
+    # projection SELECTs.  ``write_connection()`` declares the write intent
+    # so the transaction begins ``BEGIN IMMEDIATE`` (ADR-030 §D5) — a
+    # read-then-write shape on a DEFERRED BEGIN is exactly the
+    # SQLITE_BUSY_SNAPSHOT hazard the write-intent discipline closes.
     with (
         LandscapeDB.from_url(
             settings.get_landscape_url(),
             passphrase=settings.landscape_passphrase,
         ) as db,
-        db.connection() as conn,
+        db.write_connection() as conn,
     ):
         llm_call_count = _count_calls_for_run(conn, landscape_run_id)
         discarded_row_count = _count_discarded_rows(conn, landscape_run_id)

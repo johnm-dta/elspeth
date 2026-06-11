@@ -329,7 +329,7 @@ class RunLifecycleRepository:
         # FAILED/INTERRUPTED → RUNNING via update_run_status() first, so by the
         # time complete_run() is called the status is RUNNING.
         _terminal_values = [s.value for s in _TERMINAL_RUN_STATUSES]
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             result = conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
@@ -588,7 +588,7 @@ class RunLifecycleRepository:
         schema_contract_json = audit_record.to_json()
         schema_contract_hash = schema_contract.version_hash()
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             result = conn.execute(
                 run_sources_table.update()
                 .where(run_sources_table.c.run_id == run_id)
@@ -888,7 +888,7 @@ class RunLifecycleRepository:
         if not statements:
             return
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 for stmt in statements:
                     result = conn.execute(stmt)
                     if result.rowcount == 0:
@@ -925,7 +925,7 @@ class RunLifecycleRepository:
                 "Use complete_run() so completed_at is recorded in the audit trail."
             )
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # When resuming to RUNNING, clear completed_at atomically.
             # A run cannot be simultaneously RUNNING and completed — that's
             # an impossible state that confuses operational tooling and auditors.

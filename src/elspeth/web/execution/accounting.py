@@ -39,6 +39,7 @@ def load_run_accounting_for_settings(
         landscape_url,
         passphrase=settings.landscape_passphrase,
         create_tables=False,
+        read_only=True,
     ) as db:
         return load_run_accounting_map_from_db(db, run_ids)
 

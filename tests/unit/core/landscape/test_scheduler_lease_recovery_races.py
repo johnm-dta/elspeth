@@ -12,34 +12,34 @@ file-backed Tier-1 SQLite database (two engine handles on the same file —
     deterministic interleavings are pinned:
 
     1. A claimant probing AFTER the sweep's per-row UPDATE has executed but
-       BEFORE the sweep transaction commits observes NO claimable item: the
-       uncommitted READY row exists only inside the sweep's open transaction
-       and WAL snapshot isolation keeps it invisible (the committed state is
-       still LEASED). A non-atomic sweep that autocommitted each per-row
-       UPDATE would leak the READY row to the claimant mid-sweep and fail
-       this pin. After the sweep commits, the rotated attempt is claimable.
-    2. A peer sweeper + claimant that COMMIT inside that same window make the
-       caller's per-row CAS match zero rows: the losing sweep returns 0,
-       records no event, and the attempt is bumped exactly once (by the
-       winning peer) — never twice.
-    3. The mirror-image window inside ``claim_ready``: a peer claim that
-       commits between claim's SELECT and its CAS UPDATE makes the loser
-       return ``None`` cleanly (rowcount-0 path, no ``AuditIntegrityError``),
-       leaving a single lease owner and an unchanged attempt.
+       BEFORE the sweep transaction commits is excluded at its own ``BEGIN
+       IMMEDIATE`` with the retryable "database is locked" error — the
+       uncommitted READY row is unobservable by construction. After the
+       sweep commits, the rotated attempt is claimable.
+    2. A peer sweeper attempting a competing recovery inside that same
+       window is likewise lock-excluded; the caller's sweep wins, and the
+       peer's serialized retry returns 0 cleanly (records no event) — the
+       attempt is bumped exactly once, never twice.
+    3. The mirror-image window inside ``claim_ready``: a peer claim inside
+       the caller claim's SELECT→CAS window is lock-excluded; the caller
+       wins and the peer's retry returns ``None`` cleanly (no
+       ``AuditIntegrityError``), leaving a single lease owner and an
+       unchanged attempt.
 
-    SQLite serialization note, characterized honestly: with the project's
-    pysqlite transaction semantics the sweep's SELECT runs before the write
-    transaction begins (the write lock is taken at the first per-row UPDATE),
-    so a second engine CAN commit a competing claim/recovery inside the
-    SELECT->UPDATE window without hitting the single-writer lock. The CAS
-    predicate on the per-row UPDATE — not lock exclusion — is what guarantees
-    the exactly-one-winner outcome. These tests pin the ``work_item_id`` and
-    ``status`` legs of that predicate: the READY-recovery branch rotates
-    ``work_item_id`` at the attempt bump, so a raced caller's UPDATE matches
-    zero rows on the id key alone. The ``lease_expires_at < now`` expiry leg
-    — the one that protects the NON-rotating PENDING_SINK-recovery branch
-    (the elspeth-28aaa36a62 ABA window) — is NOT exercised here; it is pinned
-    directly by
+    SQLite serialization note — UPDATED for the option-c slice-1 write-intent
+    discipline (ADR-030 §D5): every scheduler write transaction now begins
+    with ``BEGIN IMMEDIATE``, taking the single WAL write lock AT BEGIN. The
+    old SELECT->UPDATE window — in which a second engine could COMMIT a
+    competing claim/recovery before the caller's first per-row UPDATE — no
+    longer exists: a peer write transaction attempted inside that window is
+    excluded at its own ``BEGIN IMMEDIATE`` with the retryable
+    "database is locked" ``OperationalError`` (after its ``busy_timeout``
+    poll). These tests therefore pin LOCK EXCLUSION inside the window plus
+    the clean serialized loser path immediately after commit (recovery
+    returns 0 / claim returns None — no ``AuditIntegrityError``, no double
+    bump). The CAS predicate on the per-row UPDATE remains as belt-and-braces
+    and still serves same-connection interleavings; its
+    ``lease_expires_at < now`` expiry leg is pinned directly by
     ``test_scheduler_recover_expired_leases_skips_pending_sink_row_with_fresh_lease``
     in tests/unit/core/test_multi_source_foundation.py.
 
@@ -71,6 +71,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, TokenWorkStatus
@@ -229,45 +230,70 @@ def _is_token_work_items_update(statement: str) -> bool:
     return statement.lstrip().upper().startswith("UPDATE TOKEN_WORK_ITEMS")
 
 
-def test_claim_ready_probing_mid_sweep_sees_nothing_until_recovery_commits(
+def _lower_busy_timeout(engine: Tier1Engine, ms: int = 100) -> None:
+    """Shrink the pooled connection's busy_timeout so lock-exclusion paths
+    fail fast in tests instead of polling the production 5000 ms window.
+
+    The engine's QueuePool holds a single DBAPI connection under sequential
+    single-threaded use, so adjusting it directly is deterministic.
+    """
+    raw = engine.raw_connection()
+    try:
+        driver = raw.driver_connection
+        assert driver is not None
+        driver.execute(f"PRAGMA busy_timeout={ms}")
+    finally:
+        raw.close()
+
+
+def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(
     engines: tuple[Tier1Engine, Tier1Engine],
 ) -> None:
-    """Item (c), interleaving 1: a concurrent claimant that probes AFTER the
-    sweep's per-row UPDATE has executed but BEFORE the sweep transaction
-    commits finds NO claimable item. At probe time the row is READY at the
-    bumped attempt *inside the sweep's open transaction*; WAL snapshot
-    isolation keeps that uncommitted write invisible to the second engine,
-    whose read sees only the committed LEASED state (and ``claim_ready``
-    never steals a LEASED row, expired or not — recovery must mediate). A
-    hypothetical non-atomic sweep that autocommitted each per-row UPDATE
-    would have already published the READY row here and the claimant would
-    steal it mid-sweep, failing this pin. After the sweep commits, the
-    rotated attempt becomes claimable. No torn intermediate state is ever
-    observable through the journal."""
+    """Item (c), interleaving 1 — write-intent discipline: a concurrent
+    claimant that probes AFTER the sweep's per-row UPDATE has executed but
+    BEFORE the sweep transaction commits cannot even BEGIN its own write
+    transaction. The sweep holds the WAL write lock from its ``BEGIN
+    IMMEDIATE``, so the claimant's ``BEGIN IMMEDIATE`` polls busy_timeout and
+    raises the retryable "database is locked" ``OperationalError``. The
+    uncommitted READY row (bumped attempt inside the sweep's open
+    transaction) is therefore trivially unobservable — the old
+    WAL-snapshot-invisibility pin is subsumed by lock exclusion, and the
+    BUSY_SNAPSHOT mid-transaction abort the old shape risked is impossible
+    by construction. After the sweep commits, the rotated attempt becomes
+    claimable. No torn intermediate state is ever observable through the
+    journal."""
     sweep_engine, claim_engine = engines
     sweep_repo = TokenSchedulerRepository(sweep_engine)
     claim_repo = TokenSchedulerRepository(claim_engine)
     _seed_run_rows_tokens(sweep_engine, ("token-0",))
     original = _enqueue_tokens(sweep_repo, ("token-0",))["token-0"]
     _expire_leases(sweep_repo, ("token-0",))
+    _lower_busy_timeout(claim_engine)
 
-    mid_sweep_claim: list[TokenWorkItem | None] = []
+    mid_sweep_outcomes: list[TokenWorkItem | OperationalError | None] = []
 
     @event.listens_for(sweep_engine, "after_cursor_execute")
     def claimant_probes_mid_sweep(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
-        if mid_sweep_claim or not _is_token_work_items_update(statement):
+        if mid_sweep_outcomes or not _is_token_work_items_update(statement):
             return
         # The sweep's per-row UPDATE has EXECUTED (the row is READY/attempt-2
         # in the sweep's uncommitted transaction) but nothing is committed: a
         # worker on a separate engine probes for claimable work right now.
-        mid_sweep_claim.append(claim_repo.claim_ready(run_id=RUN_ID, lease_owner="claimant", lease_seconds=300, now=SWEEP_AT))
+        try:
+            mid_sweep_outcomes.append(claim_repo.claim_ready(run_id=RUN_ID, lease_owner="claimant", lease_seconds=300, now=SWEEP_AT))
+        except OperationalError as exc:
+            mid_sweep_outcomes.append(exc)
 
     try:
         recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(sweep_engine, "after_cursor_execute", claimant_probes_mid_sweep)
 
-    assert mid_sweep_claim == [None], "Uncommitted recovery must be invisible: the probe sees only the committed LEASED row"
+    assert len(mid_sweep_outcomes) == 1
+    outcome = mid_sweep_outcomes[0]
+    assert isinstance(outcome, OperationalError) and "database is locked" in str(outcome), (
+        "Write-intent discipline: the mid-sweep probe is excluded at BEGIN IMMEDIATE (retryable), never fed a torn state"
+    )
     assert recovered == 1
 
     # After commit, the recovered item is claimable at the bumped attempt.
@@ -286,104 +312,115 @@ def test_claim_ready_probing_mid_sweep_sees_nothing_until_recovery_commits(
     counts = _event_counts(sweep_engine)
     assert counts[SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == 1
     # Initial expired claim + the post-recovery claim; the mid-sweep probe
-    # returned None without recording anything.
+    # was excluded at BEGIN and recorded nothing.
     assert counts[SchedulerEventType.CLAIM_READY.value] == 2
 
 
-def test_recovery_loses_cas_cleanly_when_peer_recovers_and_claims_in_select_update_window(
+def test_peer_recovery_in_select_update_window_is_lock_excluded_and_loses_cleanly_after_commit(
     engines: tuple[Tier1Engine, Tier1Engine],
 ) -> None:
-    """Item (c), interleaving 2: a peer sweeper recovers the item AND a peer
-    claimant re-leases it — both COMMITTED between the caller sweep's SELECT
-    and its per-row UPDATE. The peer's READY-branch recovery ROTATED
-    ``work_item_id`` at the attempt bump, so the caller's per-row CAS — keyed
-    on the ``work_item_id`` its SELECT observed — matches ZERO rows: the
-    losing sweep returns 0 and records no event. Exactly one attempt bump
-    (the winner's), exactly one effective owner, never a double-recovered
-    item. (The ``lease_expires_at < now`` leg of the CAS predicate, which
-    protects the non-rotating PENDING_SINK branch, is deliberately NOT what
-    saves this race — see the module docstring and the foundation ABA
-    test.)"""
+    """Item (c), interleaving 2 — write-intent discipline: a peer sweeper
+    that tries to recover the same item inside the caller sweep's
+    SELECT→UPDATE window is excluded at its own ``BEGIN IMMEDIATE`` (the
+    caller holds the write lock from BEGIN), so the window in which a peer
+    could COMMIT a competing recovery no longer exists: the caller's sweep
+    always wins its own window. The peer's retry AFTER the commit takes the
+    clean serialized loser path: ``recover_expired_leases`` finds nothing
+    expired (returns 0, records no event — the rotated attempt is READY,
+    unleased), and the peer's claim leases the bumped attempt. Exactly one
+    attempt bump, exactly one effective owner, never a double-recovered
+    item. (The per-row CAS predicate remains as belt-and-braces for
+    same-connection interleavings; its ``lease_expires_at < now`` leg is
+    pinned by the foundation ABA test — see the module docstring.)"""
     sweep_engine, peer_engine = engines
     sweep_repo = TokenSchedulerRepository(sweep_engine)
     peer_repo = TokenSchedulerRepository(peer_engine)
     _seed_run_rows_tokens(sweep_engine, ("token-0",))
     original = _enqueue_tokens(sweep_repo, ("token-0",))["token-0"]
     _expire_leases(sweep_repo, ("token-0",))
+    _lower_busy_timeout(peer_engine)
 
-    peer_results: list[tuple[int, TokenWorkItem | None]] = []
+    peer_outcomes: list[OperationalError] = []
 
     @event.listens_for(sweep_engine, "before_cursor_execute")
-    def peer_recovers_and_claims_mid_sweep(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
-        if peer_results or not _is_token_work_items_update(statement):
+    def peer_recovers_mid_sweep(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        if peer_outcomes or not _is_token_work_items_update(statement):
             return
-        # Peer sweep + peer claim commit on a separate engine while the
-        # caller's sweep is between its SELECT and its per-row UPDATE.
-        peer_recovered = peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
-        peer_claim = peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-claimant", lease_seconds=300, now=SWEEP_AT)
-        peer_results.append((peer_recovered, peer_claim))
+        # Peer sweep attempts a competing recovery on a separate engine while
+        # the caller's sweep is between its SELECT and its per-row UPDATE.
+        with pytest.raises(OperationalError, match="database is locked") as excinfo:
+            peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
+        peer_outcomes.append(excinfo.value)
 
     try:
-        loser_recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+        winner_recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
-        event.remove(sweep_engine, "before_cursor_execute", peer_recovers_and_claims_mid_sweep)
+        event.remove(sweep_engine, "before_cursor_execute", peer_recovers_mid_sweep)
 
-    assert len(peer_results) == 1
-    peer_recovered, peer_claim = peer_results[0]
-    assert peer_recovered == 1, "Peer sweep won the race"
+    assert len(peer_outcomes) == 1, "The peer's mid-window recovery was excluded at BEGIN IMMEDIATE"
+    assert winner_recovered == 1, "The caller's sweep always wins its own window under the write lock"
+
+    # Serialized loser path after the commit: nothing left to recover (clean
+    # 0, no event), and the rotated attempt is claimable by the peer.
+    assert peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper") == 0
+    peer_claim = peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-claimant", lease_seconds=300, now=SWEEP_AT)
     assert peer_claim is not None and peer_claim.attempt == 2
-
-    # The losing sweep's per-row CAS matched zero rows: clean 0, no exception.
-    assert loser_recovered == 0
 
     states = _work_item_states(sweep_engine)
     assert len(states) == 1, "Never a lost or duplicated item"
     assert states["token-0"]["status"] == TokenWorkStatus.LEASED.value
     assert states["token-0"]["lease_owner"] == "peer-claimant", "Exactly one effective owner — the peer's fresh lease survives"
-    assert states["token-0"]["attempt"] == 2, "Attempt bumped exactly once — never double-bumped by the losing sweep"
+    assert states["token-0"]["attempt"] == 2, "Attempt bumped exactly once — never double-bumped"
     assert states["token-0"]["work_item_id"] != original.work_item_id
 
     counts = _event_counts(sweep_engine)
     assert counts[SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == 1, "Only the winning sweep recorded a recovery event"
 
 
-def test_claim_ready_loses_cas_cleanly_when_peer_claims_in_select_update_window(
+def test_peer_claim_in_select_update_window_is_lock_excluded_single_owner(
     engines: tuple[Tier1Engine, Tier1Engine],
 ) -> None:
-    """Item (c), interleaving 3 (mirror window inside claim_ready): a peer
-    claim that COMMITS between the caller claim's SELECT and its CAS UPDATE
-    makes the caller's UPDATE match zero rows. The loser returns ``None``
-    cleanly — the documented rowcount-0 path, NOT an ``AuditIntegrityError``
-    — leaving a single lease owner and an unchanged attempt."""
+    """Item (c), interleaving 3 (mirror window inside claim_ready) —
+    write-intent discipline: a peer claim attempted between the caller
+    claim's SELECT and its CAS UPDATE is excluded at the peer's own ``BEGIN
+    IMMEDIATE`` — the caller has held the write lock since BEGIN, so the
+    "peer commits in the window" interleaving the CAS rowcount-0 path used
+    to absorb can no longer occur. The caller's claim wins; the peer's
+    retry after the commit returns ``None`` cleanly (the row is LEASED) —
+    single lease owner, unchanged attempt, exactly one CLAIM_READY event."""
     claim_engine, peer_engine = engines
     claim_repo = TokenSchedulerRepository(claim_engine)
     peer_repo = TokenSchedulerRepository(peer_engine)
     _seed_run_rows_tokens(claim_engine, ("token-0",))
     original = _enqueue_tokens(claim_repo, ("token-0",))["token-0"]
+    _lower_busy_timeout(peer_engine)
 
-    peer_claims: list[TokenWorkItem | None] = []
+    peer_outcomes: list[OperationalError] = []
 
     @event.listens_for(claim_engine, "before_cursor_execute")
     def peer_claims_mid_claim(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
-        if peer_claims or not _is_token_work_items_update(statement):
+        if peer_outcomes or not _is_token_work_items_update(statement):
             return
-        peer_claims.append(peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-worker", lease_seconds=300, now=BASE))
+        with pytest.raises(OperationalError, match="database is locked") as excinfo:
+            peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-worker", lease_seconds=300, now=BASE)
+        peer_outcomes.append(excinfo.value)
 
     try:
-        loser_claim = claim_repo.claim_ready(run_id=RUN_ID, lease_owner="losing-worker", lease_seconds=300, now=BASE)
+        winner_claim = claim_repo.claim_ready(run_id=RUN_ID, lease_owner="first-worker", lease_seconds=300, now=BASE)
     finally:
         event.remove(claim_engine, "before_cursor_execute", peer_claims_mid_claim)
 
-    assert len(peer_claims) == 1
-    peer_claim = peer_claims[0]
-    assert peer_claim is not None and peer_claim.lease_owner == "peer-worker"
+    assert len(peer_outcomes) == 1, "The peer's mid-window claim was excluded at BEGIN IMMEDIATE"
+    assert winner_claim is not None and winner_claim.lease_owner == "first-worker"
 
-    assert loser_claim is None, "Losing claimant's CAS matched zero rows and returned None cleanly"
+    # Serialized loser path: the peer's retry sees the committed lease and
+    # returns None cleanly — never an AuditIntegrityError, never a steal.
+    assert peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-worker", lease_seconds=300, now=BASE) is None
 
     states = _work_item_states(claim_engine)
     assert len(states) == 1
     assert states["token-0"]["status"] == TokenWorkStatus.LEASED.value
-    assert states["token-0"]["lease_owner"] == "peer-worker", "Exactly one effective owner"
+    assert states["token-0"]["lease_owner"] == "first-worker", "Exactly one effective owner"
     assert states["token-0"]["attempt"] == 1, "Claim races never touch the attempt counter"
     assert states["token-0"]["work_item_id"] == original.work_item_id
 

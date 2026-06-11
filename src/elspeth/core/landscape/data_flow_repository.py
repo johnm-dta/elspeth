@@ -627,7 +627,7 @@ class DataFlowRepository:
             created_at=row.created_at,
         )
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             result = conn.execute(rows_table.insert().values(**self._row_insert_values(row)))
             if result.rowcount == 0:
                 raise AuditIntegrityError(f"create_row_with_token: row INSERT affected zero rows (row_id={row.row_id})")
@@ -767,7 +767,7 @@ class DataFlowRepository:
         fork_group_id = generate_id()
         children = []
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # 1. Create child tokens
             for ordinal, branch_name in enumerate(branches):
                 child_id = generate_id()
@@ -922,7 +922,7 @@ class DataFlowRepository:
         envelope = {"data": dict(merged_payload), "contract": merged_contract.to_checkpoint_format()}
         token_data_ref = self._payload_store.store(checkpoint_dumps(envelope).encode("utf-8"))
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # Create merged token
             result = conn.execute(
                 tokens_table.insert().values(
@@ -1048,7 +1048,7 @@ class DataFlowRepository:
             for payload in child_payloads
         ]
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             for ordinal, payload_ref in enumerate(child_data_refs):
                 child_id = generate_id()
                 timestamp = now()

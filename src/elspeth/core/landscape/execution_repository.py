@@ -246,7 +246,7 @@ class ExecutionRepository:
         context_json = canonical_json(context_after.to_dict()) if context_after is not None else None
 
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(
                     node_states_table.insert().values(
                         state_id=state_id,
@@ -332,7 +332,7 @@ class ExecutionRepository:
             )
 
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(node_states_table.insert(), values)
                 if result.rowcount not in (-1, len(values)):
                     raise LandscapeRecordError(
@@ -458,7 +458,7 @@ class ExecutionRepository:
         # WHERE clause (same TOCTOU-safe pattern as complete_batch).
         terminal_values = [s.value for s in _TERMINAL_NODE_STATE_STATUSES]
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 update_result = conn.execute(
                     node_states_table.update()
                     .where(node_states_table.c.state_id == state_id)
@@ -551,7 +551,7 @@ class ExecutionRepository:
             )
         )
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 before_rows = conn.execute(
                     select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(state_ids))
                 ).fetchall()
@@ -844,7 +844,7 @@ class ExecutionRepository:
 
         inserted_events: list[RoutingEvent] = []
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 for ordinal, route in enumerate(routes):
                     event_id = generate_id()
                     event = RoutingEvent(
@@ -1044,7 +1044,7 @@ class ExecutionRepository:
             else:
                 stmt = stmt.where(routing_events_table.c.routing_group_id == routing_group_id)
 
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(stmt)
                 if result.rowcount != expected_rows:
                     raise AuditIntegrityError(
@@ -1284,7 +1284,7 @@ class ExecutionRepository:
                 output_data_hash=output_hash,
             )
         )
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             result = conn.execute(stmt)
             if result.rowcount == 0:
                 # Distinguish "doesn't exist" from "already completed" for diagnostics
@@ -1730,7 +1730,7 @@ class ExecutionRepository:
         # TOCTOU race between the old get_batch() read and the subsequent update.
         terminal_values = [s.value for s in _TERMINAL_BATCH_STATUSES]
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 result = conn.execute(
                     batches_table.update()
                     .where(batches_table.c.batch_id == batch_id)
@@ -1787,7 +1787,7 @@ class ExecutionRepository:
         # WHERE clause (same TOCTOU-safe pattern as update_batch_status).
         terminal_values = [s.value for s in _TERMINAL_BATCH_STATUSES]
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 update_result = conn.execute(
                     batches_table.update()
                     .where(batches_table.c.batch_id == batch_id)
@@ -1948,7 +1948,7 @@ class ExecutionRepository:
         Raises:
             ValueError: If original batch not found or not in failed status
         """
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # 1. Get original batch
             original_row = conn.execute(select(batches_table).where(batches_table.c.batch_id == batch_id)).fetchone()
             if original_row is None:

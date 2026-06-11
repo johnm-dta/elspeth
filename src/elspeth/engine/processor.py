@@ -577,11 +577,10 @@ class RowProcessor:
         the first); aggregation restores run per node afterwards, each
         internally validate-before-mutate.
 
-        KNOWN TRANSITIONAL EXCEPTION: rows manufactured by the old
-        ``ensure_blocked_barrier_work_item`` blob-materialization path lack
-        ``barrier_blocked_at``, so the executors' NULL-means-corruption assert
-        is honest only because the epoch-20 delete-the-DB policy retires those
-        rows; no live DB carries them (the writer itself is deleted in Task 4.1).
+        BLOCKED rows manufactured by the pre-epoch-20 blob-materialization
+        restore path lacked ``barrier_blocked_at``; that writer is deleted and
+        the epoch-20 delete-the-DB policy retired its rows, so the executors'
+        NULL-means-corruption assert is honest — no live DB carries them.
 
         Raises:
             AuditIntegrityError: On any journal/audit disagreement (orphan
@@ -1742,8 +1741,10 @@ class RowProcessor:
         # Out-of-claim (timeout/EOF) flush: ONE atomic journal transition
         # consumes the buffered BLOCKED rows and makes every sink-bound flush
         # output journal-durable (PENDING_SINK) before the in-process sink
-        # write runs (F1/D6). ``pending_tokens`` keeps feeding the in-process
-        # sink write; the post-sink callback terminalizes the emitted rows.
+        # write runs (F1/D6). The returned flush_results (tagged
+        # ``scheduler_pending_sink=True`` by ``_complete_aggregation_flush``)
+        # feed the in-process sink write; the post-sink callback terminalizes
+        # the emitted rows.
         if settings.output_mode == OutputMode.PASSTHROUGH:
             flush_results, child_items = self._route_passthrough_results(fctx, result)
             flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)

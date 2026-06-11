@@ -15,7 +15,7 @@ from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table
 
-_MAX_CHECKPOINT_STATE_BYTES = 10_000_000
+_MAX_BARRIER_SCALARS_BYTES = 10_000_000
 
 if TYPE_CHECKING:
     from elspeth.contracts.barrier_scalars import BarrierScalars
@@ -48,7 +48,7 @@ def _validate_barrier_scalars_json_size(serialized: str) -> None:
     not a large pipeline, so this is a crash, not a warning.
     """
     serialized_bytes = len(serialized.encode("utf-8"))
-    if serialized_bytes <= _MAX_CHECKPOINT_STATE_BYTES:
+    if serialized_bytes <= _MAX_BARRIER_SCALARS_BYTES:
         return
     raise OrchestrationInvariantError(
         f"Checkpoint barrier_scalars size {serialized_bytes / 1_000_000:.1f}MB exceeds 10MB limit. "

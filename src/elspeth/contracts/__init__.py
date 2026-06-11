@@ -20,11 +20,6 @@ Import patterns:
     from elspeth.core.config import RetrySettings, ElspethSettings
 """
 
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.contracts.audit import (
     Artifact,
     Batch,
@@ -74,11 +69,6 @@ from elspeth.contracts.call_data import (
 )
 from elspeth.contracts.checkpoint import ResumeCheck, ResumedRow, ResumePoint
 from elspeth.contracts.cli import ExecutionResult, ProgressEvent
-from elspeth.contracts.coalesce_checkpoint import (
-    CoalesceCheckpointState,
-    CoalescePendingCheckpoint,
-    CoalesceTokenCheckpoint,
-)
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
 
@@ -432,12 +422,6 @@ __all__ = [  # Grouped by category for readability
     "BarrierScalars",
     "CoalescePendingScalars",
     # checkpoint
-    "AggregationCheckpointState",
-    "AggregationNodeCheckpoint",
-    "AggregationTokenCheckpoint",
-    "CoalesceCheckpointState",
-    "CoalescePendingCheckpoint",
-    "CoalesceTokenCheckpoint",
     "ResumeCheck",
     "ResumePoint",
     "ResumedRow",

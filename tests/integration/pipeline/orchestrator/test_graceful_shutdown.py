@@ -629,7 +629,26 @@ class TestInterruptAndResume:
 
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert checkpoint is not None
-        assert checkpoint.aggregation_state_json is not None
+
+        # F1: the journal is the durable buffer truth — buffered aggregation
+        # tokens persist as BLOCKED token_work_items rows at the barrier.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            blocked_barrier_rows = (
+                conn.execute(
+                    select(token_work_items_table.c.barrier_key).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.barrier_key.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert blocked_barrier_rows, "Expected buffered aggregation tokens as BLOCKED journal rows"
 
         recovery = RecoveryManager(landscape_db, checkpoint_mgr)
         check = recovery.can_resume(run_id, graph)
@@ -673,8 +692,9 @@ class TestInterruptAndResume:
 
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert checkpoint is not None
-        assert checkpoint.aggregation_state_json is not None
-        assert checkpoint.coalesce_state_json is not None
+        # F1: pending aggregation/coalesce state persists as BLOCKED journal
+        # rows, asserted on pre_resume_work below — the checkpoint carries only
+        # scalar barrier metadata.
 
         # NOTE (multi-source-token-scheduler): the orchestrator now writes the
         # schema contract to ``run_sources`` on the first valid row (ADR-025 §3
@@ -716,7 +736,6 @@ class TestInterruptAndResume:
 
         resume_point = recovery.get_resume_point(run_id, graph)
         assert resume_point is not None
-        assert resume_point.coalesce_state is not None
 
         with pytest.raises(IncompleteSourceResumeError, match=r"source.*primary.*interrupted"):
             orchestrator.resume(
@@ -783,7 +802,25 @@ class TestInterruptAndResume:
 
         first_resume_point = recovery.get_resume_point(run_id, graph)
         assert first_resume_point is not None
-        assert first_resume_point.coalesce_state is not None
+        # F1: pending coalesce state lives in BLOCKED journal rows, not on the
+        # resume point — assert the durable pending-coalesce evidence directly.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            blocked_coalesce_rows = (
+                conn.execute(
+                    select(token_work_items_table.c.coalesce_name).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.coalesce_name.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert blocked_coalesce_rows, "Expected pending coalesce branches as BLOCKED journal rows"
 
         resume_shutdown = threading.Event()
         resume_shutdown.set()
@@ -802,7 +839,21 @@ class TestInterruptAndResume:
         second_resume_point = recovery.get_resume_point(run_id, graph)
         assert second_resume_point is not None
         assert second_resume_point.sequence_number == first_resume_point.sequence_number
-        assert second_resume_point.coalesce_state is not None
+        # F1: the pending coalesce branches must still be BLOCKED journal rows
+        # after the refused resume (nothing consumed them).
+        with landscape_db.connection() as conn:
+            post_refusal_blocked = (
+                conn.execute(
+                    select(token_work_items_table.c.coalesce_name).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.coalesce_name.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert post_refusal_blocked == blocked_coalesce_rows
         assert recovery.get_unprocessed_rows(run_id) == []
 
     def _setup_failed_run(
@@ -996,6 +1047,7 @@ class TestInterruptAndResume:
             checkpoint_mgr.create_checkpoint(
                 run_id=run_id,
                 sequence_number=processed_count - 1,
+                barrier_scalars=None,
                 graph=graph,
             )
 

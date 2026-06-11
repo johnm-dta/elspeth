@@ -1264,7 +1264,7 @@ def test_get_resume_point_revalidates_checkpoint_loaded_after_can_resume(
                 checkpoint_id="cp-later-incompatible",
                 run_id=run_id,
                 sequence_number=99,
-                aggregation_state_json=None,
+                barrier_scalars_json=None,
                 created_at=datetime.now(UTC),
                 upstream_topology_hash="x" * 64,
                 format_version=Checkpoint.CURRENT_FORMAT_VERSION,

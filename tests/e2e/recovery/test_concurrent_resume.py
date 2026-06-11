@@ -27,8 +27,8 @@ Durability-unification (F1) survival contract: every ASSERTION below reads
 PUBLIC, durable surfaces only — the ``token_work_items`` journal columns
 (status/attempt/lease_owner), ``scheduler_events``, ``token_outcomes``,
 ``node_states``, ``runs``, terminal RunStatus, and the public
-``Orchestrator.resume()`` API. Nothing asserts on checkpoint-blob internals
-(AggregationCheckpointState et al.), and resume points are treated as
+``Orchestrator.resume()`` API. Nothing asserts on checkpoint internals
+(the blob layer is deleted — Task 4.1), and resume points are treated as
 opaque handles (never dereferenced).
 
 The HARNESS, by necessity, enters resume through today's checkpoint-layer

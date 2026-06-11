@@ -542,7 +542,7 @@ scheduler_events_table = Table(
     Column("caller_owner", String(128)),
     Column("context_json", Text, nullable=False, server_default=text("'{}'")),
     CheckConstraint(
-        "event_type IN ('enqueue', 'restore_blocked', 'claim_ready', 'claim_pending_sink', "
+        "event_type IN ('enqueue', 'claim_ready', 'claim_pending_sink', "
         "'recover_expired_lease', 'lease_lost', 'mark_blocked', "
         "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
         "'mark_blocked_barrier_terminal')",
@@ -936,8 +936,6 @@ checkpoints_table = Table(
     Column("checkpoint_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("sequence_number", Integer, nullable=False),  # Monotonic progress marker
-    Column("aggregation_state_json", Text),  # Serialized aggregation buffers (if any)
-    Column("coalesce_state_json", Text),  # Serialized pending coalesce state (if any)
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Topology validation (topological checkpoint compatibility). The full
     # topology hash embeds every node's config hash, so no per-node anchor
@@ -948,10 +946,13 @@ checkpoints_table = Table(
     # Version 2: Deterministic node IDs (2026-01-24+)
     # Version 3: Phase 2 traversal refactor checkpoint break
     # Version 4: Pending coalesce state persisted in checkpoints
+    # Version 5: F1 durability unification — buffered tokens live in journal
+    #            BLOCKED rows; the checkpoint carries only scalar barrier
+    #            metadata (barrier_scalars_json)
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
-    # Epoch 20: F1 durability unification — barrier scalar metadata replaces
-    # the aggregation_state_json/coalesce_state_json blobs (columns dropped
-    # later in this epoch — Task 4.1).
+    # Epoch 20: F1 durability unification — scalar barrier metadata replaces
+    # the dropped per-barrier buffer blob columns; buffered tokens live in
+    # token_work_items journal BLOCKED rows.
     Column("barrier_scalars_json", Text, nullable=True),
 )
 

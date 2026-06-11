@@ -766,7 +766,7 @@ class TestSchemaCompatibilityGuards:
                     "runtime_val_manifest_json TEXT)"
                 )
             )
-            conn.execute(text("CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, coalesce_state_json TEXT)"))
+            conn.execute(text("CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, barrier_scalars_json TEXT)"))
         engine.dispose()
 
         instance = _make_instance(f"sqlite:///{db_path}")

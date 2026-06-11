@@ -135,9 +135,15 @@ def _persist_blocked_scheduler_work(
     barrier_key: str,
     ingest_sequence: int = 0,
 ) -> None:
-    """Persist BLOCKED scheduler work matching a fabricated buffered token."""
+    """Persist BLOCKED scheduler work matching a fabricated buffered token.
+
+    Uses the production journal verbs (enqueue+claim, then mark_blocked) so
+    the BLOCKED row carries ``barrier_blocked_at`` exactly as a live barrier
+    hold would (F1: the journal is the only barrier-buffer truth).
+    """
     _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
-    processor._scheduler.ensure_blocked_barrier_work_item(
+    now = processor._clock.now_utc()
+    item = processor._scheduler.enqueue_ready_claimed(
         run_id=processor.run_id,
         token_id=token.token_id,
         row_id=token.row_id,
@@ -145,12 +151,21 @@ def _persist_blocked_scheduler_work(
         step_index=processor.resolve_node_step(node_id),
         ingest_sequence=factory.data_flow.resolve_row_ingest_sequence(token.row_id),
         row_payload_json=processor._scheduler.serialize_row_payload(token.row_data),
-        barrier_key=barrier_key,
-        available_at=processor._clock.now_utc(),
+        available_at=now,
+        lease_owner="test-harness",
+        lease_seconds=60,
+        now=now,
         branch_name=token.branch_name,
         fork_group_id=token.fork_group_id,
         join_group_id=token.join_group_id,
         expand_group_id=token.expand_group_id,
+    )
+    processor._scheduler.mark_blocked(
+        work_item_id=item.work_item_id,
+        queue_key=None,
+        barrier_key=barrier_key,
+        now=now,
+        expected_lease_owner="test-harness",
     )
 
 
@@ -571,7 +586,8 @@ class TestConstructorErrorEdgeMap:
         payload = make_row({"value": 7})
         token = TokenInfo(row_id="row-ghost", token_id="tok-ghost", row_data=payload)
         _persist_token_for_scheduler(factory, token, ingest_sequence=0)
-        factory.scheduler.ensure_blocked_barrier_work_item(
+        ghost_now = datetime.now(UTC)
+        ghost_item = factory.scheduler.enqueue_ready_claimed(
             run_id="test-run",
             token_id="tok-ghost",
             row_id="row-ghost",
@@ -579,8 +595,17 @@ class TestConstructorErrorEdgeMap:
             step_index=0,
             ingest_sequence=0,
             row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=ghost_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=ghost_now,
+        )
+        factory.scheduler.mark_blocked(
+            work_item_id=ghost_item.work_item_id,
+            queue_key=None,
             barrier_key="ghost-barrier",
-            available_at=datetime.now(UTC),
+            now=ghost_now,
+            expected_lease_owner="test-harness",
         )
 
         with pytest.raises(AuditIntegrityError, match="orphan barrier_key 'ghost-barrier'"):

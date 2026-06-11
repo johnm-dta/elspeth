@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from elspeth.contracts.scheduler import SchedulerEventType
 from elspeth.core.landscape.database import _REQUIRED_COLUMNS
 from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
@@ -48,6 +49,17 @@ def test_required_columns_include_new_columns_and_openrouter() -> None:
     # Epoch 20: F1 durability unification (additive half).
     assert ("token_work_items", "barrier_blocked_at") in required
     assert ("checkpoints", "barrier_scalars_json") in required
+
+
+def test_checkpoint_blob_columns_are_gone() -> None:
+    """Epoch 20 (subtractive half): the barrier buffer blob columns are deleted."""
+    assert "aggregation_state_json" not in checkpoints_table.c
+    assert "coalesce_state_json" not in checkpoints_table.c
+
+
+def test_restore_blocked_event_type_is_gone() -> None:
+    """Epoch 20 (subtractive half): the blob-restore scheduler event type is deleted."""
+    assert "restore_blocked" not in {e.value for e in SchedulerEventType}
 
 
 def test_begin_node_state_writes_resume_checkpoint_id() -> None:

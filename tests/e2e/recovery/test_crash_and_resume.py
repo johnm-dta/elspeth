@@ -31,12 +31,8 @@ from elspeth.contracts import (
     RunStatus,
     SourceRow,
 )
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.diversion import SinkWriteResult
@@ -887,6 +883,7 @@ class TestResumeIdempotence:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=3,
+            barrier_scalars=None,
             graph=graph_b,
         )
 
@@ -1210,6 +1207,7 @@ class TestCheckpointRecovery:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=2,
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -1324,37 +1322,17 @@ class TestCheckpointRecovery:
             )
             conn.commit()
 
-        _agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "test_agg": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-buf-001",
-                            row_id="row-buf-001",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"value": 6},
-                            contract_version="test",
-                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
+        # F1: the checkpoint carries only scalar barrier metadata; buffered
+        # tokens live in journal BLOCKED rows.
+        _scalars = BarrierScalars(
+            aggregation={"test_agg": AggregationNodeScalars(count_fire_offset=2.0, condition_fire_offset=None)},
+            coalesce={},
         )
         original_checkpoint = checkpoint_mgr1.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
+            barrier_scalars=_scalars,
             graph=mock_graph,
-            aggregation_state=_agg_state,
         )
 
         # Close database (simulate process exit)
@@ -1378,14 +1356,14 @@ class TestCheckpointRecovery:
         check = recovery_mgr2.can_resume(run_id, mock_graph)
         assert check.can_resume is True, f"Cannot resume: {check.reason}"
 
-        # Verify resume point with aggregation state — now typed DTO
+        # Verify resume point with barrier scalars — typed DTO round-trip
         resume_point = recovery_mgr2.get_resume_point(run_id, mock_graph)
         assert resume_point is not None
-        assert resume_point.aggregation_state is not None
-        assert "test_agg" in resume_point.aggregation_state.nodes
-        node_ckpt = resume_point.aggregation_state.nodes["test_agg"]
-        assert len(node_ckpt.tokens) == 1
-        assert node_ckpt.tokens[0].row_data == {"value": 6}
+        assert resume_point.barrier_scalars is not None
+        assert "test_agg" in resume_point.barrier_scalars.aggregation
+        node_scalars = resume_point.barrier_scalars.aggregation["test_agg"]
+        assert node_scalars.count_fire_offset == 2.0
+        assert node_scalars.condition_fire_offset is None
 
         db2.close()
 
@@ -1440,11 +1418,14 @@ class TestAggregationRecovery:
         )
         return graph
 
-    def test_aggregation_state_recovers_after_crash(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
+    def test_aggregation_barrier_scalars_recover_after_crash(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
         """Create run with partial aggregation (3 rows buffered, trigger at 5).
 
-        Checkpoint with aggregation state, simulate crash, verify recovery
-        restores exact aggregation state (buffer, count, sum).
+        Checkpoint with barrier scalars, simulate crash, verify recovery
+        restores the exact scalar trigger metadata. F1: the buffered tokens
+        themselves persist as journal BLOCKED rows (proven by the journal
+        restore suites); the checkpoint round-trips only the underivable
+        trigger latches.
         """
         db: LandscapeDB = test_env["db"]
         checkpoint_mgr: CheckpointManager = test_env["checkpoint_manager"]
@@ -1529,40 +1510,18 @@ class TestAggregationRecovery:
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
 
-        # Create aggregation state (buffer of 3 rows) — typed DTO
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "aggregator": AggregationNodeCheckpoint(
-                    tokens=tuple(
-                        AggregationTokenCheckpoint(
-                            token_id=t.token_id,
-                            row_id=t.row_id,
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": i, "value": (i + 1) * 100},
-                            contract_version="test",
-                            contract={"mode": "FIXED", "locked": True, "version_hash": "test", "fields": []},
-                        )
-                        for i, t in enumerate(tokens)
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=0,
-                    completed_flush_count=0,
-                ),
-            },
+        # Create the scalar barrier metadata for the in-flight aggregation —
+        # the only checkpoint-borne barrier state post-F1.
+        scalars = BarrierScalars(
+            aggregation={"aggregator": AggregationNodeScalars(count_fire_offset=3.0, condition_fire_offset=1.0)},
+            coalesce={},
         )
 
-        # Create checkpoint with aggregation state
+        # Create checkpoint with barrier scalars
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=2,
-            aggregation_state=agg_state,
+            barrier_scalars=scalars,
             graph=mock_graph,
         )
 
@@ -1573,20 +1532,15 @@ class TestAggregationRecovery:
         check = recovery_mgr.can_resume(run.run_id, mock_graph)
         assert check.can_resume is True, f"Cannot resume: {check.reason}"
 
-        # Get resume point with aggregation state
+        # Get resume point with barrier scalars
         resume_point = recovery_mgr.get_resume_point(run.run_id, mock_graph)
         assert resume_point is not None
 
-        # Verify aggregation state is restored exactly — typed DTO
-        assert resume_point.aggregation_state is not None
-        restored_state = resume_point.aggregation_state
+        # Verify the scalar trigger metadata is restored exactly — typed DTO
+        assert resume_point.barrier_scalars is not None
+        restored_scalars = resume_point.barrier_scalars
 
-        assert "aggregator" in restored_state.nodes
-        node_ckpt = restored_state.nodes["aggregator"]
-        assert len(node_ckpt.tokens) == 3
-        assert node_ckpt.batch_id == "batch-001"
-
-        # Verify buffer contents (row_data on each token)
-        assert node_ckpt.tokens[0].row_data == {"id": 0, "value": 100}
-        assert node_ckpt.tokens[1].row_data == {"id": 1, "value": 200}
-        assert node_ckpt.tokens[2].row_data == {"id": 2, "value": 300}
+        assert "aggregator" in restored_scalars.aggregation
+        node_scalars = restored_scalars.aggregation["aggregator"]
+        assert node_scalars.count_fire_offset == 3.0
+        assert node_scalars.condition_fire_offset == 1.0

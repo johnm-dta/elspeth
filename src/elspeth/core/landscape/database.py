@@ -117,8 +117,6 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Operation I/O hashes - survive payload purge for integrity verification
     ("operations", "input_data_hash"),
     ("operations", "output_data_hash"),
-    # Coalesce state for checkpoint recovery - serialized pending merge state
-    ("checkpoints", "coalesce_state_json"),
     # Checkpoint compatibility gate - runtime always stamps the checkpoint format version
     ("checkpoints", "format_version"),
     # Epoch 20: F1 durability unification.

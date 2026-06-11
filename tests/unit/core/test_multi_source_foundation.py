@@ -2240,33 +2240,6 @@ def test_scheduler_repository_rejects_ready_work_with_wrong_ingest_sequence() ->
         )
 
 
-def test_scheduler_repository_rejects_checkpoint_block_with_wrong_ingest_sequence() -> None:
-    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-
-    engine = _make_tier1_engine()
-    metadata.create_all(engine)
-    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 3),), node_ids=("coalesce_node",))
-    repo = TokenSchedulerRepository(engine)
-    now = datetime.now(UTC)
-    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
-
-    with pytest.raises(AuditIntegrityError, match=r"row_id='row-1'.*ingest_sequence=3.*not scheduled ingest_sequence=4"):
-        repo.ensure_blocked_barrier_work_item(
-            run_id="run-1",
-            token_id="token-1",
-            row_id="row-1",
-            node_id="coalesce_node",
-            step_index=1,
-            ingest_sequence=4,
-            available_at=now,
-            row_payload_json=payload,
-            barrier_key="coalesce:row-1",
-            coalesce_node_id="coalesce_node",
-            coalesce_name="join_orders",
-        )
-
-
 def test_scheduler_repository_allows_terminal_cursor_without_fake_node() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
@@ -3101,66 +3074,6 @@ def test_scheduler_barrier_terminal_rejects_empty_live_token_set() -> None:
         ("token-a", TokenWorkStatus.BLOCKED.value),
         ("token-b", TokenWorkStatus.BLOCKED.value),
     ]
-
-
-def test_checkpoint_restore_rejects_existing_blocked_work_with_stale_resume_payload() -> None:
-    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-
-    engine = _make_tier1_engine()
-    metadata.create_all(engine)
-    repo = TokenSchedulerRepository(engine)
-    now = datetime.now(UTC)
-    _insert_scheduler_owner_records(
-        engine,
-        token_specs=(("token-a", "row-0", 0),),
-        node_ids=("aggregate", "coalesce_node"),
-    )
-    contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
-    original_payload = repo.serialize_row_payload(PipelineRow({"id": 1}, contract))
-    restored_payload = repo.serialize_row_payload(PipelineRow({"id": 2}, contract))
-
-    repo.ensure_blocked_barrier_work_item(
-        run_id="run-1",
-        token_id="token-a",
-        row_id="row-0",
-        node_id="aggregate",
-        step_index=4,
-        ingest_sequence=0,
-        row_payload_json=original_payload,
-        barrier_key="aggregate",
-        available_at=now,
-        on_success_sink="first_sink",
-        branch_name="branch-a",
-        fork_group_id="fork-a",
-        join_group_id="join-a",
-        expand_group_id="expand-a",
-        coalesce_node_id="coalesce_node",
-        coalesce_name="merge-a",
-    )
-
-    with pytest.raises(
-        AuditIntegrityError,
-        match=r"stale existing work_item_id=.*row_payload_json.*on_success_sink.*coalesce_name",
-    ):
-        repo.ensure_blocked_barrier_work_item(
-            run_id="run-1",
-            token_id="token-a",
-            row_id="row-0",
-            node_id="aggregate",
-            step_index=5,
-            ingest_sequence=0,
-            row_payload_json=restored_payload,
-            barrier_key="aggregate",
-            available_at=now + timedelta(seconds=1),
-            on_success_sink="second_sink",
-            branch_name="branch-b",
-            fork_group_id="fork-b",
-            join_group_id="join-b",
-            expand_group_id="expand-b",
-            coalesce_node_id="coalesce_node",
-            coalesce_name="merge-b",
-        )
 
 
 # =============================================================================

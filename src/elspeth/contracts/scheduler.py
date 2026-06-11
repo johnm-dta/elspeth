@@ -24,7 +24,6 @@ class SchedulerEventType(StrEnum):
     """Durable scheduler state-transition audit event types."""
 
     ENQUEUE = "enqueue"
-    RESTORE_BLOCKED = "restore_blocked"
     CLAIM_READY = "claim_ready"
     CLAIM_PENDING_SINK = "claim_pending_sink"
     RECOVER_EXPIRED_LEASE = "recover_expired_lease"

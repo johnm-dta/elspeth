@@ -38,6 +38,23 @@ class CheckpointCoordinator:
         """Set (or clear) the active execution graph for late-bound checkpoint calls."""
         self._active_graph = graph
 
+    def _checkpoint_gate(self, *, action: str) -> tuple[RuntimeCheckpointConfig, CheckpointManager, ExecutionGraph] | None:
+        """Shared enabled/manager/graph precondition gate for checkpoint writes.
+
+        Returns the narrowed (config, manager, graph) triple when checkpointing
+        should proceed, or None when checkpointing is disabled/unconfigured. A
+        missing graph with checkpointing enabled should never happen — the
+        graph is set during execution — so that arm raises instead of silently
+        skipping.
+        """
+        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+            return None
+        if self._checkpoint_manager is None:
+            return None
+        if self._active_graph is None:
+            raise OrchestrationInvariantError(f"Cannot create {action}: execution graph not available")
+        return self._checkpoint_config, self._checkpoint_manager, self._active_graph
+
     def reset_sequence(self) -> None:
         """Reset checkpoint ordering for a fresh run."""
         self._sequence_number = 0
@@ -65,18 +82,16 @@ class CheckpointCoordinator:
         baseline cannot checkpoint at all, so it crashes before any source
         row is processed rather than running un-resumable.
         """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+        gate = self._checkpoint_gate(action="run-start checkpoint")
+        if gate is None:
             return
-        if self._checkpoint_manager is None:
-            return
-        if self._active_graph is None:
-            raise OrchestrationInvariantError("Cannot create run-start checkpoint: execution graph not available")
+        _config, manager, graph = gate
 
-        self._checkpoint_manager.create_checkpoint(
+        manager.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
-            graph=self._active_graph,
+            graph=graph,
         )
 
     def maybe_checkpoint(
@@ -104,13 +119,10 @@ class CheckpointCoordinator:
         F1: only scalar barrier metadata is persisted; buffered tokens live in
         journal BLOCKED rows.
         """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+        gate = self._checkpoint_gate(action="checkpoint")
+        if gate is None:
             return
-        if self._checkpoint_manager is None:
-            return
-        if self._active_graph is None:
-            # Should never happen - graph is set during execution
-            raise OrchestrationInvariantError("Cannot create checkpoint: execution graph not available")
+        config, manager, graph = gate
 
         self._sequence_number += 1
 
@@ -118,7 +130,7 @@ class CheckpointCoordinator:
         # - 1 = every_row
         # - 0 = aggregation_only
         # - N = every N rows
-        frequency = self._checkpoint_config.frequency
+        frequency = config.frequency
         should_checkpoint = False
         if frequency == 0:
             # aggregation_only: checkpoint unconditionally. In the post-sink
@@ -133,11 +145,11 @@ class CheckpointCoordinator:
             should_checkpoint = (self._sequence_number % frequency) == 0  # every_n
 
         if should_checkpoint:
-            self._checkpoint_manager.create_checkpoint(
+            manager.create_checkpoint(
                 run_id=run_id,
                 sequence_number=self._sequence_number,
                 barrier_scalars=barrier_scalars,
-                graph=self._active_graph,
+                graph=graph,
             )
 
     def make_checkpoint_after_sink_factory(
@@ -199,19 +211,17 @@ class CheckpointCoordinator:
         checkpoint has been emitted, especially buffered aggregation/coalesce
         pipelines that intentionally skip end-of-source flushes on shutdown.
         """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+        gate = self._checkpoint_gate(action="shutdown checkpoint")
+        if gate is None:
             return
-        if self._checkpoint_manager is None:
-            return
-        if self._active_graph is None:
-            raise OrchestrationInvariantError("Cannot create shutdown checkpoint: execution graph not available")
+        _config, manager, graph = gate
 
         self._sequence_number += 1
-        self._checkpoint_manager.create_checkpoint(
+        manager.create_checkpoint(
             run_id=run_id,
             sequence_number=self._sequence_number,
             barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
-            graph=self._active_graph,
+            graph=graph,
         )
 
     def delete_checkpoints(self, run_id: str) -> None:

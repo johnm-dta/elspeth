@@ -4369,27 +4369,6 @@ class TestSinkExecutor:
 
 
 # =============================================================================
-# AggregationCheckpointState DTO structural tests
-# =============================================================================
-
-
-class TestAggregationCheckpointStateDTO:
-    """Structural tests for the AggregationCheckpointState contract DTO.
-
-    The executor-side blob restore was deleted in F1 Task 2.1 (buffers rebuild
-    from journal BLOCKED rows via restore_from_journal); the DTO remains in
-    production only on the processor restore path until Task 3.1 retires it.
-    """
-
-    def test_missing_version_rejected(self) -> None:
-        """Checkpoint without _version key is rejected as corrupt by from_dict()."""
-        from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-
-        with pytest.raises(AuditIntegrityError, match="Corrupted aggregation checkpoint: missing '_version' key"):
-            AggregationCheckpointState.from_dict({"agg_1": {"tokens": []}})
-
-
-# =============================================================================
 # TestNodeStateGuard
 # =============================================================================
 

@@ -705,7 +705,7 @@ def test_pending_sink_with_terminal_outcome_is_repaired_without_reclaiming_sink(
     assert terminal_events[0].caller_owner == "resume-repair"
 
 
-def test_blocked_barrier_restore_and_terminalization_record_transition_events() -> None:
+def test_blocked_barrier_terminalization_records_transition_event() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -713,33 +713,43 @@ def test_blocked_barrier_restore_and_terminalization_record_transition_events() 
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     payload = _insert_scheduler_prerequisites(engine, now=now)
-    item = repo.ensure_blocked_barrier_work_item(
+    item = repo.enqueue_ready(
         run_id="run-1",
         token_id="token-1",
         row_id="row-1",
         node_id="normalize",
         step_index=1,
         ingest_sequence=0,
-        row_payload_json=payload,
-        barrier_key="join:1",
         available_at=now,
+        row_payload_json=payload,
+    )
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    blocked = repo.mark_blocked(
+        work_item_id=item.work_item_id,
+        queue_key=None,
+        barrier_key="join:1",
+        now=now + timedelta(seconds=2),
+        expected_lease_owner="worker-a",
     )
     terminalized = repo.mark_blocked_barrier_terminal(
         run_id="run-1",
         barrier_key="join:1",
         token_ids=("token-1",),
-        now=now + timedelta(seconds=1),
+        now=now + timedelta(seconds=3),
     )
 
     events = _scheduler_events(engine)
-    assert item.status is TokenWorkStatus.BLOCKED
+    assert blocked.status is TokenWorkStatus.BLOCKED
     assert terminalized == 1
     assert [event.event_type for event in events] == [
-        SchedulerEventType.RESTORE_BLOCKED.value,
+        SchedulerEventType.ENQUEUE.value,
+        SchedulerEventType.CLAIM_READY.value,
+        SchedulerEventType.MARK_BLOCKED.value,
         SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value,
     ]
-    assert json.loads(events[0].context_json) == {"barrier_key": "join:1"}
-    assert json.loads(events[1].context_json) == {"barrier_key": "join:1"}
+    assert events[-1].from_status == TokenWorkStatus.BLOCKED.value
+    assert events[-1].to_status == TokenWorkStatus.TERMINAL.value
+    assert json.loads(events[-1].context_json) == {"barrier_key": "join:1"}
 
 
 def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
@@ -750,16 +760,23 @@ def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     payload = _insert_scheduler_prerequisites(engine, now=now)
-    item = repo.ensure_blocked_barrier_work_item(
+    item = repo.enqueue_ready(
         run_id="run-1",
         token_id="token-1",
         row_id="row-1",
         node_id="normalize",
         step_index=1,
         ingest_sequence=0,
-        row_payload_json=payload,
-        barrier_key="agg-1",
         available_at=now,
+        row_payload_json=payload,
+    )
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    repo.mark_blocked(
+        work_item_id=item.work_item_id,
+        queue_key=None,
+        barrier_key="agg-1",
+        now=now + timedelta(seconds=2),
+        expected_lease_owner="worker-a",
     )
     sink_payload = TokenSchedulerRepository.serialize_row_payload(
         PipelineRow({"id": 2}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
@@ -778,7 +795,7 @@ def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
                 error_message=None,
             )
         },
-        now=now + timedelta(seconds=1),
+        now=now + timedelta(seconds=3),
     )
 
     with engine.connect() as conn:
@@ -804,7 +821,9 @@ def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
     assert row.pending_outcome == TerminalOutcome.SUCCESS.value
     assert row.pending_path == TerminalPath.DEFAULT_FLOW.value
     assert [event.event_type for event in events] == [
-        SchedulerEventType.RESTORE_BLOCKED.value,
+        SchedulerEventType.ENQUEUE.value,
+        SchedulerEventType.CLAIM_READY.value,
+        SchedulerEventType.MARK_BLOCKED.value,
         SchedulerEventType.MARK_PENDING_SINK.value,
     ]
     assert events[-1].from_status == TokenWorkStatus.BLOCKED.value

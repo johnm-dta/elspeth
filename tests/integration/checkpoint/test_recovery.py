@@ -20,11 +20,6 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import Determinism, NodeType, RunStatus
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -127,11 +122,13 @@ class TestCheckpointRecoveryIntegration:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=3,
+            barrier_scalars=None,
             graph=mock_graph,
         )
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=4,
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -147,68 +144,6 @@ class TestCheckpointRecoveryIntegration:
         latest = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert latest is not None
         assert latest.sequence_number == max(c.sequence_number for c in checkpoints)
-
-    def test_recovery_with_aggregation_state(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
-        """Verify aggregation state is preserved across recovery."""
-        checkpoint_mgr = test_env["checkpoint_manager"]
-        recovery_mgr = test_env["recovery_manager"]
-        db = test_env["db"]
-
-        run_id = self._setup_partial_run(db, checkpoint_mgr, mock_graph)
-
-        # Create checkpoint with aggregation state — typed DTO
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "test_agg": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-001-001",
-                            row_id="row-001-001",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 1, "value": 100},
-                            contract_version="test",
-                            contract={"mode": "FIXED", "locked": True, "version_hash": "test", "fields": []},
-                        ),
-                        AggregationTokenCheckpoint(
-                            token_id="tok-001-002",
-                            row_id="row-001-002",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 2, "value": 200},
-                            contract_version="test",
-                            contract={"mode": "FIXED", "locked": True, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=2,
-                    completed_flush_count=0,
-                ),
-            },
-        )
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            sequence_number=3,
-            aggregation_state=agg_state,
-            graph=mock_graph,
-        )
-
-        # Get resume point — aggregation_state is now typed DTO
-        resume_point = recovery_mgr.get_resume_point(run_id, mock_graph)
-        assert resume_point is not None
-        assert resume_point.aggregation_state is not None
-        assert "test_agg" in resume_point.aggregation_state.nodes
-        node_ckpt = resume_point.aggregation_state.nodes["test_agg"]
-        assert len(node_ckpt.tokens) == 2
-        assert node_ckpt.tokens[0].row_data == {"id": 1, "value": 100}
 
     def test_checkpoint_cleanup_after_completion(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
         """Verify checkpoints are cleaned up after successful run."""
@@ -405,6 +340,7 @@ class TestCheckpointRecoveryIntegration:
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -497,6 +433,7 @@ class TestCheckpointTopologyHashAtomicity:
         checkpoint = checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -564,6 +501,7 @@ class TestCheckpointTopologyHashAtomicity:
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
                 sequence_number=0,
+                barrier_scalars=None,
                 graph=None,
             )
 
@@ -659,6 +597,7 @@ class TestResumeCheckpointCleanup:
         checkpoint = checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=0,
+            barrier_scalars=None,
             graph=simple_graph,
         )
 
@@ -767,6 +706,7 @@ class TestCanResumeErrorHandling:
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 

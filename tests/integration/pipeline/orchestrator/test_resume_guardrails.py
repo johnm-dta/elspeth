@@ -73,7 +73,7 @@ def _make_resume_point(run_id: str) -> ResumePoint:
     return ResumePoint(
         checkpoint=checkpoint,
         sequence_number=checkpoint.sequence_number,
-        aggregation_state=None,
+        barrier_scalars=None,
     )
 
 

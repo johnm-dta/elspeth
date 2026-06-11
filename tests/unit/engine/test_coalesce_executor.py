@@ -2612,28 +2612,6 @@ class TestLandscapeCompletedKeys:
         assert ("merge", "row_0") in executor._completed_keys
 
 
-class TestCoalesceCheckpointStateDTO:
-    """Structural tests for the CoalesceCheckpointState contract DTO.
-
-    The executor-side blob restore was deleted in F1 Task 2.2 (pending state
-    rebuilds from journal BLOCKED rows via restore_from_journal); the DTO
-    remains in production only on the processor restore path until Task 3.1
-    retires it.
-    """
-
-    def test_checkpoint_dto_from_dict_restores_completed_keys(self):
-        """CoalesceCheckpointState.from_dict should parse completed_keys."""
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-
-        wire = {
-            "_version": "1.0",
-            "pending": [],
-            "completed_keys": [["merge", "row_1"], ["merge", "row_2"]],
-        }
-        state = CoalesceCheckpointState.from_dict(wire)
-        assert state.completed_keys == (("merge", "row_1"), ("merge", "row_2"))
-
-
 # ===========================================================================
 # _should_merge mutation survivors — direct policy boundary tests
 # ===========================================================================

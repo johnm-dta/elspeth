@@ -16,6 +16,11 @@ from elspeth.core.landscape.errors import LandscapeRecordError
 class LandscapeConnectionProvider(Protocol):
     """Connection surface required by database operation helpers."""
 
+    @property
+    def engine(self) -> Any:
+        """The underlying Tier-1 engine (leader-fenced transactions need it)."""
+        ...
+
     def read_only_connection(self) -> AbstractContextManager[Connection]:
         raise NotImplementedError
 

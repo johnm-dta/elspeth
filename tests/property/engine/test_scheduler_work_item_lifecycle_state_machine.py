@@ -312,7 +312,12 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
 
     @rule(token_id=tokens)
     def mark_pending_sink(self, token_id: str) -> None:
-        """LEASED transform work hands off durably to PENDING_SINK, releasing the lease."""
+        """LEASED transform work hands off durably to PENDING_SINK.
+
+        Attributed park (ADR-030): the parked row KEEPS its owner with a
+        NULL ``lease_expires_at`` — "parked, owner-attributed, not leased" —
+        so the strict post-sink owner CAS can terminalize it.
+        """
         model = self.model[token_id]
         if model.status is not TokenWorkStatus.LEASED or model.pending_sink_name is not None:
             return
@@ -330,10 +335,10 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             expected_lease_owner=model.lease_owner,
         )
         assert item.status is TokenWorkStatus.PENDING_SINK
-        assert item.lease_owner is None
+        assert item.lease_owner == model.lease_owner
+        assert item.lease_expires_at is None
         assert item.pending_sink_name == SINK_NAME
         model.status = TokenWorkStatus.PENDING_SINK
-        model.lease_owner = None
         model.lease_expires_at = None
         model.pending_sink_name = SINK_NAME
 
@@ -392,13 +397,29 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
 
     @rule(token_id=tokens)
     def mark_pending_sink_terminal(self, token_id: str) -> None:
-        """A durable sink handoff (parked or re-claimed) terminalizes after sink durability."""
+        """A durable sink handoff (parked or re-claimed) terminalizes after sink durability.
+
+        Strict owner CAS (ADR-030): only the attributed owner terminalizes.
+        A NULL-owner handoff (the reap arm's park) is refused — it must be
+        re-claimed via ``claim_pending_sink`` (which restores attribution)
+        before terminalization.
+        """
         model = self.model[token_id]
         is_parked_handoff = model.status is TokenWorkStatus.PENDING_SINK
         is_claimed_handoff = model.status is TokenWorkStatus.LEASED and model.pending_sink_name is not None
         if not (is_parked_handoff or is_claimed_handoff):
             return
         now = self._tick()
+        if model.lease_owner is None:
+            # Reap-parked handoff: strict CAS refusal, zero mutation.
+            terminalized = self.repo.mark_pending_sink_terminal(
+                run_id=RUN_ID,
+                token_id=token_id,
+                now=now,
+                expected_lease_owner=WORKERS[0],
+            )
+            assert terminalized == 0
+            return
         terminalized = self.repo.mark_pending_sink_terminal(
             run_id=RUN_ID,
             token_id=token_id,
@@ -427,9 +448,14 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
         for item in blocked:
             item.status = TokenWorkStatus.TERMINAL
 
-    @rule(barrier_key=st.sampled_from(BARRIERS))
-    def release_blocked_via_barrier_pending_sink(self, barrier_key: str) -> None:
-        """A barrier flush hands its BLOCKED members off to PENDING_SINK pre-sink-write."""
+    @rule(barrier_key=st.sampled_from(BARRIERS), owner=st.sampled_from(WORKERS))
+    def release_blocked_via_barrier_pending_sink(self, barrier_key: str, owner: str) -> None:
+        """A barrier flush hands its BLOCKED members off to PENDING_SINK pre-sink-write.
+
+        Production parity (ADR-030 attributed park): the engine always stamps
+        ``pending_sink_lease_owner`` so the strict post-sink owner CAS can
+        terminalize the handoff.
+        """
         blocked = self._blocked_at(barrier_key)
         if not blocked:
             return
@@ -445,11 +471,14 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             )
             for item in blocked
         }
-        transitioned = self.repo.mark_blocked_barrier_pending_sink_many(run_id=RUN_ID, barrier_key=barrier_key, handoffs=handoffs, now=now)
+        transitioned = self.repo.mark_blocked_barrier_pending_sink_many(
+            run_id=RUN_ID, barrier_key=barrier_key, handoffs=handoffs, now=now, pending_sink_lease_owner=owner
+        )
         assert transitioned == len(blocked)
         for item in blocked:
             item.status = TokenWorkStatus.PENDING_SINK
             item.pending_sink_name = SINK_NAME
+            item.lease_owner = owner
 
     @rule(token_id=tokens)
     def blocked_is_immune_to_foreign_barrier(self, token_id: str) -> None:
@@ -571,11 +600,17 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
 
     @invariant()
     def lease_fields_set_iff_leased(self) -> None:
-        """lease_owner and lease_expires_at are non-NULL exactly when status is LEASED."""
+        """lease_expires_at is non-NULL exactly when LEASED; lease_owner is
+        non-NULL when LEASED, MAY be non-NULL on PENDING_SINK (attributed
+        park, ADR-030), and is NULL everywhere else."""
         for token_id, row in self._db_rows().items():
             is_leased = row["status"] == TokenWorkStatus.LEASED.value
-            assert (row["lease_owner"] is not None) == is_leased, f"{token_id}: lease_owner/{row['status']} mismatch"
+            is_pending_sink = row["status"] == TokenWorkStatus.PENDING_SINK.value
             assert (row["lease_expires_at"] is not None) == is_leased, f"{token_id}: lease_expires_at/{row['status']} mismatch"
+            if is_leased:
+                assert row["lease_owner"] is not None, f"{token_id}: LEASED without lease_owner"
+            elif not is_pending_sink:
+                assert row["lease_owner"] is None, f"{token_id}: lease_owner set on {row['status']}"
 
     @invariant()
     def terminalization_never_departs_ready(self) -> None:

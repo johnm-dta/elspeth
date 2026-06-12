@@ -9,16 +9,23 @@ from typing import TYPE_CHECKING
 from sqlalchemy import asc, delete, desc, select
 
 from elspeth.contracts import Checkpoint
+from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB, begin_write
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import checkpoints_table
 
 _MAX_BARRIER_SCALARS_BYTES = 10_000_000
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
+    from sqlalchemy.engine import Connection
+
     from elspeth.contracts.barrier_scalars import BarrierScalars
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.core.dag import ExecutionGraph
 
 
@@ -77,6 +84,33 @@ class CheckpointManager:
         """
         self._db = db
 
+    def _fenced_or_plain_write(
+        self,
+        *,
+        coordination_token: CoordinationToken | None,
+        verb: str,
+    ) -> AbstractContextManager[Connection]:
+        """One write-intent transaction, leader-fenced when a token is supplied.
+
+        ADR-030 §C.4 row 5: the verify-and-extend epoch fence runs as the
+        FIRST statement of the checkpoint write transaction — a deposed
+        leader's checkpoint INSERT/DELETE is refused before the
+        duplicate-sequence guard or the UNIQUE constraint is even reached
+        (both stay beneath as the durable backstop). ``None`` preserves the
+        unfenced legacy arm for direct repository-level callers (tests,
+        tooling); the orchestrator's CheckpointCoordinator always threads the
+        token it bound at run/resume start.
+        """
+        if coordination_token is None:
+            return begin_write(self._db.engine)
+        return fenced_leader_transaction(
+            self._db.engine,
+            token=coordination_token,
+            now=datetime.now(UTC),
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb=verb,
+        )
+
     def create_checkpoint(
         self,
         *,
@@ -84,6 +118,7 @@ class CheckpointManager:
         sequence_number: int,
         barrier_scalars: BarrierScalars | None,
         graph: ExecutionGraph,
+        coordination_token: CoordinationToken | None = None,
     ) -> Checkpoint:
         """Create a checkpoint at current progress point.
 
@@ -94,6 +129,10 @@ class CheckpointManager:
                 aggregation/coalesce barriers, or None. Empty scalars
                 (``has_state`` False) persist NULL, same as None.
             graph: Execution graph for topology validation (REQUIRED)
+            coordination_token: Leader fencing token (ADR-030). When
+                supplied, the verify-and-extend epoch fence is the first
+                statement of the write transaction; a stale epoch raises
+                ``RunLeadershipLostError`` with zero mutation.
 
         Returns:
             The created Checkpoint
@@ -106,7 +145,7 @@ class CheckpointManager:
             raise ValueError("graph parameter is required for checkpoint creation")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
-        with begin_write(self._db.engine) as conn:
+        with self._fenced_or_plain_write(coordination_token=coordination_token, verb="create_checkpoint") as conn:
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
                 .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
@@ -239,7 +278,7 @@ class CheckpointManager:
                 ) from e
         return checkpoints
 
-    def delete_checkpoints(self, run_id: str) -> int:
+    def delete_checkpoints(self, run_id: str, *, coordination_token: CoordinationToken | None = None) -> int:
         """Delete all checkpoints for a completed run.
 
         Called after successful run completion to clean up. Checkpoints are deletable
@@ -249,11 +288,14 @@ class CheckpointManager:
 
         Args:
             run_id: The run to clean up
+            coordination_token: Leader fencing token (ADR-030 §C.4 row 5) —
+                a deposed leader must not destroy the new leader's resume
+                anchors. Fence-first when supplied.
 
         Returns:
             Number of checkpoints deleted
         """
-        with begin_write(self._db.engine) as conn:
+        with self._fenced_or_plain_write(coordination_token=coordination_token, verb="delete_checkpoints") as conn:
             result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount

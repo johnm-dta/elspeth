@@ -11,16 +11,22 @@ cannot see in-memory coordinator state):
 
 - the refusal fires BEFORE ``rebase_sequence`` — the first mutation on the
   resume path — via a recording stub CheckpointCoordinator;
-- the shared check itself: one implementation, same reasons as can_resume;
-- the deliberate carve-out: immutable-success statuses (COMPLETED /
-  COMPLETED_WITH_FAILURES / EMPTY) are ADMITTED past the entry guard so the
-  durable run-immutability guard in update_run_status() keeps owning their
-  refusal (the pinned loser-after-winner contract).
+- the shared check itself: one implementation, same reasons as can_resume
+  (including the §B.3 live-seat enrichment, which lives in the shared
+  ``check_run_status_resumable`` so advisory and enforcing surfaces never
+  drift);
+- the §H test-#1 flip (epoch 21, ADR-030): immutable-success statuses
+  (COMPLETED / COMPLETED_WITH_FAILURES / EMPTY) are now REFUSED at the entry
+  guard with a "Run is terminal" NonResumableRunError. The durable
+  run-immutability guards stay beneath as the backstop (independently pinned
+  in tests/unit/core/landscape/test_run_lifecycle_repository.py and
+  test_run_coordination_repository.py).
 
-KNOWN RESIDUAL (deliberately NOT closed — operator option c, cross-process
-coordination, post-F1): two resumes can both observe FAILED at the guard
-before either flips the run to RUNNING (TOCTOU); the guard closes the
-caller-convention gap only.
+The old TOCTOU residual (two resumes both observing FAILED at the guard) is
+CLOSED at epoch 21: resume()'s first durable act is the seat-acquisition CAS
+``acquire_run_leadership`` (ADR-030 §B.4) — the guard now only closes the
+caller-convention gap, and check-then-act here is acceptable because the
+leadership CAS is the arbiter.
 """
 
 from __future__ import annotations
@@ -140,6 +146,32 @@ class TestCheckRunStatusResumable:
         with pytest.raises(CheckpointCorruptionError, match="invalid status 'bogus'"):
             check_run_status_resumable(db, "run-x")
 
+    def test_running_with_live_seat_reason_is_shared_with_the_advisory_surface(self, db: LandscapeDB) -> None:
+        """§B.3 parity pin: the live-seat enrichment lives in the SHARED check.
+
+        ``can_resume`` (advisory) and ``resume()`` (enforcing) both consume
+        ``check_run_status_resumable``, so the join-flavoured reason must be
+        produced HERE — the elspeth-2f23292372 "never drift" contract.
+        """
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+
+        _insert_run(db, "run-seat-parity", status=RunStatus.RUNNING)
+        leader_id = mint_worker_id("run-seat-parity")
+        RunCoordinationRepository(db.engine).register_run_leader(
+            run_id="run-seat-parity",
+            worker_id=leader_id,
+            now=datetime.now(UTC),
+            window_seconds=80.0,
+        )
+        run_status, check = check_run_status_resumable(db, "run-seat-parity")
+        assert run_status is RunStatus.RUNNING
+        assert check.can_resume is False
+        assert check.reason is not None
+        assert leader_id in check.reason
+        assert "seat expires" in check.reason
+        assert "elspeth join" in check.reason
+
 
 class TestResumeEntryGuard:
     """resume() refusal semantics, pinned ahead of the first mutation."""
@@ -161,6 +193,82 @@ class TestResumeEntryGuard:
         assert checkpoints.rebase_calls == [], "entry guard must fire BEFORE rebase_sequence (the first mutation)"
         assert _run_status_of(db, "run-running") == RunStatus.RUNNING.value
 
+    def test_running_with_live_seat_names_leader_and_points_at_join(self, db: LandscapeDB) -> None:
+        """Epoch 21 (ADR-030 §B.3, live-seat half shipped in slice 2).
+
+        RUNNING under a LIVE leader seat is refused naming the incumbent
+        worker_id, the seat expiry, and the `elspeth join` direction (the
+        join verb itself is slice 5). Polarity unchanged: still a refusal,
+        still before any mutation.
+        """
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+
+        _insert_run(db, "run-live-leader", status=RunStatus.RUNNING)
+        leader_id = mint_worker_id("run-live-leader")
+        RunCoordinationRepository(db.engine).register_run_leader(
+            run_id="run-live-leader",
+            worker_id=leader_id,
+            now=datetime.now(UTC),
+            window_seconds=80.0,
+        )
+        coordinator, checkpoints = _coordinator(db)
+
+        with pytest.raises(NonResumableRunError, match=r"in progress under live leader") as exc_info:
+            coordinator.resume(
+                _resume_point_for("run-live-leader"),
+                cast(Any, None),
+                cast(Any, None),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert leader_id in exc_info.value.reason
+        assert "seat expires" in exc_info.value.reason
+        assert "elspeth join" in exc_info.value.reason
+        assert checkpoints.rebase_calls == []
+        assert _run_status_of(db, "run-live-leader") == RunStatus.RUNNING.value
+
+    def test_running_with_expired_seat_keeps_flat_refusal_in_slice_2(self, db: LandscapeDB) -> None:
+        """RUNNING + expired seat keeps today's flat refusal until slice 4.
+
+        The dead-leader takeover admission ("entry guard learns seat
+        liveness", test #2 contract (c)) is deliberately a slice-4 flip;
+        slice 2 only ships the live-seat precision arm above.
+        """
+        from datetime import timedelta
+
+        from sqlalchemy import update as sa_update
+
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+        from elspeth.core.landscape.schema import run_coordination_table
+
+        _insert_run(db, "run-dead-leader", status=RunStatus.RUNNING)
+        RunCoordinationRepository(db.engine).register_run_leader(
+            run_id="run-dead-leader",
+            worker_id=mint_worker_id("run-dead-leader"),
+            now=datetime.now(UTC),
+            window_seconds=80.0,
+        )
+        with db.connection() as conn:
+            conn.execute(
+                sa_update(run_coordination_table)
+                .where(run_coordination_table.c.run_id == "run-dead-leader")
+                .values(leader_heartbeat_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+        coordinator, checkpoints = _coordinator(db)
+
+        with pytest.raises(NonResumableRunError) as exc_info:
+            coordinator.resume(
+                _resume_point_for("run-dead-leader"),
+                cast(Any, None),
+                cast(Any, None),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert exc_info.value.reason == "Run is still in progress"
+        assert checkpoints.rebase_calls == []
+
     def test_refuses_missing_run_before_rebase_sequence(self, db: LandscapeDB) -> None:
         coordinator, checkpoints = _coordinator(db)
 
@@ -179,20 +287,23 @@ class TestResumeEntryGuard:
         "status",
         [RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY],
     )
-    def test_immutable_success_statuses_are_deferred_to_the_immutability_guard(self, db: LandscapeDB, status: RunStatus) -> None:
-        """The deliberate carve-out: immutable-success runs pass the ENTRY guard.
+    def test_immutable_success_statuses_refused_as_terminal_at_entry_guard(self, db: LandscapeDB, status: RunStatus) -> None:
+        """The §H test-#1 FLIP: terminal runs are refused AT the entry guard.
 
-        Their refusal stays owned by the durable run-immutability guard
-        (AuditIntegrityError, "Successful terminal runs are immutable") —
-        the pinned loser-after-winner e2e contract. Here the post-guard
-        tripwire (checkpoint_manager=None) raising AFTER rebase_sequence
-        proves admission past the entry guard.
+        The designed loser-after-winner contract (ADR-030 §H item 1):
+        a resume of an immutable-success run is a clean operator-facing
+        ``NonResumableRunError`` ("Run is terminal …") raised BEFORE
+        ``rebase_sequence``, not an ``AuditIntegrityError`` surfacing from
+        the durable backstop mid-reconstruction. The backstops themselves
+        (the immutable-success arm inside ``acquire_run_leadership`` and the
+        ``update_run_status``/``complete_run`` conditional UPDATEs) remain
+        and are independently pinned in tests/unit/core/landscape/.
         """
         run_id = f"run-{status.value}"
         _insert_run(db, run_id, status=status)
         coordinator, checkpoints = _coordinator(db)
 
-        with pytest.raises(OrchestrationInvariantError, match="CheckpointManager is required"):
+        with pytest.raises(NonResumableRunError, match=r"Run is terminal") as exc_info:
             coordinator.resume(
                 _resume_point_for(run_id),
                 cast(Any, None),
@@ -200,7 +311,11 @@ class TestResumeEntryGuard:
                 payload_store=MockPayloadStore(),
             )
 
-        assert checkpoints.rebase_calls == [7], "immutable-success status must be ADMITTED past the entry guard"
+        assert exc_info.value.run_id == run_id
+        assert status.value in exc_info.value.reason
+        assert "immutable" in exc_info.value.reason
+        assert checkpoints.rebase_calls == [], "terminal refusal must fire BEFORE rebase_sequence (the first mutation)"
+        assert _run_status_of(db, run_id) == status.value
 
     @pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.INTERRUPTED])
     def test_resumable_statuses_are_admitted(self, db: LandscapeDB, status: RunStatus) -> None:

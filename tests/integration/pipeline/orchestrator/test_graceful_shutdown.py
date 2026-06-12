@@ -34,6 +34,7 @@ from tests.fixtures.base_classes import (
     as_source,
     as_transform,
 )
+from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline, build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
 
@@ -987,6 +988,9 @@ class TestInterruptAndResume:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             for node_id, plugin_name, node_type in [
                 (source_nid, "list_source", NodeType.SOURCE),

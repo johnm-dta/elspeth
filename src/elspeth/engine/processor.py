@@ -30,7 +30,12 @@ from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
     from elspeth.contracts import Batch
+    from elspeth.contracts.audit import Row as AuditRow
+    from elspeth.contracts.audit import Token as AuditToken
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.engine.clock import Clock
@@ -76,6 +81,7 @@ from elspeth.contracts.results import FailureInfo
 from elspeth.contracts.scheduler import BarrierEmission, TokenWorkItem, TokenWorkStatus
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
+from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -403,6 +409,7 @@ class RowProcessor:
         scheduler_lease_owner: str | None = None,
         scheduler_lease_seconds: int = 300,
         scheduler_heartbeat_seconds: int = 60,
+        coordination_token: CoordinationToken | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -439,6 +446,14 @@ class RowProcessor:
                                If None, telemetry emission is disabled.
             scheduler: Durable token scheduler. Every continuation is persisted,
                 leased, and terminally marked as it advances.
+            coordination_token: Leader fencing token (epoch 21, ADR-030).
+                Carried by value for the slice-2 step-4 fenced verbs this
+                processor drives (repair sweep, recover_expired_leases, the
+                fenced ingest verb). When provided, the orchestrator also
+                passes ``scheduler_lease_owner=token.worker_id`` — the §A.1
+                registered worker identity IS the lease owner; the
+                ``row-processor:{run_id}:{uuid}`` mint below remains the
+                fallback for direct repository-level construction.
         """
         if scheduler is None:
             raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
@@ -522,6 +537,7 @@ class RowProcessor:
         )
         self._telemetry_manager = telemetry_manager
         self._scheduler = scheduler
+        self._coordination_token = coordination_token
         self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
@@ -576,6 +592,16 @@ class RowProcessor:
     def token_manager(self) -> TokenManager:
         """Expose token manager for orchestrator to create tokens for quarantined rows."""
         return self._token_manager
+
+    @property
+    def coordination_token(self) -> CoordinationToken | None:
+        """The leader fencing token bound at construction (ADR-030).
+
+        Exposed so source-iteration helpers (quarantine ingest) can thread it
+        into their own fenced rows writes. None only for direct
+        repository-level construction (the unfenced legacy arm).
+        """
+        return self._coordination_token
 
     def _restore_barriers_from_journal(self, restore: BarrierJournalRestoreContext) -> None:
         """Rebuild aggregation buffers and coalesce pendings from journal BLOCKED rows.
@@ -2242,7 +2268,9 @@ class RowProcessor:
     ) -> list[RowResult]:
         """Record source node_state and start pipeline traversal.
 
-        Shared implementation for process_row and process_existing_row.
+        Implementation for process_existing_row (the resume re-drive path);
+        process_row inlines the equivalent sequence so the fenced ingest can
+        journal the initial cursor in one transaction (ADR-030 §C.4 row 9).
         Records the source node as immediately COMPLETED (duration_ms=0)
         since source "processing" already happened in the plugin iterator.
 
@@ -2268,28 +2296,116 @@ class RowProcessor:
             source_node_id=effective_source_node_id,
         )
 
-        # Per ADR-025 §2 the DAG builder always populates node_to_next for
-        # every source node — missing entries are a construction bug, not a
-        # state we silently work around with a "first transform" fallback.
-        if effective_source_node_id not in self._node_to_next:
-            raise OrchestrationInvariantError(
-                f"Traversal context is missing source continuation for {effective_source_node_id!r}. "
-                "This is a graph construction bug — every source node must have a node_to_next entry."
-            )
-        initial_node_id = self._node_to_next[effective_source_node_id]
-        if transforms and initial_node_id == effective_source_node_id:
-            raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
         effective_source_on_success = source_on_success if source_on_success is not None else self._source_on_success
         return self._drain_work_queue(
-            self._nav.create_work_item(
+            self._initial_work_item_for_source_token(
                 token=token,
-                current_node_id=initial_node_id,
+                transforms=transforms,
+                source_node_id=effective_source_node_id,
+                source_on_success=effective_source_on_success,
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
-                on_success_sink=effective_source_on_success if initial_node_id is None else None,
             ),
             ctx,
         )
+
+    def _initial_work_item_for_source_token(
+        self,
+        *,
+        token: TokenInfo,
+        transforms: Sequence[Any],
+        source_node_id: NodeID,
+        source_on_success: str,
+        coalesce_node_id: NodeID | None,
+        coalesce_name: CoalesceName | None,
+    ) -> WorkItem:
+        """Resolve the source continuation and build the initial WorkItem.
+
+        Shared by ``process_row`` (which needs the WorkItem BEFORE the fenced
+        ingest so the composed transaction can journal the initial cursor)
+        and ``_record_source_and_start_traversal`` (the resume/existing-row
+        path). Per ADR-025 §2 the DAG builder always populates node_to_next
+        for every source node — missing entries are a construction bug, not
+        a state we silently work around with a "first transform" fallback.
+        """
+        if source_node_id not in self._node_to_next:
+            raise OrchestrationInvariantError(
+                f"Traversal context is missing source continuation for {source_node_id!r}. "
+                "This is a graph construction bug — every source node must have a node_to_next entry."
+            )
+        initial_node_id = self._node_to_next[source_node_id]
+        if transforms and initial_node_id == source_node_id:
+            raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
+        return self._nav.create_work_item(
+            token=token,
+            current_node_id=initial_node_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
+            on_success_sink=source_on_success if initial_node_id is None else None,
+        )
+
+    def _ingest_source_row_with_initial_claim(
+        self,
+        *,
+        item: WorkItem,
+        source_node_id: NodeID,
+        row_index: int,
+        source_row_index: int,
+        ingest_sequence: int,
+        data: dict[str, Any],
+    ) -> TokenWorkItem:
+        """Drive the fenced leader INGEST verb for one source row (§C.4 row 9).
+
+        Composes the rows+tokens inserts (via the data-flow repository's
+        connection-accepting closure) with the initial enqueue-and-claim in
+        ONE epoch-fenced IMMEDIATE transaction. Field derivation mirrors
+        ``_enqueue_scheduler_work_item`` exactly (deterministic
+        work_item_id + strict field equality reconciliation downstream).
+        """
+        coordination_token = self._coordination_token
+        if coordination_token is None:
+            raise OrchestrationInvariantError(
+                "Fenced source ingest requires a coordination token; the unfenced arm must not reach this helper."
+            )
+        token = item.token
+        now = self._clock.now_utc()
+
+        def insert_row_and_token(conn: Connection) -> tuple[AuditRow, AuditToken]:
+            return self._data_flow.insert_row_with_token_on(
+                conn,
+                run_id=self._run_id,
+                source_node_id=str(source_node_id),
+                row_index=row_index,
+                data=data,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
+                row_id=token.row_id,
+                token_id=token.token_id,
+            )
+
+        _row, _token_record, scheduled = self._scheduler.ingest_row_with_initial_claim(
+            coordination_token=coordination_token,
+            now=now,
+            insert_row_and_token=insert_row_and_token,
+            token_id=token.token_id,
+            row_id=token.row_id,
+            node_id=self._scheduler_node_id(item.current_node_id),
+            step_index=self._scheduler_step_index(item.current_node_id),
+            ingest_sequence=ingest_sequence,
+            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
+            lease_owner=self._scheduler_lease_owner,
+            lease_seconds=self._scheduler_lease_seconds,
+            queue_key=self._queue_key_for_blocked_item(item),
+            barrier_key=self._barrier_key_for_blocked_item(item),
+            on_success_sink=item.on_success_sink,
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id,
+            join_group_id=token.join_group_id,
+            expand_group_id=token.expand_group_id,
+            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
+            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
+        )
+        return scheduled
 
     def process_row(
         self,
@@ -2331,15 +2447,20 @@ class RowProcessor:
             List of RowResults, one per terminal token (parent + children)
         """
         effective_source_node_id = source_node_id or self._source_node_id
-        # Create initial token from SourceRow
-        # TokenManager.create_initial_token() expects SourceRow and converts to PipelineRow
-        token = self._token_manager.create_initial_token(
-            run_id=self._run_id,
-            source_node_id=effective_source_node_id,
-            row_index=row_index,
-            source_row_index=source_row_index,
-            ingest_sequence=ingest_sequence,
-            source_row=source_row,
+        # Pre-mint the row/token identities (client-generated ids) so the
+        # source-boundary checks can run BEFORE any durable write (ADR-030
+        # §C.4 row 9): a boundary-failed row keeps its rows+tokens audit
+        # record but gets NO scheduler row; the happy path composes rows +
+        # tokens + initial enqueue into ONE fenced IMMEDIATE transaction.
+        if source_row.contract is None:
+            raise OrchestrationInvariantError(
+                "SourceRow must have contract to create token. Source plugins must set contract on all valid rows."
+            )
+        pipeline_row = source_row.to_pipeline_row()
+        token = TokenInfo(
+            row_id=generate_id(),
+            token_id=generate_id(),
+            row_data=pipeline_row,
         )
 
         # Valid SourceRows always carry mapping-shaped row payloads; once the
@@ -2368,6 +2489,20 @@ class RowProcessor:
                 FrameworkBugError,
                 OrchestrationInvariantError,
             ) as failure:
+                # The failed row still gets its durable rows+tokens audit
+                # record (fenced when a coordination token is held) — but
+                # never a scheduler row.
+                self._token_manager.create_initial_token(
+                    run_id=self._run_id,
+                    source_node_id=effective_source_node_id,
+                    row_index=row_index,
+                    source_row_index=source_row_index,
+                    ingest_sequence=ingest_sequence,
+                    source_row=source_row,
+                    row_id=token.row_id,
+                    token_id=token.token_id,
+                    coordination_token=self._coordination_token,
+                )
                 self._record_source_boundary_failure(
                     token=token,
                     input_data=source_input,
@@ -2375,16 +2510,52 @@ class RowProcessor:
                     source_node_id=effective_source_node_id,
                 )
                 raise
-        return self._record_source_and_start_traversal(
+
+        effective_source_on_success = source_on_success if source_on_success is not None else self._source_on_success
+        initial_item = self._initial_work_item_for_source_token(
             token=token,
-            input_data=source_input,
             transforms=transforms,
-            ctx=ctx,
             source_node_id=effective_source_node_id,
-            source_on_success=source_on_success,
+            source_on_success=effective_source_on_success,
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
+
+        preclaimed: TokenWorkItem | None = None
+        if self._coordination_token is not None:
+            # Fenced leader INGEST (§C.4 row 9): rows insert + tokens insert
+            # + initial enqueue-and-claim in ONE IMMEDIATE transaction; a
+            # stale epoch rolls the whole ingest back (no orphan rows row).
+            preclaimed = self._ingest_source_row_with_initial_claim(
+                item=initial_item,
+                source_node_id=effective_source_node_id,
+                row_index=row_index,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
+                data=pipeline_row.to_dict(),
+            )
+        else:
+            # Legacy unfenced arm (direct repository-level construction, no
+            # coordination token): rows+tokens in their own transaction; the
+            # drain performs the initial enqueue as before.
+            self._token_manager.create_initial_token(
+                run_id=self._run_id,
+                source_node_id=effective_source_node_id,
+                row_index=row_index,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
+                source_row=source_row,
+                row_id=token.row_id,
+                token_id=token.token_id,
+            )
+
+        self._record_source_node_state(
+            token=token,
+            input_data=source_input,
+            status=NodeStateStatus.COMPLETED,
+            source_node_id=effective_source_node_id,
+        )
+        return self._drain_work_queue(initial_item, ctx, preclaimed=preclaimed)
 
     def process_existing_row(
         self,
@@ -2865,14 +3036,21 @@ class RowProcessor:
         self,
         initial_item: WorkItem,
         ctx: PluginContext,
+        *,
+        preclaimed: TokenWorkItem | None = None,
     ) -> list[RowResult]:
         """Drain scheduler-backed work, processing tokens until empty.
 
         Each work item is durably persisted and leased before it advances;
         child continuations are persisted as READY work before the current
         lease is marked terminal.
+
+        ``preclaimed`` (ADR-030 §C.4 row 9): the fenced ingest verb already
+        persisted AND claimed the initial item inside its composed
+        transaction; passing the returned LEASED row here skips the drain's
+        own enqueue-and-claim.
         """
-        return self._drain_durable_work_queue(initial_item, ctx)
+        return self._drain_durable_work_queue(initial_item, ctx, preclaimed=preclaimed)
 
     def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
         """Advance already-persisted READY scheduler work for this run.
@@ -2950,6 +3128,7 @@ class RowProcessor:
             barrier_key=barrier_key,
             token_ids=token_ids,
             now=self._clock.now_utc(),
+            coordination_token=self._coordination_token,
         )
         if expected_count and terminalized_count != expected_count:
             raise AuditIntegrityError(
@@ -3101,6 +3280,10 @@ class RowProcessor:
             emitted_ready=(),
             now=self._clock.now_utc(),
             leased_exclusion_token_id=leased_token_id,
+            coordination_token=self._coordination_token,
+            # Attributed park (ADR-030): the post-sink strict owner CAS
+            # terminalizes these handoffs under this worker's lease identity.
+            pending_sink_lease_owner=self._scheduler_lease_owner,
         )
 
         if not emitted_token_ids:
@@ -3179,6 +3362,7 @@ class RowProcessor:
             now=self._clock.now_utc(),
             leased_exclusion_token_id=active_token_id,
             scope_row_id=scope_row_id,
+            coordination_token=self._coordination_token,
         )
 
     def complete_coalesce_merge(
@@ -3217,11 +3401,24 @@ class RowProcessor:
         self,
         initial_item: WorkItem,
         ctx: PluginContext,
+        *,
+        preclaimed: TokenWorkItem | None = None,
     ) -> list[RowResult]:
         """Drain the scheduler-backed work queue for a single source token."""
         pending_items: dict[str, WorkItem] = {}
 
-        initial_claim = self._enqueue_scheduler_work_item(initial_item, pending_items, claim_immediately=True)
+        if preclaimed is not None:
+            # The fenced ingest already enqueued AND claimed this item in its
+            # composed transaction. Mirror _enqueue_scheduler_work_item's
+            # pending-item registration so the drain rehydrates the live
+            # payload instead of deserializing the journal row.
+            initial_claim = preclaimed
+            if initial_claim.status is TokenWorkStatus.READY or (
+                initial_claim.status is TokenWorkStatus.LEASED and initial_claim.lease_owner == self._scheduler_lease_owner
+            ):
+                pending_items[initial_claim.work_item_id] = initial_item
+        else:
+            initial_claim = self._enqueue_scheduler_work_item(initial_item, pending_items, claim_immediately=True)
         preclaimed_items = (
             [initial_claim]
             if initial_claim.status is TokenWorkStatus.LEASED and initial_claim.lease_owner == self._scheduler_lease_owner
@@ -3244,6 +3441,7 @@ class RowProcessor:
             run_id=self._run_id,
             now=now,
             caller_owner=self._scheduler_lease_owner,
+            coordination_token=self._coordination_token,
         )
         self._scheduler_drains_since_maintenance = 0
         return recovered
@@ -3503,11 +3701,13 @@ class RowProcessor:
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
+                coordination_token=self._coordination_token,
             )
             repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
+                coordination_token=self._coordination_token,
             )
             if repaired:
                 continue
@@ -3528,6 +3728,7 @@ class RowProcessor:
             token_id=token_id,
             now=self._clock.now_utc(),
             expected_lease_owner=self._scheduler_lease_owner,
+            coordination_token=self._coordination_token,
         )
         if terminalized != 1:
             raise AuditIntegrityError(
@@ -3542,6 +3743,7 @@ class RowProcessor:
             token_ids=token_ids,
             now=self._clock.now_utc(),
             expected_lease_owner=self._scheduler_lease_owner,
+            coordination_token=self._coordination_token,
         )
         if terminalized != len(token_ids):
             raise AuditIntegrityError(

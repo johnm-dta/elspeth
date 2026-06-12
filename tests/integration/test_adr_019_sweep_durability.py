@@ -22,6 +22,7 @@ from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
+from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline
 from tests.fixtures.plugins import CollectSink, PassTransform
 from tests.fixtures.stores import MockPayloadStore
@@ -182,7 +183,9 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         openrouter_catalog_sha256: str = "0" * 64,
         openrouter_catalog_source: str = "bundled",
     ):
-        factory, run = original_init(
+        # Epoch 21: _initialize_database_phase returns the CoordinationToken
+        # minted with the run's leader seat alongside (factory, run).
+        factory, run, coordination_token = original_init(
             self,
             config,
             payload_store,
@@ -195,7 +198,7 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         )
         captured["run_id"] = run.run_id
         captured["token_id"] = plant(factory, run.run_id)
-        return factory, run
+        return factory, run, coordination_token
 
     monkeypatch.setattr(Orchestrator, "_initialize_database_phase", _init_and_plant)
     config, graph = _build_minimal_run()
@@ -267,6 +270,9 @@ def _setup_adr019_failed_resume_run(
                 openrouter_catalog_source="bundled",
             )
         )
+        # Epoch 21 (ADR-030): the crashed-run image includes the expired
+        # leader seat begin_run would have minted atomically with the run.
+        insert_crashed_leader_seat(conn, run_id=run_id)
         for node_id, plugin_name, node_type in [
             (source_nid, "list_source", NodeType.SOURCE),
             (xform_nid, "passthrough", NodeType.TRANSFORM),

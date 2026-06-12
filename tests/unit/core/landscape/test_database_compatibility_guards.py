@@ -389,6 +389,151 @@ class TestSchemaCompatibilityGuards:
         assert "Landscape database schema is outdated" in msg
         instance.close()
 
+    def test_run_coordination_substrate_is_required_schema_contract(self) -> None:
+        """Epoch-21 coordination tables must participate in stale-DB detection (ADR-030)."""
+        assert ("token_work_items", "barrier_adopted_epoch") in database_module._REQUIRED_COLUMNS
+        required_fks = set(database_module._REQUIRED_FOREIGN_KEYS)
+        assert {
+            ("run_coordination", "run_id", "runs"),
+            ("run_workers", "run_id", "runs"),
+            ("run_coordination_events", "run_id", "runs"),
+            ("coalesce_branch_losses", "run_id", "runs"),
+        } <= required_fks
+        required_checks = set(database_module._REQUIRED_CHECK_CONSTRAINTS)
+        assert {
+            ("run_coordination", "ck_run_coordination_seat_liveness_paired"),
+            ("run_workers", "ck_run_workers_role"),
+            ("run_workers", "ck_run_workers_status"),
+            ("run_workers", "ck_run_workers_evicted_at_paired"),
+            ("run_coordination_events", "ck_run_coordination_events_event_type"),
+        } <= required_checks
+        required_indexes = set(database_module._REQUIRED_INDEXES)
+        assert {
+            ("run_workers", "ix_run_workers_liveness"),
+            ("run_coordination_events", "uq_run_coordination_events_event_id"),
+            ("run_coordination_events", "ix_run_coordination_events_run"),
+            ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
+        } <= required_indexes
+        # Coordination tables are mandatory, never tolerated-as-absent.
+        assert not {"run_coordination", "run_workers", "run_coordination_events", "coalesce_branch_losses"} & set(
+            database_module._ADDITIVE_TABLE_NAMES
+        )
+
+    def test_validate_schema_rejects_token_work_items_missing_barrier_adopted_epoch(self, tmp_path: Path) -> None:
+        """Epoch-21 adoption CAS marker must fail stale DBs early."""
+        db_path = tmp_path / "missing_barrier_adopted_epoch.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.exec_driver_sql("ALTER TABLE token_work_items DROP COLUMN barrier_adopted_epoch")
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        assert "token_work_items.barrier_adopted_epoch" in str(exc_info.value)
+        instance.close()
+
+    def test_validate_schema_rejects_missing_run_workers_liveness_index(self, tmp_path: Path) -> None:
+        """The run_workers liveness/membership index must fail stale DBs early."""
+        db_path = tmp_path / "missing_run_workers_liveness_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX ix_run_workers_liveness"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "run_workers.ix_run_workers_liveness" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_run_coordination_missing_seat_liveness_check(self, tmp_path: Path) -> None:
+        """The vacant-seat ⇔ no-liveness-clock pairing CHECK must fail stale DBs early."""
+        db_path = tmp_path / "missing_seat_liveness_check.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE run_coordination"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE run_coordination (
+                        run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                        leader_worker_id TEXT,
+                        leader_epoch INTEGER NOT NULL DEFAULT 0,
+                        leader_heartbeat_expires_at TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "run_coordination.ck_run_coordination_seat_liveness_paired" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_coalesce_branch_losses_missing_run_fk(self, tmp_path: Path) -> None:
+        """The branch-loss ledger must point at its owning run in stale DBs too."""
+        db_path = tmp_path / "missing_branch_losses_run_fk.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE coalesce_branch_losses"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE coalesce_branch_losses (
+                        loss_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        coalesce_name TEXT NOT NULL,
+                        row_id TEXT NOT NULL,
+                        branch_name TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        recorded_by TEXT NOT NULL,
+                        recorded_at TIMESTAMP NOT NULL,
+                        adopted_epoch INTEGER
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_coalesce_branch_losses_natural "
+                    "ON coalesce_branch_losses (run_id, coalesce_name, row_id, branch_name)"
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "coalesce_branch_losses.run_id → runs" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
         """Stamped SQLite schema epochs provide an explicit future migration seam."""
         db_path = tmp_path / "wrong_epoch.db"

@@ -25,6 +25,7 @@ from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from tests.fixtures.base_classes import as_sink, as_source
+from tests.fixtures.landscape import expire_leader_seat
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
 
@@ -112,6 +113,10 @@ def _create_failed_run(
         status=RunStatus.FAILED,
         source_schema_json=json.dumps(_ResumeSourceSchema.model_json_schema()),
     )
+    # Epoch 21 (ADR-030 §B.4): begin_run minted this run's leader seat; a
+    # crashed leader never releases it, so lapse it deterministically — the
+    # post-window image resume's takeover CAS requires (vacant-or-expired).
+    expire_leader_seat(factory.run_lifecycle._db, run.run_id)
     if include_contract:
         contract = _make_schema_contract()
         audit_record = ContractAuditRecord.from_contract(contract)

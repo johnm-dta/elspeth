@@ -25,6 +25,7 @@ from elspeth.contracts import (
     RunStatus,
     SecretResolutionInput,
 )
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
 from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -85,6 +86,70 @@ class TestBeginRunDirect:
         repo = RunLifecycleRepository(db, ops, RunLoader())
         run = repo.begin_run(config={}, canonical_version="v1")
         assert run.run_id  # non-empty generated ID
+
+    def test_begin_run_mints_leader_seat_atomically(self) -> None:
+        """Epoch 21 (ADR-030 §B.4 closing line / uniformity rule).
+
+        begin_run creates the run_coordination seat at epoch 1, registers the
+        leader's run_workers row (with pid/hostname/entry_point forensics),
+        and writes the worker_register + leader_acquire events — every N=1
+        run, including every repository-level test fixture, exercises the
+        substrate.
+        """
+        from sqlalchemy import select as sa_select
+
+        from elspeth.core.landscape.schema import (
+            run_coordination_events_table,
+            run_coordination_table,
+            run_workers_table,
+        )
+
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        explicit_worker = "worker:seat-mint-run:abc123"
+        repo.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="seat-mint-run",
+            leader_worker_id=explicit_worker,
+        )
+        with db.connection() as conn:
+            seat = conn.execute(sa_select(run_coordination_table).where(run_coordination_table.c.run_id == "seat-mint-run")).one()
+            worker = conn.execute(sa_select(run_workers_table).where(run_workers_table.c.worker_id == explicit_worker)).one()
+            event_types = (
+                conn.execute(
+                    sa_select(run_coordination_events_table.c.event_type)
+                    .where(run_coordination_events_table.c.run_id == "seat-mint-run")
+                    .order_by(run_coordination_events_table.c.seq)
+                )
+                .scalars()
+                .all()
+            )
+        assert seat.leader_worker_id == explicit_worker
+        assert seat.leader_epoch == 1
+        assert seat.leader_heartbeat_expires_at is not None
+        assert worker.role == "leader"
+        assert worker.status == "active"
+        assert worker.entry_point == "run"
+        assert worker.pid is not None
+        assert event_types == ["worker_register", "leader_acquire"]
+
+    def test_begin_run_self_mints_worker_identity_when_omitted(self) -> None:
+        """Uniformity-for-free: callers that pass no identity still get a seat."""
+        from sqlalchemy import select as sa_select
+
+        from elspeth.core.landscape.schema import run_coordination_table
+
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        run = repo.begin_run(config={}, canonical_version="v1")
+        with db.connection() as conn:
+            seat = conn.execute(sa_select(run_coordination_table).where(run_coordination_table.c.run_id == run.run_id)).one()
+        assert isinstance(seat.leader_worker_id, str)
+        assert seat.leader_worker_id.startswith(f"worker:{run.run_id}:")
+        assert seat.leader_epoch == 1
 
     def test_get_run_roundtrip(self) -> None:
         """get_run returns the same run that begin_run created."""
@@ -1204,3 +1269,150 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
                 openrouter_catalog_sha256="not-a-sha",
                 openrouter_catalog_source="bundled",
             )
+
+
+# ---------------------------------------------------------------------------
+# Immutability backstop beneath the epoch fence + complete_run diagnosis order
+# (ADR-030 §D / §H — slice 2 test campaign §4)
+# ---------------------------------------------------------------------------
+
+
+def _make_repo_with_token(*, run_id: str = "run-fenced") -> tuple[LandscapeDB, RunLifecycleRepository, CoordinationToken]:
+    """Run + epoch-1 leader seat + the matching (CURRENT, VALID) token.
+
+    ``begin_run`` mints the seat atomically with the runs row (uniformity
+    rule); passing ``leader_worker_id`` lets the test construct the epoch-1
+    token without a read-back — exactly what the engine does.
+    """
+    db = make_landscape_db()
+    ops = DatabaseOps(db)
+    repo = RunLifecycleRepository(db, ops, RunLoader())
+    worker_id = f"worker:{run_id}:unit-fence"
+    repo.begin_run(config={"key": "value"}, canonical_version="v1", run_id=run_id, leader_worker_id=worker_id)
+    return db, repo, CoordinationToken(run_id=run_id, worker_id=worker_id, leader_epoch=1)
+
+
+def _bump_seat_epoch(db: LandscapeDB, run_id: str) -> None:
+    """The in-DB image of a takeover: depose the token holder by epoch bump."""
+    from elspeth.core.landscape.schema import run_coordination_table
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(run_coordination_table)
+            .where(run_coordination_table.c.run_id == run_id)
+            .values(leader_epoch=run_coordination_table.c.leader_epoch + 1)
+        )
+
+
+class TestImmutabilityBackstopBeneathEpochFence:
+    """ADR-030 §B.4 closing line: the epoch fence did NOT replace immutability.
+
+    The durable backstop the design retains beneath the resume() entry guard
+    (which now refuses terminal runs itself — the §H test-#1 flip): a
+    perfectly-fenced caller holding a CURRENT, VALID token still cannot
+    mutate a successful terminal run.
+    """
+
+    def test_update_run_status_from_completed_refused_even_with_current_epoch_token(self) -> None:
+        _db, repo, token = _make_repo_with_token(run_id="run-immut-fenced")
+        repo.complete_run("run-immut-fenced", RunStatus.COMPLETED, token=token)
+
+        # The token is still CURRENT (complete_run does not release the
+        # seat), so the fence passes — the refusal below is the immutability
+        # guard, not the fence.
+        with pytest.raises(AuditIntegrityError, match=r"from COMPLETED .*immutable"):
+            repo.update_run_status("run-immut-fenced", RunStatus.RUNNING, token=token)
+
+        run = repo.get_run("run-immut-fenced")
+        assert run is not None
+        assert run.status == RunStatus.COMPLETED
+
+    def test_update_run_status_immutable_success_target_still_refused_with_token(self) -> None:
+        """Setting an immutable-success status via update_run_status stays refused
+        (the :922-926 arm), token or no token — completed_at must be recorded
+        via complete_run()."""
+        _db, repo, token = _make_repo_with_token(run_id="run-immut-target")
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.update_run_status("run-immut-target", RunStatus.COMPLETED, token=token)
+
+
+class TestCompleteRunDiagnosisOrder:
+    """§D rowcount-0 diagnosis order (design :316), pinned arm by arm:
+
+    already-terminal ⇒ AuditIntegrityError (wins even over a stale fence);
+    fence mismatch on a non-terminal run ⇒ RunLeadershipLostError;
+    residual scheduler work ⇒ OrchestrationInvariantError.
+    """
+
+    def test_already_terminal_wins_over_fence_diagnosis(self) -> None:
+        """A deposed leader finalizing an ALREADY-TERMINAL run gets the
+        immutability diagnosis, not the coordination one — terminal
+        diagnosis wins over fence diagnosis."""
+        from elspeth.contracts.errors import RunLeadershipLostError
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-terminal")
+        repo.complete_run("run-diag-terminal", RunStatus.COMPLETED, token=token)
+        _bump_seat_epoch(db, "run-diag-terminal")  # token is now STALE
+
+        with pytest.raises(AuditIntegrityError, match="already terminal") as exc_info:
+            repo.complete_run("run-diag-terminal", RunStatus.FAILED, token=token)
+        assert not isinstance(exc_info.value, RunLeadershipLostError)
+
+        run = repo.get_run("run-diag-terminal")
+        assert run is not None
+        assert run.status == RunStatus.COMPLETED, "the stale finalize mutated nothing"
+
+    def test_fence_mismatch_on_non_terminal_run_is_leadership_lost(self) -> None:
+        from elspeth.contracts.errors import RunLeadershipLostError
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-fence")
+        _bump_seat_epoch(db, "run-diag-fence")
+
+        with pytest.raises(RunLeadershipLostError):
+            repo.complete_run("run-diag-fence", RunStatus.COMPLETED, token=token)
+
+        run = repo.get_run("run-diag-fence")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING, "the refused finalize mutated nothing"
+
+    def test_residual_work_with_valid_token_is_orchestration_invariant(self) -> None:
+        """One READY journal row + a SUCCESS finalize under a VALID token ⇒
+        the in-statement §D quiescence arm refuses (OrchestrationInvariantError)."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-residual")
+        factory = make_factory(db)
+        source_node = register_test_node(factory.data_flow, "run-diag-residual", "src-1", node_type=NodeType.SOURCE)
+        transform_node = register_test_node(factory.data_flow, "run-diag-residual", "t-1")
+        row = factory.data_flow.create_row(
+            run_id="run-diag-residual",
+            source_node_id=source_node,
+            row_index=0,
+            data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        journal_token = factory.data_flow.create_token(row_id=row.row_id)
+        TokenSchedulerRepository(db.engine).enqueue_ready(
+            run_id="run-diag-residual",
+            token_id=journal_token.token_id,
+            row_id=row.row_id,
+            node_id=transform_node,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=TokenSchedulerRepository.serialize_row_payload(
+                PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+            ),
+            available_at=datetime.now(UTC),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="residual scheduler work"):
+            repo.complete_run("run-diag-residual", RunStatus.COMPLETED, token=token)
+
+        run = repo.get_run("run-diag-residual")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING

@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 20)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 21)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from elspeth.core.landscape.database import _REQUIRED_COLUMNS
 from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
     checkpoints_table,
+    metadata,
     node_states_table,
     token_work_items_table,
     tokens_table,
@@ -18,12 +19,27 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 20
+def test_epoch_is_twenty_one() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 21
 
 
 def test_token_work_items_has_barrier_blocked_at() -> None:
     assert "barrier_blocked_at" in token_work_items_table.c
+
+
+def test_token_work_items_has_barrier_adopted_epoch() -> None:
+    """Epoch 21: adoption CAS marker (§C.4 row 6a) — written only by the
+    slice-3 fenced adoption verb; NULL = intake-pending."""
+    assert "barrier_adopted_epoch" in token_work_items_table.c
+    assert token_work_items_table.c.barrier_adopted_epoch.nullable
+
+
+def test_epoch_21_coordination_tables_are_defined() -> None:
+    """Epoch 21 (ADR-030 slice 2): the four coordination tables exist in metadata."""
+    assert "run_coordination" in metadata.tables
+    assert "run_workers" in metadata.tables
+    assert "run_coordination_events" in metadata.tables
+    assert "coalesce_branch_losses" in metadata.tables
 
 
 def test_checkpoints_have_barrier_scalars_column() -> None:
@@ -49,6 +65,44 @@ def test_required_columns_include_new_columns_and_openrouter() -> None:
     # Epoch 20: F1 durability unification (additive half).
     assert ("token_work_items", "barrier_blocked_at") in required
     assert ("checkpoints", "barrier_scalars_json") in required
+
+
+def test_required_columns_include_epoch_21_coordination_substrate() -> None:
+    """Epoch 21 columns must participate in the Postgres staleness backstop."""
+    required = set(_REQUIRED_COLUMNS)
+    assert ("token_work_items", "barrier_adopted_epoch") in required
+    for column in ("run_id", "leader_worker_id", "leader_epoch", "leader_heartbeat_expires_at", "updated_at"):
+        assert ("run_coordination", column) in required
+    for column in (
+        "worker_id",
+        "run_id",
+        "role",
+        "status",
+        "registered_at",
+        "heartbeat_expires_at",
+        "departed_at",
+        "evicted_at",
+        "evicted_by_worker_id",
+        "pid",
+        "hostname",
+        "entry_point",
+    ):
+        assert ("run_workers", column) in required
+    for column in ("seq", "event_id", "run_id", "event_type", "worker_id", "leader_epoch", "recorded_at", "context_json"):
+        assert ("run_coordination_events", column) in required
+    for column in (
+        "loss_id",
+        "run_id",
+        "coalesce_name",
+        "row_id",
+        "branch_name",
+        "token_id",
+        "reason",
+        "recorded_by",
+        "recorded_at",
+        "adopted_epoch",
+    ):
+        assert ("coalesce_branch_losses", column) in required
 
 
 def test_checkpoint_blob_columns_are_gone() -> None:

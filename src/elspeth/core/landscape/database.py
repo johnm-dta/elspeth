@@ -261,6 +261,43 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "recorded_at"),
     ("scheduler_events", "caller_owner"),
     ("scheduler_events", "context_json"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("token_work_items", "barrier_adopted_epoch"),
+    ("run_coordination", "run_id"),
+    ("run_coordination", "leader_worker_id"),
+    ("run_coordination", "leader_epoch"),
+    ("run_coordination", "leader_heartbeat_expires_at"),
+    ("run_coordination", "updated_at"),
+    ("run_workers", "worker_id"),
+    ("run_workers", "run_id"),
+    ("run_workers", "role"),
+    ("run_workers", "status"),
+    ("run_workers", "registered_at"),
+    ("run_workers", "heartbeat_expires_at"),
+    ("run_workers", "departed_at"),
+    ("run_workers", "evicted_at"),
+    ("run_workers", "evicted_by_worker_id"),
+    ("run_workers", "pid"),
+    ("run_workers", "hostname"),
+    ("run_workers", "entry_point"),
+    ("run_coordination_events", "seq"),
+    ("run_coordination_events", "event_id"),
+    ("run_coordination_events", "run_id"),
+    ("run_coordination_events", "event_type"),
+    ("run_coordination_events", "worker_id"),
+    ("run_coordination_events", "leader_epoch"),
+    ("run_coordination_events", "recorded_at"),
+    ("run_coordination_events", "context_json"),
+    ("coalesce_branch_losses", "loss_id"),
+    ("coalesce_branch_losses", "run_id"),
+    ("coalesce_branch_losses", "coalesce_name"),
+    ("coalesce_branch_losses", "row_id"),
+    ("coalesce_branch_losses", "branch_name"),
+    ("coalesce_branch_losses", "token_id"),
+    ("coalesce_branch_losses", "reason"),
+    ("coalesce_branch_losses", "recorded_by"),
+    ("coalesce_branch_losses", "recorded_at"),
+    ("coalesce_branch_losses", "adopted_epoch"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -271,6 +308,11 @@ _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
     ("scheduler_events", "run_id", "runs"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_coordination", "run_id", "runs"),
+    ("run_workers", "run_id", "runs"),
+    ("run_coordination_events", "run_id", "runs"),
+    ("coalesce_branch_losses", "run_id", "runs"),
 )
 
 # Required composite foreign keys for run-scoped audit integrity.
@@ -316,6 +358,12 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
     ("runs", "ck_runs_openrouter_catalog_source"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_coordination", "ck_run_coordination_seat_liveness_paired"),
+    ("run_workers", "ck_run_workers_role"),
+    ("run_workers", "ck_run_workers_status"),
+    ("run_workers", "ck_run_workers_evicted_at_paired"),
+    ("run_coordination_events", "ck_run_coordination_events_event_type"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.
@@ -339,6 +387,11 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "ix_scheduler_events_run_token_time"),
     ("scheduler_events", "ix_scheduler_events_work_item"),
     ("validation_errors", "ix_validation_errors_run_row"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_workers", "ix_run_workers_liveness"),
+    ("run_coordination_events", "uq_run_coordination_events_event_id"),
+    ("run_coordination_events", "ix_run_coordination_events_run"),
+    ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
 )
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})

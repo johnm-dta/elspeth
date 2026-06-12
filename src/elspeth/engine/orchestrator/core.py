@@ -22,7 +22,6 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -43,6 +42,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.config import RuntimeRetryConfig
+from elspeth.contracts.coordination import CoordinationToken, mint_worker_id
 from elspeth.contracts.declaration_contracts import (
     EXPECTED_CONTRACT_SITES,
     contract_sites,
@@ -65,7 +65,6 @@ from elspeth.contracts.events import (
     RunStarted,
     RunSummary,
 )
-from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.contracts.tier_registry import freeze_tier_registry
 from elspeth.contracts.types import (
     AggregationName,
@@ -77,6 +76,7 @@ from elspeth.contracts.types import (
 from elspeth.core.canonical import stable_hash
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 
@@ -93,7 +93,9 @@ from elspeth.engine.orchestrator.landscape_registration import (
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.run_status import (
+    assert_terminal_counter_parity,
     cli_completion_for,
+    derive_terminal_status_from_audit,
 )
 from elspeth.engine.orchestrator.runtime_preflight import run_transform_runtime_preflights
 from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
@@ -336,7 +338,7 @@ class Orchestrator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
-    ) -> tuple[RecorderFactory, Any]:
+    ) -> tuple[RecorderFactory, Any, CoordinationToken]:
         """Execute the DATABASE phase: create factory, begin run, record secrets.
 
         Args:
@@ -348,7 +350,11 @@ class Orchestrator:
             auth_provider_type: Optional auth provider namespace for the initiating user.
 
         Returns:
-            Tuple of (factory, run) where run has run_id and config_hash attributes.
+            Tuple of (factory, run, coordination_token) where run has run_id
+            and config_hash attributes. The token is the epoch-1 leader seat
+            minted atomically with the runs row (ADR-030 uniformity rule:
+            N=1 = leader-of-its-own-run); epoch 1 is a constant on the fresh
+            path so no read-back is needed.
 
         Raises:
             Exception: Re-raises any database connection or initialization failure.
@@ -375,6 +381,14 @@ class Orchestrator:
             source_schema_json = json.dumps(first_source.output_schema.model_json_schema())
 
             factory = RecorderFactory(self._db, payload_store=payload_store)
+
+            # Epoch 21 (ADR-030 §A.1/§B.4): hoist run-id generation so the
+            # leader worker identity can embed it, then let begin_run mint
+            # the run_coordination seat (epoch 1) atomically with the runs
+            # row. The token is constructed locally — epoch 1 is a constant
+            # on the fresh path, no read-back.
+            run_id = run_id or generate_id()
+            worker_id = mint_worker_id(run_id)
             run = factory.run_lifecycle.begin_run(
                 config=config.config,
                 canonical_version=self._canonical_version,
@@ -384,7 +398,9 @@ class Orchestrator:
                 auth_provider_type=auth_provider_type,
                 openrouter_catalog_sha256=openrouter_catalog_sha256,
                 openrouter_catalog_source=openrouter_catalog_source,
+                leader_worker_id=worker_id,
             )
+            coordination_token = CoordinationToken(run_id=run.run_id, worker_id=worker_id, leader_epoch=1)
 
             # Record secret resolutions in audit trail (deferred from pre-run loading)
             # Resolutions already contain pre-computed fingerprints (no plaintext values)
@@ -409,7 +425,7 @@ class Orchestrator:
             self._ceremony.emit_phase_error(PipelinePhase.DATABASE, e)
             raise  # CRITICAL: Always re-raise - database connection failure is fatal
 
-        return factory, run
+        return factory, run, coordination_token
 
     def _execute_export_phase(
         self,
@@ -543,8 +559,9 @@ class Orchestrator:
                 "at the L3 entry point (web lifespan or CLI bootstrap) and pass through."
             )
 
-        # DATABASE phase - create factory and begin run
-        factory, run = self._initialize_database_phase(
+        # DATABASE phase - create factory and begin run (mints the epoch-1
+        # leader seat — ADR-030 uniformity rule)
+        factory, run, coordination_token = self._initialize_database_phase(
             config,
             payload_store,
             secret_resolutions,
@@ -562,6 +579,11 @@ class Orchestrator:
                 preflight=preflight_results,
             )
 
+        # Thread the coordination token to the collaborators that step 4 of
+        # slice 2 fences (checkpoint writes, finalize, ceremonies): the
+        # token is carried by value, never re-read mid-run.
+        self._checkpoints.bind_coordination(coordination_token)
+
         run_completed = False
         run_start_time = time.perf_counter()
         try:
@@ -577,26 +599,39 @@ class Orchestrator:
                     settings,
                     payload_store=payload_store,
                     shutdown_event=active_event,
+                    coordination_token=coordination_token,
                 )
 
-            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value
-            # terminal status from the row-count shape so an operator
-            # reading /api/runs/{rid} can distinguish "ran cleanly" from
-            # "ran but no row succeeded" without opening output files.
-            terminal_status = derive_terminal_run_status(
-                rows_processed=result.rows_processed,
-                rows_succeeded=result.rows_succeeded,
-                rows_failed=result.rows_failed,
-                rows_routed_success=result.rows_routed_success,
-                rows_routed_failure=result.rows_routed_failure,
-                rows_quarantined=result.rows_quarantined,
-                rows_coalesce_failed=result.rows_coalesce_failed,
-            )
+            # ADR-030 §D (audit-derived terminal status on ALL paths — bug
+            # elspeth-ff6d48c180): the normal completion arm now derives its
+            # terminal status AND counters from the audit trail, exactly like
+            # both resume branches. Sequencing is sound here: _execute_run
+            # returned only after the end-of-source flushes, the sink writes
+            # and sweep_deferred_invariants_or_crash committed, so every
+            # outcome is visible to the derive. The live loop counters are
+            # demoted to a parity cross-check (loud on unexplained mismatch;
+            # the two documented rows_coalesce_failed divergences are
+            # tolerated — see assert_terminal_counter_parity).
+            terminal_status, audit_counters = derive_terminal_status_from_audit(factory, run.run_id)
+            assert_terminal_counter_parity(live=result, audit=audit_counters, run_id=run.run_id)
 
             # Complete run with reproducibility grade computation
-            factory.run_lifecycle.finalize_run(run.run_id, status=terminal_status)
-            result = replace(result, status=terminal_status)
+            factory.run_lifecycle.finalize_run(run.run_id, status=terminal_status, token=coordination_token)
+            result = audit_counters.to_run_result(run.run_id, terminal_status)
             run_completed = True
+
+            # Delete checkpoints on successful completion (checkpoints are
+            # for recovery, not needed after success). LEADER WORK: the
+            # delete is epoch-fenced (ADR-030 §C.4 row 5), so it must run
+            # BEFORE the seat release vacates the fence's CAS target.
+            self._checkpoints.delete_checkpoints(run.run_id)
+
+            # Seat hygiene (ADR-030 §D): the leader releases its seat AFTER
+            # the terminal finalize succeeds. Best-effort — a failed release
+            # leaves the seat to lapse on its liveness window; it must never
+            # un-complete a completed run.
+            with best_effort("Seat release after finalize", run_id=run.run_id):
+                factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
 
             # Emit telemetry AFTER Landscape finalize succeeds
             run_duration_ms = (time.perf_counter() - run_start_time) * 1000
@@ -609,10 +644,6 @@ class Orchestrator:
                     duration_ms=run_duration_ms,
                 )
             )
-
-            # Delete checkpoints on successful completion
-            # (checkpoints are for recovery, not needed after success)
-            self._checkpoints.delete_checkpoints(run.run_id)
 
             # EXPORT phase - post-run landscape export (if enabled)
             if settings is not None and settings.landscape.export.enabled:
@@ -650,7 +681,12 @@ class Orchestrator:
 
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
-                self._ceremony.emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
+                self._ceremony.emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time, token=coordination_token)
+                # Seat hygiene: released only AFTER the INTERRUPTED finalize
+                # succeeded (same best_effort block), so a finalize failure
+                # leaves the seat to lapse rather than vacating a run whose
+                # terminal status was never recorded.
+                factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
             with best_effort(
@@ -684,7 +720,10 @@ class Orchestrator:
                         factory,
                         run_start_time,
                         failed_exc.partial_result,
+                        token=coordination_token,
                     )
+                    # Seat hygiene: after the FAILED finalize succeeded.
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
         except Exception:
             # Outer broad-except: any unhandled exception type is a run failure
@@ -716,7 +755,9 @@ class Orchestrator:
                         )
                     )
                 else:
-                    self._ceremony.emit_failed_ceremony(run.run_id, factory, run_start_time)
+                    self._ceremony.emit_failed_ceremony(run.run_id, factory, run_start_time, token=coordination_token)
+                    # Seat hygiene: after the FAILED finalize succeeded.
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # CRITICAL: Always re-raise - observability doesn't suppress errors
         finally:
             self._ceremony.safe_flush_telemetry()
@@ -954,6 +995,7 @@ class Orchestrator:
         *,
         payload_store: PayloadStore,
         shutdown_event: threading.Event | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
@@ -986,6 +1028,7 @@ class Orchestrator:
             artifacts,
             payload_store,
             shutdown_event=shutdown_event,
+            coordination_token=coordination_token,
         )
         preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
         run_transform_runtime_preflights(

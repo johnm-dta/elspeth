@@ -65,6 +65,7 @@ if TYPE_CHECKING:
         TokenInfo,
     )
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.types import (
         BranchName,
@@ -265,6 +266,7 @@ class RunExecutionCore:
         coalesce_id_map: dict[CoalesceName, NodeID],
         payload_store: PayloadStore,
         barrier_restore: BarrierJournalRestoreContext | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> tuple[RowProcessor, dict[CoalesceName, NodeID], CoalesceExecutor | None]:
         """Build a RowProcessor with all supporting infrastructure.
 
@@ -397,6 +399,12 @@ class RunExecutionCore:
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,
             telemetry_manager=self._telemetry,
             scheduler=factory.scheduler,
+            # ADR-030 §A.1: the registered worker identity IS the scheduler
+            # lease_owner. When no token was threaded (repository-level test
+            # construction), RowProcessor falls back to its own
+            # row-processor:{run_id}:{uuid} mint.
+            scheduler_lease_owner=coordination_token.worker_id if coordination_token is not None else None,
+            coordination_token=coordination_token,
         )
 
         return processor, coalesce_node_map, coalesce_executor
@@ -414,6 +422,7 @@ class RunExecutionCore:
         include_source_on_start: bool = True,
         barrier_restore: BarrierJournalRestoreContext | None = None,
         shutdown_event: threading.Event | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> RunContext:
         """Initialize run context: assign node IDs, create PluginContext, call on_start, build processor.
 
@@ -422,6 +431,10 @@ class RunExecutionCore:
                 (source was fully consumed in original run).
             barrier_restore: Resume-only journal-restore inputs (F1); None on
                 the normal run path.
+            coordination_token: Leader fencing token (ADR-030). Threaded into
+                the RowProcessor so its worker identity doubles as the
+                scheduler lease_owner and so the slice-2 step-4 fenced verbs
+                (repair sweep, ingest) can present it.
 
         Returns:
             RunContext with ctx, processor, coalesce_executor, coalesce_node_map,
@@ -486,6 +499,7 @@ class RunExecutionCore:
                 coalesce_id_map=coalesce_id_map,
                 payload_store=payload_store,
                 barrier_restore=barrier_restore,
+                coordination_token=coordination_token,
             )
         except Exception:
             cleanup_plugins(config, ctx, include_source=include_source_on_start)

@@ -29,6 +29,7 @@ from elspeth.engine.orchestrator.types import ExecutionCounters
 
 if TYPE_CHECKING:
     from elspeth.contracts.audit import TokenOutcome
+    from elspeth.contracts.run_result import RunResult
     from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -56,9 +57,16 @@ def _require_routed_sink_name(outcome_record: TokenOutcome, pair: tuple[Terminal
     return name
 
 
-def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
+def derive_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
     """Recover the truthful cumulative terminal status + counters of a
-    resumed run from the Landscape audit DB.
+    run from the Landscape audit DB.
+
+    ADR-030 §D: no longer resume-only — the NORMAL completion arm
+    (``Orchestrator.run``) also finalizes from this derive, so every path
+    produces an audit-derived terminal record (single bookkeeper; the
+    historical name ``derive_resume_terminal_status_from_audit`` remains as
+    an alias). The live loop counters are demoted to a cross-check
+    (:func:`assert_terminal_counter_parity`).
 
     Phase 2.2 (elspeth-0de989c56d) introduced this for the
     "all-rows-already-processed" resume branch (resume found no
@@ -204,6 +212,75 @@ def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: s
         rows_coalesce_failed=counters.rows_coalesce_failed,
     )
     return terminal_status, counters
+
+
+# Historical name (pre-ADR-030 §D the derive was resume-only). Kept so
+# existing callers/tests keep working; new code uses the unprefixed name.
+derive_resume_terminal_status_from_audit = derive_terminal_status_from_audit
+
+
+# Live-vs-audit counter fields compared strictly by assert_terminal_counter_parity.
+# rows_coalesce_failed is EXCLUDED — its two documented divergences (ADR-030 §D,
+# bug elspeth-ff6d48c180) are tolerated and logged instead:
+#   1. arrival-time barrier failures (branch-lost cascades, merge-exception
+#      cleanup) write FAILED node_states the derive counts but the live
+#      accumulator misses (it only counts the timeout/EOF sweeps) — audit MAY
+#      EXCEED live, and the audit value is the owned improvement;
+#   2. a zero-arrival best_effort_timeout_no_arrivals failure consumes no
+#      tokens and writes no node_states — live counts it, the derive cannot,
+#      so live MAY EXCEED audit (accepted, audit-is-truth doctrine).
+_PARITY_STRICT_FIELDS: tuple[str, ...] = (
+    "rows_processed",
+    "rows_succeeded",
+    "rows_failed",
+    "rows_routed_success",
+    "rows_routed_failure",
+    "rows_quarantined",
+    "rows_forked",
+    "rows_coalesced",
+    "rows_expanded",
+    "rows_buffered",
+    "rows_diverted",
+)
+
+
+def assert_terminal_counter_parity(*, live: RunResult, audit: ExecutionCounters, run_id: str) -> None:
+    """Cross-check the demoted live loop counters against the audit derive.
+
+    ADR-030 §D: the audit-derived counters ARE the terminal record; the live
+    accumulator survives only as this assertion. Any divergence outside the
+    two documented ``rows_coalesce_failed`` arms (see
+    ``_PARITY_STRICT_FIELDS``) means one of the two bookkeepers is broken —
+    crash loudly rather than record an unexplained terminal status.
+
+    Raises:
+        OrchestrationInvariantError: on any strict-field mismatch.
+    """
+    mismatches = {
+        field: {"live": getattr(live, field), "audit": getattr(audit, field)}
+        for field in _PARITY_STRICT_FIELDS
+        if getattr(live, field) != getattr(audit, field)
+    }
+    if dict(live.routed_destinations) != dict(audit.routed_destinations):
+        mismatches["routed_destinations"] = {
+            "live": dict(live.routed_destinations),
+            "audit": dict(audit.routed_destinations),
+        }
+    if mismatches:
+        raise OrchestrationInvariantError(
+            f"Live-vs-audit terminal counter mismatch for run {run_id!r}: {mismatches!r}. "
+            "The audit derive is the terminal record (ADR-030 §D); an unexplained divergence "
+            "from the live loop counters means one of the two bookkeepers is broken."
+        )
+    if live.rows_coalesce_failed != audit.rows_coalesce_failed:
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "rows_coalesce_failed live/audit divergence (documented, tolerated)",
+            run_id=run_id,
+            live=live.rows_coalesce_failed,
+            audit=audit.rows_coalesce_failed,
+        )
 
 
 def cli_completion_for(status: RunStatus) -> tuple[RunCompletionStatus, int]:

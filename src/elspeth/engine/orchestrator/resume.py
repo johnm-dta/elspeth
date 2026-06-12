@@ -34,6 +34,11 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import PipelineRow, ResumedRow, RunStatus
 from elspeth.contracts.config import RuntimeRetryConfig
+from elspeth.contracts.coordination import (
+    DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+    CoordinationToken,
+    mint_worker_id,
+)
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     EmptyResumeStateError,
@@ -50,8 +55,10 @@ from elspeth.core.landscape.factory import RecorderFactory
 
 # The immutable-success family (COMPLETED / COMPLETED_WITH_FAILURES / EMPTY)
 # is deliberately imported from its single source of truth rather than
-# duplicated: the resume() entry guard defers these statuses to the durable
-# run-immutability guard in RunLifecycleRepository.update_run_status().
+# duplicated: the resume() entry guard refuses these statuses as "Run is
+# terminal" (the §H loser-after-winner contract), with the durable
+# immutable-success backstops retained beneath (the acquire_run_leadership
+# takeover CAS and the run_lifecycle conditional UPDATEs).
 from elspeth.core.landscape.run_lifecycle_repository import _IMMUTABLE_SUCCESS_RUN_STATUSES
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.engine._best_effort import best_effort
@@ -476,27 +483,42 @@ class ResumeCoordinator:
         self,
         resume_point: ResumePoint,
         payload_store: PayloadStore,
+        *,
+        worker_id: str | None = None,
     ) -> ResumeState:
         """Reconstruct state needed to process resumed rows.
 
-        Creates a fresh factory, handles incomplete batches, deserializes the
-        source schema for type fidelity, validates the schema contract, and
-        retrieves unprocessed rows from the payload store. (Barrier state is
-        NOT restored here — that happens at processor construction, which
-        rebuilds executors from journal BLOCKED rows plus checkpoint scalars.)
+        Creates a fresh factory, validates resumability (read-only), then —
+        as the resume path's FIRST durable act (epoch 21, ADR-030 §B.4) —
+        executes the seat-acquisition CAS ``acquire_run_leadership``: one
+        BEGIN IMMEDIATE transaction carrying the seat takeover, the
+        FAILED/INTERRUPTED→RUNNING run-status flip, and the identity-eviction
+        of the deposed leader. A CAS loser is refused with
+        ``NonResumableRunError`` and ZERO mutation — this closes the
+        documented resume TOCTOU. Only after winning the seat does this
+        method rewrite incomplete batches. (Barrier state is NOT restored
+        here — that happens at processor construction, which rebuilds
+        executors from journal BLOCKED rows plus checkpoint scalars.)
 
         Args:
             resume_point: ResumePoint from RecoveryManager.get_resume_point()
             payload_store: PayloadStore for retrieving row data
+            worker_id: §A.1 worker identity minted by ``resume()``;
+                self-minted when None (direct repository-level callers).
 
         Returns:
-            ResumeState with all reconstruction results.
+            ResumeState with all reconstruction results, including the
+            leader ``coordination_token`` minted by the takeover CAS.
 
         Raises:
             ValueError: If checkpoint_manager is not initialized.
             OrchestrationInvariantError: If schema contract is missing from audit trail.
+            NonResumableRunError: If the seat CAS loses to a live leader.
+            AuditIntegrityError: If the run is terminally successful
+                (immutable-success durable backstop inside the CAS).
         """
         run_id = resume_point.checkpoint.run_id
+        worker_id = worker_id or mint_worker_id(run_id)
 
         # Create fresh factory (stateless, like run())
         # Pass payload_store for external call payload persistence
@@ -580,15 +602,32 @@ class ResumeCoordinator:
             source_schema_classes=source_schema_classes,
         )
 
-        # 1. Handle incomplete batches - call module function directly.
+        # 1. THE FIRST DURABLE ACT (epoch 21, ADR-030 §B.4 — TOCTOU closure):
+        # the seat-acquisition CAS. One BEGIN IMMEDIATE transaction = seat
+        # takeover (leader_epoch+1) + the FAILED/INTERRUPTED→RUNNING
+        # run-status flip (which this subsumed from the old
+        # update_run_status(RUNNING) first-durable-write) + identity-eviction
+        # of the deposed leader + leader_acquire/worker_register/worker_evict
+        # events. A CAS loser raises NonResumableRunError with zero mutation;
+        # a terminally-successful run is refused by the immutable-success
+        # durable backstop (AuditIntegrityError); a held WAL write lock
+        # surfaces as the operator-actionable WriteLockHeldError naming the
+        # registered workers' pids.
+        coordination_token = factory.run_coordination.acquire_run_leadership(
+            run_id=run_id,
+            worker_id=worker_id,
+            now=datetime.now(UTC),
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            entry_point="resume",
+        )
+
+        # 2. Handle incomplete batches - call module function directly.
         # The returned old→retry batch_id mapping feeds the processor's
         # journal-based barrier restore (BUFFERED token_outcomes still carry
         # the dead original batch ids after a flush-interrupting crash),
-        # threaded through ResumeState.
+        # threaded through ResumeState. Runs strictly AFTER the seat CAS:
+        # only the seat winner may rewrite retry batches.
         batch_id_remap = handle_incomplete_batches(factory.execution, run_id)
-
-        # 2. Update run status to running after validation has succeeded.
-        factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
         # 3. F1: barrier restore runs in PROCESSOR CONSTRUCTION — resume()
         # bundles a BarrierJournalRestoreContext (checkpoint scalars + the
@@ -610,6 +649,7 @@ class ResumeCoordinator:
             source_lifecycle_by_source=source_lifecycle_by_source,
             has_restored_barrier_work=has_restored_barrier_work,
             batch_id_remap=batch_id_remap,
+            coordination_token=coordination_token,
         )
 
     def resume(
@@ -653,31 +693,36 @@ class ResumeCoordinator:
         # RecoveryManager.can_resume() and never re-checked run status itself,
         # so a competing resume against a RUNNING run was ADMITTED. Re-check
         # here via the SAME shared implementation can_resume() uses, BEFORE
-        # the first mutation (rebase_sequence below, then
-        # reconstruct_resume_state's batch + run-header writes).
+        # the first mutation. The RUNNING arm's live-seat precision (§B.3:
+        # naming the incumbent + `elspeth join` direction) lives INSIDE
+        # check_run_status_resumable so the advisory and enforcing surfaces
+        # never drift.
         #
-        # The immutable-success family (COMPLETED / COMPLETED_WITH_FAILURES /
-        # EMPTY) is deliberately NOT intercepted here: the run-immutability
-        # guard in RunLifecycleRepository.update_run_status() already refuses
-        # those durably with AuditIntegrityError ("Successful terminal runs
-        # are immutable"), and that refusal is the pinned loser-after-winner
-        # contract (tests/e2e/recovery/test_concurrent_resume.py). This guard
-        # closes the caller-convention gap for everything else — RUNNING
-        # above all, plus runs that do not exist.
+        # Terminal-run arm (epoch 21, ADR-030 §H test #1 flip): the
+        # immutable-success family (COMPLETED / COMPLETED_WITH_FAILURES /
+        # EMPTY) is now refused HERE, at the entry guard, with a "Run is
+        # terminal" NonResumableRunError — the designed loser-after-winner
+        # contract. The durable immutability guards stay BENEATH as the
+        # backstop (the immutable-success arm inside the
+        # acquire_run_leadership takeover CAS, and update_run_status /
+        # complete_run's conditional UPDATEs — independently pinned in
+        # tests/unit/core/landscape/), so a caller that skips this guard
+        # still cannot mutate a successful terminal run.
         #
-        # KNOWN RESIDUAL (TOCTOU): two resumes can BOTH observe FAILED here
-        # before either flips the run to RUNNING in reconstruct_resume_state;
-        # closing that check-then-act window requires cross-process
-        # coordination (operator option c — a separate post-F1 effort,
-        # deliberately not attempted here). The immutability guard remains
-        # the durable backstop for the completed half of that window.
+        # The old TOCTOU residual (two resumes both observing FAILED here) is
+        # CLOSED at epoch 21: the first durable act of resume() is the
+        # seat-acquisition CAS in reconstruct_resume_state — exactly one of
+        # two racing resumes commits it; the loser is refused with zero
+        # mutation. Check-then-act at THIS guard is therefore acceptable —
+        # the leadership CAS is the arbiter (design §B.3).
         guarded_run_id = resume_point.checkpoint.run_id
         run_status, status_check = check_run_status_resumable(self._db, guarded_run_id)
-        if not status_check.can_resume and run_status not in _IMMUTABLE_SUCCESS_RUN_STATUSES:
-            raise NonResumableRunError(
-                guarded_run_id,
-                status_check.reason or f"Run status {run_status!r} precludes resume",
-            )
+        if not status_check.can_resume:
+            if run_status is not None and run_status in _IMMUTABLE_SUCCESS_RUN_STATUSES:
+                refusal_reason = f"Run is terminal (status {run_status.value!r}); successful terminal runs are immutable"
+            else:
+                refusal_reason = status_check.reason or f"Run status {run_status!r} precludes resume"
+            raise NonResumableRunError(guarded_run_id, refusal_reason)
 
         # ADR-010 §Decision 3: freeze both registries at bootstrap, mirroring
         # run(). Recovery happens in a new process — the module import chain
@@ -688,9 +733,17 @@ class ResumeCoordinator:
         prepare_for_run()
 
         self._checkpoints.rebase_sequence(resume_point.sequence_number)
-        state = self.reconstruct_resume_state(resume_point, payload_store)
+        # §A.1: mint this process's single-use worker identity; the takeover
+        # CAS inside reconstruct_resume_state registers it as the new leader
+        # and returns the fencing token on ResumeState.
+        resume_worker_id = mint_worker_id(resume_point.checkpoint.run_id)
+        state = self.reconstruct_resume_state(resume_point, payload_store, worker_id=resume_worker_id)
         run_id = state.run_id
         factory = state.factory
+        coordination_token = state.coordination_token
+        # Thread the token to the collaborators the slice-2 step-4 fences
+        # consume (checkpoint writes, finalize, ceremonies).
+        self._checkpoints.bind_coordination(coordination_token)
         schema_contracts_by_source = state.schema_contracts_by_source
         unprocessed_rows = state.unprocessed_rows
         # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
@@ -735,7 +788,18 @@ class ResumeCoordinator:
                 # correct four-value terminal status and feed it to both the
                 # Landscape finalize and the local RunResult.
                 terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
-                factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+                factory.run_lifecycle.finalize_run(run_id, status=terminal_status, token=coordination_token)
+
+                # Delete checkpoints on successful completion. LEADER WORK:
+                # the delete is epoch-fenced (ADR-030 §C.4 row 5) and must
+                # run BEFORE the seat release vacates the fence's CAS target.
+                self._checkpoints.delete_checkpoints(run_id)
+
+                # Seat hygiene (ADR-030 §D): release the seat AFTER the
+                # terminal finalize succeeded. Best-effort.
+                with best_effort("Seat release after resume finalize (no-work arm)", run_id=run_id):
+                    if coordination_token is not None:
+                        factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
 
                 # Emit RunFinished telemetry (matching the normal completion path)
                 self._ceremony.emit_telemetry(
@@ -766,9 +830,6 @@ class ResumeCoordinator:
                     )
                 )
 
-                # Delete checkpoints on successful completion
-                self._checkpoints.delete_checkpoints(run_id)
-
                 return audit_counters.to_run_result(run_id, terminal_status)
 
             with shutdown_ctx as active_event:
@@ -797,6 +858,7 @@ class ResumeCoordinator:
                     resume_checkpoint_id=resume_checkpoint_id,
                     schema_contracts_by_source=schema_contracts_by_source,
                     shutdown_event=active_event,
+                    coordination_token=coordination_token,
                 )
 
             # 6. Complete the run with reproducibility grade
@@ -841,8 +903,19 @@ class ResumeCoordinator:
             # (resumed run_B == uninterrupted oracle run_A).
             terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
 
-            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+            factory.run_lifecycle.finalize_run(run_id, status=terminal_status, token=coordination_token)
             result = audit_counters.to_run_result(run_id, terminal_status)
+
+            # Delete checkpoints on successful completion. LEADER WORK: the
+            # delete is epoch-fenced (ADR-030 §C.4 row 5) and must run BEFORE
+            # the seat release vacates the fence's CAS target.
+            self._checkpoints.delete_checkpoints(run_id)
+
+            # Seat hygiene (ADR-030 §D): release the seat AFTER the terminal
+            # finalize succeeded. Best-effort.
+            with best_effort("Seat release after resume finalize", run_id=run_id):
+                if coordination_token is not None:
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
@@ -875,13 +948,15 @@ class ResumeCoordinator:
                 )
             )
 
-            # 9. Delete checkpoints on successful completion
-            self._checkpoints.delete_checkpoints(run_id)
-
             return result
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
-                self._ceremony.emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
+                self._ceremony.emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time, token=coordination_token)
+                # Seat hygiene: only AFTER the INTERRUPTED finalize succeeded
+                # (same best_effort block); without this a failed resume's
+                # seat wedges retries for the liveness window.
+                if coordination_token is not None:
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
             with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
@@ -890,14 +965,21 @@ class ResumeCoordinator:
                     factory,
                     resume_start_time,
                     failed_exc.partial_result,
+                    token=coordination_token,
                 )
+                # Seat hygiene: after the FAILED finalize succeeded.
+                if coordination_token is not None:
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
         except Exception:
             # Finalize as FAILED to prevent the run from being stuck in RUNNING
             # permanently (which blocks future resume attempts). The outer broad-except
             # is justified — any unhandled exception during resume needs ceremony.
             with best_effort("Generic failure ceremony on resume", run_id=run_id):
-                self._ceremony.emit_failed_ceremony(run_id, factory, resume_start_time)
+                self._ceremony.emit_failed_ceremony(run_id, factory, resume_start_time, token=coordination_token)
+                # Seat hygiene: after the FAILED finalize succeeded.
+                if coordination_token is not None:
+                    factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise
         finally:
             self._ceremony.safe_flush_telemetry()
@@ -918,6 +1000,7 @@ class ResumeCoordinator:
         resume_checkpoint_id: str,
         schema_contracts_by_source: Mapping[NodeID, SchemaContract],
         shutdown_event: threading.Event | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
 
@@ -955,6 +1038,7 @@ class ResumeCoordinator:
             include_source_on_start=False,
             barrier_restore=barrier_restore,
             shutdown_event=shutdown_event,
+            coordination_token=coordination_token,
         )
 
         # ADR-025 §3: schema contracts are plural-by-source on resume.

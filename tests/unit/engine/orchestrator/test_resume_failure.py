@@ -999,7 +999,9 @@ class TestResumeFinalizesAsFailed:
 
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 3
-        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED)
+        # token=None: this unit test stubs reconstruct_resume_state, so no
+        # coordination seat exists and the threaded fencing token is None.
+        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED, token=None)
 
     def test_resume_with_only_journal_barrier_work_does_not_early_complete(self) -> None:
         """THE F1 TASK 3.2 TRAP: fully-buffered crashed run must not early-complete.

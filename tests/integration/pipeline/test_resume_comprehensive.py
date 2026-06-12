@@ -48,7 +48,7 @@ from elspeth.plugins.sources.null_source import NullSource
 from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_contract, make_row
 from tests.fixtures.base_classes import inject_write_failure
-from tests.fixtures.landscape import make_factory
+from tests.fixtures.landscape import insert_crashed_leader_seat, make_factory
 
 
 def _null_source(on_success: str = "default") -> NullSource:
@@ -153,6 +153,9 @@ def _build_two_source_failed_run(
                 openrouter_catalog_source="bundled",
             )
         )
+        # Epoch 21 (ADR-030): the crashed-run image includes the expired
+        # leader seat begin_run would have minted atomically with the run.
+        insert_crashed_leader_seat(conn, run_id=run_id)
         for node_id, plugin_name, node_type in [
             ("source-orders", "null", NodeType.SOURCE),
             ("source-refunds", "null", NodeType.SOURCE),
@@ -374,6 +377,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -900,6 +906,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1140,6 +1149,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1365,6 +1377,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1590,6 +1605,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1808,6 +1826,9 @@ class TestResumeComprehensive:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -2562,6 +2583,9 @@ class TestMultiSourceResumeContractDispatch:
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
             for node_id, plugin_name, node_type in [
                 ("source-only", "null", NodeType.SOURCE),
                 ("sink", "json", NodeType.SINK),

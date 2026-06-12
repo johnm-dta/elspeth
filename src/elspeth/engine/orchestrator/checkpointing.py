@@ -16,6 +16,7 @@ from elspeth.contracts.errors import OrchestrationInvariantError
 if TYPE_CHECKING:
     from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.identity import TokenInfo
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
@@ -33,10 +34,23 @@ class CheckpointCoordinator:
         self._checkpoint_config = checkpoint_config
         self._sequence_number = 0
         self._active_graph: ExecutionGraph | None = None  # relocated from Orchestrator._current_graph; late-bound at fire time
+        # ADR-030 leader fencing token; bound at run/resume start and
+        # threaded into every CheckpointManager write so the checkpoint
+        # INSERT/DELETE carries the verify-and-extend epoch fence.
+        self._coordination_token: CoordinationToken | None = None
 
     def set_active_graph(self, graph: ExecutionGraph | None) -> None:
         """Set (or clear) the active execution graph for late-bound checkpoint calls."""
         self._active_graph = graph
+
+    def bind_coordination(self, token: CoordinationToken | None) -> None:
+        """Bind (or clear) the leader fencing token for this run's checkpoint writes.
+
+        Called once at run/resume start with the token minted by
+        ``begin_run`` / ``acquire_run_leadership``. The token is carried by
+        value and never re-read mid-run (ADR-030 §G).
+        """
+        self._coordination_token = token
 
     def _checkpoint_gate(self, *, action: str) -> tuple[RuntimeCheckpointConfig, CheckpointManager, ExecutionGraph] | None:
         """Shared enabled/manager/graph precondition gate for checkpoint writes.
@@ -92,6 +106,7 @@ class CheckpointCoordinator:
             sequence_number=0,
             barrier_scalars=None,
             graph=graph,
+            coordination_token=self._coordination_token,
         )
 
     def maybe_checkpoint(
@@ -150,6 +165,7 @@ class CheckpointCoordinator:
                 sequence_number=self._sequence_number,
                 barrier_scalars=barrier_scalars,
                 graph=graph,
+                coordination_token=self._coordination_token,
             )
 
     def make_checkpoint_after_sink_factory(
@@ -222,6 +238,7 @@ class CheckpointCoordinator:
             sequence_number=self._sequence_number,
             barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
             graph=graph,
+            coordination_token=self._coordination_token,
         )
 
     def delete_checkpoints(self, run_id: str) -> None:
@@ -231,4 +248,4 @@ class CheckpointCoordinator:
             run_id: Run to clean up checkpoints for
         """
         if self._checkpoint_manager is not None:
-            self._checkpoint_manager.delete_checkpoints(run_id)
+            self._checkpoint_manager.delete_checkpoints(run_id, coordination_token=self._coordination_token)

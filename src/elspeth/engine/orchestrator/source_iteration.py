@@ -177,6 +177,10 @@ class SourceIterationDriver:
             ingest_sequence=ingest_sequence,
             source_row=source_item,
             validation_error_id=validation_error_id,
+            # ADR-030 §C.4 row 9: the quarantine arm is an ingest-adjacent
+            # durable rows write — it rides the leader epoch fence (rows +
+            # token in ONE fenced transaction).
+            coordination_token=processor.coordination_token,
         )
 
         # Record source node_state (step_index=0) for quarantine audit lineage.

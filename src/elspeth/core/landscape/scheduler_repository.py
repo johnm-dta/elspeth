@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from sqlalchemy import ColumnElement, and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts import TokenInfo
+from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
@@ -31,6 +33,7 @@ from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import (
     blocked_barrier_hold_clause,
     nodes_table,
@@ -40,6 +43,9 @@ from elspeth.core.landscape.schema import (
     token_work_items_table,
     tokens_table,
 )
+
+if TYPE_CHECKING:
+    from elspeth.contracts.audit import Row, Token
 
 
 def token_from_journal_item(
@@ -116,6 +122,35 @@ class TokenSchedulerRepository:
             )
 
         self._engine = engine
+
+    def _fenced_or_plain_write(
+        self,
+        *,
+        coordination_token: CoordinationToken | None,
+        now: datetime,
+        verb: str,
+    ) -> AbstractContextManager[Connection]:
+        """One write-intent transaction, leader-fenced when a token is supplied.
+
+        Slice-2 transitional surface: every ENGINE caller threads its
+        :class:`CoordinationToken` so the verify-and-extend epoch fence
+        (ADR-030 §C.4) is the first statement of the verb's transaction —
+        rowcount-0 rolls the whole transaction back, records a
+        ``fence_refusal`` event on a fresh connection, and raises
+        :class:`~elspeth.contracts.errors.RunLeadershipLostError`. ``None``
+        preserves the unfenced legacy arm for direct repository-level callers
+        (tests, tooling); slice 4 is expected to make the token mandatory once
+        the membership fences land.
+        """
+        if coordination_token is None:
+            return begin_write(self._engine)
+        return fenced_leader_transaction(
+            self._engine,
+            token=coordination_token,
+            now=now,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb=verb,
+        )
 
     def enqueue_ready(
         self,
@@ -222,6 +257,66 @@ class TokenSchedulerRepository:
         coalesce_name: str | None = None,
     ) -> TokenWorkItem:
         """Persist a READY continuation and claim it in the same audit transaction."""
+        with begin_write(self._engine) as conn:
+            row = self._enqueue_ready_claimed_on(
+                conn,
+                run_id=run_id,
+                token_id=token_id,
+                row_id=row_id,
+                node_id=node_id,
+                step_index=step_index,
+                ingest_sequence=ingest_sequence,
+                row_payload_json=row_payload_json,
+                available_at=available_at,
+                lease_owner=lease_owner,
+                lease_seconds=lease_seconds,
+                now=now,
+                attempt=attempt,
+                queue_key=queue_key,
+                barrier_key=barrier_key,
+                on_success_sink=on_success_sink,
+                branch_name=branch_name,
+                fork_group_id=fork_group_id,
+                join_group_id=join_group_id,
+                expand_group_id=expand_group_id,
+                coalesce_node_id=coalesce_node_id,
+                coalesce_name=coalesce_name,
+            )
+        return self._item_from_mapping(row)
+
+    def _enqueue_ready_claimed_on(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        token_id: str,
+        row_id: str,
+        node_id: str | None,
+        step_index: int,
+        ingest_sequence: int,
+        row_payload_json: str,
+        available_at: datetime,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+        attempt: int = 1,
+        queue_key: str | None = None,
+        barrier_key: str | None = None,
+        on_success_sink: str | None = None,
+        branch_name: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        coalesce_node_id: str | None = None,
+        coalesce_name: str | None = None,
+    ) -> RowMapping:
+        """Connection-accepting enqueue-and-claim: composes into the caller's transaction.
+
+        Extracted from :meth:`enqueue_ready_claimed` so the fenced ingest verb
+        (:meth:`ingest_row_with_initial_claim`, ADR-030 §C.4 row 9) can
+        compose the reference validation + idempotent insert + ENQUEUE/CLAIM
+        events onto ONE connection with the rows/tokens inserts.
+        """
         work_item_id = self._work_item_id(run_id, token_id, node_id, attempt)
         values = self._ready_work_item_values(
             run_id=run_id,
@@ -243,46 +338,125 @@ class TokenSchedulerRepository:
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
-        with begin_write(self._engine) as conn:
-            self._validate_work_item_references(
+        self._validate_work_item_references(
+            conn,
+            run_id=run_id,
+            token_id=token_id,
+            row_id=row_id,
+            ingest_sequence=ingest_sequence,
+            node_id=node_id,
+            coalesce_node_id=coalesce_node_id,
+        )
+        inserted = self._insert_work_item_idempotent(conn, values=values, operation="enqueue and claim READY scheduler work")
+        if inserted:
+            self._record_scheduler_event(
+                conn,
+                event_type=SchedulerEventType.ENQUEUE,
+                run_id=run_id,
+                token_id=token_id,
+                work_item_id=work_item_id,
+                node_id=node_id,
+                from_status=None,
+                to_status=TokenWorkStatus.READY,
+                from_lease_owner=None,
+                to_lease_owner=None,
+                from_attempt=None,
+                to_attempt=attempt,
+                recorded_at=available_at,
+            )
+        row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        if row["status"] == TokenWorkStatus.READY.value:
+            claimed = self._claim_ready_row(
+                conn,
+                row=row,
+                run_id=run_id,
+                lease_owner=lease_owner,
+                lease_seconds=lease_seconds,
+                now=now,
+            )
+            if claimed is not None:
+                row = claimed
+        return row
+
+    def ingest_row_with_initial_claim(
+        self,
+        *,
+        coordination_token: CoordinationToken,
+        now: datetime,
+        insert_row_and_token: Callable[[Connection], tuple[Row, Token]],
+        token_id: str,
+        row_id: str,
+        node_id: str | None,
+        step_index: int,
+        ingest_sequence: int,
+        row_payload_json: str,
+        lease_owner: str,
+        lease_seconds: int,
+        queue_key: str | None = None,
+        barrier_key: str | None = None,
+        on_success_sink: str | None = None,
+        branch_name: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        coalesce_node_id: str | None = None,
+        coalesce_name: str | None = None,
+    ) -> tuple[Row, Token, TokenWorkItem]:
+        """Fenced leader INGEST (ADR-030 §C.4 row 9): one IMMEDIATE transaction.
+
+        Composes (1) the verify-and-extend epoch fence, (2) the ``rows`` +
+        ``tokens`` inserts (via the injected ``insert_row_and_token``
+        callable, a closure over ``DataFlowRepository.insert_row_with_token_on``),
+        and (3) the initial enqueue-and-claim — on ONE connection. A stale
+        epoch refuses the WHOLE ingest: the rows insert rolls back with
+        everything else, so a deposed leader woken mid-ingest leaves no
+        orphan ``rows`` row (crash-walk step 8). The UNIQUE
+        ``(run_id, ingest_sequence)`` constraint becomes a true backstop.
+
+        ``coordination_token`` is REQUIRED — this verb has no legacy callers.
+        Raises :class:`~elspeth.contracts.errors.RunLeadershipLostError` on a
+        fence miss (``fence_refusal`` evented on a fresh connection).
+        """
+        run_id = coordination_token.run_id
+        with fenced_leader_transaction(
+            self._engine,
+            token=coordination_token,
+            now=now,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb="ingest_row_with_initial_claim",
+        ) as conn:
+            row_record, token_record = insert_row_and_token(conn)
+            if row_record.row_id != row_id or token_record.token_id != token_id:
+                raise AuditIntegrityError(
+                    f"Fenced ingest for run_id={run_id!r} inserted row_id={row_record.row_id!r} / "
+                    f"token_id={token_record.token_id!r} but the scheduler enqueue was declared for "
+                    f"row_id={row_id!r} / token_id={token_id!r}; the composed transaction would "
+                    "journal a cursor for identities it did not insert."
+                )
+            scheduled = self._enqueue_ready_claimed_on(
                 conn,
                 run_id=run_id,
                 token_id=token_id,
                 row_id=row_id,
-                ingest_sequence=ingest_sequence,
                 node_id=node_id,
+                step_index=step_index,
+                ingest_sequence=ingest_sequence,
+                row_payload_json=row_payload_json,
+                available_at=now,
+                lease_owner=lease_owner,
+                lease_seconds=lease_seconds,
+                now=now,
+                queue_key=queue_key,
+                barrier_key=barrier_key,
+                on_success_sink=on_success_sink,
+                branch_name=branch_name,
+                fork_group_id=fork_group_id,
+                join_group_id=join_group_id,
+                expand_group_id=expand_group_id,
                 coalesce_node_id=coalesce_node_id,
+                coalesce_name=coalesce_name,
             )
-            inserted = self._insert_work_item_idempotent(conn, values=values, operation="enqueue and claim READY scheduler work")
-            if inserted:
-                self._record_scheduler_event(
-                    conn,
-                    event_type=SchedulerEventType.ENQUEUE,
-                    run_id=run_id,
-                    token_id=token_id,
-                    work_item_id=work_item_id,
-                    node_id=node_id,
-                    from_status=None,
-                    to_status=TokenWorkStatus.READY,
-                    from_lease_owner=None,
-                    to_lease_owner=None,
-                    from_attempt=None,
-                    to_attempt=attempt,
-                    recorded_at=available_at,
-                )
-            row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
-            if row["status"] == TokenWorkStatus.READY.value:
-                claimed = self._claim_ready_row(
-                    conn,
-                    row=row,
-                    run_id=run_id,
-                    lease_owner=lease_owner,
-                    lease_seconds=lease_seconds,
-                    now=now,
-                )
-                if claimed is not None:
-                    row = claimed
-        return self._item_from_mapping(row)
+        return row_record, token_record, self._item_from_mapping(scheduled)
 
     def _ready_work_item_values(
         self,
@@ -811,8 +985,21 @@ class TokenSchedulerRepository:
                 )
         return self._item_from_mapping(claimed)
 
-    def recover_expired_leases(self, *, run_id: str, now: datetime, caller_owner: str) -> int:
+    def recover_expired_leases(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+        coordination_token: CoordinationToken | None = None,
+    ) -> int:
         """Return expired LEASED work to READY for retry by another worker.
+
+        ``coordination_token`` (ADR-030 §C.4 row 8): the repair sweep is a
+        LEADER verb — the verify-and-extend epoch fence runs as the first
+        statement of the transaction so a deposed leader cannot rotate
+        attempts under the new one. The reap arms beneath are byte-identical
+        to the unfenced form (liveness-aware predicates are slice 4).
 
         Recovery advances the durable scheduler attempt so any node state
         created before the crashed worker lost its lease is not replayed under
@@ -860,7 +1047,7 @@ class TokenSchedulerRepository:
             token_work_items_table.c.lease_owner.is_(None),
             token_work_items_table.c.lease_owner != caller_owner,
         )
-        with begin_write(self._engine) as conn:
+        with self._fenced_or_plain_write(coordination_token=coordination_token, now=now, verb="recover_expired_leases") as conn:
             expired = conn.execute(
                 select(token_work_items_table)
                 .where(token_work_items_table.c.run_id == run_id)
@@ -1173,7 +1360,16 @@ class TokenSchedulerRepository:
         now: datetime,
         expected_lease_owner: str,
     ) -> TokenWorkItem:
-        """Move a claimed item to a durable sink handoff state."""
+        """Move a claimed item to a durable sink handoff state.
+
+        Attributed park (ADR-030 strict pending-sink terminalization): the
+        parked row KEEPS ``lease_owner=expected_lease_owner`` with
+        ``lease_expires_at=None`` — "parked, owner-attributed, not leased"
+        (schema-legal: the lease CHECK constrains only LEASED rows). The
+        post-sink terminalization (:meth:`mark_pending_sink_terminal`) then
+        CASes strictly on that owner; the historical NULL park forced a
+        NULL-acceptance arm there that a takeover could slip through.
+        """
         return self._transition(
             work_item_id=work_item_id,
             now=now,
@@ -1185,7 +1381,7 @@ class TokenSchedulerRepository:
             pending_path=path,
             pending_error_hash=error_hash,
             pending_error_message=error_message,
-            lease_owner=None,
+            lease_owner=expected_lease_owner,
             lease_expires_at=None,
         )
 
@@ -1195,20 +1391,47 @@ class TokenSchedulerRepository:
         run_id: str,
         token_id: str,
         now: datetime,
-        expected_lease_owner: str | None = None,
+        expected_lease_owner: str,
+        coordination_token: CoordinationToken | None = None,
     ) -> int:
-        """Terminalize pending sink scheduler work after token outcome durability."""
+        """Terminalize pending sink scheduler work after token outcome durability.
+
+        ``expected_lease_owner`` is REQUIRED and the owner CAS is STRICT
+        (ADR-030 §C.4 row 7): the historical NULL-owner acceptance arm is
+        deleted. Every path that parks a row into PENDING_SINK now attributes
+        the owner (``mark_pending_sink`` / ``complete_barrier``'s emission
+        arms stamp it; ``recover_expired_leases``' reap arm deliberately
+        parks NULL because the prior owner is deposed — reaped handoffs are
+        always re-claimed via ``claim_pending_sink``, which overwrites the
+        owner, before terminalization). A row whose owner does not match —
+        including NULL — is simply not terminalized (returns 0 for the
+        caller's loud invariant check).
+
+        ``coordination_token`` (ADR-030 §C.4 row 7, "per terminalization
+        batch"): when supplied, the verify-and-extend leader epoch fence is
+        the FIRST statement of this verb's transaction — a deposed leader
+        cannot terminalize the new leader's ledger even with a matching
+        owner. ``None`` preserves the unfenced legacy arm.
+        """
         predicates = [
             token_work_items_table.c.run_id == run_id,
             token_work_items_table.c.token_id == token_id,
             token_work_items_table.c.status.in_((TokenWorkStatus.PENDING_SINK.value, TokenWorkStatus.LEASED.value)),
             token_work_items_table.c.pending_sink_name.is_not(None),
+            token_work_items_table.c.lease_owner == expected_lease_owner,
         ]
-        if expected_lease_owner is not None:
-            predicates.append(
-                (token_work_items_table.c.lease_owner.is_(None)) | (token_work_items_table.c.lease_owner == expected_lease_owner)
+        write_ctx = (
+            begin_write(self._engine)
+            if coordination_token is None
+            else fenced_leader_transaction(
+                self._engine,
+                token=coordination_token,
+                now=now,
+                window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                verb="mark_pending_sink_terminal",
             )
-        with begin_write(self._engine) as conn:
+        )
+        with write_ctx as conn:
             rows = (
                 conn.execute(select(token_work_items_table).where(and_(*predicates)).order_by(token_work_items_table.c.work_item_id))
                 .mappings()
@@ -1267,8 +1490,21 @@ class TokenSchedulerRepository:
         leased_exclusion_token_id: str | None = None,
         require_exhaustive_release: bool = True,
         scope_row_id: str | None = None,
+        coordination_token: CoordinationToken | None = None,
+        pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Complete a barrier atomically: consume BLOCKED inputs and emit outputs.
+
+        ``coordination_token`` (ADR-030 §C.4 row 6): the verify-and-extend
+        epoch fence runs as the FIRST statement of the journal transaction —
+        a deposed leader's completion is refused before any journal mutation.
+        Fenced on BOTH arms (the legacy partial-release wrappers are leader
+        verbs too). ``pending_sink_lease_owner`` is the attributed-park stamp
+        for the pending-sink emission arms (passthrough transition + fresh
+        insert): strict post-sink terminalization
+        (:meth:`mark_pending_sink_terminal[_many]`) CASes on it. The engine
+        passes its scheduler lease owner (== the §A.1 worker identity); None
+        preserves the legacy NULL park for direct repository callers.
 
         ONE journal transaction (F1, elspeth-ae5183307b) performs:
 
@@ -1403,7 +1639,7 @@ class TokenSchedulerRepository:
         if scope_row_id is not None:
             blocked_select = blocked_select.where(token_work_items_table.c.row_id == scope_row_id)
 
-        with begin_write(self._engine) as conn:
+        with self._fenced_or_plain_write(coordination_token=coordination_token, now=now, verb="complete_barrier") as conn:
             blocked_rows = (
                 conn.execute(
                     blocked_select.order_by(
@@ -1487,6 +1723,7 @@ class TokenSchedulerRepository:
                 passthrough_emissions=passthrough_emissions,
                 emission_context=emission_context,
                 now=now,
+                parked_lease_owner=pending_sink_lease_owner,
             )
             for emission in fresh_emissions:
                 self._insert_fresh_pending_sink_emission(
@@ -1496,6 +1733,7 @@ class TokenSchedulerRepository:
                     emission=emission,
                     emission_context=emission_context,
                     now=now,
+                    parked_lease_owner=pending_sink_lease_owner,
                 )
             for emission in emitted_ready:
                 self._insert_ready_emission(
@@ -1583,8 +1821,15 @@ class TokenSchedulerRepository:
         passthrough_emissions: Sequence[BarrierEmission],
         emission_context: Mapping[str, object],
         now: datetime,
+        parked_lease_owner: str | None = None,
     ) -> None:
-        """BLOCKED -> PENDING_SINK in place for buffered passthrough tokens (legacy handoff arm)."""
+        """BLOCKED -> PENDING_SINK in place for buffered passthrough tokens (legacy handoff arm).
+
+        ``parked_lease_owner`` is the attributed-park stamp (ADR-030): the
+        handed-off row is parked owner-attributed but not leased
+        (``lease_expires_at`` stays NULL) so the strict post-sink owner CAS
+        can terminalize it.
+        """
         emission_by_token = {emission.token_id: emission for emission in passthrough_emissions}
         if not emission_by_token:
             return
@@ -1608,7 +1853,7 @@ class TokenSchedulerRepository:
                     pending_path=emission.path,
                     pending_error_hash=emission.error_hash,
                     pending_error_message=emission.error_message,
-                    lease_owner=None,
+                    lease_owner=parked_lease_owner,
                     lease_expires_at=None,
                     updated_at=now,
                 )
@@ -1624,7 +1869,7 @@ class TokenSchedulerRepository:
                     from_status=TokenWorkStatus.BLOCKED,
                     to_status=TokenWorkStatus.PENDING_SINK,
                     from_lease_owner=row["lease_owner"],
-                    to_lease_owner=None,
+                    to_lease_owner=parked_lease_owner,
                     from_attempt=row["attempt"],
                     to_attempt=row["attempt"],
                     recorded_at=now,
@@ -1653,8 +1898,13 @@ class TokenSchedulerRepository:
         emission: BarrierEmission,
         emission_context: Mapping[str, object],
         now: datetime,
+        parked_lease_owner: str | None = None,
     ) -> None:
-        """INSERT a fresh PENDING_SINK row on the node_id-NULL terminal lane."""
+        """INSERT a fresh PENDING_SINK row on the node_id-NULL terminal lane.
+
+        ``parked_lease_owner``: attributed-park stamp (ADR-030); see
+        :meth:`_transition_passthrough_pending_sink`.
+        """
         if emission.node_id is not None:
             raise AuditIntegrityError(
                 f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} "
@@ -1702,7 +1952,7 @@ class TokenSchedulerRepository:
             "coalesce_node_id": emission.coalesce_node_id,
             "coalesce_name": emission.coalesce_name,
             "attempt": emission.attempt,
-            "lease_owner": None,
+            "lease_owner": parked_lease_owner,
             "lease_expires_at": None,
             "available_at": now,
             "created_at": now,
@@ -1719,7 +1969,7 @@ class TokenSchedulerRepository:
             from_status=None,
             to_status=TokenWorkStatus.PENDING_SINK,
             from_lease_owner=None,
-            to_lease_owner=None,
+            to_lease_owner=parked_lease_owner,
             from_attempt=None,
             to_attempt=emission.attempt,
             recorded_at=now,
@@ -1797,6 +2047,8 @@ class TokenSchedulerRepository:
         barrier_key: str,
         handoffs: Mapping[str, BlockedPendingSinkHandoff],
         now: datetime,
+        coordination_token: CoordinationToken | None = None,
+        pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Move BLOCKED barrier work to PENDING_SINK before external sink writes.
 
@@ -1829,6 +2081,8 @@ class TokenSchedulerRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
+            coordination_token=coordination_token,
+            pending_sink_lease_owner=pending_sink_lease_owner,
         )
         # complete_barrier raised unless every requested handoff transitioned.
         return len(requested_token_ids)
@@ -1839,13 +2093,27 @@ class TokenSchedulerRepository:
         run_id: str,
         token_ids: tuple[str, ...],
         now: datetime,
-        expected_lease_owner: str | None = None,
+        expected_lease_owner: str,
+        coordination_token: CoordinationToken | None = None,
     ) -> int:
         """Terminalize sink-bound scheduler work for a durable sink batch.
 
         This preserves the audit contract of one scheduler event per terminalized
         work item while avoiding one transaction and one indexed SELECT per token
         after large sink writes.
+
+        ``expected_lease_owner`` is REQUIRED and the owner CAS is STRICT
+        (ADR-030 §C.4 row 7; see :meth:`mark_pending_sink_terminal` for the
+        attributed-park co-change): a row whose owner does not match —
+        including NULL — refuses the whole batch with
+        :class:`~elspeth.contracts.errors.AuditIntegrityError`.
+
+        ``coordination_token`` (ADR-030 §C.4 row 7, "per terminalization
+        batch"): when supplied, the verify-and-extend leader epoch fence is
+        the FIRST statement of the batch transaction; a deposed leader's
+        batch is refused with :class:`RunLeadershipLostError` (and a
+        ``fence_refusal`` event) before any row is touched. ``None``
+        preserves the unfenced legacy arm.
         """
         requested_token_ids = token_ids
         if not requested_token_ids:
@@ -1864,7 +2132,18 @@ class TokenSchedulerRepository:
             token_work_items_table.c.status.in_((TokenWorkStatus.PENDING_SINK.value, TokenWorkStatus.LEASED.value)),
             token_work_items_table.c.pending_sink_name.is_not(None),
         ]
-        with begin_write(self._engine) as conn:
+        write_ctx = (
+            begin_write(self._engine)
+            if coordination_token is None
+            else fenced_leader_transaction(
+                self._engine,
+                token=coordination_token,
+                now=now,
+                window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                verb="mark_pending_sink_terminal_many",
+            )
+        )
+        with write_ctx as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table)
@@ -1897,19 +2176,15 @@ class TokenSchedulerRepository:
                         f"{len(matching_rows)} matching rows; expected exactly one."
                     )
                 row_lease_owner = matching_rows[0]["lease_owner"]
-                if expected_lease_owner is not None and row_lease_owner not in (None, expected_lease_owner):
+                if row_lease_owner != expected_lease_owner:
                     raise AuditIntegrityError(
                         f"Scheduler pending-sink batch terminalization for run_id={run_id!r} token_id={token_id!r} found "
-                        f"lease_owner={row_lease_owner!r}; expected lease_owner={expected_lease_owner!r} or NULL."
+                        f"lease_owner={row_lease_owner!r}; expected lease_owner={expected_lease_owner!r} "
+                        "(strict owner CAS — NULL-owner acceptance removed, ADR-030)."
                     )
 
             terminalized = 0
             for row in rows:
-                lease_owner_predicate = (
-                    token_work_items_table.c.lease_owner.is_(None)
-                    if row["lease_owner"] is None
-                    else token_work_items_table.c.lease_owner == row["lease_owner"]
-                )
                 result = conn.execute(
                     update(token_work_items_table)
                     .where(token_work_items_table.c.work_item_id == row["work_item_id"])
@@ -1917,7 +2192,7 @@ class TokenSchedulerRepository:
                     .where(token_work_items_table.c.token_id == row["token_id"])
                     .where(token_work_items_table.c.status == row["status"])
                     .where(token_work_items_table.c.pending_sink_name.is_not(None))
-                    .where(lease_owner_predicate)
+                    .where(token_work_items_table.c.lease_owner == expected_lease_owner)
                     .values(
                         status=TokenWorkStatus.TERMINAL.value,
                         row_payload_json=self._scrubbed_row_payload_json(row["token_id"]),
@@ -1953,12 +2228,26 @@ class TokenSchedulerRepository:
                     )
         return terminalized
 
-    def terminalize_pending_sinks_with_terminal_outcomes(self, *, run_id: str, now: datetime, caller_owner: str) -> int:
+    def terminalize_pending_sinks_with_terminal_outcomes(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+        coordination_token: CoordinationToken | None = None,
+    ) -> int:
         """Repair PENDING_SINK work whose terminal token outcome is already durable.
 
         A crash can land after sink outcome durability but before the scheduler
         handoff row is marked terminal. Resume must not claim and re-emit those
         rows externally; the terminal token outcome is the authoritative witness.
+
+        ``coordination_token`` (ADR-030 §G): this verb deliberately
+        terminalizes REGARDLESS of owner — it is the crash-repair verb and
+        the terminal token outcome is the witness — so its protection is the
+        leader epoch fence (first statement of the transaction), not the
+        owner CAS. Owner-blindness is unchanged; ``caller_owner`` remains the
+        event attribution only.
         """
         terminal_outcome_exists = (
             select(token_outcomes_table.c.outcome_id)
@@ -1967,7 +2256,9 @@ class TokenSchedulerRepository:
             .where(token_outcomes_table.c.completed == 1)
             .exists()
         )
-        with begin_write(self._engine) as conn:
+        with self._fenced_or_plain_write(
+            coordination_token=coordination_token, now=now, verb="terminalize_pending_sinks_with_terminal_outcomes"
+        ) as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table)
@@ -2034,6 +2325,7 @@ class TokenSchedulerRepository:
         barrier_key: str,
         token_ids: tuple[str, ...],
         now: datetime,
+        coordination_token: CoordinationToken | None = None,
     ) -> int:
         """Mark BLOCKED work consumed by a resolved barrier as terminal.
 
@@ -2056,6 +2348,7 @@ class TokenSchedulerRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
+            coordination_token=coordination_token,
         )
 
     def peer_active_leases(

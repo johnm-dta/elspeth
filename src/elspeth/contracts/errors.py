@@ -28,6 +28,7 @@ FrameworkBugError = tier_1_error(
 
 if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
+    from elspeth.contracts.coordination import RegisteredWorker
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,6 +751,132 @@ class SchedulerLeaseLostError(Exception):
             f"lease_owner={lease_owner!r} on run_id={run_id!r}: the row has been "
             "reaped or reassigned by a peer worker. This worker must abandon "
             "its in-flight processing without a follow-up scheduler write."
+        )
+
+
+# The run's leader seat moved to a new epoch (takeover CAS, ADR-030 §B.4), so
+# this worker's fenced transaction was refused by the verify-and-extend CAS and
+# rolled back with ZERO durable mutation. The audit trail is intact (the refusal
+# itself is best-effort attributed via a fence_refusal coordination event); the
+# deposed worker must abandon cleanly, the same discipline as
+# SchedulerLeaseLostError at the item level. Not corruption: the
+# immutability/uniqueness backstops beneath the fence remain Tier-1.
+# TIER-2: Legitimate multi-worker coordination — a peer took over the leader seat; the fenced write rolled back cleanly with zero mutation, not audit corruption.
+class RunLeadershipLostError(Exception):
+    """Raised when the leader verify-and-extend epoch fence CAS misses (ADR-030 §C.4).
+
+    The first statement of every leader-fenced transaction is a conditional
+    UPDATE on ``run_coordination`` matching ``(run_id, leader_worker_id,
+    leader_epoch)``. Rowcount 0 means the seat was taken over (epoch bumped)
+    or released: the entire transaction rolls back before any payload write,
+    and this worker — a deposed leader — must abandon its run-scoped work
+    without further audit writes.
+
+    Attributes:
+        run_id: The run whose seat fence refused this worker.
+        worker_id: The identity this worker held the (stale) token under.
+        leader_epoch: The stale epoch the refused token carried.
+        verb: The fenced verb that was refused (forensic attribution; also
+            recorded in the best-effort ``fence_refusal`` coordination event).
+    """
+
+    def __init__(self, *, run_id: str, worker_id: str, leader_epoch: int, verb: str) -> None:
+        self.run_id = run_id
+        self.worker_id = worker_id
+        self.leader_epoch = leader_epoch
+        self.verb = verb
+        super().__init__(
+            f"Run leadership lost for run_id={run_id!r}: worker_id={worker_id!r} "
+            f"holds stale leader_epoch={leader_epoch} (refused at verb {verb!r}). "
+            "The seat was taken over or released; this worker must abandon its "
+            "run-scoped work without further audit writes."
+        )
+
+
+# This worker's run_workers registry row left 'active' (evicted by the leader's
+# housekeeping sweep, or departed at finalize). Single-use identity doctrine
+# (ADR-030): the row never returns to 'active'; the drain loop abandons
+# in-flight work cleanly at the next boundary, exactly the
+# SchedulerLeaseLostError discipline.
+# TIER-2: Legitimate multi-worker coordination — registry eviction/departure is a clean abandon signal handled by the drain loop, not audit corruption.
+class RunWorkerEvictedError(Exception):
+    """Raised when a worker discovers its registry row is no longer ``active``.
+
+    Latched from the heartbeat CAS miss (slice-4 thread) or raised directly
+    when a membership-fenced verb (``claim_ready`` / ``claim_pending_sink`` /
+    ``enqueue_ready``, slice 4) refuses with zero rows. The worker abandons
+    in-flight processing without emitting; a returning process mints a fresh
+    worker identity and re-admits.
+
+    Attributes:
+        worker_id: The evicted/departed worker identity.
+        run_id: The run the registration belonged to.
+    """
+
+    def __init__(self, *, worker_id: str, run_id: str) -> None:
+        self.worker_id = worker_id
+        self.run_id = run_id
+        super().__init__(
+            f"Worker {worker_id!r} is no longer an active member of run {run_id!r} "
+            "(evicted or departed). Worker identities are single-use; abandon "
+            "in-flight work and re-admit under a fresh identity if appropriate."
+        )
+
+
+# Joining this run is not currently admissible (run terminal, config-hash
+# mismatch, no live leader, or a failed filesystem preflight). The audit DB is
+# intact; same register as NonResumableRunError on the resume path.
+# TIER-2: Operator-interpretable refuse signal — join admission precondition failed, carried as run_id + reason; the audit DB is intact, not corruption.
+class JoinRefusedError(Exception):
+    """Raised when ``elspeth join`` admission is refused (ADR-030 §B.1).
+
+    Carries ``run_id`` and a human-readable ``reason`` so CLI/API callers can
+    surface a precise refusal (e.g. "run is terminal", "FAILED — use
+    ``elspeth resume``", "no live leader", config-hash mismatch, or an
+    actionable filesystem-writability failure) without parsing text.
+    """
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        self.run_id = run_id
+        self.reason = reason
+        super().__init__(f"Cannot join run {run_id!r}: {reason}")
+
+
+# The audit DB write lock is held by a live or frozen process, so the takeover
+# CAS could not even begin (SQLITE_BUSY after the busy_timeout poll). NOT
+# "leadership held": ADR-030 §B.4 requires BUSY to be reported distinctly from a
+# clean CAS loss. The remediation is operator SIGKILL of the wedged holder
+# (locks release on process death); the registered-worker forensics
+# (pid/hostname) carried here make that actionable.
+# TIER-2: Operator-actionable environmental refusal — a held WAL write lock surfaced with pid forensics for remediation; the audit DB is intact, not corruption.
+class WriteLockHeldError(Exception):
+    """Raised when a coordination write times out on the audit DB write lock.
+
+    Distinct from ``NonResumableRunError`` (clean seat-CAS loss to a live
+    leader): a busy timeout means some process — live or frozen — holds the
+    WAL write lock. Carries the run's registered workers (pid/hostname/role
+    forensics from ``run_workers``) so the operator knows what to inspect or
+    SIGKILL.
+
+    Attributes:
+        run_id: The run whose coordination write was refused.
+        workers: Registered ``run_workers`` rows for the run at refusal time
+            (read on a plain read connection; WAL readers don't block on the
+            writer). May be empty if the registry could not be read.
+    """
+
+    def __init__(self, *, run_id: str, workers: tuple["RegisteredWorker", ...]) -> None:
+        self.run_id = run_id
+        self.workers = workers
+        roster = (
+            "; ".join(f"worker_id={w.worker_id!r} role={w.role} status={w.status} pid={w.pid} hostname={w.hostname!r}" for w in workers)
+            or "<none readable>"
+        )
+        super().__init__(
+            f"The audit DB write lock is held by a live or frozen process; the "
+            f"coordination write for run {run_id!r} timed out at BEGIN IMMEDIATE. "
+            f"Registered workers: {roster}. If a worker is frozen inside a "
+            "transaction, SIGKILL it (SQLite locks release on process death) and retry."
         )
 
 

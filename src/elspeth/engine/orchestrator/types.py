@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.checkpoint import ResumedRow
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -68,6 +69,11 @@ class RowProcessorHandle(Protocol):
     @property
     def token_manager(self) -> Any:
         raise NotImplementedError
+
+    @property
+    def coordination_token(self) -> CoordinationToken | None:
+        """Leader fencing token bound at construction (ADR-030)."""
+        ...
 
     def process_row(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
@@ -612,6 +618,12 @@ class ResumeState:
     # by the processor's journal restore (BUFFERED token_outcomes still carry
     # the dead original batch ids after a flush-interrupting crash).
     batch_id_remap: Mapping[str, str] = field(default_factory=dict)
+    # ADR-030 (epoch 21): the leader fencing token minted by resume()'s
+    # seat-acquisition CAS (acquire_run_leadership) — the resume path's FIRST
+    # durable act. Carried by value out of reconstruct_resume_state to the
+    # processor / checkpoint / finalize collaborators; never re-read mid-run.
+    # A frozen dataclass — no freezing needed here.
+    coordination_token: CoordinationToken | None = None
 
     def __post_init__(self) -> None:
         # Local import to avoid hoisting OrchestrationInvariantError into the

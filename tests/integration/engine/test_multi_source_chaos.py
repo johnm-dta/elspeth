@@ -708,7 +708,11 @@ def test_lease_expiry_mid_transform_peer_reclaim_bumps_attempt_and_fences_stale_
     assert recovery["from_attempt"] == 1 and recovery["to_attempt"] == 2
     assert recovery["to_status"] == TokenWorkStatus.READY.value
     stale_owner = recovery["from_lease_owner"]
-    assert isinstance(stale_owner, str) and stale_owner.startswith("row-processor:")
+    # Epoch 21 (ADR-030 §A.1): the engine threads the registered worker
+    # identity (worker:{run_id}:{uuid}) into RowProcessor as the scheduler
+    # lease_owner; row-processor:{run_id}:{uuid} remains only as the fallback
+    # mint for direct repository-level construction.
+    assert isinstance(stale_owner, str) and stale_owner.startswith("worker:")
 
     assert fence["token_id"] == busted_item["token_id"]
     assert fence["caller_owner"] == stale_owner

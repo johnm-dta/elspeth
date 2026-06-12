@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
@@ -38,6 +39,7 @@ from elspeth.core.checkpoint.manager import CheckpointCorruptionError, Checkpoin
 from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.schema import (
     blocked_barrier_hold_clause,
     node_states_table,
@@ -133,7 +135,23 @@ def check_run_status_resumable(db: LandscapeDB, run_id: str) -> tuple[RunStatus 
         return run_status, ResumeCheck(can_resume=False, reason="Run already completed successfully")
 
     if run_status == RunStatus.RUNNING:
-        return run_status, ResumeCheck(can_resume=False, reason="Run is still in progress")
+        # §B.3 live-seat precision arm (epoch 21, ADR-030 — slice 2 ships the
+        # live-seat half): a RUNNING run under a LIVE leader seat is refused
+        # naming the incumbent and pointing at `elspeth join` (the join verb
+        # itself lands in slice 5). Lives HERE — in the SHARED implementation —
+        # so the advisory can_resume() and the enforcing resume() entry guard
+        # produce the SAME reason (the elspeth-2f23292372 parity contract).
+        # RUNNING + expired/absent seat keeps the flat refusal until slice 4
+        # teaches the guard seat liveness (dead-leader takeover).
+        reason = "Run is still in progress"
+        leader = RunCoordinationRepository(db.engine).live_leader(run_id=run_id, now=datetime.now(UTC))
+        if leader is not None and leader.seat_live:
+            reason = (
+                f"Run is in progress under live leader {leader.leader_worker_id!r} "
+                f"(seat expires {leader.leader_heartbeat_expires_at.isoformat()}) — "
+                "use `elspeth join` to attach as a follower"
+            )
+        return run_status, ResumeCheck(can_resume=False, reason=reason)
 
     if run_status not in _RESUMABLE_RUN_STATUSES:
         return run_status, ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")

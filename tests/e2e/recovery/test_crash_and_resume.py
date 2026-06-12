@@ -13,7 +13,7 @@ import json
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -49,7 +49,10 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
     nodes_table,
     rows_table,
+    run_coordination_events_table,
+    run_coordination_table,
     run_sources_table,
+    run_workers_table,
     runs_table,
     token_outcomes_table,
     tokens_table,
@@ -890,6 +893,19 @@ class TestResumeIdempotence:
         # Mark run as failed (simulating crash)
         factory.run_lifecycle.complete_run(run_id, status=RunStatus.FAILED)
 
+        # Epoch 21 (ADR-030 §B.4): begin_run minted this run's leader seat
+        # (uniformity rule), and a hard-killed leader never releases it — the
+        # seat stays HELD until its liveness window lapses. Resume's takeover
+        # CAS requires vacant-or-expired, so craft the post-window image
+        # deterministically (the in-DB picture an operator sees ~80s after
+        # the crash) instead of sleeping out the window.
+        with db_b.engine.begin() as conn:
+            conn.execute(
+                run_coordination_table.update()
+                .where(run_coordination_table.c.run_id == run_id)
+                .values(leader_heartbeat_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+
         # Phase 2: Resume and process remaining rows
         recovery_mgr = RecoveryManager(db_b, checkpoint_mgr)
 
@@ -947,6 +963,33 @@ class TestResumeIdempotence:
         assert combined_output == baseline_output, (
             f"Resume did not produce same result as uninterrupted run.\nExpected: {baseline_output}\nGot: {combined_output}"
         )
+
+        # Epoch 21 (ADR-030 §B.4) — the resume-side coordination pin: the
+        # takeover CAS bumped the seat to epoch 2, identity-evicted the
+        # crashed begin_run leader, and the successful finalize released the
+        # seat (vacant, epoch retained).
+        with db_b.engine.connect() as conn:
+            seat = conn.execute(select(run_coordination_table).where(run_coordination_table.c.run_id == run_id)).one()
+            workers = conn.execute(
+                select(run_workers_table).where(run_workers_table.c.run_id == run_id).order_by(run_workers_table.c.registered_at)
+            ).all()
+            event_types = (
+                conn.execute(
+                    select(run_coordination_events_table.c.event_type)
+                    .where(run_coordination_events_table.c.run_id == run_id)
+                    .order_by(run_coordination_events_table.c.seq)
+                )
+                .scalars()
+                .all()
+            )
+        assert seat.leader_epoch == 2, "resume's takeover CAS must bump the seat epoch"
+        assert seat.leader_worker_id is None, "graceful completion must release the seat"
+        statuses_by_entry = {w.entry_point: w.status for w in workers}
+        assert statuses_by_entry == {"run": "evicted", "resume": "departed"}, (
+            "the crashed begin_run leader must be identity-evicted by the takeover; the resume leader departs on release"
+        )
+        assert "worker_evict" in event_types
+        assert event_types[-1] == "leader_release"
 
         db_b.close()
 

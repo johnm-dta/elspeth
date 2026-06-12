@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
 
 from elspeth.contracts import (
@@ -30,6 +31,7 @@ from elspeth.contracts import (
     ValidationErrorWithContract,
 )
 from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, DISCARD_SINK_NAME, TokenRef
+from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
@@ -46,6 +48,7 @@ from elspeth.core.landscape.model_loaders import (
     TransformErrorLoader,
     ValidationErrorLoader,
 )
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batches_table,
@@ -608,8 +611,73 @@ class DataFlowRepository:
         row_id: str | None = None,
         token_id: str | None = None,
         quarantined: bool = False,
+        coordination_token: CoordinationToken | None = None,
     ) -> tuple[Row, Token]:
-        """Create a source row and its initial token in one audit transaction."""
+        """Create a source row and its initial token in one audit transaction.
+
+        ``coordination_token`` (ADR-030 §C.4 row 9): an ingest-adjacent
+        durable ``rows`` write at sequence N — when supplied, the
+        verify-and-extend epoch fence is the first statement of the
+        transaction (the boundary-failure and quarantine ingest arms ride
+        this; the happy path composes through the scheduler's fenced
+        ``ingest_row_with_initial_claim`` instead). ``None`` preserves the
+        unfenced legacy arm for direct repository-level callers.
+        """
+        if coordination_token is None:
+            with self._db.write_connection() as conn:
+                return self.insert_row_with_token_on(
+                    conn,
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    row_index=row_index,
+                    data=data,
+                    source_row_index=source_row_index,
+                    ingest_sequence=ingest_sequence,
+                    row_id=row_id,
+                    token_id=token_id,
+                    quarantined=quarantined,
+                )
+        with fenced_leader_transaction(
+            self._db.engine,
+            token=coordination_token,
+            now=now(),
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb="create_row_with_token",
+        ) as conn:
+            return self.insert_row_with_token_on(
+                conn,
+                run_id=run_id,
+                source_node_id=source_node_id,
+                row_index=row_index,
+                data=data,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
+                row_id=row_id,
+                token_id=token_id,
+                quarantined=quarantined,
+            )
+
+    def insert_row_with_token_on(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
+        row_id: str | None = None,
+        token_id: str | None = None,
+        quarantined: bool = False,
+    ) -> tuple[Row, Token]:
+        """Connection-accepting rows+tokens insert: composes into the caller's transaction.
+
+        Extracted from :meth:`create_row_with_token` so the fenced leader
+        ingest (``TokenSchedulerRepository.ingest_row_with_initial_claim``,
+        ADR-030 §C.4 row 9) can compose the rows insert, the tokens insert
+        and the initial enqueue on ONE connection.
+        """
         row = self._prepare_source_row_record(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -627,23 +695,22 @@ class DataFlowRepository:
             created_at=row.created_at,
         )
 
-        with self._db.write_connection() as conn:
-            result = conn.execute(rows_table.insert().values(**self._row_insert_values(row)))
-            if result.rowcount == 0:
-                raise AuditIntegrityError(f"create_row_with_token: row INSERT affected zero rows (row_id={row.row_id})")
-            result = conn.execute(
-                tokens_table.insert().values(
-                    token_id=token.token_id,
-                    row_id=token.row_id,
-                    run_id=token.run_id,
-                    fork_group_id=token.fork_group_id,
-                    join_group_id=token.join_group_id,
-                    branch_name=token.branch_name,
-                    created_at=token.created_at,
-                )
+        result = conn.execute(rows_table.insert().values(**self._row_insert_values(row)))
+        if result.rowcount == 0:
+            raise AuditIntegrityError(f"create_row_with_token: row INSERT affected zero rows (row_id={row.row_id})")
+        result = conn.execute(
+            tokens_table.insert().values(
+                token_id=token.token_id,
+                row_id=token.row_id,
+                run_id=token.run_id,
+                fork_group_id=token.fork_group_id,
+                join_group_id=token.join_group_id,
+                branch_name=token.branch_name,
+                created_at=token.created_at,
             )
-            if result.rowcount == 0:
-                raise AuditIntegrityError(f"create_row_with_token: token INSERT affected zero rows (token_id={token.token_id})")
+        )
+        if result.rowcount == 0:
+            raise AuditIntegrityError(f"create_row_with_token: token INSERT affected zero rows (token_id={token.token_id})")
 
         return row, token
 

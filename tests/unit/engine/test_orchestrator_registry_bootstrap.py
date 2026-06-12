@@ -430,7 +430,7 @@ def test_resume_calls_prepare_for_run() -> None:
     def fake_prepare_for_run() -> None:
         calls.append("prepare_for_run")
 
-    def fake_reconstruct_resume_state(self, resume_point, payload_store):  # type: ignore[no-untyped-def]
+    def fake_reconstruct_resume_state(self, resume_point, payload_store, *, worker_id=None):  # type: ignore[no-untyped-def]
         assert calls == ["prepare_for_run"], (
             "Orchestrator.resume() must invoke prepare_for_run() before reconstructing resume state (ADR-010 §Decision 3)"
         )

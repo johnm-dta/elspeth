@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    select,
     text,
 )
 
@@ -101,7 +102,12 @@ metadata = MetaData()
 #        checkpoints aggregation_state_json/coalesce_state_json replaced by
 #        barrier_scalars_json; restore_blocked event type removed from
 #        scheduler_events CHECK.
-SQLITE_SCHEMA_EPOCH = 20
+#   21 → Option-C multi-worker coordination substrate (ADR-030, slice 2):
+#        run_coordination / run_workers / run_coordination_events /
+#        coalesce_branch_losses tables; token_work_items gains
+#        barrier_adopted_epoch (adoption CAS marker, written only by the
+#        slice-3 fenced adoption verb; NULL = intake-pending).
+SQLITE_SCHEMA_EPOCH = 21
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -430,6 +436,10 @@ token_work_items_table = Table(
     Column("lease_expires_at", DateTime(timezone=True)),
     Column("available_at", DateTime(timezone=True), nullable=False),
     Column("barrier_blocked_at", DateTime(timezone=True), nullable=True),
+    # Epoch 21: adoption CAS marker (§C.4 row 6a) — set only by the fenced
+    # barrier-adoption verb (slice 3). NULL means intake-pending. Column lands
+    # at epoch 21 so the schema is stable across slices 2→3.
+    Column("barrier_adopted_epoch", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
@@ -574,6 +584,158 @@ Index(
     scheduler_events_table.c.work_item_id,
     scheduler_events_table.c.recorded_at,
 )
+
+# === Multi-worker run coordination (epoch 21, ADR-030) ===
+
+run_coordination_table = Table(
+    "run_coordination",
+    metadata,
+    # Exactly one row per run, created by begin_run (uniformity rule: an N=1
+    # worker is leader of its own run at epoch 1).
+    Column("run_id", String(64), ForeignKey("runs.run_id"), primary_key=True),
+    Column("leader_worker_id", String(128)),  # NULL = vacant seat
+    # THE fencing token; monotonic, bumps on every acquisition CAS (§B.4).
+    Column("leader_epoch", Integer, nullable=False, server_default=text("0")),
+    Column("leader_heartbeat_expires_at", DateTime(timezone=True)),  # run-level leader liveness clock
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Vacant seat ⇔ no liveness clock; occupied seat ⇔ clock present.
+    CheckConstraint(
+        "(leader_worker_id IS NULL) = (leader_heartbeat_expires_at IS NULL)",
+        name="ck_run_coordination_seat_liveness_paired",
+    ),
+)
+
+run_workers_table = Table(
+    "run_workers",
+    metadata,
+    Column("worker_id", String(128), primary_key=True),  # 'worker:{run_id}:{uuid4().hex}'
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("role", String(16), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("registered_at", DateTime(timezone=True), nullable=False),
+    Column("heartbeat_expires_at", DateTime(timezone=True), nullable=False),  # run-level worker liveness clock
+    Column("departed_at", DateTime(timezone=True)),
+    Column("evicted_at", DateTime(timezone=True)),  # forensics (graft, Design 1)
+    Column("evicted_by_worker_id", String(128)),  # forensics: who ran the eviction CAS
+    # Forensic only — EXCEPT pid, surfaced by the BUSY-takeover diagnostic
+    # (§B.4 WriteLockHeldError carries registered pids).
+    Column("pid", Integer),
+    Column("hostname", String(255)),
+    Column("entry_point", String(255)),
+    CheckConstraint("role IN ('leader','follower')", name="ck_run_workers_role"),
+    CheckConstraint("status IN ('active','departed','evicted')", name="ck_run_workers_status"),
+    CheckConstraint("(status = 'evicted') = (evicted_at IS NOT NULL)", name="ck_run_workers_evicted_at_paired"),
+)
+# Serves both hot paths: the slice-4 EXISTS membership fence probes
+# (run_id, status='active', worker_id) — (run_id, status) prefix seek then
+# worker_id filter on a tiny table — and the liveness reap scans
+# (run_id, status, heartbeat_expires_at) index-only. Worker_id point lookups
+# (heartbeat CAS) use the PK.
+Index(
+    "ix_run_workers_liveness",
+    run_workers_table.c.run_id,
+    run_workers_table.c.status,
+    run_workers_table.c.heartbeat_expires_at,
+)
+
+run_coordination_events_table = Table(
+    "run_coordination_events",
+    metadata,
+    # Authoritative replay order. AUTOINCREMENT (not bare rowid) so seq values
+    # are never reused after deletion and are strictly monotonic for the life
+    # of the ledger — process-stamped recorded_at can invert commit order
+    # under busy_timeout stalls; seq cannot.
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    # sha256(canonical_json(identity)) — same dedup recipe as scheduler
+    # events (scheduler_repository.py:434-455).
+    Column("event_id", String(64), nullable=False),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("worker_id", String(128), nullable=False),
+    Column("leader_epoch", Integer),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),  # forensic wall-clock; NOT the replay order
+    Column("context_json", Text, nullable=False, server_default=text("'{}'")),
+    # All 10 event types from the design DDL (§A.2), including the slice-4
+    # producers worker_stalled and heartbeat_degraded — pinned into the
+    # epoch-21 CHECK now so slice 4 needs no schema change.
+    CheckConstraint(
+        "event_type IN ('worker_register', 'worker_depart', 'worker_evict', 'worker_stalled', "
+        "'leader_acquire', 'leader_release', 'leadership_lost', "
+        "'fence_refusal', 'heartbeat_degraded', 'finalize')",
+        name="ck_run_coordination_events_event_type",
+    ),
+    # Mandatory: without the table kwarg, SQLAlchemy emits a bare INTEGER
+    # PRIMARY KEY (rowid alias, values reusable after delete); with it the DDL
+    # is `seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT`. Inert on Postgres
+    # (Integer PK becomes IDENTITY — also monotonic).
+    sqlite_autoincrement=True,
+)
+# event_id uniqueness is a named unique Index, not UniqueConstraint/unique=True,
+# deliberately: SQLAlchemy's SQLite inspector get_indexes() does not report
+# sqlite_autoindex_* indexes created by inline UNIQUE constraints, so a
+# UniqueConstraint cannot be verified by the _REQUIRED_INDEXES loop. Same
+# pattern as uq_token_work_items_terminal_identity above.
+Index(
+    "uq_run_coordination_events_event_id",
+    run_coordination_events_table.c.event_id,
+    unique=True,
+)
+Index(
+    "ix_run_coordination_events_run",
+    run_coordination_events_table.c.run_id,
+    run_coordination_events_table.c.seq,
+)
+
+coalesce_branch_losses_table = Table(
+    "coalesce_branch_losses",
+    metadata,
+    # §E.5: durable cross-worker branch-loss hand-off. Table only at epoch 21;
+    # record/replay verbs land in slice 3.
+    Column("loss_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("coalesce_name", String(128), nullable=False),
+    Column("row_id", String(64), nullable=False),
+    Column("branch_name", String(128), nullable=False),
+    Column("token_id", String(64), nullable=False),
+    Column("reason", String(64), nullable=False),  # failed / quarantined / error_routed / ...
+    Column("recorded_by", String(128), nullable=False),  # worker_id
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("adopted_epoch", Integer),  # NULL = not yet replayed into leader memory
+)
+# Natural-key idempotency (design §G: record_coalesce_branch_loss is
+# "idempotent on the natural key"). Named unique Index rather than a
+# UniqueConstraint for _REQUIRED_INDEXES verifiability; doubles as the hot
+# lookup index (replay scans by run_id + coalesce_name prefix).
+Index(
+    "uq_coalesce_branch_losses_natural",
+    coalesce_branch_losses_table.c.run_id,
+    coalesce_branch_losses_table.c.coalesce_name,
+    coalesce_branch_losses_table.c.row_id,
+    coalesce_branch_losses_table.c.branch_name,
+    unique=True,
+)
+
+
+def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
+    """Membership fence: the acting worker holds an *active* run_workers row.
+
+    Single source of truth for the EXISTS predicate that slice 4 compiles
+    into claim_ready / claim_pending_sink CAS UPDATEs and enqueue_ready's
+    INSERT…SELECT (design §G verb table). Single-use identity doctrine:
+    'departed'/'evicted' rows never return to 'active', so a False result is
+    a permanent fence. The literal 'active' MUST match the worker-status
+    CHECK on run_workers.
+    """
+    return (
+        select(run_workers_table.c.worker_id)
+        .where(
+            run_workers_table.c.worker_id == worker_id,
+            run_workers_table.c.run_id == run_id,
+            run_workers_table.c.status == "active",
+        )
+        .exists()
+    )
+
 
 # === Token Parents (for multi-parent joins) ===
 

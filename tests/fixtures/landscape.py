@@ -38,6 +38,57 @@ def make_landscape_db() -> LandscapeDB:
     return LandscapeDB.in_memory()
 
 
+def expire_leader_seat(db: LandscapeDB, run_id: str) -> None:
+    """Lapse the epoch-21 leader seat ``begin_run`` minted for ``run_id``.
+
+    ADR-030 §B.4: a hard-killed leader never releases its ``run_coordination``
+    seat — it stays HELD until the liveness window (80 s) lapses, and resume's
+    takeover CAS requires vacant-or-expired. Fixtures that craft a crashed run
+    via ``begin_run(...)`` + direct status writes (instead of running the real
+    engine, whose ceremony arms release the seat) call this to produce the
+    post-window image deterministically rather than sleeping out the window.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from elspeth.core.landscape.schema import run_coordination_table
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(run_coordination_table)
+            .where(run_coordination_table.c.run_id == run_id)
+            .values(leader_heartbeat_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+
+
+def insert_crashed_leader_seat(conn: Any, *, run_id: str) -> None:
+    """Insert the expired ``run_coordination`` seat row a crashed leader leaves.
+
+    For fixtures that craft the ``runs`` row via raw SQL (bypassing
+    ``begin_run``, which at epoch 21 mints the seat atomically with the run):
+    without a seat row, resume's takeover CAS refuses with
+    ``AuditIntegrityError`` ("no run_coordination seat row"). Call on the same
+    connection/transaction that inserted the ``runs`` row (FK).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import insert as sa_insert
+
+    from elspeth.core.landscape.schema import run_coordination_table
+
+    lapsed = datetime.now(UTC) - timedelta(seconds=1)
+    conn.execute(
+        sa_insert(run_coordination_table).values(
+            run_id=run_id,
+            leader_worker_id=f"worker:{run_id}:crashed-leader",
+            leader_epoch=1,
+            leader_heartbeat_expires_at=lapsed,
+            updated_at=lapsed,
+        )
+    )
+
+
 def make_factory(db: LandscapeDB | None = None, *, payload_store: PayloadStore | None = None) -> RecorderFactory:
     """Factory for RecorderFactory.
 

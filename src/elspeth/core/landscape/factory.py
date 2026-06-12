@@ -48,6 +48,7 @@ from elspeth.core.landscape.model_loaders import (
     ValidationErrorLoader,
 )
 from elspeth.core.landscape.query_repository import QueryRepository
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
@@ -347,6 +348,10 @@ class RecorderFactory:
         # there is nothing it could ever do, so skip construction entirely
         # and fail loudly on access instead.
         self._scheduler: TokenSchedulerRepository | None = None if db.is_read_only else TokenSchedulerRepository(db.engine)
+        # Same posture for the coordination substrate (epoch 21, ADR-030): a
+        # pure write/arbitration surface whose constructor runs the same
+        # Tier-1 PRAGMA probe — nothing it could do on a read-only handle.
+        self._run_coordination: RunCoordinationRepository | None = None if db.is_read_only else RunCoordinationRepository(db.engine)
 
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
@@ -373,6 +378,12 @@ class RecorderFactory:
         if self._scheduler is None:
             raise RuntimeError("scheduler repository is not available on a read-only LandscapeDB handle")
         return self._scheduler
+
+    @property
+    def run_coordination(self) -> RunCoordinationRepository:
+        if self._run_coordination is None:
+            raise RuntimeError("run coordination repository is not available on a read-only LandscapeDB handle")
+        return self._run_coordination
 
     @property
     def payload_store(self) -> PayloadStore | None:

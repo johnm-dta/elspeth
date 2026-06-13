@@ -1,5 +1,6 @@
 """Tests for BatchDriftCompare aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -340,3 +341,19 @@ class TestBatchDriftCompareConfig:
                 "value_type",
             }
         )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+    guard = BatchDriftCompare._is_non_finite_group_key
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

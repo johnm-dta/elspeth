@@ -8,6 +8,7 @@ will buffer rows and call process() with a list when the trigger fires.
 """
 
 import math
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
@@ -264,6 +265,8 @@ class BatchStats(BaseTransform):
     def _is_non_finite_group_key(value: object) -> bool:
         if type(value) is float:
             return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
         return False
 
     def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:

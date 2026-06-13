@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
@@ -220,6 +221,8 @@ class BatchDistributionProfile(BaseTransform):
     def _is_non_finite_group_key(value: object) -> bool:
         if type(value) is float:
             return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
         return False
 
     def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
@@ -219,6 +220,8 @@ class BatchExperimentCompare(BaseTransform):
     def _is_non_finite_variant(value: object) -> bool:
         if type(value) is float:
             return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
         return False
 
     def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:

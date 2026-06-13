@@ -108,6 +108,25 @@ class TestBatchOutlierAnnotator:
         inlier = result.rows[0]
         assert inlier["outlier_robust_z_score"] == pytest.approx(0.0)
 
+    def test_stdev_zero_reports_none_z_score(self, ctx: PluginContext) -> None:
+        """All-identical batch: stdev=0 -> z_score undefined, must be None (B4.5-c)."""
+        from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
+
+        transform = BatchOutlierAnnotator({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [_make_row({"id": i, "score": 5.0}) for i in range(1, 5)]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 4
+        for row in result.rows:
+            assert row["outlier_stdev"] == pytest.approx(0.0)
+            # z_score = (x - mean) / stdev is x/0 = undefined -- honest None, never 0.0
+            assert row["outlier_z_score"] is None
+            assert row["outlier_is_outlier"] is False
+
     def test_all_identical_batch_reports_none_robust_z(self, ctx: PluginContext) -> None:
         """An all-identical batch has no spread: robust-z is undefined, emit None.
 

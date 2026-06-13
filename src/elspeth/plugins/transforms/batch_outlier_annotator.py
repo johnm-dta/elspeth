@@ -143,7 +143,7 @@ class BatchOutlierAnnotator(BaseTransform):
     name = "batch_outlier_annotator"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:79c0566e539c382b"
+    source_file_hash: str | None = "sha256:302135f6539168da"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False
@@ -390,7 +390,11 @@ class BatchOutlierAnnotator(BaseTransform):
 
     def _annotation_for(self, entry: _FiniteEntry, stats: _BatchStats) -> dict[str, object]:
         value = self._coerce_finite_float(entry.value, operation="float_conversion")
-        z_score = 0.0 if stats.stdev == 0.0 else self._require_finite_float((value - stats.mean) / stats.stdev, operation="z_score")
+        # z_score = (x - mean) / stdev is undefined when stdev==0 (all-identical
+        # batch); emit None (honest-absence), never 0.0 (B4.5-c)
+        z_score: float | None = (
+            None if stats.stdev == 0.0 else self._require_finite_float((value - stats.mean) / stats.stdev, operation="z_score")
+        )
         robust_z_score: float | None
         if stats.mad != 0.0:
             robust_z_score = self._require_finite_float(0.6745 * (value - stats.median) / stats.mad, operation="robust_z_score")
@@ -408,7 +412,7 @@ class BatchOutlierAnnotator(BaseTransform):
             robust_z_score = None
 
         reasons: list[str] = []
-        if abs(z_score) >= self._z_threshold:
+        if z_score is not None and abs(z_score) >= self._z_threshold:
             reasons.append("z_score")
         if robust_z_score is not None and abs(robust_z_score) >= self._robust_z_threshold:
             reasons.append("robust_z_score")

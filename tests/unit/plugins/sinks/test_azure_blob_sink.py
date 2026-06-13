@@ -355,6 +355,84 @@ class TestAzureBlobSinkWrite:
         assert len(lines) == 1
         assert "id" not in lines[0] or lines[0].startswith("1")
 
+    # ------------------------------------------------------------------
+    # B3.2-azure: per-row CSV codec encoding faults must be diverted, not
+    # batch-aborting. Mirrors test_write_json_diverts_non_serializable_row_not_batch.
+    # ------------------------------------------------------------------
+
+    def test_write_csv_diverts_unencodable_row_not_batch(self) -> None:
+        """A row with a non-cp1252 character is diverted; the good rows are uploaded.
+
+        _serialize_csv previously encoded the WHOLE batch with a single
+        output.getvalue().encode(encoding) call, so one emoji in cp1252 aborted
+        the entire upload.  After the fix, each row is trial-encoded individually
+        and the offending row is diverted (recorded + routed per on_write_failure)
+        before _serialize_rows is called, keeping the upload all-or-nothing over
+        the GOOD rows.
+        """
+        sink = inject_write_failure(
+            AzureBlobSink(
+                _base_config(
+                    format="csv",
+                    schema=DYNAMIC_SCHEMA,
+                    csv_options={"encoding": "cp1252"},
+                )
+            )
+        )
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write(
+                [
+                    {"v": "hello"},
+                    {"v": "hi \U0001f600"},  # not representable in cp1252
+                    {"v": "world"},
+                ],
+                ctx,
+            )
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"v": "hi \U0001f600"}
+
+        # The blob must have been uploaded (not aborted).
+        assert mock_blob.upload_blob.called
+        uploaded: bytes = mock_blob.upload_blob.call_args[0][0]
+        text = uploaded.decode("cp1252")
+        # Header + two good rows
+        lines = [ln for ln in text.strip().split("\n") if ln]
+        assert len(lines) == 3  # header + 2 data rows
+        data_lines = lines[1:]
+        assert all("hello" in ln or "world" in ln for ln in data_lines)
+
+    def test_write_csv_codec_diversion_content_hash_is_sha256_of_uploaded_bytes(self) -> None:
+        """content_hash after a csv codec diversion matches the actually-uploaded bytes."""
+        sink = inject_write_failure(
+            AzureBlobSink(
+                _base_config(
+                    format="csv",
+                    schema=DYNAMIC_SCHEMA,
+                    csv_options={"encoding": "cp1252"},
+                )
+            )
+        )
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write(
+                [
+                    {"v": "hello"},
+                    {"v": "hi \U0001f600"},  # diverted
+                ],
+                ctx,
+            )
+
+        uploaded: bytes = mock_blob.upload_blob.call_args[0][0]
+        expected_hash = hashlib.sha256(uploaded).hexdigest()
+        assert result.artifact.content_hash == expected_hash
+
 
 # ============================================================================
 # TestAzureBlobSinkTemplateAndOverwrite -- Blob path + overwrite protection

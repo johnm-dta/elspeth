@@ -289,6 +289,62 @@ class TestBatchStatsFloatOverflow:
         assert result.reason["skipped_non_finite"] == 2
         assert result.reason["skipped_non_finite_indices"] == [0, 1]
 
+    def test_none_value_skipped_and_reported(self, ctx: PluginContext) -> None:
+        """None in value_field is a missing value: skipped-and-reported, never a crash.
+
+        Per CLAUDE.md Tier 2/3 doctrine and every sibling batch transform
+        (batch_distribution_profile etc.), None is missing data — it is skipped
+        from the computation and reported in skipped_missing, NOT raised as a
+        TypeError that aborts the whole run (plugins review C2).
+        """
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
+
+        rows = [
+            _make_row({"id": 1, "amount": 10.0}),
+            _make_row({"id": 2, "amount": None}),
+            _make_row({"id": 3, "amount": 30.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 2  # Only present values counted
+        assert result.row["sum"] == 40.0
+        assert result.row["mean"] == 20.0
+        assert result.row["skipped_missing"] == 1
+        assert result.row["skipped_missing_indices"] == (1,)
+
+    def test_all_none_batch_returns_error_not_crash(self, ctx: PluginContext) -> None:
+        """A group with only None values returns an audited error, never count=0/sum=0.
+
+        Without the missing-value branch this hits sum([])=0 then mean=0/0
+        (ZeroDivisionError), crashing the run — and fabricating count=0/sum=0
+        would be a phantom statistic. The honest outcome is a validation_failed
+        error naming each missing row (plugins review C2).
+        """
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
+
+        rows = [
+            _make_row({"id": 1, "amount": None}),
+            _make_row({"id": 2, "amount": None}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["batch_size"] == 2
+        assert result.reason["skipped_count"] == 2
+        assert result.reason["valid_count"] == 0
+        row_error_reasons = {entry["reason"] for entry in result.reason["row_errors"]}
+        assert row_error_reasons == {"missing_value"}
+
     def test_sum_overflow_returns_error(self, ctx: PluginContext) -> None:
         """Summing large valid floats that overflow to inf returns error."""
         from elspeth.plugins.transforms.batch_stats import BatchStats

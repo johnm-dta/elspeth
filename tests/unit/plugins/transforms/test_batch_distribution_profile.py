@@ -229,6 +229,21 @@ class TestBatchDistributionProfile:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_single_value_reports_none_stdev(self, ctx: PluginContext) -> None:
+        """n=1 stdev is undefined -- must emit None, never 0.0 (B4.5-a-distribution_profile)."""
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+        rows = [_make_row({"score": 42.0})]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 1
+        # stdev undefined at n=1 -- honest None, never 0.0
+        assert result.row["stdev"] is None
+
 
 class TestBatchDistributionProfileConfig:
     @pytest.mark.parametrize("blank_value_field", ["", "   "])

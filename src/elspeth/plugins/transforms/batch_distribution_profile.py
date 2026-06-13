@@ -107,7 +107,7 @@ class BatchDistributionProfile(BaseTransform):
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b8dc744bbac72ac4"
+    source_file_hash: str | None = "sha256:92452b5339fc1b70"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -339,7 +339,8 @@ class BatchDistributionProfile(BaseTransform):
             median = self._require_finite_float(self._percentile(sorted_values, 0.5), operation="median")
             p25 = self._require_finite_float(self._percentile(sorted_values, 0.25), operation="p25")
             p75 = self._require_finite_float(self._percentile(sorted_values, 0.75), operation="p75")
-            stdev = 0.0 if count == 1 else self._require_finite_float(statistics.stdev(values), operation="stdev")
+            # stdev is undefined at n=1 -- emit None, never 0.0 (B4.5-a)
+            stdev: float | None = None if count == 1 else self._require_finite_float(statistics.stdev(values), operation="stdev")
         except OverflowError as exc:
             reason: TransformErrorReason = {
                 "reason": "float_overflow",

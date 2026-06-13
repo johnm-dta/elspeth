@@ -842,6 +842,34 @@ class JoinRefusedError(Exception):
         super().__init__(f"Cannot join run {run_id!r}: {reason}")
 
 
+# ADR-030 §B.1 step 5: leader seat expired while a follower was draining.
+# The follower departed cleanly but the run is NOT complete — the operator
+# must use `elspeth resume` to continue.  Distinct from RunWorkerEvictedError
+# (our row left 'active') and JoinRefusedError (admission-time refusal).
+# TIER-2: Operator-actionable mid-drain signal — the seat died while we were
+# draining; the run is intact but leaderless; the operator must resume.
+class FollowerSeatDeadError(Exception):
+    """Raised when the leader seat expires while the follower is draining.
+
+    The follower has already departed cleanly (``depart_worker`` called).
+    The run is NOT complete — the operator must use ``elspeth resume`` to
+    take over the run (design §B.1 step 5, §C.3).
+
+    Attributes:
+        worker_id: The follower's worker identity.
+        run_id: The run the follower was attached to.
+    """
+
+    def __init__(self, *, worker_id: str, run_id: str) -> None:
+        self.worker_id = worker_id
+        self.run_id = run_id
+        super().__init__(
+            f"Follower {worker_id!r} detected no live leader for run {run_id!r}. "
+            "The follower has departed cleanly. "
+            f"Use `elspeth resume {run_id}` to take over the run."
+        )
+
+
 # The audit DB write lock is held by a live or frozen process, so the takeover
 # CAS could not even begin (SQLITE_BUSY after the busy_timeout poll). NOT
 # "leadership held": ADR-030 §B.4 requires BUSY to be reported distinctly from a

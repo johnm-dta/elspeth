@@ -35,7 +35,20 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # +1 comes from small pre-existing drift in test_execution_repository,
 # test_outcomes, test_read_only_audit_surfaces across the branch's accumulated
 # changes (no single new file; the new heartbeat tests contribute zero).
-BASELINE_UNSPECCED_MOCK_TOTAL = 2618
+# Bumped 2618→2623 (2026-06-13): +5 from slice 5 step 2 (follower-mode
+# RowProcessor — test_follower_processor.py).  The new MagicMock() calls are
+# return-value fakes for _drain_scheduler_claims result items (SchedulerResult
+# stubs) where spec= would need to import internal scheduler types; low-value
+# spec here. Step 3 (CLI join + journal path tests) contributed zero new
+# unspecced mocks (uses create_autospec and patch only).
+# Bumped 2623→2630 (2026-06-13): +7 from slice 5 steps 4-5 (e2e recovery
+# tests for follower lifecycle: test_follower_join_and_drain.py x5 and
+# test_follower_coordination_chaos.py x2).  These are stub RowProcessor
+# objects — MagicMock() stubs where spec= would require importing internal
+# RowProcessor and wiring a full engine stack; low-value spec for integration
+# harness stubs. The real follower routing (barrier/branch-loss/sink) is
+# covered by the processor-level drain tests, not these lifecycle stubs.
+BASELINE_UNSPECCED_MOCK_TOTAL = 2630
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

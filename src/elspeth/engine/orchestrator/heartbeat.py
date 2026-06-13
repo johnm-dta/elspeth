@@ -152,6 +152,17 @@ class RunHeartbeatThread:
         self._stop_event.set()
         self._thread.join()
 
+    @property
+    def coordination_lost(self) -> bool:
+        """True when the heartbeat latch is set (worker row left 'active').
+
+        Read-only view for callers that need to test the flag WITHOUT raising
+        (e.g. the follower drain loop discriminates between a finalize-departure
+        clean exit and a true eviction before propagating
+        :class:`~elspeth.contracts.errors.RunWorkerEvictedError`).
+        """
+        return self._coordination_lost_event.is_set()
+
     def check_and_raise(self) -> None:
         """Raise :class:`~elspeth.contracts.errors.RunWorkerEvictedError` if the latch is set.
 
@@ -184,12 +195,20 @@ class RunHeartbeatThread:
         """Execute one heartbeat tick; NEVER raises.
 
         Three outcomes:
-        1. ``worker_active=True``, snapshot ``leader_worker_id==our_id`` →
-           healthy; reset busy counter.
-        2. ``worker_active=False`` OR foreign ``leader_worker_id`` →
-           coordination lost; latch the flag.
+        1. ``worker_active=True``, and (if leader) snapshot
+           ``leader_worker_id==our_id`` → healthy; reset busy counter.
+        2. ``worker_active=False`` → coordination lost; latch the flag.
+           For a LEADER ONLY: foreign ``leader_worker_id`` (deposed) also
+           latches.  A follower seeing a foreign leader is the NORMAL case
+           (the follower is never the leader); follower deposed-latch is
+           triggered only by ``worker_active=False`` (eviction/departure).
         3. Any exception (including SQLITE_BUSY ``OperationalError``) →
            liveness-unknown; log, count toward degraded threshold, continue.
+
+        ADR-030 §B: ``snapshot.worker_role`` discriminates leader vs follower
+        so that the deposed-latch is role-gated.  The field defaults to
+        "leader" for backward-compat with tests that construct snapshots
+        without the field.
         """
         try:
             snapshot = self._repo.worker_heartbeat(  # type: ignore[attr-defined]
@@ -201,6 +220,9 @@ class RunHeartbeatThread:
             self._consecutive_busy = 0
 
             # LATCH: evicted/departed — our registry row left 'active'.
+            # Applies to BOTH leaders and followers: if the run_workers row is
+            # no longer active the worker must stop (evicted by leader, or
+            # departed at finalize).
             if not snapshot.worker_active:
                 logger.warning(
                     "run_heartbeat: worker %r row left 'active' in run %r (evicted or departed)",
@@ -208,27 +230,26 @@ class RunHeartbeatThread:
                     self._token.run_id,
                 )
                 self._coordination_lost_reason = (
-                    f"worker {self._token.worker_id!r} registry row left 'active' "
-                    "(evicted or departed at finalize)"
+                    f"worker {self._token.worker_id!r} registry row left 'active' (evicted or departed at finalize)"
                 )
                 self._coordination_lost_event.set()
                 return
 
             # LATCH: deposed — seat taken by another process.
-            if (
-                snapshot.leader_worker_id is not None
-                and snapshot.leader_worker_id != self._token.worker_id
-            ):
+            # LEADER ONLY: a leader seeing a foreign leader_worker_id means it
+            # has been deposed and must stop.  A FOLLOWER seeing a foreign
+            # leader_worker_id is the NORMAL, HEALTHY case (§B.2: trigger
+            # evaluation is leader-only; the follower always has a different
+            # leader_worker_id from its own worker_id) and must NOT latch.
+            is_leader = snapshot.worker_role == "leader"
+            if is_leader and snapshot.leader_worker_id is not None and snapshot.leader_worker_id != self._token.worker_id:
                 logger.warning(
                     "run_heartbeat: seat taken by %r (our worker_id=%r) in run %r",
                     snapshot.leader_worker_id,
                     self._token.worker_id,
                     self._token.run_id,
                 )
-                self._coordination_lost_reason = (
-                    f"seat taken by {snapshot.leader_worker_id!r} "
-                    f"(our worker_id={self._token.worker_id!r})"
-                )
+                self._coordination_lost_reason = f"seat taken by {snapshot.leader_worker_id!r} (our worker_id={self._token.worker_id!r})"
                 self._coordination_lost_event.set()
                 return
 

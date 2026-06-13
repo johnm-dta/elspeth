@@ -1137,6 +1137,7 @@ class LandscapeDB:
         dump_to_jsonl_fail_on_error: bool = False,
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
+        dump_to_jsonl_worker_suffix: str | None = None,
     ) -> Self:
         """Create database from connection URL.
 
@@ -1152,10 +1153,18 @@ class LandscapeDB:
                 sidecar use ``immutable=1``; live WAL databases do not, so
                 committed WAL contents remain visible.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
-            dump_to_jsonl_path: Optional override path for JSONL journal
+            dump_to_jsonl_path: Optional override path for JSONL journal.
+                When set alongside ``dump_to_jsonl_worker_suffix``, it is the
+                operator's responsibility to ensure distinct paths for each
+                worker (explicit-path-at-N-over-1 is unsupported).
             dump_to_jsonl_fail_on_error: Fail if journal write fails
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
+            dump_to_jsonl_worker_suffix: Per-worker hex suffix (the uuid4 hex
+                tail of the ``worker_id``).  When set, the derived journal
+                path becomes ``db.journal.{suffix}.jsonl`` so followers on
+                the same host write distinct files (ADR-030 §C.4 row 13).
+                Ignored when ``dump_to_jsonl_path`` is supplied explicitly.
 
         Returns:
             LandscapeDB instance
@@ -1182,7 +1191,7 @@ class LandscapeDB:
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url)
+            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url, dump_to_jsonl_worker_suffix)
             journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -1223,15 +1232,45 @@ class LandscapeDB:
         return self._read_only
 
     @staticmethod
-    def _derive_journal_path(connection_string: str) -> str:
-        """Derive a default JSONL journal path from the connection string."""
+    def _derive_journal_path(connection_string: str, worker_suffix: str | None = None) -> str:
+        """Derive a default JSONL journal path from the connection string.
+
+        Args:
+            connection_string: SQLAlchemy connection string (must be SQLite).
+            worker_suffix: Optional per-worker hex suffix.  When ``None``
+                (the default N=1 leader case) the path is unchanged:
+                ``db.journal.jsonl``.  When set the path becomes
+                ``db.journal.{worker_suffix}.jsonl`` so that multiple workers
+                on one host write to distinct files (ADR-030 §C.4 row 13;
+                design line 284 / G line 455).
+
+                Derive from ``worker_id`` (``worker:{run_id}:{HEX}``) by
+                splitting on ``:`` and taking the last field.
+
+        Note — FORENSIC-ONLY at N>1:
+            Per-worker paths fix the file-corruption half of the N>1 journal
+            problem, not the ordering half.  Records carry per-statement
+            timestamps (``journal.py`` lines 39, 121) buffered to commit;
+            statement-time is **not** cross-process WAL commit order.  At
+            N>1 the per-worker journal is a forensic aid, **not** a
+            replayable log.  The authoritative replay order is
+            ``run_coordination_events.seq`` (AUTOINCREMENT — G line 409).
+            Restore tooling must gate on single-worker provenance; a true
+            in-transaction ``journal_seq`` total order is deferred to a
+            future release.
+        """
         url = make_url(connection_string)
         if not url.drivername.startswith("sqlite"):
             raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
         database = url.database
         if database is None or database == ":memory:":
             raise ValueError("dump_to_jsonl requires a file-backed SQLite database")
-        return str(Path(database).with_suffix(".journal.jsonl"))
+        db_path = Path(database)
+        if worker_suffix is None:
+            # N=1 leader path: byte-for-byte unchanged.
+            return str(db_path.with_suffix(".journal.jsonl"))
+        # N>1 follower path: embed the hex suffix before the extension.
+        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:

@@ -121,6 +121,11 @@ class CoordinationSnapshot:
     leader_epoch: int
     seat_live: bool
     worker_active: bool
+    # Role of THIS worker (the one that called worker_heartbeat). Defaults to
+    # "leader" for backward-compat with slice-4 tests that construct snapshots
+    # directly. The heartbeat thread uses this to gate the deposed-latch: a
+    # follower seeing a foreign leader_worker_id is NORMAL, not deposed.
+    worker_role: str = "leader"
 
 
 @dataclass(frozen=True, slots=True)

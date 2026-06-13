@@ -911,3 +911,95 @@ class TestEndToEnd:
         journal_path = tmp_path / "journal.jsonl"
         lines = journal_path.read_text().strip().split("\n")
         assert len(lines) == 3
+
+
+# ===========================================================================
+# Per-worker journal path derivation (ADR-030 §C.4 row 13, design line 284)
+# ===========================================================================
+
+
+class TestDeriveJournalPath:
+    """Tests for LandscapeDB._derive_journal_path per-worker path derivation.
+
+    N=1 invariant: the N=1 (no worker_suffix) path must be byte-for-byte
+    identical to the old behaviour so existing consumers and tests are
+    unaffected.
+
+    N>1 invariant: each worker hex suffix produces a distinct filename
+    alongside the N=1 file, preventing file-corruption from concurrent
+    appends on the same host.
+    """
+
+    def test_derive_journal_path_default_unchanged(self, tmp_path: Path) -> None:
+        """Regression pin: N=1 leader path equals db.journal.jsonl (no suffix)."""
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+        path = LandscapeDB._derive_journal_path(url)
+        assert path == str(tmp_path / "landscape.journal.jsonl")
+
+    def test_derive_journal_path_per_worker(self, tmp_path: Path) -> None:
+        """Per-worker path embeds the hex suffix before the .jsonl extension."""
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+        suffix = "abc123"
+        path = LandscapeDB._derive_journal_path(url, suffix)
+        assert path == str(tmp_path / "landscape.journal.abc123.jsonl")
+
+    def test_derive_journal_path_per_worker_none_same_as_default(self, tmp_path: Path) -> None:
+        """Passing worker_suffix=None explicitly equals the no-arg call."""
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+        assert LandscapeDB._derive_journal_path(url, None) == LandscapeDB._derive_journal_path(url)
+
+    def test_two_workers_write_distinct_journal_files(self, tmp_path: Path) -> None:
+        """Two follower instances with distinct hex suffixes write separate files.
+
+        Simulates two followers sharing a WAL DB on the same host.  Each must
+        write to a distinct file; no cross-contamination.
+        """
+        db_path = tmp_path / "landscape.db"
+        url = f"sqlite:///{db_path}"
+
+        suffix_a = "aaaa1111"
+        suffix_b = "bbbb2222"
+
+        path_a = LandscapeDB._derive_journal_path(url, suffix_a)
+        path_b = LandscapeDB._derive_journal_path(url, suffix_b)
+
+        # Paths must be distinct.
+        assert path_a != path_b
+
+        # Write something to each path.
+        journal_a = LandscapeJournal(path_a, fail_on_error=True)
+        journal_b = LandscapeJournal(path_b, fail_on_error=True)
+
+        conn_a = _make_conn()
+        conn_b = _make_conn()
+
+        journal_a._after_cursor_execute(
+            conn_a,
+            cursor=None,
+            statement="INSERT INTO rows (id) VALUES (?)",
+            parameters={"id": "row-from-a"},
+            context=None,
+            executemany=False,
+        )
+        journal_a._after_commit(conn_a)
+
+        journal_b._after_cursor_execute(
+            conn_b,
+            cursor=None,
+            statement="INSERT INTO rows (id) VALUES (?)",
+            parameters={"id": "row-from-b"},
+            context=None,
+            executemany=False,
+        )
+        journal_b._after_commit(conn_b)
+
+        # Both files exist and contain only their own record.
+        lines_a = Path(path_a).read_text().strip().split("\n")
+        lines_b = Path(path_b).read_text().strip().split("\n")
+        assert len(lines_a) == 1
+        assert len(lines_b) == 1
+        assert json.loads(lines_a[0])["parameters"] == {"id": "row-from-a"}
+        assert json.loads(lines_b[0])["parameters"] == {"id": "row-from-b"}

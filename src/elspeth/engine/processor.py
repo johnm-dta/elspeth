@@ -435,6 +435,7 @@ class RowProcessor:
         scheduler_heartbeat_seconds: int = 60,
         coordination_token: CoordinationToken | None = None,
         run_coordination: RunCoordinationRepository | None = None,
+        follower_barrier_node_ids: frozenset[NodeID] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -484,6 +485,14 @@ class RowProcessor:
                 workers and calling ``evict_worker`` for each. None = no
                 housekeeping sweep (N=1 without the coordination substrate, or
                 direct repository-level construction in tests).
+            follower_barrier_node_ids: ADR-030 §B (slice 5, follower aggregation
+                barrier hand-off): frozenset of aggregation node IDs that this
+                follower must NOT execute locally.  When a batch-aware transform
+                is encountered at one of these node IDs, the processor returns
+                (None, []) which triggers mark_blocked so the leader's next
+                journal-intake adopts the arrival and runs trigger evaluation
+                (§B.2: trigger evaluation is leader-only).  Non-follower
+                processors leave this None (no-op path).
         """
         if scheduler is None:
             raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
@@ -520,6 +529,10 @@ class RowProcessor:
         self._sink_names: frozenset[str] = sink_names or frozenset()
         self._coalesce_on_success_map: dict[CoalesceName, str] = coalesce_on_success_map or {}
         self._aggregation_settings: dict[NodeID, AggregationSettings] = aggregation_settings or {}
+        # ADR-030 §B (slice 5): aggregation node IDs that a follower must NOT
+        # execute locally — these are barrier nodes whose trigger evaluation is
+        # leader-only.  Empty frozenset on any non-follower processor (no-op).
+        self._follower_barrier_node_ids: frozenset[NodeID] = follower_barrier_node_ids or frozenset()
         self._clock = clock if clock is not None else DEFAULT_CLOCK
 
         # DAG navigator: pure topology queries extracted from RowProcessor
@@ -569,6 +582,13 @@ class RowProcessor:
         self._scheduler = scheduler
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
+        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when the
+        # caller explicitly passed a scheduler_lease_owner that is registered in the
+        # run_workers table (production multi-worker paths: run_core.py for leaders,
+        # follower.py for followers).  False = legacy / test / single-worker path
+        # where the auto-generated "row-processor:{run_id}:{uuid}" identity has no
+        # run_workers row; the membership fence is inactive in that case.
+        self._scheduler_lease_owner_registered: bool = scheduler_lease_owner is not None
         self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
@@ -2961,14 +2981,27 @@ class RowProcessor:
         coalesce_name: CoalesceName | None,
         child_items: list[WorkItem],
     ) -> tuple[bool, RowResult | None]:
-        if (
-            self._coalesce_executor is None
-            or current_token.branch_name is None
-            or coalesce_name is None
-            or coalesce_node_id is None
-            or current_node_id != coalesce_node_id
-        ):
+        # Structural guard: only handle when we're actually at the coalesce node
+        # for this branch token's assigned coalesce point.
+        if current_token.branch_name is None or coalesce_name is None or coalesce_node_id is None or current_node_id != coalesce_node_id:
             return False, None
+
+        # ADR-030 §B (slice 5, follower barrier hand-off): a follower has no
+        # in-process CoalesceExecutor.  When a follower arrives at a coalesce
+        # node it must mark_blocked (durable barrier hold, no in-memory accept)
+        # so the leader's next journal-intake adopts the arrival and runs the
+        # trigger evaluation (§B.2: trigger evaluation is leader-only).
+        # Returning (True, None) with no child items triggers the
+        # `result is None and not child_items` arm of _drain_scheduler_claims
+        # which calls mark_blocked (§E.2).
+        if self._coalesce_executor is None:
+            logger.debug(
+                "follower: coalesce barrier hold for token %r at node %r (coalesce=%r) — marking blocked; leader adopts via journal-intake",
+                current_token.token_id,
+                current_node_id,
+                coalesce_name,
+            )
+            return True, None
 
         # ADR-030 §E.2 (slice 3, journal-first barrier acceptance): the
         # arriving branch token is NOT accepted in-claim. It is held
@@ -3009,7 +3042,7 @@ class RowProcessor:
             of the branch loss, or a COALESCED RowResult if the merge triggered
             at a terminal coalesce step. Empty if no consequences yet.
         """
-        if self._coalesce_executor is None or current_token.branch_name is None:
+        if current_token.branch_name is None:
             return []
 
         branch_name = BranchName(current_token.branch_name)
@@ -3019,11 +3052,16 @@ class RowProcessor:
 
         coalesce_node_id = self._coalesce_node_ids[coalesce_name]
         # §E.5 record-then-notify: stage the durable loss record BEFORE the
-        # in-memory notify. The spec rides the branch token's own disposition
-        # transaction (the drain's mark_failed / mark_pending_sink /
-        # mark_terminal for the claimed token, or the flush's complete_barrier
-        # for empty-emission losses) — committed iff the disposition commits,
-        # idempotent on the natural key.
+        # in-memory notify, and UNCONDITIONALLY (regardless of whether this
+        # worker has a coalesce_executor). A follower has no in-process
+        # CoalesceExecutor, but it MUST still write the durable branch-loss row
+        # in the same transaction as its mark_failed/divert so the leader's
+        # next journal-intake can see the loss (design §E.5:366-374).
+        # The spec rides the branch token's own disposition transaction (the
+        # drain's mark_failed / mark_pending_sink / mark_terminal for the
+        # claimed token, or the flush's complete_barrier for empty-emission
+        # losses) — committed iff the disposition commits, idempotent on the
+        # natural key.
         self._pending_branch_losses.append(
             BranchLossSpec(
                 coalesce_name=str(coalesce_name),
@@ -3034,6 +3072,13 @@ class RowProcessor:
                 recorded_by=self._scheduler_lease_owner,
             )
         )
+
+        # In-memory notify: only possible when this worker has a coalesce
+        # executor (leader).  Followers skip the in-memory notify; the durable
+        # record above is sufficient for the leader's next intake.
+        if self._coalesce_executor is None:
+            return []
+
         outcome = self._coalesce_executor.notify_branch_lost(
             coalesce_name=coalesce_name,
             row_id=current_token.row_id,
@@ -3535,6 +3580,22 @@ class RowProcessor:
 
         Leader-only: the evict sweep is gated on ``_coordination_token`` being
         set (followers never evict; unfenced/test arm skips silently).
+
+        ADR-030 §C.2/§C.3 (slice 5): followers must NOT run
+        ``recover_expired_leases``.  A follower passes
+        ``coordination_token=None``, which takes the UNFENCED/LEGACY arm of
+        ``recover_expired_leases`` — that arm unconditionally reaps ALL
+        expired non-caller leases, defeating the liveness-aware gate that
+        protects the leader's and peers' in-flight item leases from spurious
+        rotation (§A.5/§C.1).  Followers are drain-only workers; lease
+        recovery and eviction are the leader's responsibility (§C.2 path 1,
+        §C.3: "followers drain what is claimable, then idle/exit").
+        The follower path is identified by both ``_coordination_token is None``
+        AND ``_scheduler_lease_owner_registered`` (registered worker identity
+        from run_workers) AND ``_run_coordination is None``.  All three must
+        be true simultaneously for the follower build path (follower.py); in
+        all other None-token cases (N=1 test arm, direct repo construction)
+        the legacy reap is correct and must be preserved.
         """
         # §C.2 path 1: leader evicts dead non-leader members before reaping.
         # Individual, not bulk — one evict_worker call per dead member (§B.4,
@@ -3557,6 +3618,17 @@ class RowProcessor:
                     grace_seconds=grace,
                     window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
                 )
+
+        # ADR-030 §C.3: followers must not run recover_expired_leases.
+        # The follower build path (follower.py:build_follower_processor) has
+        # coordination_token=None AND run_coordination=None AND a registered
+        # lease owner (scheduler_lease_owner_registered=True).  In that case
+        # skipping the reap is CORRECT; the leader owns the reap sweep.
+        # All other None-token paths (N=1, test arm) still run the legacy reap.
+        is_follower_path = self._coordination_token is None and self._run_coordination is None and self._scheduler_lease_owner_registered
+        if is_follower_path:
+            self._scheduler_drains_since_maintenance = 0
+            return 0
 
         recovered = self._scheduler.recover_expired_leases(
             run_id=self._run_id,
@@ -4660,16 +4732,15 @@ class RowProcessor:
                 expand_group_id=item.token.expand_group_id,
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
-                # Membership fence (ADR-030 §G, slice 4): thread the worker
-                # identity so an evicted RowProcessor cannot enqueue READY
-                # items that no active worker will claim. scheduler_lease_owner
-                # == token.worker_id when coordination is active (§A.1).
-                # Deferred: worker_id wiring to enqueue_ready is gated on
-                # mandatory run_workers registration (future slice).  In this
-                # slice the processor may not have a run_workers row (single-
-                # worker / test mode), so we pass None to skip the fence here;
-                # the fence is tested via explicit callers in e2e and unit tests.
-                worker_id=None,
+                # Membership fence (ADR-030 §G, slice 5): thread the registered
+                # worker identity so an evicted RowProcessor cannot enqueue READY
+                # items that no active worker will claim. The fence is active only
+                # when scheduler_lease_owner was explicitly registered in run_workers
+                # (production multi-worker path: leaders via run_core.py, followers
+                # via follower.py). Legacy / single-worker / test-fixture builds
+                # pass scheduler_lease_owner=None → auto-generate an unregistered
+                # identity → _scheduler_lease_owner_registered=False → fence skipped.
+                worker_id=self._scheduler_lease_owner if self._scheduler_lease_owner_registered else None,
             )
         if scheduled.status is TokenWorkStatus.READY or (
             scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner
@@ -4722,8 +4793,18 @@ class RowProcessor:
         return None
 
     def _barrier_key_for_blocked_item(self, item: WorkItem) -> str | None:
-        """Return a barrier key for coalesce/aggregation blocking, if applicable."""
+        """Return a barrier key for coalesce/aggregation blocking, if applicable.
+
+        On a leader this checks ``_aggregation_settings`` (which is populated).
+        On a follower ``_aggregation_settings`` is empty but
+        ``_follower_barrier_node_ids`` carries the aggregation node IDs; both
+        paths produce the same barrier key (``str(node_id)``).
+        """
         if item.current_node_id in self._aggregation_settings:
+            return str(item.current_node_id)
+        # ADR-030 §B (slice 5): follower path — aggregation_settings is empty
+        # but follower_barrier_node_ids carries the aggregation node IDs.
+        if item.current_node_id in self._follower_barrier_node_ids:
             return str(item.current_node_id)
         if item.coalesce_name is not None:
             return str(item.coalesce_name)
@@ -5402,6 +5483,24 @@ class RowProcessor:
                         coalesce_node_id=coalesce_node_id,
                         coalesce_name=coalesce_name,
                     )
+
+                # ADR-030 §B (slice 5, follower aggregation barrier hand-off):
+                # a follower has no AggregationSettings (trigger evaluation is
+                # leader-only per §B.2).  If this batch-aware transform sits at
+                # a known aggregation node, the follower must NOT execute it
+                # row-wise — doing so produces wrong aggregate output and
+                # bypasses the leader's barrier.  Return (None, []) so that
+                # _drain_scheduler_claims hits the ``result is None and not
+                # child_items`` arm (line 4241) and calls mark_blocked with the
+                # aggregation barrier key.  The leader's next journal-intake
+                # adopts the arrival and runs trigger evaluation.
+                if row_transform.is_batch_aware and transform_node_id is not None and transform_node_id in self._follower_barrier_node_ids:
+                    logger.debug(
+                        "follower: aggregation barrier hold for token %r at node %r — marking blocked; leader adopts via journal-intake",
+                        current_token.token_id,
+                        transform_node_id,
+                    )
+                    return None, child_items
 
                 # NOTE: child_items is mutated inside (deagg appends, coalesce notifications).
                 transform_outcome = self._handle_transform_node(

@@ -1,7 +1,7 @@
 # ADR-030: Multi-Worker Deployment Shape — One-Host WAL Pack
 
 **Date:** 2026-06-11
-**Status:** Proposed (Draft at slice 0 of elspeth-1396d3f790; → Accepted at slice 5)
+**Status:** Accepted (Proposed at slice 0; Accepted at slice 5 of elspeth-1396d3f790)
 **Deciders:** John Morrissey, Claude Fable 5
 **Tags:** scheduler, coordination, multi-worker, deployment, sqlite, wal,
           leader-election, fencing, multi-source-token-scheduler, adr-026,

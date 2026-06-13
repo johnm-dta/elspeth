@@ -85,9 +85,7 @@ class _StubRepo:
         return self.snapshot
 
     def record_heartbeat_degraded(self, *, run_id: str, worker_id: str, failures: int, now: datetime) -> None:
-        self.record_heartbeat_degraded_calls.append(
-            {"run_id": run_id, "worker_id": worker_id, "failures": failures, "now": now}
-        )
+        self.record_heartbeat_degraded_calls.append({"run_id": run_id, "worker_id": worker_id, "failures": failures, "now": now})
         if self.degraded_exception is not None:
             raise self.degraded_exception
 
@@ -522,6 +520,86 @@ class TestLifecycle:
         assert drain.is_alive() is False, "drain check hung"
         # All checks should be True (healthy thread, no eviction)
         assert all(results), f"unexpected eviction in concurrent check: {results}"
+
+
+# ---------------------------------------------------------------------------
+# 7. Follower role: deposed-latch is role-gated (ADR-030 §B, slice 5)
+# ---------------------------------------------------------------------------
+
+
+class TestFollowerHeartbeatRoleGating:
+    """A follower seeing a foreign leader_worker_id must NOT latch.
+
+    Design §B.2: trigger evaluation is leader-only.  A follower's
+    leader_worker_id is always a different process's worker_id — this is
+    the NORMAL, HEALTHY case.  The deposed-latch must only fire for leaders.
+    """
+
+    def test_follower_foreign_leader_does_not_latch(self) -> None:
+        """worker_role='follower' + foreign leader_worker_id → no latch."""
+        follower_worker_id = f"worker:{_RUN_ID}:follower-abc"
+        follower_token = CoordinationToken(run_id=_RUN_ID, worker_id=follower_worker_id, leader_epoch=0)
+        repo = _StubRepo()
+        # Snapshot: our row is active (worker_active=True), but leader is a
+        # DIFFERENT process — normal for a follower.
+        repo.snapshot = CoordinationSnapshot(
+            leader_worker_id="worker:some-run:the-leader",
+            leader_epoch=1,
+            seat_live=True,
+            worker_active=True,
+            worker_role="follower",  # this worker is a follower
+        )
+
+        thread = RunHeartbeatThread(
+            repo,
+            token=follower_token,
+            heartbeat_seconds=DEFAULT_RUN_HEARTBEAT_SECONDS,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            wait_fn=lambda _: False,
+        )
+        thread._step_beat()
+
+        # MUST NOT latch — a follower seeing a live foreign leader is healthy.
+        assert not thread._coordination_lost_event.is_set()
+        thread.check_and_raise()  # must not raise
+
+    def test_follower_eviction_does_latch(self) -> None:
+        """worker_role='follower' + worker_active=False → latch set (evicted)."""
+        follower_worker_id = f"worker:{_RUN_ID}:follower-xyz"
+        follower_token = CoordinationToken(run_id=_RUN_ID, worker_id=follower_worker_id, leader_epoch=0)
+        repo = _StubRepo()
+        repo.snapshot = CoordinationSnapshot(
+            leader_worker_id="worker:some-run:the-leader",
+            leader_epoch=1,
+            seat_live=True,
+            worker_active=False,  # our row left 'active' (evicted or departed)
+            worker_role="follower",
+        )
+
+        thread = RunHeartbeatThread(
+            repo,
+            token=follower_token,
+            heartbeat_seconds=DEFAULT_RUN_HEARTBEAT_SECONDS,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            wait_fn=lambda _: False,
+        )
+        thread._step_beat()
+
+        # MUST latch — eviction applies to followers too.
+        assert thread._coordination_lost_event.is_set()
+        with pytest.raises(RunWorkerEvictedError):
+            thread.check_and_raise()
+
+    def test_leader_foreign_leader_still_latches(self) -> None:
+        """worker_role='leader' (default) + foreign leader_worker_id → latch set."""
+        # This is the pre-existing deposed-leader case; must still work.
+        repo = _StubRepo()
+        repo.snapshot = _DEPOSED_SNAPSHOT  # worker_role defaults to "leader"
+
+        thread = _make_thread(repo)
+        thread._step_beat()
+
+        assert thread._coordination_lost_event.is_set()
 
 
 # ---------------------------------------------------------------------------

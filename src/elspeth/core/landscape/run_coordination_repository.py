@@ -766,6 +766,7 @@ class RunCoordinationRepository:
             leader_epoch=leader_epoch,
             seat_live=seat_live,
             worker_active=worker_active,
+            worker_role=member.role,  # ADR-030 §B: follower sees foreign leader_worker_id normally
         )
 
     def admit_follower(

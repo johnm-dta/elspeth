@@ -2,15 +2,23 @@
 """Integration tests for CLI end-to-end workflow."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
+from sqlalchemy import insert
 from typer.testing import CliRunner
 
 # Note: In Click 8.0+, mix_stderr is no longer a CliRunner parameter.
 # Stderr output is combined with stdout by default when using CliRunner.invoke()
 runner = CliRunner()
+
+# ---------------------------------------------------------------------------
+# Module-level constants (used by TestJoinCommand helpers)
+# ---------------------------------------------------------------------------
+_JOIN_NOW = datetime(2026, 6, 13, 12, 0, 0, tzinfo=UTC)
+_JOIN_WINDOW = 80.0
 
 
 class TestCLIIntegration:
@@ -323,3 +331,281 @@ class TestTransformErrorSinkRouting:
 
         result = runner.invoke(app, ["run", "-s", str(config_path), "--execute"])
         assert result.exit_code == 0, f"Pipeline failed: {result.output}"
+
+
+# ===========================================================================
+# CLI join command tests (ADR-030 §B.1, slice 5 task c)
+# ===========================================================================
+
+
+def _make_minimal_settings(tmp_path: Path, *, config_hash_override: str | None = None) -> Path:
+    """Write a minimal settings.yaml and return the path.
+
+    The config_hash stored in the run row is whatever ``stable_hash(resolve_config(settings))``
+    produces for this config.  For refusal tests we either use the real hash or patch the
+    run row with a known mismatch value.
+    """
+    sample_csv = tmp_path / "data.csv"
+    sample_csv.write_text("id,name\n1,alice\n")
+    config = {
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "default",
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        },
+        "sinks": {
+            "default": {
+                "plugin": "json",
+                "on_write_failure": "discard",
+                "options": {
+                    "path": str(tmp_path / "output.json"),
+                    "schema": {"mode": "observed"},
+                },
+            },
+        },
+        "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
+        "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
+    }
+    (tmp_path / "payloads").mkdir(exist_ok=True)
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(yaml.dump(config))
+    return settings_path
+
+
+def _seed_running_run(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    config_hash: str,
+    status: str = "running",
+    live_leader: bool = True,
+) -> None:
+    """Seed the landscape DB with a run row and (optionally) a live coordination seat."""
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
+
+    db_path = tmp_path / "landscape.db"
+    db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=True)
+    try:
+        with db.engine.begin() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id=run_id,
+                    started_at=_JOIN_NOW,
+                    config_hash=config_hash,
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status=status,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            if live_leader:
+                leader_wid = f"worker:{run_id}:leaderabc123"
+                expires = (_JOIN_NOW + timedelta(seconds=_JOIN_WINDOW)).replace(tzinfo=None)
+                conn.execute(
+                    insert(run_coordination_table).values(
+                        run_id=run_id,
+                        leader_worker_id=leader_wid,
+                        leader_epoch=1,
+                        leader_heartbeat_expires_at=expires,
+                        updated_at=_JOIN_NOW.replace(tzinfo=None),
+                    )
+                )
+                conn.execute(
+                    insert(run_workers_table).values(
+                        worker_id=leader_wid,
+                        run_id=run_id,
+                        role="leader",
+                        status="active",
+                        registered_at=_JOIN_NOW.replace(tzinfo=None),
+                        heartbeat_expires_at=expires,
+                    )
+                )
+    finally:
+        db.close()
+
+
+class TestJoinCommand:
+    """Tests for ``elspeth join`` CLI (ADR-030 §B.1, slice 5 task c).
+
+    Each test seeds a temporary SQLite DB to the relevant state without going
+    through a full pipeline run, keeping the fixture footprint minimal.
+    """
+
+    def test_join_requires_settings_or_default(self, tmp_path: Path) -> None:
+        """join exits 1 when settings.yaml is absent and no --settings provided."""
+        from elspeth.cli import app
+
+        db_path = tmp_path / "landscape.db"
+
+        # Invoke from a temp directory that has NO settings.yaml.
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                app,
+                ["join", "run-missing-settings", "--database", str(db_path)],
+            )
+
+        assert result.exit_code == 1
+        assert "Settings" in result.output or "settings" in result.output
+
+    def test_join_refused_terminal_run(self, tmp_path: Path) -> None:
+        """join exits 1 with a clear refusal when the run is COMPLETED (terminal)."""
+        from elspeth.cli import app
+
+        run_id = "run-terminal-001"
+        settings_path = _make_minimal_settings(tmp_path)
+        _seed_running_run(tmp_path, run_id=run_id, config_hash="any", status="completed", live_leader=False)
+
+        result = runner.invoke(
+            app,
+            ["join", run_id, "--settings", str(settings_path)],
+        )
+
+        assert result.exit_code == 1
+        combined = result.output
+        assert "terminal" in combined.lower() or "completed" in combined.lower() or "cannot" in combined.lower()
+
+    def test_join_refused_config_mismatch(self, tmp_path: Path) -> None:
+        """join exits 1 when the joiner's config hash differs from the run's."""
+        from elspeth.cli import app
+
+        run_id = "run-hash-mismatch-002"
+        settings_path = _make_minimal_settings(tmp_path)
+
+        # Seed with a deliberately wrong config_hash so the admission check refuses.
+        _seed_running_run(tmp_path, run_id=run_id, config_hash="totally-wrong-hash", live_leader=True)
+
+        result = runner.invoke(
+            app,
+            ["join", run_id, "--settings", str(settings_path)],
+        )
+
+        assert result.exit_code == 1
+        combined = result.output
+        # The refusal message should mention hash or mismatch.
+        assert "hash" in combined.lower() or "mismatch" in combined.lower() or "config" in combined.lower()
+
+    def test_join_refused_no_live_leader(self, tmp_path: Path) -> None:
+        """join exits 1 and names elspeth resume when the leader seat is dead."""
+        from elspeth.cli import app
+        from elspeth.core.canonical import stable_hash
+        from elspeth.core.config import load_settings, resolve_config
+
+        run_id = "run-dead-leader-003"
+        settings_path = _make_minimal_settings(tmp_path)
+
+        # Compute the real config_hash so the hash check passes, then insert an expired seat.
+        settings_config = load_settings(settings_path)
+        real_hash = stable_hash(resolve_config(settings_config))
+
+        # Seed with live_leader=False: no seat row, so no live leader.
+        _seed_running_run(tmp_path, run_id=run_id, config_hash=real_hash, live_leader=False)
+
+        result = runner.invoke(
+            app,
+            ["join", run_id, "--settings", str(settings_path)],
+        )
+
+        assert result.exit_code == 1
+        combined = result.output
+        assert "leader" in combined.lower() or "resume" in combined.lower()
+
+    def test_join_clean_depart(self, tmp_path: Path) -> None:
+        """join exits 0 and emits a departed confirmation after admission + immediate drain completion.
+
+        The drain loop is stubbed to return immediately (simulating zero available
+        work + run already terminal) so the test stays deterministic and fast without
+        real wall-clock sleeps.
+        """
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.core.canonical import stable_hash
+        from elspeth.core.config import load_settings, resolve_config
+
+        run_id = "run-clean-depart-004"
+        settings_path = _make_minimal_settings(tmp_path)
+
+        # Compute the real config_hash so admission succeeds.
+        settings_config = load_settings(settings_path)
+        real_hash = stable_hash(resolve_config(settings_config))
+
+        # Seed a RUNNING run with a live leader seat whose expiry is well in the
+        # future (real datetime.now(UTC) + 3600s) so admit_follower's liveness
+        # check passes.
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
+
+        real_now = datetime.now(UTC)
+        db_path = tmp_path / "landscape.db"
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=True)
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    insert(runs_table).values(
+                        run_id=run_id,
+                        started_at=real_now.replace(tzinfo=None),
+                        config_hash=real_hash,
+                        settings_json="{}",
+                        canonical_version="v1",
+                        status="running",
+                        openrouter_catalog_sha256="0" * 64,
+                        openrouter_catalog_source="bundled",
+                    )
+                )
+                leader_wid = f"worker:{run_id}:leaderabc123"
+                expires = (real_now + timedelta(hours=1)).replace(tzinfo=None)
+                conn.execute(
+                    insert(run_coordination_table).values(
+                        run_id=run_id,
+                        leader_worker_id=leader_wid,
+                        leader_epoch=1,
+                        leader_heartbeat_expires_at=expires,
+                        updated_at=real_now.replace(tzinfo=None),
+                    )
+                )
+                conn.execute(
+                    insert(run_workers_table).values(
+                        worker_id=leader_wid,
+                        run_id=run_id,
+                        role="leader",
+                        status="active",
+                        registered_at=real_now.replace(tzinfo=None),
+                        heartbeat_expires_at=expires,
+                    )
+                )
+        finally:
+            db.close()
+
+        # Stub build_follower_processor to return a no-op spec'd mock so the
+        # drain loop exits immediately.  This tests: admission → worker_id minted
+        # → follower built → run() called → clean departure path → exit 0.
+        # build_follower_processor would otherwise fail because the seeded run
+        # has no registered edges (the full run_core.py pipeline is not invoked).
+        from unittest.mock import create_autospec
+
+        from elspeth.engine.orchestrator.follower import FollowerProcessor
+
+        mock_follower = create_autospec(FollowerProcessor, instance=True)
+        mock_follower.run.return_value = None  # Immediate clean exit
+
+        with patch(
+            "elspeth.engine.orchestrator.follower.build_follower_processor",
+            return_value=mock_follower,
+        ):
+            result = runner.invoke(
+                app,
+                ["join", run_id, "--settings", str(settings_path)],
+            )
+
+        assert result.exit_code == 0, f"Expected exit 0 but got {result.exit_code}.\nOutput:\n{result.output}"
+        combined = result.output
+        # Should mention the run was joined and departed cleanly.
+        assert run_id in combined

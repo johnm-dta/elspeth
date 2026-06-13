@@ -7239,17 +7239,20 @@ class TestCoalesceTraversalInvariant:
             branch_name="path_a",
         )
         # Should not raise — at coalesce node, not past it.
-        # Without coalesce_executor, coalesce handling is skipped (returns False, None)
-        # and the token completes normally. The invariant check only validates
-        # traversal ordering, not coalesce executor presence.
-        result, _ = processor._process_single_token(
+        # ADR-030 §B (slice 5): without coalesce_executor (follower mode),
+        # _maybe_coalesce_token returns (True, None) → mark_blocked hand-off.
+        # result is None and child_items is [] — the outer drain calls
+        # mark_blocked so the leader's next intake adopts the arrival.
+        result, child_items = processor._process_single_token(
             token=token,
             ctx=ctx,
             current_node_id=coalesce_node,
             coalesce_node_id=coalesce_node,
             coalesce_name=CoalesceName("merge"),
         )
-        assert result is not None
+        # Follower coalesce barrier: (None, []) → mark_blocked, not a completion.
+        assert result is None
+        assert child_items == []
 
 
 class TestTerminalWorkItemInvariant:

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, field_validator
 from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -194,15 +194,27 @@ class DatabaseSink(BaseSink):
         For observed-mode schemas, ALL fields are checked since any field
         could contain a complex value when the schema is inferred.
 
+        For flexible-mode schemas, ALL fields are also checked: declared fields
+        have their configured types, but extra columns are added as plain Text
+        at table-creation time and never enter _any_typed_fields -- so a dict/list
+        value in an extra column would hit the driver raw and raise ProgrammingError.
+        Serializing all fields in flexible mode mirrors the observed-mode path.
+
         Scalar values (str, int, float, bool, None) are left unchanged.
         """
-        if not self._any_typed_fields and not self._schema_config.is_observed:
+        is_flexible = self._schema_config.mode == "flexible"
+        if not self._any_typed_fields and not self._schema_config.is_observed and not is_flexible:
             return rows
 
         result = []
         for row in rows:
             new_row = dict(row)
-            fields_to_check = self._any_typed_fields if self._any_typed_fields else set(row.keys())
+            # Observed and flexible modes must check every key: any column may
+            # hold a complex value that the Text column cannot accept raw.
+            if self._schema_config.is_observed or is_flexible:
+                fields_to_check: frozenset[str] | set[str] = set(row.keys())
+            else:
+                fields_to_check = self._any_typed_fields
             for field in fields_to_check:
                 if field in new_row:
                     value = new_row[field]
@@ -685,9 +697,12 @@ class DatabaseSink(BaseSink):
             try:
                 conn.execute(insert(table), insert_rows)
                 batch_savepoint.commit()
-            except IntegrityError:
+            except (IntegrityError, DataError):
                 # Per-row-attributable: re-execute row-by-row to identify the
                 # offending row(s). Roll the failed batch attempt back first.
+                # DataError (e.g. integer overflow on a typed column) is a sibling
+                # of IntegrityError under DatabaseError -- both are row-attributable
+                # faults that must divert the bad row rather than crash the batch.
                 batch_savepoint.rollback()
                 written_rows = []
                 for i, sql_row in enumerate(insert_rows):
@@ -696,7 +711,7 @@ class DatabaseSink(BaseSink):
                         conn.execute(insert(table), [sql_row])
                         row_savepoint.commit()
                         written_rows.append(sql_row)
-                    except IntegrityError as exc:
+                    except (IntegrityError, DataError) as exc:
                         row_savepoint.rollback()
                         self._divert_row(
                             rows[i],

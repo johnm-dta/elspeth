@@ -314,6 +314,27 @@ class TestBatchPairedPreference:
         assert result.row["confidence_95_low"] is None
         assert result.row["confidence_95_high"] is None
 
+    def test_duplicate_variant_in_pair_returns_error(self, ctx: PluginContext) -> None:
+        """Two rows with the same pair_id and same variant must error (B4.5-e)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.4}),
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.7}),  # duplicate variant within pair
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.6}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "duplicate_variant_in_pair"
+        assert not result.retryable
+
 
 class TestBatchPairedPreferenceConfig:
     @pytest.mark.parametrize("field_name", ["pair_field", "variant_field", "score_field"])

@@ -590,6 +590,7 @@ class TransformErrorReason(TypedDict):
     errors: NotRequired[list[str | ErrorDetail]]  # Error messages or structured errors
     skipped_non_finite: NotRequired[int]  # Count of NaN/Inf values skipped
     skipped_non_finite_indices: NotRequired[list[int]]  # Row indices with non-finite values
+    duplicate_pair_ids: NotRequired[list[str]]  # Pair IDs with duplicate variant entries (B4.5-e)
 
 
 class SourceQuarantineReason(TypedDict):

@@ -116,7 +116,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:02cf90a2063b06d7"
+    source_file_hash: str | None = "sha256:82913533f865862a"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -256,6 +256,32 @@ class BatchPairedPreference(BaseTransform):
                 pairs.append((pair_id, [entry]))
 
         return pairs, variants
+
+    @staticmethod
+    def _has_duplicate_variants(entries: list[_ScoreEntry]) -> bool:
+        seen: list[Any] = []
+        for entry in entries:
+            for seen_variant in seen:
+                if same_scalar_bucket_value(entry.variant, seen_variant):
+                    return True
+            seen.append(entry.variant)
+        return False
+
+    def _duplicate_variant_in_pair_error(self, pairs: list[tuple[Any, list[_ScoreEntry]]]) -> TransformResult | None:
+        """Return an error if any pair contains two entries with the same variant (B4.5-e)."""
+        dup_pairs: list[str] = []
+        for pair_id, entries in pairs:
+            if self._has_duplicate_variants(entries):
+                dup_pairs.append(str(pair_id))
+        if not dup_pairs:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "duplicate_variant_in_pair",
+            "field": self._variant_field,
+            "duplicate_pair_ids": dup_pairs,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     @staticmethod
     def _find_variant_entry(entries: list[_ScoreEntry], variant: Any) -> _ScoreEntry | None:
@@ -434,6 +460,11 @@ class BatchPairedPreference(BaseTransform):
             return non_finite_error
 
         pairs, variants = self._collect_pairs(rows)
+
+        dup_error = self._duplicate_variant_in_pair_error(pairs)
+        if dup_error is not None:
+            return dup_error
+
         baseline_variant = self._baseline_variant if self._baseline_variant is not None else variants[0]
         if not scalar_bucket_contains(variants, baseline_variant):
             return TransformResult.error(

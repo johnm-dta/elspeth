@@ -4,6 +4,61 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
+## [0.6.0] - Unreleased (cross-process multi-worker run coordination)
+
+The single-worker-to-multi-worker transition. Multiple cooperating
+processes on one host may now operate against a single run backed by one
+WAL SQLite audit database: one leader (source ingest, barrier trigger
+evaluation, checkpoints, finalization, sink I/O) and any number of
+claim-only followers attached through the new `elspeth join` entry point.
+The deployment shape, its alternatives, and the operator requirements are
+recorded in ADR-030. Builds on the 0.5.4 maintenance fixes below.
+
+The audit database schema epoch advances to 21; per the delete-the-DB
+migration policy operators delete the prior database before first run on
+this version.
+
+### Added
+
+- **`elspeth join <run_id>`** — attach a follower to a RUNNING run. A
+  second worker joining is the supported feature; racing `resume()`
+  remains refused. Admission is one atomic transaction gated on run
+  status, pipeline-config-hash equality, and a live leader seat, after a
+  filesystem preflight that fails with an operator-actionable error when
+  the worker cannot write the database, its directory, or the WAL
+  sidecars.
+- **Run-level worker registry and heartbeat** — a dedicated heartbeat
+  thread beats the worker row and the leader seat in one transaction;
+  liveness drives takeover and reaping decisions.
+- **Dead-leader takeover** — a run left RUNNING under a dead leader is now
+  resumable via `elspeth resume` (previously a wedged, unrecoverable
+  state); a leader frozen holding the write lock surfaces an
+  operator-actionable error naming the process to terminate before
+  resuming.
+
+### Changed
+
+- **Barrier buffers are journal-first** — aggregation and coalesce
+  acceptance is durable in the scheduler journal before it enters
+  executor memory, so barrier state spans workers and survives takeover
+  (ADR-029 amended).
+- **Leader writes are epoch-fenced** — finalization, run-status changes,
+  checkpoints, barrier completion, lease recovery, and source ingest each
+  verify leadership inside their transaction; a superseded leader's writes
+  are refused, not applied.
+- **Cross-process write discipline** — writable Landscape transactions
+  take the WAL write lock at `BEGIN IMMEDIATE`; dashboard and audit-story
+  read paths open read-only (ADR-030 §D5).
+- **Lease recovery is liveness-aware** — an expired item lease held by a
+  worker whose registry heartbeat is still live is revived, not reaped, so
+  a long in-flight model call is no longer mistaken for a dead worker.
+
+See the rewritten `docs/runbooks/scheduler-lease-recovery.md` for N>1
+recovery procedures and operator guidance (worker count, lease sizing,
+shared group/clock requirements, per-worker forensic journals).
+
+---
+
 ## [0.5.4] - Unreleased
 
 Maintenance line opened on top of RC-5.3, carrying correctness fixes that

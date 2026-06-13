@@ -122,7 +122,7 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4c54c1d514d3e99b"
+    source_file_hash: str | None = "sha256:d4f5d341910c4712"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 
@@ -214,6 +214,28 @@ class BatchExperimentCompare(BaseTransform):
             value=2.0,
         )
         return [baseline, candidate]
+
+    @staticmethod
+    def _is_non_finite_variant(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        return False
+
+    def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite variant key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_variant(row[self._variant_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_variant"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_variant",
+            "field": self._variant_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[Any, list[tuple[int, PipelineRow]]]]:
         """Partition rows by variant while preserving first-seen order."""
@@ -398,6 +420,10 @@ class BatchExperimentCompare(BaseTransform):
         """Compare experiment variants over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_variant_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         grouped = self._group_rows(rows)
         stats_by_variant: list[_VariantStats] = [

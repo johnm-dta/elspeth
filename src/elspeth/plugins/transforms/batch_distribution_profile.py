@@ -107,7 +107,7 @@ class BatchDistributionProfile(BaseTransform):
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:92452b5339fc1b70"
+    source_file_hash: str | None = "sha256:3ee882a8c9a35a99"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -215,6 +215,30 @@ class BatchDistributionProfile(BaseTransform):
                 value=1.0,
             )
         ]
+
+    @staticmethod
+    def _is_non_finite_group_key(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        return False
+
+    def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite group_by key (B4.5-d)."""
+        if self._group_by is None:
+            return None
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_group_key(row[self._group_by]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_group_key"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_group_key",
+            "field": self._group_by,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[Any, list[tuple[int, PipelineRow]]]]:
         """Partition rows by group_by value while preserving first-seen order."""
@@ -405,6 +429,10 @@ class BatchDistributionProfile(BaseTransform):
         """Compute distribution profile rows over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_group_key_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         results: list[BatchDistributionProfileRow] = []
         for group_value, grouped_rows in self._group_rows(rows):

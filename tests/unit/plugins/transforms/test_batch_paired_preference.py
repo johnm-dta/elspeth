@@ -212,6 +212,28 @@ class TestBatchPairedPreference:
         with pytest.raises(TypeError, match="must be numeric"):
             transform.process(rows, ctx)
 
+    @pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, non_finite: float) -> None:
+        """Non-finite variant key must error before producing output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p1", "variant": non_finite, "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_variant"
+        assert result.reason["field"] == "variant"
+        assert not result.retryable
+
     def test_no_complete_pairs_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
 

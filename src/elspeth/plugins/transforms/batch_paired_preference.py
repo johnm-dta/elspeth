@@ -11,7 +11,7 @@ from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -116,7 +116,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f547287eb536901d"
+    source_file_hash: str | None = "sha256:02cf90a2063b06d7"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -215,6 +215,28 @@ class BatchPairedPreference(BaseTransform):
             return _ScoreEntry(variant=variant, score=None, non_finite=True)
 
         return _ScoreEntry(variant=variant, score=raw_score)
+
+    @staticmethod
+    def _is_non_finite_variant(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        return False
+
+    def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite variant key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_variant(row[self._variant_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_variant"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_variant",
+            "field": self._variant_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _collect_pairs(self, rows: list[PipelineRow]) -> tuple[list[tuple[Any, list[_ScoreEntry]]], list[Any]]:
         pairs: list[tuple[Any, list[_ScoreEntry]]] = []
@@ -406,6 +428,10 @@ class BatchPairedPreference(BaseTransform):
         """Compute paired preference summaries over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_variant_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         pairs, variants = self._collect_pairs(rows)
         baseline_variant = self._baseline_variant if self._baseline_variant is not None else variants[0]

@@ -156,6 +156,26 @@ class TestBatchExperimentCompare:
         assert result.row["baseline_missing_indices"] == (1,)
         assert result.row["variant_non_finite_indices"] == (3,)
 
+    @pytest.mark.parametrize("variant_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, variant_value: float) -> None:
+        """Non-finite variant group key must error (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 1.0}),
+            _make_row({"variant": variant_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_variant"
+        assert result.reason["field"] == "variant"
+        assert not result.retryable
+
     def test_baseline_missing_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
 

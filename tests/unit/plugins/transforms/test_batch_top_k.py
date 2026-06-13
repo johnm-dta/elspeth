@@ -68,6 +68,26 @@ class TestBatchTopK:
             {"value": "b", "count": 1, "rate": 0.2},
         ]
 
+    @pytest.mark.parametrize("group_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, group_value: float) -> None:
+        """Non-finite group_by key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "label", "group_by": "cohort", "k": 1})
+        rows = [
+            _make_row({"cohort": "A", "label": "x"}),
+            _make_row({"cohort": group_value, "label": "y"}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "cohort"
+        assert not result.retryable
+
     def test_group_by_emits_one_row_per_group(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_top_k import BatchTopK
 

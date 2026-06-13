@@ -252,6 +252,26 @@ class TestBatchDriftCompare:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    @pytest.mark.parametrize("cohort_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, cohort_value: float) -> None:
+        """Non-finite cohort key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+        transform = BatchDriftCompare({"schema": DYNAMIC_SCHEMA, "cohort_field": "cohort", "value_field": "score"})
+        rows = [
+            _make_row({"cohort": "baseline", "score": 1.0}),
+            _make_row({"cohort": cohort_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "cohort"
+        assert not result.retryable
+
 
 class TestBatchDriftCompareConfig:
     @pytest.mark.parametrize("field_name", ["cohort_field", "value_field"])

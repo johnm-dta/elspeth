@@ -409,6 +409,26 @@ class TestBatchStatsGroupByRollups:
         with pytest.raises(PluginConfigError, match="group_by must not be empty"):
             BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": blank_group_by})
 
+    @pytest.mark.parametrize("group_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, group_value: float) -> None:
+        """Non-finite group_by key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+        rows = [
+            _make_row({"amount": 10.0, "category": "A"}),
+            _make_row({"amount": 20.0, "category": group_value}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "category"
+        assert not result.retryable
+
     def test_homogeneous_group_by_included(self, ctx: PluginContext) -> None:
         """All rows same group_by value — included in output."""
         from elspeth.plugins.transforms.batch_stats import BatchStats

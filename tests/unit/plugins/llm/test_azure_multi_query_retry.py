@@ -147,24 +147,16 @@ class TestRetryBehavior:
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
-        """Capacity errors trigger automatic retry until success.
+        """Transient rate-limit on first two calls then success -> row succeeds.
 
-        In the unified LLMTransform, retryable errors are re-raised from
-        MultiQueryStrategy. The BatchTransformMixin worker catches these
-        and they propagate as ExceptionResult. However, the first query
-        that hits a rate limit causes the entire row to fail atomically
-        (no per-query retry in sequential mode).
-
-        This test verifies that non-retryable error handling works correctly:
-        when the first few calls fail and then succeed, subsequent queries
-        in the row execute normally.
+        B3.7 bounded local retry: when the first few calls fail with a retryable
+        error then succeed, the bounded local retry in _execute_sequential absorbs
+        the transient failures and the row completes successfully.
         """
         from openai import RateLimitError as OpenAIRateLimitError
 
-        # Only first 2 calls fail; queries 3+ succeed.
-        # With 4 sequential queries per row, query 1 and 2 fail => row fails
-        # because retryable errors are re-raised (atomic failure).
-        # Instead, test that after initial failures, a fresh row succeeds.
+        # First 2 calls fail with rate-limit; calls 3+ succeed.
+        # The bounded local retry absorbs these and the row succeeds.
         def failure_condition(count: int) -> OpenAIRateLimitError | None:
             if count <= 2:
                 return OpenAIRateLimitError(
@@ -178,8 +170,9 @@ class TestRetryBehavior:
             chaosllm_server,
             {"score": 85, "rationale": "Success after retry"},
             failure_condition,
-        ) as (_mock_client, _call_count):
-            transform = LLMTransform(_make_config())
+        ) as (_mock_client, call_count):
+            # Large budget so retries complete quickly
+            transform = LLMTransform(_make_config(max_capacity_retry_seconds=30))
             init_ctx = make_context(landscape=mock_recorder)
             transform.on_start(init_ctx)
             transform.connect_output(collector, max_pending=10)
@@ -197,17 +190,15 @@ class TestRetryBehavior:
             finally:
                 transform.close()
 
-            # Row will fail because retryable errors are re-raised (atomic failure).
-            # The first query hits rate limit and the error propagates.
+            # Bounded local retry absorbs the transient failures - row succeeds
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
-            # Result is either an ExceptionResult (re-raised retryable) or error TransformResult
-            if isinstance(result, TransformResult):
-                # Non-retryable path: error returned
-                assert result.status == "error"
-            else:
-                # Retryable path: exception propagated for engine retry
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult)
+            assert result.status == "success", (
+                f"Expected success after bounded retry, got status={result.status!r}, reason={result.reason!r}"
+            )
+            # More calls than 4 queries proves retries happened
+            assert call_count[0] > 4
 
     def test_capacity_retry_timeout(
         self,
@@ -215,7 +206,12 @@ class TestRetryBehavior:
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
-        """Row fails when all queries hit rate limits (no engine retry in test)."""
+        """Row diverts with reason='retry_timeout' when budget exhausted.
+
+        B3.7 bounded local retry: when the provider never recovers, the bounded
+        retry times out and diverts the row as TransformResult.error with
+        reason='retry_timeout'. The result is non-retryable (terminal divert).
+        """
         from openai import RateLimitError as OpenAIRateLimitError
 
         def always_fail(count: int) -> OpenAIRateLimitError:
@@ -230,7 +226,8 @@ class TestRetryBehavior:
             {"score": 85, "rationale": "Never returned"},
             always_fail,
         ):
-            transform = LLMTransform(_make_config())
+            # Small budget so the test completes quickly
+            transform = LLMTransform(_make_config(max_capacity_retry_seconds=1))
             init_ctx = make_context(landscape=mock_recorder)
             transform.on_start(init_ctx)
             transform.connect_output(collector, max_pending=10)
@@ -248,14 +245,14 @@ class TestRetryBehavior:
             finally:
                 transform.close()
 
-            # Should fail — rate limit error propagated
+            # Bounded retry exhausted - TransformResult.error with reason='retry_timeout'
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
-            if isinstance(result, TransformResult):
-                assert result.status == "error"
-            else:
-                # Retryable error re-raised as ExceptionResult
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult)
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "retry_timeout"
+            assert result.retryable is False
 
     def test_mixed_success_and_failure(
         self,
@@ -263,16 +260,16 @@ class TestRetryBehavior:
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
-        """When some queries succeed and some fail, the row fails atomically.
+        """Single transient failure on the 3rd call is absorbed by bounded local retry.
 
-        In the unified LLMTransform with MultiQueryStrategy, queries run
-        sequentially. If any query raises a retryable error, the entire
-        row fails (atomic failure semantics).
+        B3.7 bounded local retry: when the 3rd query call fails once then succeeds,
+        the bounded local retry absorbs it. Earlier queries are not re-executed.
+        The row completes successfully with all 4 query outputs.
         """
         from openai import RateLimitError as OpenAIRateLimitError
 
         def intermittent_failure(count: int) -> OpenAIRateLimitError | None:
-            # Third call fails (affects first row's 3rd query)
+            # Third call fails ONCE (affects first row's 3rd query on first attempt)
             if count == 3:
                 return OpenAIRateLimitError(
                     message="Rate limit",
@@ -285,8 +282,9 @@ class TestRetryBehavior:
             chaosllm_server,
             {"score": 85, "rationale": "Success"},
             intermittent_failure,
-        ):
-            transform = LLMTransform(_make_config())
+        ) as (_mock_client, call_count):
+            # Large budget so retry completes quickly
+            transform = LLMTransform(_make_config(max_capacity_retry_seconds=30))
             init_ctx = make_context(landscape=mock_recorder)
             transform.on_start(init_ctx)
             transform.connect_output(collector, max_pending=10)
@@ -304,15 +302,13 @@ class TestRetryBehavior:
             finally:
                 transform.close()
 
-            # Row fails atomically when any query fails
+            # Bounded local retry absorbs the single transient failure - row succeeds
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
-            if isinstance(result, TransformResult):
-                # If error was non-retryable, we get error result
-                assert result.status == "error"
-            else:
-                # If error was retryable, it's re-raised as ExceptionResult
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult)
+            assert result.status == "success", f"Expected success after single transient retry, got {result.status!r}: {result.reason!r}"
+            # 5 calls: 4 queries + 1 retry for the 3rd query
+            assert call_count[0] == 5, f"Expected 5 calls (4 queries + 1 retry), got {call_count[0]}"
 
 
 class TestConcurrentRowProcessing:
@@ -522,17 +518,17 @@ class TestSequentialFallback:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_sequential_mode_retryable_error_propagates(
+    def test_sequential_mode_retryable_error_absorbed_by_bounded_retry(
         self,
         mock_recorder: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
-        """Retryable errors are re-raised for engine retry (not swallowed).
+        """Single transient error on first call is absorbed by bounded local retry.
 
-        In the unified LLMTransform, retryable LLMClientErrors are re-raised
-        by MultiQueryStrategy, propagating through BatchTransformMixin as
-        ExceptionResult.
+        B3.7 bounded local retry: a single rate-limit error on the first call
+        is retried locally. On the next attempt the call succeeds, and all 4
+        queries complete - the row succeeds rather than being diverted.
         """
         from openai import RateLimitError as OpenAIRateLimitError
 
@@ -549,8 +545,9 @@ class TestSequentialFallback:
             chaosllm_server,
             {"score": 85, "rationale": "Success"},
             first_call_fails,
-        ) as (_mock_client, _call_count):
-            config = _make_config()
+        ) as (_mock_client, call_count):
+            # Large budget so the single retry completes immediately
+            config = _make_config(max_capacity_retry_seconds=30)
             transform = LLMTransform(config)
             init_ctx = make_context(landscape=mock_recorder)
             transform.on_start(init_ctx)
@@ -569,14 +566,13 @@ class TestSequentialFallback:
             finally:
                 transform.close()
 
-            # Row fails because first query hit rate limit
+            # Bounded local retry absorbed the single transient error - row succeeds
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
-            # Retryable error is re-raised — appears as ExceptionResult
-            if isinstance(result, TransformResult):
-                assert result.status == "error"
-            else:
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult)
+            assert result.status == "success", f"Expected success after bounded retry, got {result.status!r}: {result.reason!r}"
+            # 5 calls: 4 queries + 1 retry for the first query
+            assert call_count[0] == 5, f"Expected 5 calls (4 queries + 1 retry), got {call_count[0]}"
 
 
 class TestProviderClientLifecycle:
@@ -656,17 +652,17 @@ class TestLLMErrorRetry:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_network_error_is_propagated(
+    def test_network_error_absorbed_by_bounded_retry(
         self,
         mock_recorder: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
-        """NetworkError (retryable) is propagated as ExceptionResult.
+        """NetworkError (retryable) on first two calls absorbed by bounded local retry.
 
-        In the unified LLMTransform, retryable LLMClientErrors are re-raised
-        by MultiQueryStrategy. The BatchTransformMixin catches these and wraps
-        them as ExceptionResult for the engine to handle.
+        B3.7 bounded local retry: transient network timeouts on the first two calls
+        are retried locally. Once the provider recovers, the row completes successfully.
+        The error is NOT propagated as ExceptionResult.
         """
         from openai import APITimeoutError
 
@@ -679,8 +675,9 @@ class TestLLMErrorRetry:
             chaosllm_server,
             {"score": 85, "rationale": "Good"},
             first_two_fail,
-        ) as (_mock_client, _call_count):
-            config = _make_config()
+        ) as (_mock_client, call_count):
+            # Large budget so retries complete quickly
+            config = _make_config(max_capacity_retry_seconds=30)
             transform = LLMTransform(config)
             init_ctx = make_context(landscape=mock_recorder)
             transform.on_start(init_ctx)
@@ -698,14 +695,13 @@ class TestLLMErrorRetry:
             finally:
                 transform.close()
 
+            # Bounded local retry absorbed the transient network errors - row succeeds
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
-            # Network error is retryable — propagated as exception
-            if isinstance(result, TransformResult):
-                # If the provider classified it as non-retryable, we get error result
-                assert result.status == "error"
-            else:
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult)
+            assert result.status == "success", f"Expected success after bounded retry, got {result.status!r}: {result.reason!r}"
+            # More than 4 calls proves retries happened
+            assert call_count[0] > 4
 
     def test_content_policy_error_not_retried(
         self,
@@ -758,3 +754,185 @@ class TestLLMErrorRetry:
             # Non-retryable: only the first query is attempted before failure
             # (atomic failure on first query hit)
             assert call_count[0] == 1, f"Expected 1 call (non-retryable stops at first query), got {call_count[0]}"
+
+
+class TestSequentialBoundedLocalRetry:
+    """Tests for B3.7 bounded local retry in sequential multi-query mode.
+
+    A transient retryable error (429/5xx/network) on a sequential multi-query
+    row must be retried locally within a bounded budget rather than immediately
+    diverting the row. Earlier queries that already succeeded must NOT be
+    re-executed.
+    """
+
+    @pytest.fixture
+    def mock_recorder(self) -> Mock:
+        """Create mock ExecutionRepository."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def collector(self) -> CollectorOutputPort:
+        """Create output collector for capturing results."""
+        return CollectorOutputPort()
+
+    def test_sequential_transient_then_success_does_not_divert(
+        self,
+        mock_recorder: Mock,
+        collector: CollectorOutputPort,
+        chaosllm_server,
+    ) -> None:
+        """Transient error on first attempt then success -> row succeeds, not diverted.
+
+        B3.7 fix: a bounded local retry must be applied for retryable LLMClientErrors
+        in sequential mode. A single transient 429/RateLimitError that then succeeds
+        must produce a successful row result, NOT an error result or ExceptionResult.
+
+        AUDITED-OUTCOME assertions:
+          (a) result is TransformResult.success (status=='success')
+          (b) success_reason['action']=='multi_query_enriched' and
+              queries_completed==len(query_specs) (4 queries)
+          (c) the provider was called >4 times (proving retry happened) and
+              earlier-succeeded queries are NOT re-executed (call_count > 4 but
+              the row output has all 4 query fields)
+        """
+        from openai import RateLimitError as OpenAIRateLimitError
+
+        # Per-query call tracking: the 2nd query (call index 2) fails once then succeeds.
+        # Call index 1 -> query cs1_diagnosis succeeds
+        # Call index 2 -> query cs1_treatment FAILS (rate limit)
+        # Call index 3 -> retry of cs1_treatment succeeds (bounded local retry)
+        # Call index 4 -> query cs2_diagnosis succeeds
+        # Call index 5 -> query cs2_treatment succeeds
+        # Total: 5 calls (4 queries + 1 retry)
+        def second_call_fails_once(count: int) -> OpenAIRateLimitError | None:
+            if count == 2:
+                return OpenAIRateLimitError(
+                    message="Rate limit exceeded",
+                    response=Mock(status_code=429),
+                    body=None,
+                )
+            return None
+
+        with mock_azure_openai_with_counter(
+            chaosllm_server,
+            {"score": 85, "rationale": "Success after retry"},
+            second_call_fails_once,
+        ) as (_mock_client, call_count):
+            # Use a large retry budget so the retry completes quickly in tests
+            config = _make_config(max_capacity_retry_seconds=30)
+            transform = LLMTransform(config)
+            init_ctx = make_context(landscape=mock_recorder)
+            transform.on_start(init_ctx)
+            transform.connect_output(collector, max_pending=10)
+
+            try:
+                row = {
+                    "cs1_bg": "data",
+                    "cs2_bg": "data",
+                }
+                token = make_token("row-transient-retry-1")
+                ctx = make_context(state_id="state-transient-retry-1", token=token)
+
+                transform.accept(make_pipeline_row(row), ctx)
+                transform.flush_batch_processing(timeout=10.0)
+            finally:
+                transform.close()
+
+            # (a) Row SUCCEEDS - not diverted
+            assert len(collector.results) == 1
+            _, result, _state_id = collector.results[0]
+            assert isinstance(result, TransformResult), f"Expected TransformResult, got {type(result).__name__}: {result}"
+            assert result.status == "success", f"Expected status='success', got status={result.status!r}, reason={result.reason!r}"
+
+            # (b) All queries completed - success_reason reflects full enrichment
+            assert result.success_reason is not None, "success_reason must be set"
+            assert result.success_reason["action"] == "multi_query_enriched", f"Unexpected action: {result.success_reason['action']!r}"
+            assert result.success_reason["queries_completed"] == 4, (
+                f"Expected queries_completed=4, got {result.success_reason['queries_completed']}"
+            )
+
+            # (c) Provider was called >4 times (retry happened); row has all 4 output fields
+            assert call_count[0] > 4, f"Expected >4 provider calls (retry proof), got {call_count[0]}"
+            assert result.row is not None
+            row_dict = dict(result.row)
+            assert "cs1_diagnosis_score" in row_dict, "cs1_diagnosis must have been produced"
+            assert "cs1_treatment_score" in row_dict, "cs1_treatment must have been produced (after retry)"
+            assert "cs2_diagnosis_score" in row_dict, "cs2_diagnosis must have been produced"
+            assert "cs2_treatment_score" in row_dict, "cs2_treatment must have been produced"
+
+    def test_sequential_bounded_retry_timeout_diverts_with_audited_result(
+        self,
+        mock_recorder: Mock,
+        collector: CollectorOutputPort,
+        chaosllm_server,
+    ) -> None:
+        """Always-failing retryable error + small budget -> bounded divert with audit record.
+
+        B3.7 fix: when retry exhausts the max_capacity_retry_seconds budget,
+        the row must divert to TransformResult.error with reason='retry_timeout',
+        mirroring the Azure _capacity_retry_timeout_result shape. The result must
+        NOT be an ExceptionResult (engine must not be asked to retry a timed-out row).
+
+        AUDITED-OUTCOME assertions:
+          (a) result is TransformResult.error (status=='error'), NOT ExceptionResult
+          (b) result.reason['reason']=='retry_timeout'
+          (c) result.reason contains 'elapsed_seconds' and 'max_seconds'
+          (d) result.retryable is False (bounded timeout is terminal, not retriable)
+        """
+        from openai import RateLimitError as OpenAIRateLimitError
+
+        def always_fail(count: int) -> OpenAIRateLimitError:
+            return OpenAIRateLimitError(
+                message="Rate limit exceeded - never recovers",
+                response=Mock(status_code=429),
+                body=None,
+            )
+
+        with mock_azure_openai_with_counter(
+            chaosllm_server,
+            {"score": 85, "rationale": "Never returned"},
+            always_fail,
+        ) as (_mock_client, call_count):
+            # Very small budget - will exhaust almost immediately
+            config = _make_config(max_capacity_retry_seconds=1)
+            transform = LLMTransform(config)
+            init_ctx = make_context(landscape=mock_recorder)
+            transform.on_start(init_ctx)
+            transform.connect_output(collector, max_pending=10)
+
+            try:
+                row = {
+                    "cs1_bg": "data",
+                    "cs2_bg": "data",
+                }
+                token = make_token("row-timeout-budget-1")
+                ctx = make_context(state_id="state-timeout-budget-1", token=token)
+
+                transform.accept(make_pipeline_row(row), ctx)
+                transform.flush_batch_processing(timeout=10.0)
+            finally:
+                transform.close()
+
+            # (a) Result is a diverted TransformResult.error, not ExceptionResult
+            assert len(collector.results) == 1
+            _, result, _state_id = collector.results[0]
+            assert isinstance(result, TransformResult), (
+                f"Expected TransformResult.error (bounded divert), got {type(result).__name__}: {result}"
+            )
+            assert result.status == "error", f"Expected status='error', got {result.status!r}"
+
+            # (b) Reason is retry_timeout - proves bounded retry exhausted
+            assert result.reason is not None
+            assert result.reason["reason"] == "retry_timeout", f"Expected reason='retry_timeout', got {result.reason['reason']!r}"
+
+            # (c) Audit fields present
+            assert "elapsed_seconds" in result.reason, f"Missing elapsed_seconds in reason: {result.reason}"
+            assert "max_seconds" in result.reason, f"Missing max_seconds in reason: {result.reason}"
+
+            # (d) Non-retryable (terminal divert - engine must not retry)
+            assert result.retryable is False, f"retry_timeout result must not be retryable, got retryable={result.retryable!r}"
+
+            # Proof that retry happened (called more than once per query)
+            assert call_count[0] > 1, f"Expected >1 call (retry proof), got {call_count[0]}"

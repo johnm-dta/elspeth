@@ -108,7 +108,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7b35aa9be26c361e"
+    source_file_hash: str | None = "sha256:437e81da37577e2d"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -737,12 +737,12 @@ class DatabaseSink(BaseSink):
             return PluginAssistance(
                 plugin_name="database",
                 issue_code=None,
-                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write modes: insert, upsert, replace.",
+                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write behaviour is set by if_exists: 'append' (default) or 'replace'.",
                 composer_hints=(
-                    "write_mode: 'insert' (default, append-only), 'upsert' (requires unique key constraint), 'replace' (drops + recreates table at run start — destructive).",
+                    "if_exists: 'append' (default — insert into the existing table, creating it if missing) or 'replace' (drops and recreates the table on the FIRST write — destructive). These are the only two values; there is no insert/upsert mode.",
                     "url is sanitised and audit-recorded — never put credentials inline; use the secrets store.",
                     "Schema fields map to column types: string→TEXT, int→Integer, float→Float, bool→Boolean. Other types need explicit type_coerce upstream.",
-                    "table-replace mode is irreversible mid-run. Confirm with the operator before declaring 'replace' on existing data.",
+                    "if_exists='replace' is irreversible — it drops the table on first write. Confirm with the operator before declaring 'replace' on existing data.",
                     "on_write_failure routes per-row constraint violations (UNIQUE / NOT NULL / CHECK / foreign-key) — the offending row is diverted and the rest of the batch commits. Batch-integrity failures (connection loss, lock timeout, bad SQL) are not row-attributable and crash the run.",
                 ),
             )
@@ -756,14 +756,8 @@ class DatabaseSink(BaseSink):
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
         hints: list[str] = []
-        if "write_mode" in config_snapshot:
-            write_mode = config_snapshot["write_mode"]
-            if write_mode == "replace":
-                hints.append(
-                    "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
-                )
-            elif write_mode == "upsert":
-                hints.append(
-                    "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
-                )
+        if config_snapshot.get("if_exists") == "replace":
+            hints.append(
+                "if_exists: 'replace' DROPS and recreates the target table on the first write. Confirm with the operator that the existing data is expendable before running."
+            )
         return tuple(hints)

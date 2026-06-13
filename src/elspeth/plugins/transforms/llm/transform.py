@@ -1040,7 +1040,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fb051e2d972183b0"
+    source_file_hash: str | None = "sha256:bace27511d6582b7"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1634,7 +1634,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
                     "This is prompt-injection defense; do not substitute azure_content_safety. Use azure_content_safety only for harmful-content moderation or safety classification.",
-                    "max_concurrency and per_minute_rate_limit interact — neither bounds the other; set both when the provider has hard rate caps.",
+                    "Concurrency is pool_size (1 = sequential, no pooling). Tune dispatch pacing with min_dispatch_delay_ms / max_dispatch_delay_ms and bound capacity retries with max_capacity_retry_seconds; there is no max_concurrency or per_minute_rate_limit field.",
                 ),
             )
         return None

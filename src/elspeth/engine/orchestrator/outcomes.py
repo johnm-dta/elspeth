@@ -392,12 +392,12 @@ def accumulate_row_outcomes(
             # F1 Task 4.3 (rows_buffered unification): this is the SINGLE live
             # increment site for rows_buffered, and it fires once per accepted
             # batch member — INCLUDING the count-trigger flush's triggering
-            # token, whose synthetic BUFFERED result is emitted by the
-            # processor drain (RowProcessor._take_in_claim_buffer_accepts)
-            # because its returned result is the flush output riding the
-            # LEASED claim. Live therefore equals the audit value (one
-            # BUFFERED token_outcome per accepted member; run_status.derive
-            # counts the same records on the resume path).
+            # arrival, which since ADR-030 §E.2 (journal-first acceptance)
+            # returns a real (None, BUFFERED) RowResult like every other
+            # member (the flush fires from the next intake step, not from its
+            # claim). Live therefore equals the audit value (one BUFFERED
+            # token_outcome per accepted member; run_status.derive counts the
+            # same records on the resume path).
             counters.rows_buffered += 1
         else:
             raise OrchestrationInvariantError(

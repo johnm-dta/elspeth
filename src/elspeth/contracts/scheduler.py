@@ -81,6 +81,11 @@ class TokenWorkItem:
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     barrier_blocked_at: datetime | None = None
+    # ADR-030 §E.2 (slice 3): the leader epoch that durably adopted this
+    # BLOCKED barrier hold into executor memory via adopt_blocked_barrier_item.
+    # NULL = intake-pending (deposited but not yet adopted); the per-iteration
+    # journal-first intake filters on IS NULL.
+    barrier_adopted_epoch: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

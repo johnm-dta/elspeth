@@ -635,6 +635,11 @@ class TestResumeFinalizesAsFailed:
         processor = MagicMock(spec=RowProcessor)
         processor.check_aggregation_timeout.return_value = (False, None)
         processor.process_row.side_effect = lambda **kwargs: events.append("process") or []
+        # Slice 3 (ADR-030 §D): the EOF flush helper gates on journal
+        # quiescence and runs a journal-first intake pass first.
+        processor.count_unquiesced_scheduler_work.return_value = 0
+        processor.run_barrier_intake.return_value = []
+        processor.has_blocked_barrier_work.return_value = False
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
@@ -658,7 +663,9 @@ class TestResumeFinalizesAsFailed:
         with (
             patch("elspeth.engine.orchestrator.source_iteration.track_operation", _source_operation),
             patch.object(orch._source_driver, "load_source_with_events", side_effect=_load_source),
-            patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
+            # Slice 3 re-pin: the EOF flush seam moved into the
+            # run_end_of_input_barrier_flush helper (orchestrator/aggregation.py).
+            patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
             pytest.raises(RuntimeError, match="boom during EOF flush"),
         ):
             orch._source_driver.run_main_processing_loop(

@@ -146,28 +146,21 @@ class AggregationExecutor:
                 f"Configured nodes: {list(self._nodes.keys())}"
             ) from exc
 
-    def buffer_row(
-        self,
-        node_id: NodeID,
-        token: TokenInfo,
-    ) -> None:
-        """Buffer a row for aggregation.
+    def open_batch_membership(self, node_id: NodeID) -> tuple[str, int]:
+        """Return ``(batch_id, next_ordinal)`` for the node's in-progress batch.
 
-        The engine owns the buffer. When trigger fires, buffered rows
-        are passed to a batch-aware Transform.
-
-        Args:
-            node_id: Aggregation node ID
-            token: Token with row data to buffer
+        Creates the ``batches`` row on the FIRST member (ADR-030 §E.2 note:
+        this durable create happens in its own transaction BEFORE the fenced
+        adoption verb — a deposed leader can orphan one DRAFT batches row;
+        accepted residue, see ``adopt_blocked_barrier_item``). Does NOT mutate
+        buffers or counters: the membership/BUFFERED writes belong to
+        ``adopt_blocked_barrier_item`` and the memory mutation to
+        ``accept_adopted_row`` after the adoption CAS succeeds.
 
         Raises:
             OrchestrationInvariantError: If node_id is not a configured aggregation.
-                This prevents silent data loss where rows are buffered but no
-                trigger evaluator exists to determine when to flush.
         """
-        node = self._get_node(node_id, "buffer_row")
-
-        # Create batch on first row if needed
+        node = self._get_node(node_id, "open_batch_membership")
         if node.batch_id is None:
             batch = self._execution.create_batch(
                 run_id=self._run_id,
@@ -175,30 +168,80 @@ class AggregationExecutor:
             )
             node.batch_id = batch.batch_id
             node.member_count = 0
-
         batch_id = node.batch_id
         if batch_id is None:
             raise OrchestrationInvariantError(f"batch_id is None after creation for node {node_id}")
+        return batch_id, node.member_count
 
+    def accept_adopted_row(
+        self,
+        node_id: NodeID,
+        token: TokenInfo,
+        *,
+        accept_time: float | None = None,
+    ) -> None:
+        """Feed one durably-adopted row into executor memory (ADR-030 §E.2).
+
+        Memory-only twin of the old ``buffer_row``: the durable writes
+        (``batch_members`` + BUFFERED ``token_outcomes``) already committed
+        inside ``adopt_blocked_barrier_item``'s fenced transaction — this
+        method appends the buffer entry, advances the counters and anchors the
+        trigger latches at ``accept_time`` (the row's ``barrier_blocked_at``
+        on the monotonic scale — backdated accept timing, §H 476).
+
+        Caller obligations: call ``open_batch_membership`` first (the batch
+        must exist) and ONLY on the adoption verb's ``adopted=True`` arm —
+        the idempotent SKIP arm must not re-feed memory.
+
+        Raises:
+            OrchestrationInvariantError: If node_id is not a configured
+                aggregation or no batch is open.
+        """
+        node = self._get_node(node_id, "accept_adopted_row")
+        if node.batch_id is None:
+            raise OrchestrationInvariantError(
+                f"accept_adopted_row called for node {node_id} with no open batch; open_batch_membership must run before the adoption verb."
+            )
         # Buffer the row - store dict (JSON-serializable for checkpoints)
         # TokenInfo.row_data is PipelineRow, extract dict for buffer
         node.buffers.append(token.row_data.to_dict())
         node.tokens.append(token)
+        node.member_count += 1
+        # Durable cumulative counter that drives AggregationBatchContext.rows_seen_total.
+        # Incremented exactly once per accepted row.
+        node.accepted_count_total += 1
+        node.trigger.record_accept(accept_time)
 
+    def buffer_row(
+        self,
+        node_id: NodeID,
+        token: TokenInfo,
+    ) -> None:
+        """Buffer a row for aggregation (legacy unfenced composition).
+
+        NOT the engine acceptance path: since ADR-030 §E.2 (slice 3) the
+        engine accepts barrier rows journal-first via
+        ``TokenSchedulerRepository.adopt_blocked_barrier_item`` (which owns
+        the ``batch_members`` + BUFFERED writes inside the leader-fenced
+        adoption transaction) followed by :meth:`accept_adopted_row`. This
+        composition keeps the pre-§E.2 single-call shape for executor-level
+        tests and diagnostics: batch creation, an UNfenced ``batch_members``
+        write, then the memory accept at live clock time.
+
+        Raises:
+            OrchestrationInvariantError: If node_id is not a configured aggregation.
+                This prevents silent data loss where rows are buffered but no
+                trigger evaluator exists to determine when to flush.
+        """
+        self._get_node(node_id, "buffer_row")
+        batch_id, ordinal = self.open_batch_membership(node_id)
         # Record batch membership for audit trail
-        ordinal = node.member_count
         self._execution.add_batch_member(
             batch_id=batch_id,
             token_id=token.token_id,
             ordinal=ordinal,
         )
-        node.member_count = ordinal + 1
-        # Durable cumulative counter that drives AggregationBatchContext.rows_seen_total.
-        # Incremented exactly once per accepted row; persisted in the checkpoint.
-        node.accepted_count_total += 1
-
-        # Update trigger evaluator
-        node.trigger.record_accept()
+        self.accept_adopted_row(node_id, token)
 
     def get_buffered_rows(self, node_id: NodeID) -> list[dict[str, Any]]:
         """Get currently buffered rows (does not clear buffer).

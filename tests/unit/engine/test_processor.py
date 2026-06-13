@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -65,6 +64,7 @@ from elspeth.engine.processor import (
     DAGTraversalContext,
     RowProcessor,
     _FlushContext,
+    _LiveBarrierHold,
 )
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -72,7 +72,7 @@ from elspeth.plugins.infrastructure.clients.llm import LLMClientError
 from elspeth.plugins.transforms.batch_replicate import BatchReplicateConfig
 from elspeth.testing import make_contract, make_pipeline_row, make_row, make_source_row, make_token_info
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder_with_run
+from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 
 # =============================================================================
 # Helpers
@@ -134,12 +134,20 @@ def _persist_blocked_scheduler_work(
     node_id: NodeID,
     barrier_key: str,
     ingest_sequence: int = 0,
+    adopted: bool = True,
+    coalesce_name: str | None = None,
 ) -> None:
     """Persist BLOCKED scheduler work matching a fabricated buffered token.
 
     Uses the production journal verbs (enqueue+claim, then mark_blocked) so
     the BLOCKED row carries ``barrier_blocked_at`` exactly as a live barrier
     hold would (F1: the journal is the only barrier-buffer truth).
+
+    ``adopted=True`` (the default) stamps ``barrier_adopted_epoch`` — the
+    post-adoption journal image (ADR-030 §E.2). Tests that fabricate executor
+    memory directly need the adopted image so the journal-first intake does
+    not try to re-adopt (and re-feed) the row; pass ``adopted=False`` to
+    fabricate an intake-pending deposit instead.
     """
     _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
     now = processor._clock.now_utc()
@@ -159,6 +167,7 @@ def _persist_blocked_scheduler_work(
         fork_group_id=token.fork_group_id,
         join_group_id=token.join_group_id,
         expand_group_id=token.expand_group_id,
+        coalesce_name=coalesce_name,
     )
     processor._scheduler.mark_blocked(
         work_item_id=item.work_item_id,
@@ -167,6 +176,37 @@ def _persist_blocked_scheduler_work(
         now=now,
         expected_lease_owner="test-harness",
     )
+    if adopted:
+        _stamp_blocked_rows_adopted(processor._scheduler, work_item_id=item.work_item_id)
+
+
+def _stamp_blocked_rows_adopted(
+    scheduler: Any,
+    *,
+    run_id: str | None = None,
+    work_item_id: str | None = None,
+    epoch: int = 1,
+) -> None:
+    """Stamp ``barrier_adopted_epoch`` on fabricated BLOCKED rows.
+
+    ADR-030 §E.2 (slice 3): tests that fabricate the post-adoption journal
+    image directly (BLOCKED rows + batch_members + BUFFERED outcomes, or
+    coalesce holds + node_states) must carry the adoption marker — the
+    journal restore restores ONLY adopted rows (intake-pending rows have no
+    audit writes to restore and are left for the journal-first intake).
+    """
+    from sqlalchemy import update as _sa_update
+
+    from elspeth.core.landscape.schema import token_work_items_table as _twi
+
+    stmt = _sa_update(_twi).values(barrier_adopted_epoch=epoch)
+    if work_item_id is not None:
+        stmt = stmt.where(_twi.c.work_item_id == work_item_id)
+    if run_id is not None:
+        stmt = stmt.where(_twi.c.run_id == run_id)
+    stmt = stmt.where(_twi.c.status == "blocked")
+    with scheduler._engine.begin() as conn:
+        conn.execute(stmt)
 
 
 def _assert_outcome_pair(
@@ -223,6 +263,7 @@ def _make_processor(
     scheduler: Any = _DEFAULT_SCHEDULER,
     scheduler_lease_owner: str | None = None,
     clock: Any = None,
+    stamp_blocked_rows_adopted: bool = True,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     coalesce_nodes = dict(coalesce_node_ids or {})
@@ -288,11 +329,23 @@ def _make_processor(
         coalesce_node_map=coalesce_nodes,
     )
 
+    if barrier_restore is not None and stamp_blocked_rows_adopted:
+        # ADR-030 §E.2: restore-shaped tests fabricate the post-adoption
+        # journal image (BLOCKED rows + the audit writes adoption owns), so
+        # stamp the adoption marker — the journal restore restores ONLY
+        # adopted rows. Tests exercising intake-pending restores (rows the
+        # dead leader deposited but never adopted) pass
+        # ``stamp_blocked_rows_adopted=False`` and stamp selectively.
+        _stamp_blocked_rows_adopted(factory.scheduler, run_id=run_id)
+
     return RowProcessor(
         execution=factory.execution,
         data_flow=factory.data_flow,
         span_factory=SpanFactory(),  # No tracer — no-op spans
         run_id=run_id,
+        # Slice 3 (ADR-030 §E.2): the journal-first barrier intake's adoption
+        # verbs are leader-fenced; bind the run's own epoch-1 seat token.
+        coordination_token=leader_coordination_token(factory, run_id),
         source_node_id=NodeID(source_node_id),
         source_on_success=source_on_success,
         source_plugin=source_plugin,
@@ -387,9 +440,12 @@ class TestConstructorErrorEdgeMap:
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
         with (
+            # Slice 3 re-pin (token-bound fixture): a coordination-token-bound
+            # processor ingests rows via the fenced composed verb (ADR-030
+            # §C.4 row 9), not the unfenced enqueue_ready_claimed arm.
             patch.object(
-                factory.scheduler, "enqueue_ready_claimed", wraps=factory.scheduler.enqueue_ready_claimed
-            ) as enqueue_ready_claimed,
+                factory.scheduler, "ingest_row_with_initial_claim", wraps=factory.scheduler.ingest_row_with_initial_claim
+            ) as fenced_ingest,
             patch.object(factory.scheduler, "claim_ready", wraps=factory.scheduler.claim_ready) as claim_ready,
             patch.object(factory.scheduler, "recover_expired_leases", wraps=factory.scheduler.recover_expired_leases) as recover_expired,
         ):
@@ -415,7 +471,7 @@ class TestConstructorErrorEdgeMap:
             )
 
         assert recover_expired.call_count == 1
-        assert enqueue_ready_claimed.call_count == SCHEDULER_MAINTENANCE_INTERVAL
+        assert fenced_ingest.call_count == SCHEDULER_MAINTENANCE_INTERVAL
         assert claim_ready.call_count == 0
 
     def test_lease_recovered_work_offsets_transform_attempt_identity(self) -> None:
@@ -1706,43 +1762,25 @@ class TestProcessRowNoTransforms:
         recorded_refs = {call.kwargs["ref"].token_id for call in mock_record_token_outcome.call_args_list}
         assert recorded_refs == {"token-a", "token-b"}
 
-    def test_buffered_scheduler_barrier_key_rejects_mixed_aggregation_batches(self) -> None:
-        """A scheduler claim may block on only one aggregation barrier."""
+    def test_buffered_scheduler_barrier_key_requires_live_hold_stash(self) -> None:
+        """A BUFFERED claim result without a live barrier-hold stash is a processor bug.
+
+        Slice 3 re-pin (ADR-030 §E.2): the barrier_key for the drain's
+        mark_blocked no longer derives from the (now nonexistent) in-claim
+        BUFFERED outcome — the producer stashes the live hold; a missing
+        stash entry is refused loudly.
+        """
         _db, factory = _make_factory()
         processor = _make_processor(factory)
-        result_a = RowResult(
+
+        with pytest.raises(AuditIntegrityError, match="no live barrier hold stash"):
+            processor._barrier_key_for_live_hold("token-a")
+
+        processor._live_barrier_holds["token-a"] = _LiveBarrierHold(
             token=make_token_info(row_id="row-a", token_id="token-a", data={"value": 1}),
-            final_data=make_pipeline_row({"value": 1}),
-            outcome=None,
-            path=TerminalPath.BUFFERED,
+            barrier_key="aggregation_a",
         )
-        result_b = RowResult(
-            token=make_token_info(row_id="row-b", token_id="token-b", data={"value": 2}),
-            final_data=make_pipeline_row({"value": 2}),
-            outcome=None,
-            path=TerminalPath.BUFFERED,
-        )
-
-        def get_token_outcome(token_id: str) -> SimpleNamespace:
-            if token_id == "token-a":
-                return SimpleNamespace(batch_id="batch-a")
-            if token_id == "token-b":
-                return SimpleNamespace(batch_id="batch-b")
-            raise AssertionError(f"unexpected token_id {token_id!r}")
-
-        def get_batch(batch_id: str) -> SimpleNamespace:
-            if batch_id == "batch-a":
-                return SimpleNamespace(aggregation_node_id="aggregation_a")
-            if batch_id == "batch-b":
-                return SimpleNamespace(aggregation_node_id="aggregation_b")
-            raise AssertionError(f"unexpected batch_id {batch_id!r}")
-
-        with (
-            patch.object(factory.data_flow, "get_token_outcome", side_effect=get_token_outcome),
-            patch.object(factory.execution, "get_batch", side_effect=get_batch),
-            pytest.raises(AuditIntegrityError, match="mixes aggregation barriers"),
-        ):
-            processor._barrier_key_for_buffered_scheduler_result((result_a, result_b))
+        assert processor._barrier_key_for_live_hold("token-a") == "aggregation_a"
 
     def test_handle_flush_error_telemetry_failure_does_not_interrupt_failed_outcomes(self) -> None:
         """Batch-flush failure terminalization must continue after telemetry errors."""
@@ -2208,13 +2246,21 @@ class TestAggregationFailureMatrix:
         return db, factory, processor, transform, agg_node
 
     def test_flush_failure_passthrough_records_failed_outcomes(self) -> None:
-        """Passthrough flush failure records FAILED terminal outcomes for buffered tokens."""
+        """Passthrough flush failure records FAILED terminal outcomes for buffered tokens.
+
+        Slice 3 re-pin (ADR-030 §E.2): the arrival returns a real
+        (None, BUFFERED) RowResult and the count flush fires from the NEXT
+        drain iteration's journal-first intake; the BUFFERED audit record is
+        written by the fenced adoption verb (not record_token_outcome), so
+        only the flush-failure FAILED record goes through the repository
+        method.
+        """
         _db, factory, processor, transform, _agg_node = self._setup_batch_processor(output_mode="passthrough")
         source_row = _make_source_row({"value": 10})
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -2225,10 +2271,8 @@ class TestAggregationFailureMatrix:
             )
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
         ):
@@ -2241,17 +2285,13 @@ class TestAggregationFailureMatrix:
                 ingest_sequence=0,
             )
 
-        # F1 Task 4.3 (rows_buffered unification): the triggering token's
-        # buffer-accept surfaces as a synthetic (None, BUFFERED) result ahead
-        # of the flush outcome — its BUFFERED audit record exists even though
-        # the flush failed, so live rows_buffered matches the audit value.
         assert len(results) == 2
         _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
         _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
-        # BUFFERED is always recorded before the flush check, then FAILED on flush error.
-        # The synthetic BUFFERED RowResult records NOTHING extra in the audit trail.
+        # The intake adoption verb wrote the BUFFERED record durably inside
+        # its fenced transaction; the repository method sees only the flush
+        # failure's FAILED record.
         assert [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list] == [
-            (None, TerminalPath.BUFFERED),
             (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
         ]
 
@@ -2267,7 +2307,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -2278,10 +2318,8 @@ class TestAggregationFailureMatrix:
             )
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
         ):
@@ -2294,17 +2332,16 @@ class TestAggregationFailureMatrix:
                 ingest_sequence=0,
             )
 
-        # F1 Task 4.3 (rows_buffered unification): the triggering token's
-        # buffer-accept surfaces as a synthetic (None, BUFFERED) result ahead
-        # of the flush outcome — its BUFFERED audit record exists even though
-        # the flush failed, so live rows_buffered matches the audit value.
+        # Slice 3 re-pin (ADR-030 §E.2): the arrival returns a real BUFFERED
+        # RowResult; the count flush fires from the next iteration's intake.
         assert len(results) == 2
         _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
         _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         outcomes = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
-        # BUFFERED is always recorded before the flush check, then FAILED on flush error.
-        # The synthetic BUFFERED RowResult records NOTHING extra in the audit trail.
-        assert outcomes == [(None, TerminalPath.BUFFERED), (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
+        # The intake adoption verb wrote the BUFFERED record durably inside
+        # its fenced transaction; only the flush failure's FAILED record goes
+        # through the repository method.
+        assert outcomes == [(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
     def test_passthrough_success_with_rows_none_raises(self) -> None:
         """Passthrough flush requires rows list; rows=None is an invariant violation."""
@@ -2318,17 +2355,15 @@ class TestAggregationFailureMatrix:
         bad_result.is_multi_row = True
         bad_result.rows = None
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return bad_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(processor._data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -2355,7 +2390,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "mismatch"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -2363,10 +2398,8 @@ class TestAggregationFailureMatrix:
             return mismatch_result, [captured["token"], other_token], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(processor._data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -2469,17 +2502,15 @@ class TestAggregationFailureMatrix:
             },
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -2532,17 +2563,15 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -2558,15 +2587,17 @@ class TestAggregationFailureMatrix:
                 ingest_sequence=0,
             )
 
-        # Triggering token should be CONSUMED_IN_BATCH (no quarantine).
-        triggering_results = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
-        assert len(triggering_results) == 1, (
-            f"Expected triggering token RowResult with CONSUMED_IN_BATCH outcome, got outcomes: {[r.outcome for r in results]}"
-        )
+        # Slice 3 re-pin (ADR-030 §E.2): the trigger arrival surfaces as a
+        # real (None, BUFFERED) RowResult and the intake-fired flush takes the
+        # out-of-claim shape (triggering_token=None) — no extra
+        # CONSUMED_IN_BATCH RowResult is emitted for the trigger member. Its
+        # consumption lives in the audit trail.
+        assert [(r.outcome, r.path) for r in results] == [(None, TerminalPath.BUFFERED)]
 
         # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
         recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
         assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
+        assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) not in recorded_pairs
 
     def test_transform_mode_count_flush_expands_from_non_quarantined_parent(self) -> None:
         """Count-triggered batch output children must not use a quarantined triggering token as parent."""
@@ -2585,17 +2616,15 @@ class TestAggregationFailureMatrix:
             },
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -2762,17 +2791,15 @@ class TestTransformModeOutcomeOrdering:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -2812,17 +2839,15 @@ class TestTransformModeOutcomeOrdering:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -5016,19 +5041,40 @@ class TestDurableSchedulerResumeDrain:
             rows_after = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
         assert rows_after == rows_before
 
-    def test_resume_restore_rejects_blocked_coalesce_row_without_hold_state(self) -> None:
-        """A BLOCKED coalesce row with no OPEN node_state hold is journal/audit divergence.
+    def test_resume_restore_recovers_adopted_coalesce_row_without_hold_state(self) -> None:
+        """Adopted BLOCKED coalesce row with no OPEN node_state hold is a crash-window state.
 
-        The hold is written at accept() time BEFORE the journal row blocks;
-        its absence at restore means the audit trail and journal disagree —
-        AuditIntegrityError, not a silent default.
+        Under ADR-030 §E.2 journal-first ordering the adoption CAS commits in
+        one transaction and accept() (which writes the PENDING hold) runs in a
+        separate transaction.  A leader crash between them leaves an adopted row
+        with no OPEN state_id — a reachable, legitimate crash state, not
+        corruption.
+
+        The restore reconcile (§E.3/§E.4 crash-window recovery) must:
+        - detect the holdless adopted row,
+        - determine the key is NOT completed (normal adoption crash, not a late
+          arrival), and
+        - reset barrier_adopted_epoch to NULL so the row becomes intake-pending
+          again and the first drain iteration's journal-first intake processes it
+          via the normal adopt + accept + trigger path.
+
+        The processor MUST be created successfully (no AuditIntegrityError).
+        After creation, the row must be intake-pending (barrier_adopted_epoch IS
+        NULL) so the next drain iteration's journal-first intake picks it up.
+
+        Re-pin of test_resume_restore_rejects_blocked_coalesce_row_without_hold_state:
+        that pin pre-dated §E.2 and claimed "hold written BEFORE journal row blocks",
+        which is inverted under journal-first ordering — the adoption CAS commits
+        first, accept() runs after. A refusal on this crash state permanently
+        wedges every subsequent resume.
         """
-        _db, factory = _make_factory()
+        db, factory = _make_factory()
         coalesce_node = NodeID("coalesce::merge")
         self._seed_held_coalesce_branch(factory, coalesce_node)
         now = datetime.now(UTC)
         # Block the row through the production claim path WITHOUT the
-        # accept()-written hold node_state.
+        # accept()-written hold node_state (simulates a crash between adoption
+        # CAS commit and accept() in _intake_adopt_coalesce_row).
         claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
         assert claimed is not None
         factory.scheduler.mark_blocked(
@@ -5040,20 +5086,32 @@ class TestDurableSchedulerResumeDrain:
         )
 
         resumed_executor = self._make_real_coalesce_executor(factory, coalesce_node)
-        with pytest.raises(AuditIntegrityError, match="No entry in state_ids"):
-            _make_processor(
-                factory,
-                coalesce_executor=resumed_executor,
-                coalesce_node_ids={CoalesceName("merge"): coalesce_node},
-                node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
-                node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
-                coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
-                barrier_restore=BarrierJournalRestoreContext(
-                    resume_checkpoint_id="ckpt-resume-1",
-                    barrier_scalars=None,
-                    batch_id_remap={},
-                ),
-            )
+        # Under §E.2 crash-window recovery the processor MUST be created without
+        # error; the holdless adopted row is reset to intake-pending.
+        _make_processor(
+            factory,
+            coalesce_executor=resumed_executor,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
+        )
+        # After crash-window recovery: barrier_adopted_epoch must be NULL
+        # (reset by the restore reconcile) so the next intake re-adopts the row.
+        from sqlalchemy import select as _select
+
+        from elspeth.core.landscape.schema import token_work_items_table as _twi
+
+        with db.connection() as conn:
+            row = conn.execute(_select(_twi.c.barrier_adopted_epoch).where(_twi.c.work_item_id == claimed.work_item_id)).one()
+        assert row.barrier_adopted_epoch is None, (
+            "crash-window recovery must reset barrier_adopted_epoch to NULL so the intake re-processes the row"
+        )
 
     def test_aggregation_buffering_leaves_scheduler_work_blocked(self) -> None:
         """Buffered aggregation tokens remain active until a flush consumes them."""
@@ -5204,7 +5262,11 @@ class TestDurableSchedulerResumeDrain:
             expected_lease_owner="test-worker",
         )
 
-        with pytest.raises(AuditIntegrityError, match=rf"orphan.*{stray_token.token_id}|{stray_token.token_id}.*orphan"):
+        # Slice 3 re-pin (ADR-030 §E.2/§E.3): the refusal moved EARLIER — the
+        # journal-first intake refuses to ADOPT a row this leader cannot
+        # attribute (no live stash entry, no resume provenance) before any
+        # durable mutation, instead of the flush-time orphan refusal.
+        with pytest.raises(AuditIntegrityError, match="no live stash entry and no resume checkpoint provenance"):
             processor.process_row(
                 row_index=1,
                 source_row=_make_source_row({"value": 2}),
@@ -6093,14 +6155,25 @@ class TestMaybeCoalesceToken:
         assert result is None
 
     def test_coalesce_failure_with_outcomes_recorded_does_not_duplicate_recording(self) -> None:
-        """When executor already recorded FAILED outcome, processor must not record again."""
+        """When executor already recorded FAILED outcome, the intake must not record again.
+
+        Slice 3 re-pin (ADR-030 §E.2): the accept-time failure surfaces from
+        the journal-first intake (the arrival blocked first, then the
+        adoption-time executor accept produced the failure), not in-claim.
+        """
         _, factory = _make_factory()
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
         coalesce = Mock()
         coalesce.accept.return_value = CoalesceOutcome(
             held=False,
             merged_token=None,
-            failure_reason="late_arrival_after_merge",
-            consumed_tokens=(),
+            failure_reason="merge_failed:path_b_lost",
+            consumed_tokens=(token,),
             outcomes_recorded=True,
         )
         processor = _make_processor(
@@ -6109,37 +6182,53 @@ class TestMaybeCoalesceToken:
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
             node_step_map={NodeID("coalesce::merge"): 2},
         )
-        token = TokenInfo(
-            row_id="row-1",
-            token_id="token-1",
-            row_data=make_row({}),
-            branch_name="path_a",
-        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
         with (
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_token_completed") as emit_token_completed,
         ):
-            handled, result = processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
-            )
+            results, child_items = processor._run_barrier_intake_pass(ctx)
 
-        assert handled is True
-        assert result is not None
-        _assert_outcome_pair(result, TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        assert child_items == []
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         record_outcome.assert_not_called()
         emit_token_completed.assert_called_once()
+        # Backdated accept timing (§H 476): the intake passed an explicit
+        # monotonic arrival anchor derived from barrier_blocked_at.
+        assert coalesce.accept.call_args.kwargs["arrival_time"] is not None
 
-    def test_coalesce_merged_at_terminal_returns_coalesced_result(self) -> None:
-        """All branches arrived at terminal coalesce → COALESCED result."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
+    def test_coalesce_merged_at_terminal_emits_pending_sink_handoff(self) -> None:
+        """All branches arrived at terminal coalesce → durable COALESCED handoff.
+
+        Slice 3 re-pin (ADR-030 §E.2/§E.3): the merge fires from the
+        journal-first intake; for a TERMINAL coalesce the COALESCED output is
+        emitted as a fresh PENDING_SINK row atomically with the consumed
+        branches (F1/D6) — the old in-claim memory-only ride between the
+        consumption and the claim disposition is gone.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
+        token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
         coalesce = Mock()
-        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6147,32 +6236,61 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 3},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
         )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
+
+        results, child_items = processor._run_barrier_intake_pass(ctx)
+
+        # Terminal coalesce: the COALESCED sink-bound result is emitted as a
+        # fresh PENDING_SINK row in the SAME atomic completion (no READY hop)
+        # — the merged output is journal-durable before the sink write.
+        assert child_items == []
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
+        assert results[0].sink_name == "output"
+        assert results[0].scheduler_pending_sink is True
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            rows = dict(
+                conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.run_id == "test-run"
+                    )
+                ).all()
+            )
+        assert rows["merged-1"] == "pending_sink"
+        assert rows["token-1"] == "terminal"
+
+    def test_coalesce_merged_at_terminal_missing_sink_mapping_raises(self) -> None:
+        """Terminal coalesce merge without sink mapping is an internal bug.
+
+        Slice 3 re-pin (ADR-030 §E.2): the terminal fire resolves the sink to
+        build the durable PENDING_SINK emission, so the invariant raises from
+        the intake pass.
+        """
+        _, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
         )
-
-        handled, result = processor._maybe_coalesce_token(
-            token,
-            current_node_id=NodeID("coalesce::merge"),
-            coalesce_node_id=NodeID("coalesce::merge"),
-            coalesce_name=CoalesceName("merge"),
-            child_items=[],
-        )
-
-        assert handled is True
-        assert result is not None
-        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
-        assert result.sink_name == "output"
-
-    def test_coalesce_merged_at_terminal_missing_sink_mapping_raises(self) -> None:
-        """Terminal coalesce merge without sink mapping is an internal bug."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6180,21 +6298,12 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 3},
             # Intentionally omit coalesce_on_success_map
         )
-        token = TokenInfo(
-            row_id="row-1",
-            token_id="token-1",
-            row_data=make_row({}),
-            branch_name="path_a",
-        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
         with pytest.raises(OrchestrationInvariantError, match="Coalesce 'merge' not in on_success map"):
-            processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
-            )
+            processor._run_barrier_intake_pass(ctx)
 
     def test_coalesce_merged_at_non_terminal_queues_work(self) -> None:
         """Merged at non-terminal step → child work item added, no result.
@@ -6223,8 +6332,14 @@ class TestMaybeCoalesceToken:
         )
         merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
         factory.data_flow.create_token(row.row_id, token_id="merged-1")
+        token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
         coalesce = Mock()
-        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -6232,24 +6347,15 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 2},
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-5")},
         )
-        token = TokenInfo(
-            row_id=row.row_id,
-            token_id="token-1",
-            row_data=make_row({}),
-            branch_name="path_a",
-        )
-        child_items: list[WorkItem] = []
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        # Slice 3 re-pin (ADR-030 §E.2): the merge fires from the
+        # journal-first intake, not from an in-claim accept.
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
-        handled, result = processor._maybe_coalesce_token(
-            token,
-            current_node_id=NodeID("coalesce::merge"),
-            coalesce_node_id=NodeID("coalesce::merge"),
-            coalesce_name=CoalesceName("merge"),
-            child_items=child_items,
-        )
+        results, child_items = processor._run_barrier_intake_pass(ctx)
 
-        assert handled is True
-        assert result is None
+        assert results == []
         assert len(child_items) == 1
         assert child_items[0].current_node_id == NodeID("coalesce::merge")
         # The merged child's continuation is already journal-durable (F1/D6).
@@ -6266,7 +6372,11 @@ class TestMaybeCoalesceToken:
         assert (status, node_id) == ("ready", "coalesce::merge")
 
     def test_invalid_coalesce_outcome_state_raises_invariant(self) -> None:
-        """CoalesceOutcome must be held, merged, or failed; empty state is invalid."""
+        """CoalesceOutcome must be held, merged, or failed; empty state is invalid.
+
+        Slice 3 re-pin (ADR-030 §E.2): the executor accept runs at intake, so
+        the invalid-state invariant fires from the intake pass.
+        """
         _db, factory = _make_factory()
         coalesce = Mock()
         coalesce.accept.return_value = Mock(
@@ -6274,6 +6384,7 @@ class TestMaybeCoalesceToken:
             merged_token=None,
             failure_reason=None,
             outcomes_recorded=False,
+            late_arrival=False,
         )
         processor = _make_processor(
             factory,
@@ -6287,15 +6398,12 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
         with pytest.raises(OrchestrationInvariantError, match="invalid state"):
-            processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
-            )
+            processor._run_barrier_intake_pass(ctx)
 
 
 # =============================================================================
@@ -7748,9 +7856,13 @@ class TestGateJumpPastCoalesceInvariant:
         # Token should be held at the coalesce node without emitting a terminal result.
         assert result is None
         assert _child_items == []
-        coalesce_exec.accept.assert_called_once()
-        assert coalesce_exec.accept.call_args.kwargs["token"].token_id == "tok-1"
-        assert coalesce_exec.accept.call_args.kwargs["coalesce_name"] == CoalesceName("merge")
+        # Slice 3 re-pin (ADR-030 §E.2): acceptance is journal-first — the
+        # in-claim accept is gone. The hold is stashed for the next drain
+        # iteration's intake (which runs the executor accept post-adoption).
+        coalesce_exec.accept.assert_not_called()
+        hold = processor._live_barrier_holds["tok-1"]
+        assert hold.barrier_key == "merge"
+        assert hold.token.token_id == "tok-1"
 
 
 class TestFlushContextImmutability:

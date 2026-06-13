@@ -49,13 +49,12 @@ from elspeth.core.operations import track_operation
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
-    flush_remaining_aggregation_buffers,
+    run_end_of_input_barrier_flush,
 )
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.landscape_registration import record_schema_contract
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
-    flush_coalesce_pending,
     handle_coalesce_timeouts,
 )
 from elspeth.engine.orchestrator.types import (
@@ -602,48 +601,31 @@ class SourceIterationDriver:
             )
 
         if not interrupted_by_shutdown and flush_end_of_input:
-            # CRITICAL: Flush remaining aggregation buffers only at true end-of-input.
+            # CRITICAL: Flush remaining barriers only at true end-of-input.
             # Multi-source runs may feed shared downstream queues, aggregations,
             # and coalesce barriers. Per-source completion is not a global EOF.
             # A graceful shutdown is resumable and must preserve buffered state
             # instead of forcing an END_OF_SOURCE flush.
-            if config.aggregation_settings:
-                # NOTE: Aggregation-flushed tokens are NOT checkpointed here.
-                # They go into pending_tokens and are checkpointed only after
-                # SinkExecutor.write() achieves sink durability, via the
-                # checkpoint_after_sink callback.
-                flush_result = flush_remaining_aggregation_buffers(
-                    config=config,
-                    processor=processor,
-                    ctx=ctx,
-                    pending_tokens=pending_tokens,
-                )
-                counters.accumulate_flush_result(flush_result)
-
-                # TERMINAL GUARANTEE: After end-of-source flush, all aggregation
-                # buffers must be empty. Any remaining tokens would be silently
-                # lost — never reaching a terminal state in the audit trail.
-                for agg_node_id_str in config.aggregation_settings:
-                    remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
-                    if remaining > 0:
-                        raise OrchestrationInvariantError(
-                            f"Aggregation buffer for node '{agg_node_id_str}' still has "
-                            f"{remaining} tokens after end-of-source flush. "
-                            f"These tokens would never reach a terminal state."
-                        )
-
-            # Flush pending coalesce operations only when all configured sources
-            # are exhausted. Per-source flushing would resolve shared barriers
-            # before later source roots have had a chance to contribute.
-            if coalesce_executor is not None:
-                flush_coalesce_pending(
-                    coalesce_executor=coalesce_executor,
-                    coalesce_node_map=coalesce_node_map,
-                    processor=processor,
-                    ctx=ctx,
-                    counters=counters,
-                    pending_tokens=pending_tokens,
-                )
+            #
+            # ADR-030 §D steps 2-3 (slice 3): the flush is gated on journal
+            # quiescence and runs as an intake -> trigger evaluation -> flush
+            # loop until no BLOCKED barrier holds remain.
+            # NOTE: Aggregation-flushed tokens are NOT checkpointed here.
+            # They go into pending_tokens and are checkpointed only after
+            # SinkExecutor.write() achieves sink durability, via the
+            # checkpoint_after_sink callback. Coalesce flushing happens only
+            # when all configured sources are exhausted — per-source flushing
+            # would resolve shared barriers before later source roots have had
+            # a chance to contribute.
+            run_end_of_input_barrier_flush(
+                config=config,
+                processor=processor,
+                ctx=ctx,
+                counters=counters,
+                pending_tokens=pending_tokens,
+                coalesce_executor=coalesce_executor,
+                coalesce_node_map=coalesce_node_map,
+            )
 
     def load_source_with_events(
         self,

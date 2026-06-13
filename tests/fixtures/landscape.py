@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import NodeType
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
@@ -87,6 +88,24 @@ def insert_crashed_leader_seat(conn: Any, *, run_id: str) -> None:
             updated_at=lapsed,
         )
     )
+
+
+def leader_coordination_token(factory: RecorderFactory, run_id: str) -> CoordinationToken:
+    """The run's OWN leader token (the epoch-1 seat ``begin_run`` minted).
+
+    ADR-030 slice 3: the journal-first barrier intake's adoption verbs are
+    leader-fenced with NO unfenced arm, so any test that drives barrier work
+    through a directly-constructed ``RowProcessor`` must bind the coordination
+    token. ``begin_run`` always mints the seat (self-minted worker identity at
+    epoch 1); this helper reads it back. The fence predicate is identity+epoch
+    only — an expired seat still passes its own leader's fence.
+    """
+    from datetime import UTC, datetime
+
+    leader = factory.run_coordination.live_leader(run_id=run_id, now=datetime.now(UTC))
+    if leader is None:
+        raise AssertionError(f"run {run_id!r} has no run_coordination seat; begin_run mints one — was the run created via raw SQL?")
+    return CoordinationToken(run_id=run_id, worker_id=leader.leader_worker_id, leader_epoch=leader.leader_epoch)
 
 
 def make_factory(db: LandscapeDB | None = None, *, payload_store: PayloadStore | None = None) -> RecorderFactory:

@@ -117,6 +117,22 @@ class RowProcessorHandle(Protocol):
         """Return grouped unresolved scheduler work for invariant diagnostics."""
         ...
 
+    def run_barrier_intake(self, ctx: PluginContext) -> list[RowResult]:
+        """Run one journal-first barrier intake pass (ADR-030 §E.2, §D step 3)."""
+        ...
+
+    def has_blocked_barrier_work(self) -> bool:
+        """Return whether durable BLOCKED barrier holds remain (§D step-3 loop)."""
+        ...
+
+    def count_unquiesced_scheduler_work(self) -> int:
+        """Count §D step-2 unquiesced journal work (READY + non-pending-sink LEASED)."""
+        ...
+
+    def summarize_unquiesced_scheduler_work(self) -> tuple[str, ...]:
+        """Return grouped §D step-2 unquiesced work for invariant diagnostics."""
+        ...
+
     def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
         """Mark durable scheduler work consumed by a barrier as terminal."""
         ...

@@ -64,14 +64,13 @@ from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
-    flush_remaining_aggregation_buffers,
     handle_incomplete_batches,
+    run_end_of_input_barrier_flush,
 )
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
-    flush_coalesce_pending,
     handle_coalesce_timeouts,
 )
 from elspeth.engine.orchestrator.run_status import (
@@ -409,37 +408,19 @@ def run_resume_processing_loop(
             break
 
     if not interrupted_by_shutdown:
-        # CRITICAL: Flush remaining aggregation buffers only at true end-of-source.
-        if config.aggregation_settings:
-            # Call module function directly (no wrapper method)
-            flush_result = flush_remaining_aggregation_buffers(
-                config=config,
-                processor=processor,
-                ctx=ctx,
-                pending_tokens=pending_tokens,
-            )
-            counters.accumulate_flush_result(flush_result)
-
-            # TERMINAL GUARANTEE: same assertion as _post_source_iteration_work.
-            for agg_node_id_str in config.aggregation_settings:
-                remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
-                if remaining > 0:
-                    raise OrchestrationInvariantError(
-                        f"Aggregation buffer for node '{agg_node_id_str}' still has "
-                        f"{remaining} tokens after end-of-source flush. "
-                        f"These tokens would never reach a terminal state."
-                    )
-
-        # Flush pending coalesce operations only when resume processing exhausted all rows.
-        if coalesce_executor is not None:
-            flush_coalesce_pending(
-                coalesce_executor=coalesce_executor,
-                coalesce_node_map=coalesce_node_map,
-                processor=processor,
-                ctx=ctx,
-                counters=counters,
-                pending_tokens=pending_tokens,
-            )
+        # CRITICAL: Flush remaining barriers only at true end-of-source.
+        # ADR-030 §D steps 2-3 (slice 3): journal-quiescence gate, then the
+        # intake -> trigger evaluation -> flush loop until no BLOCKED barrier
+        # holds remain (same helper as _post_source_iteration_work).
+        run_end_of_input_barrier_flush(
+            config=config,
+            processor=processor,
+            ctx=ctx,
+            counters=counters,
+            pending_tokens=pending_tokens,
+            coalesce_executor=coalesce_executor,
+            coalesce_node_map=coalesce_node_map,
+        )
 
         if processor.has_unresolved_scheduler_work():
             active_work = "; ".join(processor.summarize_unresolved_scheduler_work()) or "<unknown>"

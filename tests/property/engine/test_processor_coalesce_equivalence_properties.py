@@ -131,9 +131,13 @@ class TestCoalesceTriggerEquivalence:
         assert legacy_should_handle == node_should_handle
         assert handled is node_should_handle
 
+        # Slice 3 re-pin (ADR-030 §E.2): acceptance is journal-first — the
+        # in-claim accept is gone for every arm. A handled token stashes its
+        # live barrier hold for the next drain iteration's intake instead.
+        coalesce_executor.accept.assert_not_called()
+        assert result is None
         if node_should_handle:
-            coalesce_executor.accept.assert_called_once()
-            assert result is None
+            hold = processor._live_barrier_holds["token-1"]
+            assert hold.barrier_key == "merge"
         else:
-            coalesce_executor.accept.assert_not_called()
-            assert result is None
+            assert "token-1" not in processor._live_barrier_holds

@@ -50,7 +50,8 @@ from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, rule
 from sqlalchemy import create_engine, insert, select
 
 from elspeth.contracts import NodeType
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.coordination import CoordinationToken
+from elspeth.contracts.errors import AuditIntegrityError, RunLeadershipLostError
 from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
@@ -59,6 +60,7 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -73,6 +75,11 @@ LEASE_SECONDS = 60
 
 WORKERS = ("worker-a", "worker-b")
 BARRIERS = ("barrier-east", "barrier-west")
+# ADR-030 slice 3: the leader identity whose seat the fenced adoption verbs
+# verify (epoch 1, minted with the run row below).
+LEADER_WORKER_ID = "machine-leader"
+LEADER_TOKEN = CoordinationToken(run_id=RUN_ID, worker_id=LEADER_WORKER_ID, leader_epoch=1)
+STALE_LEADER_TOKEN = CoordinationToken(run_id=RUN_ID, worker_id=LEADER_WORKER_ID, leader_epoch=99)
 
 # Statuses from which a work item may never transition again.
 FINAL_STATUSES = {TokenWorkStatus.TERMINAL, TokenWorkStatus.FAILED}
@@ -102,6 +109,17 @@ def _insert_run_and_nodes(engine: Tier1Engine, *, now: datetime) -> None:
                 status="running",
                 openrouter_catalog_sha256="0" * 64,
                 openrouter_catalog_source="bundled",
+            )
+        )
+        # ADR-030 epoch-21 seat: the fenced adoption verbs (slice 3) verify
+        # identity+epoch against this row.
+        conn.execute(
+            insert(run_coordination_table).values(
+                run_id=RUN_ID,
+                leader_worker_id=LEADER_WORKER_ID,
+                leader_epoch=1,
+                leader_heartbeat_expires_at=now + timedelta(days=1),
+                updated_at=now,
             )
         )
         for node_id, node_type, plugin in (
@@ -156,6 +174,9 @@ class ModelItem:
     lease_expires_at: datetime | None = None
     pending_sink_name: str | None = None
     barrier_key: str | None = None
+    # ADR-030 §E.2 adoption marker: NULL until the leader's journal-first
+    # intake adopts the BLOCKED barrier hold; persists across the release.
+    barrier_adopted_epoch: int | None = None
 
 
 class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
@@ -493,6 +514,76 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             self.repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=foreign_barrier, token_ids=(token_id,), now=now)
 
     # -------------------------------------------------------------------------
+    # Rules: journal-first adoption (ADR-030 §E.2, slice 3)
+    # -------------------------------------------------------------------------
+
+    @rule(token_id=tokens)
+    def adopt_blocked_barrier_item(self, token_id: str) -> None:
+        """The leader adopts a BLOCKED barrier hold: NULL→epoch CAS, idempotent SKIP after."""
+        model = self.model[token_id]
+        if model.status is not TokenWorkStatus.BLOCKED:
+            return
+        assert model.barrier_key is not None
+        now = self._tick()
+        result = self.repo.adopt_blocked_barrier_item(
+            run_id=RUN_ID,
+            work_item_id=model.work_item_id,
+            token_id=token_id,
+            barrier_key=model.barrier_key,
+            membership=None,
+            buffered_outcome=None,
+            now=now,
+            coordination_token=LEADER_TOKEN,
+        )
+        if model.barrier_adopted_epoch is None:
+            assert result.adopted is True
+            assert result.barrier_adopted_epoch == 1
+            model.barrier_adopted_epoch = 1
+        else:
+            # Idempotent success-SKIP: any non-NULL epoch counts as adopted.
+            assert result.adopted is False
+            assert result.barrier_adopted_epoch == model.barrier_adopted_epoch
+
+    @rule(token_id=tokens)
+    def adoption_requires_a_blocked_hold(self, token_id: str) -> None:
+        """Adopting a non-BLOCKED row is journal corruption: Tier-1, zero mutation."""
+        model = self.model[token_id]
+        if model.status is TokenWorkStatus.BLOCKED:
+            return
+        now = self._tick()
+        with pytest.raises(AuditIntegrityError):
+            self.repo.adopt_blocked_barrier_item(
+                run_id=RUN_ID,
+                work_item_id=model.work_item_id,
+                token_id=token_id,
+                barrier_key=BARRIERS[0],
+                membership=None,
+                buffered_outcome=None,
+                now=now,
+                coordination_token=LEADER_TOKEN,
+            )
+
+    @rule(token_id=tokens)
+    def stale_leader_cannot_adopt(self, token_id: str) -> None:
+        """A deposed leader's adoption is fence-refused before any mutation."""
+        model = self.model[token_id]
+        if model.status is not TokenWorkStatus.BLOCKED:
+            return
+        assert model.barrier_key is not None
+        now = self._tick()
+        with pytest.raises(RunLeadershipLostError):
+            self.repo.adopt_blocked_barrier_item(
+                run_id=RUN_ID,
+                work_item_id=model.work_item_id,
+                token_id=token_id,
+                barrier_key=model.barrier_key,
+                membership=None,
+                buffered_outcome=None,
+                now=now,
+                coordination_token=STALE_LEADER_TOKEN,
+            )
+
+    # -------------------------------------------------------------------------
     # Rules: lease expiry and recovery
     # -------------------------------------------------------------------------
 
@@ -597,6 +688,11 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             assert row["pending_sink_name"] == item.pending_sink_name
             if item.status is TokenWorkStatus.BLOCKED:
                 assert row["barrier_key"] == item.barrier_key
+            # ADR-030 §E.2: the adoption marker agrees with the model on every
+            # row that ever blocked (it persists across the barrier release).
+            assert row["barrier_adopted_epoch"] == item.barrier_adopted_epoch, (
+                f"{token_id}: db barrier_adopted_epoch {row['barrier_adopted_epoch']} != model {item.barrier_adopted_epoch}"
+            )
 
     @invariant()
     def lease_fields_set_iff_leased(self) -> None:

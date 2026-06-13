@@ -10,7 +10,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
 
@@ -1380,6 +1380,68 @@ class DataFlowRepository:
         if result is None:
             return None
         return self._token_outcome_loader.load(result)
+
+    def get_live_buffered_outcomes(self, ref: TokenRef) -> list[TokenOutcome]:
+        """All LIVE BUFFERED outcomes for a token (ADR-030 §E.4 restore read).
+
+        "Live" = the token has no ``completed=1`` outcome; a flushed token's
+        BUFFERED row is dead history and exempt. ``token_outcomes`` has NO
+        non-terminal uniqueness (the only unique index is partial on
+        ``completed=1``), so more than one live BUFFERED row means a deposed
+        leader's unfenced intake wrote a second acceptance — the restore path
+        (``_derive_restored_batch_id``) refuses loudly with Tier-1 instead of
+        the historical silent latest-wins of :meth:`get_token_outcome`. At
+        epoch 21 this is the BACKSTOP behind the adoption CAS, which is the
+        structural guarantee.
+
+        Ordered by ``(recorded_at, outcome_id)`` for deterministic reporting.
+        """
+        terminal = token_outcomes_table.alias("terminal_outcomes")
+        terminal_witness = (
+            select(terminal.c.outcome_id)
+            .where(terminal.c.token_id == ref.token_id)
+            .where(terminal.c.run_id == ref.run_id)
+            .where(terminal.c.completed == 1)
+            .exists()
+        )
+        query = (
+            select(token_outcomes_table)
+            .where(token_outcomes_table.c.token_id == ref.token_id)
+            .where(token_outcomes_table.c.run_id == ref.run_id)
+            .where(token_outcomes_table.c.completed == 0)
+            .where(token_outcomes_table.c.path == TerminalPath.BUFFERED.value)
+            .where(~terminal_witness)
+            .order_by(token_outcomes_table.c.recorded_at, token_outcomes_table.c.outcome_id)
+        )
+        return [self._token_outcome_loader.load(row) for row in self._ops.execute_fetchall(query)]
+
+    def find_duplicate_live_buffered_outcomes(self, run_id: str) -> list[tuple[str, int]]:
+        """Run-wide sweep: token_ids holding >1 live BUFFERED outcome.
+
+        The cheap belt to :meth:`get_live_buffered_outcomes`' per-token check,
+        intended to run once at barrier-restore entry for a single loud
+        report. Returns ``(token_id, live_buffered_count)`` pairs ordered by
+        token_id; empty means the adoption-CAS invariant held.
+        """
+        terminal = token_outcomes_table.alias("terminal_outcomes")
+        terminal_witness = (
+            select(terminal.c.outcome_id)
+            .where(terminal.c.token_id == token_outcomes_table.c.token_id)
+            .where(terminal.c.run_id == run_id)
+            .where(terminal.c.completed == 1)
+            .exists()
+        )
+        query = (
+            select(token_outcomes_table.c.token_id, func.count())
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.completed == 0)
+            .where(token_outcomes_table.c.path == TerminalPath.BUFFERED.value)
+            .where(~terminal_witness)
+            .group_by(token_outcomes_table.c.token_id)
+            .having(func.count() > 1)
+            .order_by(token_outcomes_table.c.token_id)
+        )
+        return [(str(row[0]), int(row[1])) for row in self._ops.execute_fetchall(query)]
 
     def get_token_outcomes_for_row(self, run_id: str, row_id: str) -> list[TokenOutcome]:
         """Get all token outcomes for a row in a single query.

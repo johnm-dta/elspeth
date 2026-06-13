@@ -58,6 +58,11 @@ class CoalesceOutcome:
         coalesce_name: Name of the coalesce point that produced this outcome
         outcomes_recorded: True if terminal outcomes were already recorded by executor.
             When True, caller MUST NOT record outcomes again (Bug 9z8 fix).
+        late_arrival: True when this failure outcome is the late-arrival arm —
+            the token arrived after its group already merged/failed (ADR-030
+            §E.3a): the journal-first intake releases the token's BLOCKED row
+            via ``mark_blocked_barrier_terminal`` with a ``late_arrival``
+            release context instead of the standard group-failure consumption.
     """
 
     held: bool
@@ -67,6 +72,7 @@ class CoalesceOutcome:
     failure_reason: str | None = None
     coalesce_name: str | None = None
     outcomes_recorded: bool = False
+    late_arrival: bool = False
 
     def __post_init__(self) -> None:
         # Validate mutual exclusivity of states
@@ -593,11 +599,20 @@ class CoalesceExecutor:
         self,
         token: TokenInfo,
         coalesce_name: str,
+        *,
+        arrival_time: float | None = None,
     ) -> CoalesceOutcome:
         """Accept a token at a coalesce point.
 
         If merge conditions are met, returns the merged token.
         Otherwise, holds the token and returns held=True.
+
+        ``arrival_time`` (ADR-030 §E.2 backdated accept timing): an explicit
+        monotonic anchor for this arrival — the journal-first intake passes
+        the row's durable ``barrier_blocked_at`` converted onto this clock's
+        monotonic scale, so ``first_arrival`` (the timeout anchor) and the
+        branch's ``arrival_time`` are invariant under leader takeover (§H
+        pinned doctrine). ``None`` preserves the live-clock anchor.
 
         Step position is resolved internally via the injected StepResolver
         from the coalesce point's registered node_id.
@@ -640,7 +655,7 @@ class CoalesceExecutor:
 
         # Get or create pending state for this row
         key = (coalesce_name, token.row_id)
-        now = self._clock.monotonic()
+        now = arrival_time if arrival_time is not None else self._clock.monotonic()
 
         # Check if this coalesce already completed (late arrival).
         # Two-level lookup: FIFO cache first, then Landscape fallback.
@@ -695,6 +710,7 @@ class CoalesceExecutor:
                 ),
                 coalesce_name=coalesce_name,
                 outcomes_recorded=True,
+                late_arrival=True,
             )
 
         if key not in self._pending:
@@ -704,6 +720,11 @@ class CoalesceExecutor:
             )
 
         pending = self._pending[key]
+        if now < pending.first_arrival:
+            # min-anchor: §H doctrine pins the timeout anchor to the OLDEST
+            # member's durable arrival; a backdated adoption arriving out of
+            # blocked-at order must still rewind the anchor.
+            pending.first_arrival = now
 
         # Detect duplicate arrivals (indicates bug in upstream code)
         # Per "Plugin Ownership" principle: bugs in our code should crash, not hide
@@ -1609,6 +1630,21 @@ class CoalesceExecutor:
         self._completed_keys.clear()
 
         return results
+
+    def has_recorded_branch_loss(self, coalesce_name: str, row_id: str, branch_name: str) -> bool:
+        """Whether this branch loss is already in executor memory (§E.5 replay dedup).
+
+        The journal-first loss replay (per-iteration intake / takeover
+        restore) consults this BEFORE ``notify_branch_lost``: at N=1 the
+        producer already notified in-claim (record-then-notify in the same
+        drain step), and re-notifying a recorded loss is a Tier-1 duplicate.
+        A completed/unknown key returns False — ``notify_branch_lost``'s own
+        completed-keys check makes that replay a no-op.
+        """
+        pending = self._pending.get((coalesce_name, row_id))
+        if pending is None:
+            return False
+        return branch_name in pending.lost_branches
 
     def notify_branch_lost(
         self,

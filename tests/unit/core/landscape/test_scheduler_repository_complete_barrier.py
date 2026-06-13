@@ -421,65 +421,221 @@ def test_complete_barrier_passthrough_handoff_counts_toward_blocked_coverage() -
     assert json.loads(emission_events[0]["context_json"]) == {"barrier_key": BARRIER_KEY, "consumed_count": 2}
 
 
-def test_complete_barrier_leased_triggering_token_is_excluded() -> None:
-    """An in-claim LEASED trigger under the same barrier_key is neither required nor terminalized."""
-    engine, repo = _make_repo()
-    payload = _seed_run(
-        engine,
-        run_id=RUN_ID,
-        tokens=[("r1", "t1", 0), ("r2", "t2", 1), ("r-trig", "t-trigger", 2)],
-        now=NOW,
-    )
-    for ingest_sequence, (row_id, token_id) in enumerate([("r1", "t1"), ("r2", "t2")]):
-        _enqueue_and_block(repo, token_id=token_id, row_id=row_id, ingest_sequence=ingest_sequence, payload=payload, now=NOW)
-    trigger = repo.enqueue_ready(
-        run_id=RUN_ID,
-        token_id="t-trigger",
-        row_id="r-trig",
-        node_id="normalize",
-        step_index=1,
-        ingest_sequence=2,
-        available_at=NOW,
-        row_payload_json=payload,
-        barrier_key=BARRIER_KEY,
-    )
-    claimed = repo.claim_ready(run_id=RUN_ID, lease_owner="w-trigger", lease_seconds=30, now=NOW)
-    assert claimed is not None
-    assert claimed.work_item_id == trigger.work_item_id
-
-    n = repo.complete_barrier(
-        run_id=RUN_ID,
-        barrier_key=BARRIER_KEY,
-        consumed_token_ids=["t1", "t2"],
-        emitted_pending_sink=[],
-        emitted_ready=[],
-        now=NOW,
-        leased_exclusion_token_id="t-trigger",
-    )
-
-    assert n == 2
-    assert _statuses(engine, ["t1", "t2"]) == {TokenWorkStatus.TERMINAL.value}
-    assert _row_for_token(engine, "t-trigger")["status"] == TokenWorkStatus.LEASED.value
-
-
-def test_complete_barrier_leased_exclusion_exempts_blocked_row_from_coverage() -> None:
-    """The exclusion arm: a BLOCKED row for the excluded token is not required in consumed_token_ids."""
+def test_complete_barrier_snapshot_equal_to_durable_is_n1_parity() -> None:
+    """§E.3 N=1 algebra: snapshot == durable behaves exactly like no snapshot."""
     engine, repo = _make_repo()
     _seed_three_blocked(engine, repo)
 
     n = repo.complete_barrier(
         run_id=RUN_ID,
         barrier_key=BARRIER_KEY,
-        consumed_token_ids=["t1", "t2"],
+        consumed_token_ids=["t1", "t2", "t3"],
         emitted_pending_sink=[],
         emitted_ready=[],
         now=NOW,
-        leased_exclusion_token_id="t3",
+        intake_snapshot_token_ids=frozenset({"t1", "t2", "t3"}),
+    )
+
+    assert n == 3
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.TERMINAL.value}
+    terminal_events = [e for e in _events(engine) if e["event_type"] == SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value]
+    assert len(terminal_events) == 3
+    # Empty late set by construction: no late_arrival_token_ids key anywhere.
+    assert all(json.loads(e["context_json"]) == {"barrier_key": BARRIER_KEY} for e in terminal_events)
+
+
+def test_complete_barrier_late_arrival_outside_snapshot_stays_blocked() -> None:
+    """§E.3: a durable BLOCKED row OUTSIDE the snapshot is a late arrival —
+    it legitimately stays BLOCKED (no orphan Tier-1) and the completion's
+    emission events record it as late_arrival_token_ids for forensics.
+
+    Re-pins the protective intent of the deleted leased-exclusion coverage
+    test: the snapshot is what now narrows the exhaustiveness universe.
+    """
+    engine, repo = _make_repo()
+    payload = _seed_three_blocked(engine, repo, extra_tokens=[("r-next", "t-next", 3)])
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=BARRIER_KEY,
+        consumed_token_ids=["t1", "t2"],
+        emitted_pending_sink=[],
+        emitted_ready=[
+            BarrierEmission(
+                token_id="t-next",
+                row_id="r-next",
+                row_payload_json=payload,
+                node_id="normalize",
+                step_index=4,
+                ingest_sequence=3,
+            )
+        ],
+        now=NOW,
+        intake_snapshot_token_ids=frozenset({"t1", "t2"}),
     )
 
     assert n == 2
     assert _statuses(engine, ["t1", "t2"]) == {TokenWorkStatus.TERMINAL.value}
-    assert _row_for_token(engine, "t3")["status"] == TokenWorkStatus.BLOCKED.value
+    assert _row_for_token(engine, "t3")["status"] == TokenWorkStatus.BLOCKED.value, "late arrival stays BLOCKED"
+    # Emission events carry the late set; consumed events keep the pinned legacy shape.
+    enqueue_events = [e for e in _events(engine) if e["event_type"] == SchedulerEventType.ENQUEUE.value and e["token_id"] == "t-next"]
+    assert len(enqueue_events) == 1
+    assert json.loads(enqueue_events[0]["context_json"]) == {
+        "barrier_key": BARRIER_KEY,
+        "consumed_count": 2,
+        "late_arrival_token_ids": ["t3"],
+    }
+    terminal_events = [e for e in _events(engine) if e["event_type"] == SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value]
+    assert all(json.loads(e["context_json"]) == {"barrier_key": BARRIER_KEY} for e in terminal_events)
+
+
+def test_complete_barrier_snapshot_minus_durable_is_tier1() -> None:
+    """§E.3: the leader believes in a token the journal does not hold."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"no durable BLOCKED row.*t-ghost"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2", "t3"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            intake_snapshot_token_ids=frozenset({"t1", "t2", "t3", "t-ghost"}),
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_consumed_outside_snapshot_is_tier1() -> None:
+    """§E.3: consuming a token outside the adopted firing group is a caller bug."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"outside its own intake snapshot.*t3"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2", "t3"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            intake_snapshot_token_ids=frozenset({"t1", "t2"}),
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_handed_off_outside_snapshot_is_tier1() -> None:
+    """§E.3: a buffered passthrough handoff outside the snapshot is refused too."""
+    engine, repo = _make_repo()
+    payload = _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"handed\s+off buffered token\(s\) outside its own intake snapshot.*t3"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2"],
+            emitted_pending_sink=[
+                BarrierEmission(
+                    token_id="t3",
+                    row_payload_json=payload,
+                    sink_name="out",
+                    outcome="success",
+                    path="completed",
+                )
+            ],
+            emitted_ready=[],
+            now=NOW,
+            intake_snapshot_token_ids=frozenset({"t1", "t2"}),
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_snapshot_orphan_within_snapshot_is_tier1() -> None:
+    """§E.3 middle arm: ``(durable ∩ snapshot) - consumed - handed_off`` is the
+    ORIGINAL orphaning invariant, preserved inside the snapshot universe — a
+    token the leader adopted but neither consumed nor handed off still raises."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"uncovered token_ids.*t3"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            intake_snapshot_token_ids=frozenset({"t1", "t2", "t3"}),
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_explicit_none_snapshot_is_durable_universe_exhaustiveness() -> None:
+    """Explicit pin of the ``intake_snapshot_token_ids=None`` arm (§E.3).
+
+    ``None`` means the exhaustiveness universe is the WHOLE durable BLOCKED
+    set — the exact pre-§E.2 semantics every wrapper/N=1 caller relies on.
+    This is the most dangerous silent inversion in the snapshot relaxation:
+    if ``None`` ever started meaning "empty snapshot" (late-arrival
+    everything), partial flushes would silently strand BLOCKED rows instead
+    of raising. Pinned in both directions: partial set refused, full set
+    accepted.
+    """
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"uncovered token_ids.*t3"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            intake_snapshot_token_ids=None,
+        )
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=BARRIER_KEY,
+        consumed_token_ids=["t1", "t2", "t3"],
+        emitted_pending_sink=[],
+        emitted_ready=[],
+        now=NOW,
+        intake_snapshot_token_ids=None,
+    )
+    assert n == 3
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.TERMINAL.value}
+
+
+def test_complete_barrier_leased_exclusion_token_id_parameter_is_deleted() -> None:
+    """§E.2 signature pin: the in-claim arm is removed, so the LEASED
+    triggering-token exemption parameter no longer exists — passing it is a
+    TypeError, not a silently ignored kwarg. (The four deleted
+    leased-exclusion tests are replaced by the §E.3 snapshot tests above:
+    the triggering token is now BLOCKED like any arrival and needs no
+    exemption.)"""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    with pytest.raises(TypeError, match="leased_exclusion_token_id"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            consumed_token_ids=["t1", "t2"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            leased_exclusion_token_id="t3",
+        )
+
+    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
 
 
 def test_complete_barrier_emitted_ready_inserts_ready_rows_with_enqueue_events() -> None:
@@ -858,12 +1014,12 @@ def test_complete_barrier_scoped_fire_rejects_emission_outside_scope_group() -> 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
 
 
-def test_complete_barrier_leased_exclusion_requires_exhaustive_release() -> None:
-    """leased_exclusion_token_id only affects the strict exhaustiveness check; the legacy arm refuses it."""
+def test_complete_barrier_snapshot_requires_exhaustive_release() -> None:
+    """intake_snapshot_token_ids narrows the strict exhaustiveness universe; the legacy arm refuses it."""
     engine, repo = _make_repo()
     _seed_three_blocked(engine, repo)
 
-    with pytest.raises(AuditIntegrityError, match="exclusion only exempts"):
+    with pytest.raises(AuditIntegrityError, match="meaningless on the legacy partial-release arm"):
         repo.complete_barrier(
             run_id=RUN_ID,
             barrier_key=BARRIER_KEY,
@@ -871,11 +1027,109 @@ def test_complete_barrier_leased_exclusion_requires_exhaustive_release() -> None
             emitted_pending_sink=[],
             emitted_ready=[],
             now=NOW,
-            leased_exclusion_token_id="t3",
+            intake_snapshot_token_ids=frozenset({"t1", "t2"}),
             require_exhaustive_release=False,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_cross_group_snapshot_token_is_tier1() -> None:
+    """§E.3 scope validation: a snapshot token durably BLOCKED in ANOTHER row
+    group under the shared coalesce barrier_key names the flush caller's bug
+    precisely — never a silent intersection."""
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    with pytest.raises(AuditIntegrityError, match=r"DIFFERENT row group.*t2a.*firing-group snapshot across row groups"):
+        repo.complete_barrier(
+            run_id=RUN_ID,
+            barrier_key=COALESCE_KEY,
+            consumed_token_ids=["t1a", "t1b"],
+            emitted_pending_sink=[],
+            emitted_ready=[],
+            now=NOW,
+            scope_row_id="r1",
+            intake_snapshot_token_ids=frozenset({"t1a", "t1b", "t2a"}),
+        )
+
+    assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+
+def test_complete_barrier_snapshot_isolates_sibling_coalesce_group() -> None:
+    """§H pin (design :477): flushing group A with A's snapshot leaves group
+    B's held branches untouched and fires no Tier-1 — the snapshot is the
+    firing group, never whole executor memory. Sibling of
+    test_complete_barrier_scope_row_id_isolates_coalesce_group."""
+    engine, repo = _make_repo()
+    _seed_two_coalesce_groups(engine, repo)
+
+    n = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=COALESCE_KEY,
+        consumed_token_ids=["t1a", "t1b"],
+        emitted_pending_sink=[],
+        emitted_ready=[],
+        now=NOW,
+        scope_row_id="r1",
+        intake_snapshot_token_ids=frozenset({"t1a", "t1b"}),
+    )
+
+    assert n == 2
+    assert _statuses(engine, ["t1a", "t1b"]) == {TokenWorkStatus.TERMINAL.value}
+    assert _statuses(engine, ["t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
+
+    # Group B then flushes with ITS snapshot, proving full two-group algebra.
+    n2 = repo.complete_barrier(
+        run_id=RUN_ID,
+        barrier_key=COALESCE_KEY,
+        consumed_token_ids=["t2a", "t2b"],
+        emitted_pending_sink=[],
+        emitted_ready=[],
+        now=NOW,
+        scope_row_id="r2",
+        intake_snapshot_token_ids=frozenset({"t2a", "t2b"}),
+    )
+    assert n2 == 2
+    assert _statuses(engine, ["t2a", "t2b"]) == {TokenWorkStatus.TERMINAL.value}
+
+
+def test_mark_blocked_barrier_terminal_release_context_merged_into_event() -> None:
+    """§E.3a additive re-pin: release_context keys merge into each per-row
+    MARK_BLOCKED_BARRIER_TERMINAL event context; without it the legacy
+    {"barrier_key"}-only shape is pinned (see
+    test_wrappers_delegate_preserving_legacy_partial_release)."""
+    engine, repo = _make_repo()
+    _seed_three_blocked(engine, repo)
+
+    released = repo.mark_blocked_barrier_terminal(
+        run_id=RUN_ID,
+        barrier_key=BARRIER_KEY,
+        token_ids=("t3",),
+        now=NOW,
+        release_context={
+            "late_arrival": True,
+            "reason": "late_arrival_after_merge",
+            "released_by": "intake",
+            "scope_row_id": "r3",
+        },
+    )
+
+    assert released == 1
+    assert _row_for_token(engine, "t3")["status"] == TokenWorkStatus.TERMINAL.value
+    # Partial release: the unnamed rows stay BLOCKED.
+    assert _statuses(engine, ["t1", "t2"]) == {TokenWorkStatus.BLOCKED.value}
+    terminal_events = [
+        e for e in _events(engine) if e["event_type"] == SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL.value and e["token_id"] == "t3"
+    ]
+    assert len(terminal_events) == 1
+    assert json.loads(terminal_events[0]["context_json"]) == {
+        "barrier_key": BARRIER_KEY,
+        "late_arrival": True,
+        "reason": "late_arrival_after_merge",
+        "released_by": "intake",
+        "scope_row_id": "r3",
+    }
 
 
 def test_complete_barrier_rejects_duplicate_ready_emissions() -> None:
@@ -907,25 +1161,6 @@ def test_complete_barrier_rejects_duplicate_ready_emissions() -> None:
                 ),
             ],
             now=NOW,
-        )
-
-    assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
-
-
-def test_complete_barrier_rejects_leased_exclusion_token_in_consumed_set() -> None:
-    """The in-claim trigger must be excluded, not completed: exclusion ∩ consumed raises."""
-    engine, repo = _make_repo()
-    _seed_three_blocked(engine, repo)
-
-    with pytest.raises(AuditIntegrityError, match="must be excluded, not completed"):
-        repo.complete_barrier(
-            run_id=RUN_ID,
-            barrier_key=BARRIER_KEY,
-            consumed_token_ids=["t1", "t2", "t3"],
-            emitted_pending_sink=[],
-            emitted_ready=[],
-            now=NOW,
-            leased_exclusion_token_id="t3",
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}

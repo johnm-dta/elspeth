@@ -55,6 +55,11 @@ def _make_loop_ctx(ctx: PluginContext, *, coalesce_executor: MagicMock | None = 
     config.sinks = {}
     processor = MagicMock()
     processor.get_aggregation_buffer_count.return_value = 0
+    # Slice 3 (ADR-030 §D): the EOF flush helper gates on journal quiescence,
+    # runs a journal-first intake pass and loops until no BLOCKED holds remain.
+    processor.count_unquiesced_scheduler_work.return_value = 0
+    processor.run_barrier_intake.return_value = []
+    processor.has_blocked_barrier_work.return_value = False
     return LoopContext(
         counters=ExecutionCounters(),
         pending_tokens={},
@@ -156,7 +161,9 @@ class TestFinalizeSourceIterationContext:
         coalesce_executor = MagicMock()
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
-        with patch("elspeth.engine.orchestrator.source_iteration.flush_coalesce_pending") as flush_coalesce:
+        # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
+        # (orchestrator/aggregation.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.aggregation.flush_coalesce_pending") as flush_coalesce:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
@@ -186,7 +193,9 @@ class TestFinalizeSourceIterationContext:
         coalesce_executor = MagicMock()
         loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
 
-        with patch("elspeth.engine.orchestrator.source_iteration.flush_coalesce_pending") as flush_coalesce:
+        # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
+        # (orchestrator/aggregation.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.aggregation.flush_coalesce_pending") as flush_coalesce:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
@@ -216,7 +225,9 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx)
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
 
-        with patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers") as flush_aggregation:
+        # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
+        # (orchestrator/aggregation.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers") as flush_aggregation:
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),
@@ -246,7 +257,10 @@ class TestFinalizeSourceIterationContext:
         loop_ctx = _make_loop_ctx(ctx)
         loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
 
-        with patch("elspeth.engine.orchestrator.source_iteration.flush_remaining_aggregation_buffers") as flush_aggregation:
+        # Slice 3 re-pin: the EOF flush moved behind run_end_of_input_barrier_flush
+        # (orchestrator/aggregation.py), so the seam lives in that module now.
+        with patch("elspeth.engine.orchestrator.aggregation.flush_remaining_aggregation_buffers") as flush_aggregation:
+            flush_aggregation.return_value = ExecutionCounters().to_flush_result()
             orchestrator._source_driver.finalize_source_iteration(
                 loop_ctx,
                 factory=MagicMock(),

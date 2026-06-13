@@ -47,7 +47,7 @@ from tests.fixtures.base_classes import (
     as_transform,
 )
 from tests.fixtures.factories import wire_transforms
-from tests.fixtures.landscape import make_landscape_db
+from tests.fixtures.landscape import leader_coordination_token, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
 from tests.fixtures.stores import MockPayloadStore
@@ -759,6 +759,9 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake requires
+            # the run's leader token (begin_run minted the epoch-1 seat).
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         assert result.status == RunStatus.RUNNING
@@ -781,6 +784,7 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # The single output row should have value=60 (10+20+30) and count=3
@@ -812,6 +816,7 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Aggregated output reached the sink (proves flush was inside the loop)

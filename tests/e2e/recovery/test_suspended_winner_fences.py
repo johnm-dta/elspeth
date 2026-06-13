@@ -28,10 +28,10 @@ Common contract asserted for EVERY fenced verb:
       proving the refusal was the fence, not broken setup — and the seat
       expiry moves forward (verify-AND-EXTEND, design :246-255).
 
-Slice scope: ``adopt_blocked_barrier_item`` joins this matrix in slice 3
-(design :490); the membership-fence arms (``claim_ready`` /
-``claim_pending_sink`` / ``enqueue_ready`` refusing ``RunWorkerEvictedError``)
-are slice 4.
+Slice scope: ``adopt_blocked_barrier_item`` and
+``adopt_coalesce_branch_losses`` joined this matrix in slice 3 (design :490);
+the membership-fence arms (``claim_ready`` / ``claim_pending_sink`` /
+``enqueue_ready`` refusing ``RunWorkerEvictedError``) are slice 4.
 """
 
 from __future__ import annotations
@@ -53,10 +53,17 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.core.landscape.database import begin_write
+from elspeth.core.landscape.scheduler_repository import (
+    BatchMembershipSpec,
+    BufferedOutcomeSpec,
+    TokenSchedulerRepository,
+    record_coalesce_branch_loss,
+)
 from elspeth.core.landscape.schema import (
     batch_members_table,
     batches_table,
+    coalesce_branch_losses_table,
     run_coordination_table,
     run_workers_table,
     runs_table,
@@ -385,6 +392,136 @@ class TestSuspendedWinnerFences:
             coordination_token=current,
         )
         assert _work_item(crashed.db, token_id)["status"] == TokenWorkStatus.TERMINAL.value
+        _assert_seat_extended(crashed, seat_before)
+        crashed.db.close()
+
+    def test_stale_adopt_blocked_barrier_item_refused_zero_rows_in_all_three_tables(self, tmp_path: Path) -> None:
+        """Slice 3 (design §C.4 row 6a / §E.2): the journal-first adoption verb.
+
+        A deposed leader's adoption must leave ZERO trace in all three
+        tables the verb writes — no ``barrier_adopted_epoch`` CAS marker, no
+        ``batch_members`` row, no BUFFERED ``token_outcomes`` row. The CAS is
+        the ONLY double-BUFFERED guard, so a fence leak here IS the F2
+        duplicate-acceptance regression."""
+        crashed, token_old = _takeover_image(tmp_path)
+        token_id, _row_id, work_item_id = _seed_journal_row(crashed, ingest_sequence=3)
+        crashed.repo.mark_blocked(
+            work_item_id=work_item_id,
+            queue_key=None,
+            barrier_key="agg-1",
+            now=crashed.clock.now_utc(),
+            expected_lease_owner=WORKER_OLD,
+        )
+        batch = crashed.factory.execution.create_batch(crashed.run_id, crashed.journal_node_id)
+        current = _usurp(crashed)
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+        item_before = _work_item(crashed.db, token_id)
+        assert item_before["status"] == TokenWorkStatus.BLOCKED.value
+        assert item_before["barrier_adopted_epoch"] is None
+        members_before = _table_count(crashed.db, batch_members_table, crashed.run_id)
+        outcomes_before = _table_count(crashed.db, token_outcomes_table, crashed.run_id)
+
+        def _adopt(coordination_token: CoordinationToken) -> Any:
+            return crashed.repo.adopt_blocked_barrier_item(
+                run_id=crashed.run_id,
+                work_item_id=work_item_id,
+                token_id=token_id,
+                barrier_key="agg-1",
+                membership=BatchMembershipSpec(batch_id=batch.batch_id, ordinal=0),
+                buffered_outcome=BufferedOutcomeSpec(batch_id=batch.batch_id),
+                now=crashed.clock.now_utc(),
+                coordination_token=coordination_token,
+            )
+
+        with pytest.raises(RunLeadershipLostError) as exc_info:
+            _adopt(token_old)
+        assert not isinstance(exc_info.value, AuditIntegrityError)
+
+        item_after = _work_item(crashed.db, token_id)
+        assert item_after == item_before, "BLOCKED row intact: barrier_adopted_epoch still NULL"
+        assert _table_count(crashed.db, batch_members_table, crashed.run_id) == members_before, "zero batch_members rows"
+        assert _table_count(crashed.db, token_outcomes_table, crashed.run_id) == outcomes_before, "zero BUFFERED outcomes"
+        _assert_refusal_contract(crashed, verb="adopt_blocked_barrier_item", stale_epoch=token_old.leader_epoch, seat_before=seat_before)
+
+        # Positive control: the current leader adopts the same hold.
+        result = _adopt(current)
+        assert result.adopted is True
+        assert result.barrier_adopted_epoch == current.leader_epoch
+        adopted_item = _work_item(crashed.db, token_id)
+        assert adopted_item["status"] == TokenWorkStatus.BLOCKED.value, "adoption marks, it does not transition"
+        assert adopted_item["barrier_adopted_epoch"] == current.leader_epoch
+        assert _table_count(crashed.db, batch_members_table, crashed.run_id) == members_before + 1
+        assert _table_count(crashed.db, token_outcomes_table, crashed.run_id) == outcomes_before + 1
+        _assert_seat_extended(crashed, seat_before)
+
+        # Idempotency: a second current-token call on the already-adopted row
+        # is a success-SKIP — no second batch_members row, NO second BUFFERED
+        # outcome (the adoption CAS is the ONLY double-BUFFERED guard).
+        readopt = _adopt(current)
+        assert readopt.adopted is False
+        assert readopt.barrier_adopted_epoch == current.leader_epoch
+        assert _table_count(crashed.db, batch_members_table, crashed.run_id) == members_before + 1
+        assert _table_count(crashed.db, token_outcomes_table, crashed.run_id) == outcomes_before + 1
+        with crashed.db.engine.connect() as conn:
+            live_buffered = conn.execute(
+                select(func.count())
+                .select_from(token_outcomes_table)
+                .where(token_outcomes_table.c.token_id == token_id)
+                # ADR-019 BUFFERED shape: (outcome=NULL, path='buffered'), non-terminal.
+                .where(token_outcomes_table.c.path == "buffered")
+                .where(token_outcomes_table.c.completed == 0)
+            ).scalar_one()
+        assert live_buffered == 1, "exactly one live non-terminal BUFFERED acceptance"
+        crashed.db.close()
+
+    def test_stale_adopt_coalesce_branch_losses_refused(self, tmp_path: Path) -> None:
+        """Slice 3 (design §E.5): a deposed leader cannot move the branch-loss
+        replay cursor (``adopted_epoch`` stays NULL for the real leader's
+        intake replay)."""
+        crashed, token_old = _takeover_image(tmp_path)
+        with begin_write(crashed.db.engine) as conn:
+            assert record_coalesce_branch_loss(
+                conn,
+                run_id=crashed.run_id,
+                coalesce_name="merge",
+                row_id="row-3",
+                branch_name="left",
+                token_id="token-left",
+                reason="failed",
+                recorded_by=WORKER_OLD,
+                now=crashed.clock.now_utc(),
+            )
+        (loss,) = crashed.repo.list_unadopted_coalesce_branch_losses(run_id=crashed.run_id)
+        current = _usurp(crashed)
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+
+        with pytest.raises(RunLeadershipLostError) as exc_info:
+            crashed.repo.adopt_coalesce_branch_losses(
+                run_id=crashed.run_id,
+                loss_ids=(loss.loss_id,),
+                now=crashed.clock.now_utc(),
+                coordination_token=token_old,
+            )
+        assert not isinstance(exc_info.value, AuditIntegrityError)
+
+        with crashed.db.engine.connect() as conn:
+            adopted_epoch = conn.execute(
+                select(coalesce_branch_losses_table.c.adopted_epoch).where(coalesce_branch_losses_table.c.loss_id == loss.loss_id)
+            ).scalar_one()
+        assert adopted_epoch is None, "the replay cursor did not move"
+        _assert_refusal_contract(crashed, verb="adopt_coalesce_branch_losses", stale_epoch=token_old.leader_epoch, seat_before=seat_before)
+
+        # Positive control: the current leader marks it under its own epoch.
+        marked = crashed.repo.adopt_coalesce_branch_losses(
+            run_id=crashed.run_id,
+            loss_ids=(loss.loss_id,),
+            now=crashed.clock.now_utc(),
+            coordination_token=current,
+        )
+        assert marked == 1
+        assert crashed.repo.list_unadopted_coalesce_branch_losses(run_id=crashed.run_id) == []
+        full = crashed.repo.list_coalesce_branch_losses(run_id=crashed.run_id)
+        assert [loss_row.adopted_epoch for loss_row in full] == [current.leader_epoch]
         _assert_seat_extended(crashed, seat_before)
         crashed.db.close()
 

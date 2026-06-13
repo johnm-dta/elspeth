@@ -29,7 +29,7 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.testing import make_field, make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import _TestSchema
 
 # ---------------------------------------------------------------------------
@@ -163,6 +163,9 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
             scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -249,6 +252,9 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
             scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -280,14 +286,17 @@ class TestBatchTokenIdentity:
             ingest_sequence=1,
         )
 
-        # Should have: CONSUMED_IN_BATCH (triggering token) + COMPLETED (output)
-        consumed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
+        # Slice 3 re-pin (ADR-030 §E.2): the trigger arrival returns a real
+        # BUFFERED RowResult and the flush fires from the next intake step in
+        # the out-of-claim shape — no CONSUMED_IN_BATCH RowResult is emitted
+        # for the trigger member (its consumption lives in the audit trail).
+        buffered = [r for r in results_1 if (r.outcome, r.path) == (None, TerminalPath.BUFFERED)]
         completed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
 
-        assert len(consumed) == 1, "Triggering token must be CONSUMED_IN_BATCH"
+        assert len(buffered) == 1, "Triggering arrival must surface as BUFFERED"
         assert len(completed) == 1, "Must have exactly 1 COMPLETED output"
 
-        triggering_token_id = consumed[0].token.token_id
+        triggering_token_id = buffered[0].token.token_id
         output_token_id = completed[0].token.token_id
 
         # THE BUG: In the old code, output_token_id == triggering_token_id
@@ -335,6 +344,9 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
             scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 

@@ -1618,6 +1618,41 @@ class TestJSONSourceKeyNormalization:
         assert rows[1].row["extra_field"] == "bonus"
         assert rows[1].row["score"] == 95
 
+    def test_field_resolution_is_union_across_heterogeneous_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """B4.3: get_field_resolution() must be the UNION of all keys seen across rows.
+
+        When row1={id, name} is followed by row2={id, email}, the resolution
+        must contain {id, name, email} -- not just {id, email} (the last row's
+        keys).  Before the fix the rebuild used list(row.keys()) on the NEW row
+        only, silently discarding 'name' from the resolution (and hence from the
+        Landscape field-resolution audit record).
+        """
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.jsonl"
+        json_file.write_text('{"id": 1, "name": "alice"}\n{"id": 2, "email": "bob@example.com"}\n')
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        # Union: both rows' keys must be present
+        assert "name" in mapping, "field 'name' from row 1 was lost after row 2 rebuilt the resolution"
+        assert "email" in mapping, "field 'email' from row 2 must be present"
+        assert "id" in mapping
+
     def test_field_mapping_collision_crashes_not_quarantines(self, tmp_path: Path, ctx: PluginContext) -> None:
         """B3.1: A field_mapping that collapses two fields into one is a CONFIG fault
         and must crash (ValueError propagates), not be silently quarantined.

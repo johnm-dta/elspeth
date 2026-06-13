@@ -865,6 +865,41 @@ class TestAzureBlobSourceSchemaValidation:
         assert second_contract.get_field("b").original_name == "b"
 
 
+class TestAzureBlobSourceFieldResolutionUnion:
+    """B4.3: field resolution after heterogeneous sparse rows must be the UNION."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_operation_context(plugin_name="azure_blob")
+
+    def test_field_resolution_is_union_across_heterogeneous_rows(self, ctx: PluginContext) -> None:
+        """B4.3: get_field_resolution() must be the UNION of all keys seen across rows.
+
+        When row1={id, name} is followed by row2={id, email}, the resolution
+        must contain {id, name, email} -- not just {id, email} (the last row).
+        Before the fix the rebuild used list(row.keys()) on the NEW row only,
+        discarding 'name' from the Landscape field-resolution audit record.
+        Mirrors test_field_resolution_is_union_across_heterogeneous_rows in
+        test_json_source.py and test_dataverse_source.py.
+        """
+        blob_bytes = b'{"id": 1, "name": "alice"}\n{"id": 2, "email": "bob@example.com"}\n'
+        source = _make_source(_base_config(format="jsonl"))
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        # Union: all keys from both rows must be present
+        assert "name" in mapping, "field 'name' from row 1 was lost after row 2 rebuilt the resolution"
+        assert "email" in mapping, "field 'email' from row 2 must be present"
+        assert "id" in mapping
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Audit Trail and Error Handling
 # ---------------------------------------------------------------------------

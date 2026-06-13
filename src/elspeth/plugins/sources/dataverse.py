@@ -207,7 +207,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6a19a87b28a54845"
+    source_file_hash: str | None = "sha256:0a03a7915974ea4e"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -449,13 +449,17 @@ class DataverseSource(BaseSource):
                 has_unmapped_fields = True
             result[normalized_name] = v
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild from the
+        # UNION of previously-seen keys and this row's new keys. Using only
+        # list(row.keys()) would REPLACE the mapping with just the current row's
+        # fields, discarding keys from earlier rows and corrupting the Landscape
+        # field-resolution audit record (B4.3, elspeth-594221617d).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes

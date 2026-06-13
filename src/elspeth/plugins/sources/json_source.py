@@ -148,7 +148,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c42e5a7b5f7c4f8d"
+    source_file_hash: str | None = "sha256:1a0772822cfdf5e9"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -474,13 +474,17 @@ class JSONSource(BaseSource):
                 normalized[final_name] = value
                 has_unmapped_fields = True
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild field
+        # resolution from the UNION of all previously-seen keys and this row's
+        # new keys. Using only list(row.keys()) would REPLACE the mapping with
+        # just the current row's fields, discarding keys from earlier rows and
+        # corrupting the Landscape field-resolution audit record (B4.3).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys

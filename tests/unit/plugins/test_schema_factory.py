@@ -652,6 +652,45 @@ class TestNonFiniteFloatRejection:
         path = _find_non_finite_value_path(large_val, "$")
         assert path is None, "Finite np.longdouble must not be reported as non-finite"
 
+    def test_find_non_finite_path_detects_nan_in_mapping_subclass(self) -> None:
+        """NaN nested in a Mapping subclass (OrderedDict/defaultdict) must be caught.
+
+        The scanner used exact-type checks (value_type is dict), so a NaN inside
+        an OrderedDict or any other Mapping subclass bypassed the source-boundary
+        gate entirely — a fail-open leak (plugins review Batch 3 item 6).
+        """
+        from collections import OrderedDict, defaultdict
+
+        from elspeth.plugins.infrastructure.schema_factory import _find_non_finite_value_path
+
+        ordered = OrderedDict([("a", 1.0), ("b", float("nan"))])
+        path = _find_non_finite_value_path(ordered, "$")
+        assert path is not None
+        assert ".b" in path
+
+        nested = {"outer": OrderedDict([("inner", float("inf"))])}
+        assert _find_non_finite_value_path(nested, "$") is not None
+
+        dd: defaultdict[str, float] = defaultdict(float, {"x": float("nan")})
+        assert _find_non_finite_value_path(dd, "$") is not None
+
+    def test_find_non_finite_path_detects_nan_in_tuple_subclass(self) -> None:
+        """NaN inside a named-tuple (a tuple subclass) must be caught.
+
+        value_type in {list, tuple} missed tuple subclasses, so a NaN inside a
+        namedtuple bypassed the gate (plugins review Batch 3 item 6).
+        """
+        from typing import NamedTuple
+
+        from elspeth.plugins.infrastructure.schema_factory import _find_non_finite_value_path
+
+        class Point(NamedTuple):
+            x: float
+            y: float
+
+        path = _find_non_finite_value_path(Point(1.0, float("nan")), "$")
+        assert path is not None
+
     def test_explicit_schema_no_validator_at_transform_boundary(self) -> None:
         """Transform boundary (allow_coercion=False) does not add non-finite validator.
 

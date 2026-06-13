@@ -281,11 +281,16 @@ class TestBatchReplicateTypeEnforcement:
         assert result.rows[0]["copy_index"] == 0
         assert result.rows[1]["id"] == 2
         assert result.rows[1]["copy_index"] == 1
-        # Quarantine info in success_reason.metadata
+        # Quarantine info in success_reason.metadata records the row INDEX, not the
+        # row body — Tier-2/3 row content must not be embedded in audit metadata
+        # (plugins review Batch 4 item 6, prior row-content-leak family).
         assert result.success_reason is not None
         assert result.success_reason["metadata"]["quarantined_count"] == 1
-        assert result.success_reason["metadata"]["quarantined"][0]["reason"] == "invalid_copies"
-        assert result.success_reason["metadata"]["quarantined"][0]["row_data"]["id"] == 1
+        entry = result.success_reason["metadata"]["quarantined"][0]
+        assert entry["reason"] == "invalid_copies"
+        assert entry["row_index"] == 0
+        assert entry["value"] == -1  # the offending copies count is fine; it is not row content
+        assert "row_data" not in entry  # the full row body must NOT leak into the audit record
 
     def test_error_message_indicates_upstream_bug(self, ctx: PluginContext) -> None:
         """Error message explicitly indicates upstream validation bug."""

@@ -183,7 +183,27 @@ class ChromaSearchProvider:
         token_id: str | None,
     ) -> list[RetrievalChunk]:
         count_start = time.monotonic()
-        collection_count = self._collection.count()
+        count_request = RawCallPayload({"query": query, "top_k": top_k, "collection": self._config.collection})
+        try:
+            collection_count = self._collection.count()
+        except (
+            chromadb.errors.InvalidDimensionException,
+            chromadb.errors.InvalidArgumentError,
+            chromadb.errors.NotFoundError,
+            chromadb.errors.AuthorizationError,
+        ) as exc:
+            self._record_error(state_id, count_start, count_request, exc, retryable=False)
+            raise RetrievalError(
+                f"Chroma count failed (permanent): {exc}",
+                retryable=False,
+            ) from exc
+        except chromadb.errors.ChromaError as exc:
+            self._record_error(state_id, count_start, count_request, exc, retryable=True)
+            raise RetrievalError(f"Chroma count failed: {exc}", retryable=True) from exc
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            # OS-level failures that bypass the ChromaDB SDK's own error wrapping
+            self._record_error(state_id, count_start, count_request, exc, retryable=True)
+            raise RetrievalError(f"Chroma connection failed during count: {exc}", retryable=True) from exc
         if collection_count == 0:
             # The corpus is empty: no query() is issued and zero chunks are
             # returned. This is still an auditable retrieval decision — the

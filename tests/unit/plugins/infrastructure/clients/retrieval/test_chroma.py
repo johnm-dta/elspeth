@@ -987,3 +987,79 @@ class TestChromaSearchProviderReadiness:
 
         with pytest.raises(TypeError, match="unexpected type"):
             provider.check_readiness()
+
+
+class TestCountErrorBoundary:
+    """B3.4 -- count() outside the guard in search() must produce audit record + RetrievalError.
+
+    The bare count() at line 185-186 of chroma.py has NO try/except, so any
+    transient ChromaError/ConnectionError/TimeoutError/OSError from count()
+    escapes search() as a raw exception. The RAG transform caller catches only
+    RetrievalError, so the row crashes the run with no per-row quarantine and
+    no audit ERROR record.
+    """
+
+    def _make_provider(self) -> ChromaSearchProvider:
+        unique_name = f"ceb-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        return ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=_mock_execution(),
+            run_id="test-run",
+        )
+
+    def _make_provider_with_execution(self) -> tuple["ChromaSearchProvider", MagicMock]:
+        """Build a provider backed by a real ephemeral collection + captured execution mock."""
+        unique_name = f"ceb-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        return provider, execution
+
+    def test_count_connection_error_raises_retrieval_error_retryable(self) -> None:
+        """count() ConnectionError must be wrapped in RetrievalError(retryable=True) with audit record."""
+        provider, execution = self._make_provider_with_execution()
+        mock_collection = MagicMock()
+        mock_collection.count.side_effect = ConnectionError("refused")
+        provider._collection = mock_collection
+
+        with pytest.raises(RetrievalError) as exc_info:
+            provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)
+
+        # Must be retryable (transient infrastructure failure)
+        assert exc_info.value.retryable is True
+        # Must have produced an audit ERROR record
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+
+    def test_count_not_found_error_raises_retrieval_error_permanent(self) -> None:
+        """count() NotFoundError must be wrapped in RetrievalError(retryable=False) with audit record."""
+        provider, execution = self._make_provider_with_execution()
+        mock_collection = MagicMock()
+        mock_collection.count.side_effect = chromadb.errors.NotFoundError("collection gone")
+        provider._collection = mock_collection
+
+        with pytest.raises(RetrievalError) as exc_info:
+            provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)
+
+        # NotFoundError is permanent
+        assert exc_info.value.retryable is False
+        # Must have produced an audit ERROR record
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+        assert execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+
+    def test_count_programming_error_crashes_through(self) -> None:
+        """TypeError from count() (a code bug) must NOT be caught -- it must crash through."""
+        provider, _execution = self._make_provider_with_execution()
+        mock_collection = MagicMock()
+        mock_collection.count.side_effect = TypeError("bad argument")
+        provider._collection = mock_collection
+
+        with pytest.raises(TypeError, match="bad argument"):
+            provider.search("query", top_k=5, min_score=0.0, state_id="s1", token_id=None)

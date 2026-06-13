@@ -254,6 +254,24 @@ class AzureBlobSourceConfig(DataPluginConfig):
             if self.csv_options.has_header and self.columns is not None:
                 raise ValueError("columns requires csv_options.has_header: false for headerless CSV blobs.")
 
+            # B4.4: headerless CSV with no columns and no schema-declared fields
+            # would fall back to inventing numeric field names ("0","1","2") which
+            # are not valid Python identifiers -- violating the source-boundary
+            # invariant and silently dropping the field-resolution audit record.
+            # Fail fast at config time (Option B, mirrors csv_source which has NO
+            # numeric fallback at all: headerless mode REQUIRES explicit columns).
+            if (
+                not self.csv_options.has_header
+                and self.columns is None
+                and self.schema_config is not None
+                and (self.schema_config.is_observed or not self.schema_config.fields)
+            ):
+                raise ValueError(
+                    "headerless CSV (csv_options.has_header: false) with no columns and no schema-declared "
+                    "fields cannot generate valid field names. Provide explicit columns (e.g. columns: [id, name, value]) "
+                    "or declare schema fields so field names can be inferred."
+                )
+
         if self.format == "csv" and self.columns is not None:
             validate_field_names(self.columns, "columns")
 
@@ -341,7 +359,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8e1346387e26fea6"
+    source_file_hash: str | None = "sha256:d42264e2c268787c"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -669,7 +687,10 @@ class AzureBlobSource(BaseSource):
             )
             headers = self._field_resolution.final_headers
         else:
-            # Headerless CSV with schema-defined field names
+            # Headerless CSV with schema-defined field names.
+            # The config validator (validate_field_normalization_options) rejects
+            # headerless+no-columns+no-schema at init time (B4.4), so by the time
+            # we reach here, schema fields must be present.
             if not self._schema_config.is_observed and self._schema_config.fields:
                 schema_names = [field_def.name for field_def in self._schema_config.fields]
                 self._field_resolution = resolve_field_names(
@@ -679,18 +700,14 @@ class AzureBlobSource(BaseSource):
                 )
                 headers = self._field_resolution.final_headers
             else:
-                # No headers, no columns, no schema — peek at first row
-                # to generate numeric column names (matching pandas behavior).
-                # next(..., sentinel) makes end-of-file ordinary control flow;
-                # csv.Error still propagates (matching prior behavior).
-                first_row = next(reader, _ROW_EXHAUSTED)
-                if first_row is _ROW_EXHAUSTED:
-                    return  # Empty headerless file — no data to process
-                numeric_names = [str(i) for i in range(len(first_row))]
-                headers = tuple(numeric_names)
-                # Push the first row back by re-creating the reader chain
-                # We'll process first_row manually, then continue with reader
-                first_data_row = first_row
+                # Defensive guard: config validator rejects headerless+no-columns+
+                # no-schema at init time (B4.4). Reaching here would mean inventing
+                # non-identifier numeric column names ("0","1","2") which violates
+                # the source-boundary invariant. Raise rather than produce bad data.
+                raise AssertionError(
+                    "headerless CSV with no columns and no schema fields: "
+                    "this config should have been rejected by validate_field_normalization_options"
+                )
 
         expected_count = len(headers)
 

@@ -290,16 +290,20 @@ class TestAzureBlobSourceCSV:
         assert len(rows) == 2
         assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
 
-    def test_headerless_no_columns_uses_numeric(self, ctx: PluginContext) -> None:
-        """Headerless CSV without columns uses numeric column names."""
-        csv_bytes = b"1,alice,100\n2,bob,200\n"
-        source = _make_source(_base_config(csv_options={"has_header": False}))
+    def test_headerless_no_columns_no_schema_rejected_at_config(self) -> None:
+        """B4.4: headerless CSV with no columns and no schema fields must be rejected at
+        config time, not silently generate non-identifier numeric field names ("0","1",...).
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
-            rows = list(source.load(ctx))
+        "0".isidentifier() is False -- numeric names break the all-fields-are-valid-
+        Python-identifiers source-boundary invariant, violate validate_field_names
+        everywhere, and skip field-resolution audit recording entirely.
 
-        assert len(rows) == 2
-        assert rows[0].row == {"0": "1", "1": "alice", "2": "100"}
+        Option B (fail-fast): mirror csv_source which structurally requires 'columns'
+        for headerless mode and has no numeric-name fallback.
+        """
+        cfg = _base_config(csv_options={"has_header": False})
+        with pytest.raises(PluginConfigError, match="columns"):
+            _make_source(cfg)
 
     def test_column_count_mismatch_quarantines_row(self, ctx: PluginContext) -> None:
         """Column count mismatch quarantines individual row, continues processing."""

@@ -117,7 +117,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:82913533f865862a"
+    source_file_hash: str | None = "sha256:89304d51f94ab298"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 

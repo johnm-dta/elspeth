@@ -128,7 +128,7 @@ class BatchDriftCompare(BaseTransform):
     name = "batch_drift_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a8b8bf870e3525ed"
+    source_file_hash: str | None = "sha256:3efb65134bc8c78a"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 

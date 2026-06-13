@@ -435,7 +435,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4171a6f06e0b676f"
+    source_file_hash: str | None = "sha256:f41b69a4d749b1d9"
     config_model = WebScrapeConfig
     passes_through_input = True
 

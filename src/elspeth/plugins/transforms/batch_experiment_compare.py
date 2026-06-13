@@ -123,7 +123,7 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d4f5d341910c4712"
+    source_file_hash: str | None = "sha256:25204a1f415379a1"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 

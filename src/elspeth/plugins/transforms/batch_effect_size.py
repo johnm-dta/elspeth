@@ -115,7 +115,7 @@ class BatchEffectSize(BaseTransform):
     name = "batch_effect_size"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8128ecaabd37153e"
+    source_file_hash: str | None = "sha256:5d9429c66e7bea92"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
 
@@ -285,9 +285,10 @@ class BatchEffectSize(BaseTransform):
         return sum(stats.values) / stats.count
 
     @staticmethod
-    def _stdev(stats: _VariantStats) -> float:
+    def _stdev(stats: _VariantStats) -> float | None:
         if stats.count == 1:
-            return 0.0
+            # stdev is undefined at n=1 -- emit None, never 0.0 (B4.5-a)
+            return None
         return statistics.stdev(stats.values)
 
     @staticmethod
@@ -306,12 +307,11 @@ class BatchEffectSize(BaseTransform):
         try:
             baseline_mean = self._require_finite(self._mean(baseline), operation="baseline_mean")
             variant_mean = self._require_finite(self._mean(variant), operation="variant_mean")
+            # _stdev returns None at n=1 (undefined); _require_finite propagates None
             baseline_stdev = self._require_finite(self._stdev(baseline), operation="baseline_stdev")
             variant_stdev = self._require_finite(self._stdev(variant), operation="variant_stdev")
             assert baseline_mean is not None
             assert variant_mean is not None
-            assert baseline_stdev is not None
-            assert variant_stdev is not None
 
             mean_delta = self._require_finite(variant_mean - baseline_mean, operation="mean_delta")
             assert mean_delta is not None
@@ -319,8 +319,12 @@ class BatchEffectSize(BaseTransform):
             if pooled_variance_denominator <= 0:
                 pooled_stdev = 0.0
             else:
+                # When stdev is None (n=1) the (count-1)*stdev^2 term is 0*? = 0,
+                # so treat None as 0.0 only for the pooled intermediate.
+                baseline_stdev_val = baseline_stdev if baseline_stdev is not None else 0.0
+                variant_stdev_val = variant_stdev if variant_stdev is not None else 0.0
                 pooled_variance = (
-                    ((baseline.count - 1) * (baseline_stdev**2)) + ((variant.count - 1) * (variant_stdev**2))
+                    ((baseline.count - 1) * (baseline_stdev_val**2)) + ((variant.count - 1) * (variant_stdev_val**2))
                 ) / pooled_variance_denominator
                 pooled_stdev_candidate = self._require_finite(math.sqrt(pooled_variance), operation="pooled_stdev")
                 assert pooled_stdev_candidate is not None

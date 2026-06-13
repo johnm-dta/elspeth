@@ -116,7 +116,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:48862b640e0de744"
+    source_file_hash: str | None = "sha256:603b2f206e45f7cd"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -247,9 +247,10 @@ class BatchPairedPreference(BaseTransform):
         return sum(values) / len(values)
 
     @staticmethod
-    def _standard_error(values: list[float]) -> float:
+    def _standard_error(values: list[float]) -> float | None:
         if len(values) <= 1:
-            return 0.0
+            # se undefined at n<=1 -- emit None, never 0.0 (B4.5-a)
+            return None
         return statistics.stdev(values) / math.sqrt(len(values))
 
     @staticmethod
@@ -323,11 +324,22 @@ class BatchPairedPreference(BaseTransform):
 
         try:
             mean_delta = self._require_finite(sum(deltas) / compared_count, operation="mean_paired_delta")
-            standard_error = self._require_finite(self._standard_error(deltas), operation="standard_error_delta")
             baseline_mean = self._require_finite(self._mean(baseline_scores), operation="baseline_mean")
             variant_mean = self._require_finite(self._mean(variant_scores), operation="variant_mean")
-            confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
-            confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
+            # _standard_error returns None when n<=1 (undefined) -- CI bounds are
+            # also undefined in that case; emit None (honest-absence, B4.5-a)
+            se_raw = self._standard_error(deltas)
+            standard_error_delta: float | None
+            confidence_95_low: float | None
+            confidence_95_high: float | None
+            if se_raw is None:
+                standard_error_delta = None
+                confidence_95_low = None
+                confidence_95_high = None
+            else:
+                standard_error_delta = self._require_finite(se_raw, operation="standard_error_delta")
+                confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error_delta, operation="confidence_95_low")
+                confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error_delta, operation="confidence_95_high")
         except OverflowError as exc:
             aggregate_overflow_reason: TransformErrorReason = {
                 "reason": "float_overflow",
@@ -362,7 +374,7 @@ class BatchPairedPreference(BaseTransform):
             "loss_rate": losses / compared_count,
             "tie_rate": ties / compared_count,
             "preference_rate": preference_rate,
-            "standard_error_delta": standard_error,
+            "standard_error_delta": standard_error_delta,
             "confidence_95_low": confidence_95_low,
             "confidence_95_high": confidence_95_high,
         }

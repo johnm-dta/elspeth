@@ -341,7 +341,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2e4533eea58ca358"
+    source_file_hash: str | None = "sha256:16ab1becac809057"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -571,7 +571,11 @@ class AzureBlobSource(BaseSource):
 
         # Parse CSV row-by-row using csv.reader for per-row error handling.
         # This allows quarantining individual bad rows instead of the entire file.
-        reader = csv.reader(io.StringIO(text_data), delimiter=delimiter)
+        # strict=True is required (matching CSVSource) so malformed quoting fails at
+        # the source boundary with a csv.Error — without it, data after a closing
+        # quote is silently merged into adjacent fields and a field-count-preserving
+        # corrupt row passes through with no quarantine and no audit record.
+        reader = csv.reader(io.StringIO(text_data), delimiter=delimiter, strict=True)
 
         # Track a peeked first data row (used for headerless CSV with no schema)
         first_data_row: list[str] | None = None

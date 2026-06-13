@@ -318,6 +318,34 @@ class TestAzureBlobSourceCSV:
         assert "expected" in quarantined[0].quarantine_error
         assert quarantined[0].quarantine_destination == QUARANTINE_SINK
 
+    def test_malformed_quote_quarantined_not_silently_coerced(self, ctx: PluginContext) -> None:
+        """A row with broken quoting is quarantined with an audit record, never coerced.
+
+        ``4,"bad"quote,6`` has data after a closing quote. Without strict=True the
+        csv module silently merges it into ``badquote`` — a 3-field row whose count
+        still matches, so it passed through as valid with NO quarantine and NO audit
+        record (silent Tier-3 coercion). strict=True makes it raise csv.Error at the
+        source boundary so the existing handler quarantines it (plugins review C1).
+        Rows parsed before the fault survive; processing then stops because csv.Error
+        leaves the parser state untrustworthy (matching CSVSource).
+        """
+        csv_bytes = b'id,name,value\n1,alice,100\n4,"bad"quote,6\n7,carol,300\n'
+        source = _make_source(_base_config())
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+            rows = list(source.load(ctx))
+
+        valid = [r for r in rows if not r.is_quarantined]
+        quarantined = [r for r in rows if r.is_quarantined]
+
+        # The malformed-quote row is quarantined with an audit record, not coerced.
+        assert len(quarantined) == 1
+        assert "csv parse error" in quarantined[0].quarantine_error.lower()
+        assert quarantined[0].quarantine_destination == QUARANTINE_SINK
+        # The clean row before the fault survives; none carries the coerced value.
+        assert any(r.row.get("name") == "alice" for r in valid)
+        assert all(r.row.get("name") != "badquote" for r in valid)
+
     def test_empty_file_quarantines(self, ctx: PluginContext) -> None:
         """Empty CSV file quarantines (no header row)."""
         source = _make_source(_base_config())

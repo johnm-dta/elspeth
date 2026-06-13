@@ -92,6 +92,39 @@ class TestValueTransformBehavior:
         assert result.row is not None
         assert result.row["price"] == pytest.approx(110.0)
 
+    def test_overwrite_with_different_type_retypes_output_contract(self, ctx: "PluginContext") -> None:
+        """Overwriting a typed field with a different-typed result retypes the contract.
+
+        ``price`` is declared int; the expression makes it float. Before this fix
+        ``with_field`` was only called for NEW targets, so the output contract kept
+        python_type=int and the emitted row FAILED its own contract.validate() — a
+        self-contradictory audit record (plugins review Batch 4 item 2).
+        """
+        from elspeth.contracts.schema_contract import SchemaContract
+        from elspeth.plugins.transforms.value_transform import ValueTransform
+        from elspeth.testing import make_field, make_row
+
+        fields = (make_field("price", int, original_name="price", required=False, source="inferred"),)
+        contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
+        row = make_row({"price": 100}, contract=contract)
+
+        transform = ValueTransform(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "operations": [{"target": "price", "expression": "row['price'] * 1.1"}],
+            }
+        )
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert isinstance(result.row["price"], float)
+        out_field = result.row.contract.find_field("price")
+        assert out_field is not None
+        assert out_field.python_type is float
+        violations = result.row.contract.validate(result.row.to_dict())
+        assert violations == [], f"emitted row must satisfy its own contract, got: {violations}"
+
     def test_duplicate_targets_sequential_rewrite(self, ctx: "PluginContext") -> None:
         from elspeth.plugins.transforms.value_transform import ValueTransform
 

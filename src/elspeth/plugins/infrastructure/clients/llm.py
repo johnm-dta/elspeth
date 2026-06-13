@@ -464,8 +464,11 @@ class AuditedLLMClient(AuditedClientBase):
                 # Client error or unknown - not retryable
                 raise LLMClientError(str(e), retryable=False) from e
 
-        # Success path — OUTSIDE try/except so internal processing bugs crash
-        # instead of being misclassified as LLM errors
+        # Success path — OUTSIDE the SDK-call try/except so genuine internal logic
+        # bugs crash instead of being misclassified as LLM errors. Tier-3 boundary
+        # reads taken from the response snapshot below (usage, model_dump, content,
+        # finish_reason) are each individually guarded and RECORDED on failure, so a
+        # malformed provider response is audited rather than crashing (B4.1).
         latency_ms = (time.perf_counter() - start) * 1000
 
         # Capture the provider response once, then validate/normalize the Tier 3
@@ -585,15 +588,48 @@ class AuditedLLMClient(AuditedClientBase):
             )
             raise LLMClientError(error_msg, retryable=False)
 
-        # NOTE: content/finish_reason extraction is deliberately OUTSIDE a guard.
-        # A missing .message/.content here is treated as an internal bug and is
-        # allowed to crash directly rather than be masked as an LLMClientError
-        # (Bug 4.6, TestBug4_6_SuccessPathOutsideTryExcept). Plugins-review Batch 4
-        # item 1 argued these should be recorded like the usage/model_dump reads
-        # above; that conflicts with the tested Bug-4.6 decision and is left for
-        # operator adjudication rather than silently re-litigated here.
-        content = response.choices[0].message.content
-        finish_reason = response.choices[0].finish_reason
+        # B4.1 (operator decision 2026-06-14): wrap the Tier-3 content/finish_reason
+        # reads so that a malformed response (e.g. missing .message/.content due to
+        # SDK drift) is RECORDED in the audit trail before re-raising. The LLM call
+        # consumed a call_index and provider tokens, so it must appear in the audit
+        # trail even if the response shape is unexpected. Supersedes the prior
+        # direct-crash doctrine (Bug-4.6 / TestBug4_6_SuccessPathOutsideTryExcept).
+        # Mirror: the malformed-model branch (lines ~512-543) which uses RawCallPayload
+        # and raises LLMClientError(retryable=False) from the original exception.
+        try:
+            content = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+        except AttributeError as attr_exc:
+            error_msg = f"LLM response missing expected attribute at Tier-3 boundary: {attr_exc}"
+            response_payload = RawCallPayload(raw_response)
+            self._record_call(
+                call_index=call_index,
+                call_type=CallType.LLM,
+                status=CallStatus.ERROR,
+                request_data=request_dto,
+                response_data=response_payload,
+                error=LLMCallError(
+                    type="MalformedResponseError",
+                    message=error_msg,
+                    retryable=False,
+                ),
+                latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
+            )
+            # Telemetry emitted AFTER successful Landscape recording -- keeps
+            # content-extraction failures counted alongside the other error
+            # branches (elspeth-a960d22540).
+            self._emit_telemetry_after_audit(
+                call_status=CallStatus.ERROR,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                request_payload=request_dto,
+                response_data=response_payload.to_dict(),
+                response_payload=response_payload,
+                token_usage=usage if usage.has_data else None,
+            )
+            raise LLMClientError(error_msg, retryable=False) from attr_exc
+
         if content is None:
             # Tool call responses have no text content — ELSPETH does not support
             # tool_calls, so this is an error (not a fabrication opportunity).

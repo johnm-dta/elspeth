@@ -37,6 +37,7 @@ from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     FieldResolution,
     normalize_field_name,
     resolve_field_names,
@@ -206,7 +207,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:24de6a391a45041c"
+    source_file_hash: str | None = "sha256:6a19a87b28a54845"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -625,14 +626,18 @@ class DataverseSource(BaseSource):
                             )
                         continue
 
-                    # Normalize field names — Tier 3 boundary: field names from
-                    # Dataverse can be arbitrary strings. normalize_field_name()
-                    # raises ValueError if a name normalizes to empty string
-                    # (e.g., all-special-character field names). Quarantine the
-                    # row rather than crashing the entire load.
+                    # Normalize field names -- Tier-3 boundary: field names from
+                    # Dataverse can be arbitrary strings. Catch only
+                    # ExternalHeaderError (data faults: header normalizes to empty,
+                    # normalization collision in the entity's own field names).
+                    # Plain ValueError (config faults: bad field_mapping collision,
+                    # mapping keys not found, non-identifier mapping value) must
+                    # propagate and crash -- they signal OUR config error, not bad
+                    # source data. Mirrors azure_blob_source.py _validate_and_yield
+                    # and the CSV _load_csv path (elspeth-594221617d).
                     try:
                         normalized_row = self._normalize_row_fields(cleaned_row, is_first_row)
-                    except ValueError as e:
+                    except ExternalHeaderError as e:
                         quarantine_count += 1
                         ctx.record_validation_error(
                             row=cleaned_row,

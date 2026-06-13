@@ -1618,6 +1618,63 @@ class TestJSONSourceKeyNormalization:
         assert rows[1].row["extra_field"] == "bonus"
         assert rows[1].row["score"] == 95
 
+    def test_field_mapping_collision_crashes_not_quarantines(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """B3.1: A field_mapping that collapses two fields into one is a CONFIG fault
+        and must crash (ValueError propagates), not be silently quarantined.
+
+        field_mapping={'a': 'x'} on rows carrying both 'a' and a passthrough 'x'
+        causes check_mapping_collisions to raise a plain ValueError.  Before the fix,
+        the broad 'except ValueError' in _validate_and_yield masked it as a per-row
+        quarantine; after the fix only ExternalHeaderError (data faults) is caught.
+        Mirrors test_json_field_mapping_collision_crashes_not_quarantines in the azure
+        test suite.
+        """
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"a": 1, "x": 2}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+                "field_mapping": {"a": "x"},
+            }
+        )
+
+        with pytest.raises(ValueError, match="collision"):
+            list(source.load(ctx))
+
+    def test_non_object_row_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """B3.1: A non-object JSON element is a Tier-3 DATA fault and must be quarantined
+        with an audit record, not crash the run.
+
+        Pins that _normalize_row_keys raises ExternalHeaderError (not plain ValueError)
+        for a non-object row, so _validate_and_yield catches it and quarantines.
+        Mirrors test_non_object_row_in_json_array_quarantines in the azure test suite.
+        """
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"id": 1}, "not_an_object", {"id": 2}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        valid = [r for r in rows if not r.is_quarantined]
+        quarantined = [r for r in rows if r.is_quarantined]
+        assert len(valid) == 2
+        assert len(quarantined) == 1
+        assert "Expected JSON object" in quarantined[0].quarantine_error
+
     def test_fixed_schema_fast_path_sets_contract_in_init(self, tmp_path: Path) -> None:
         """FIXED schema sets contract immediately in __init__ without waiting for first row."""
         from elspeth.plugins.sources.json_source import JSONSource

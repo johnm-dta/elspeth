@@ -1841,3 +1841,29 @@ class TestDataverseSparseFieldMapping:
         r2b = src2._normalize_row_fields({"contactid": "1"}, is_first_row=False)
         assert r1b == {"contactid": "2", "client_name": "Alice"}
         assert r2b == {"contactid": "1"}
+
+
+class TestFieldMappingCollisionPolarity:
+    """B3.1: field_mapping-created collisions are config faults (crash), not data
+    faults (quarantine). Mirrors the azure test suite's
+    test_json_field_mapping_collision_crashes_not_quarantines."""
+
+    def test_field_mapping_collision_crashes_not_quarantines(self) -> None:
+        """A field_mapping that collapses two fields into one final name is a CONFIG
+        fault and must crash the run, not be silently quarantined.
+
+        field_mapping={'contactid': 'id'} on a row that also carries a passthrough
+        field 'id' causes check_mapping_collisions to raise a plain ValueError.
+        Before the fix, the broad 'except ValueError' in load() masked it as a
+        per-row quarantine; after the fix only ExternalHeaderError (data faults) is
+        caught, so the plain ValueError propagates and crashes.
+        """
+        pages = [_make_page([{"contactid": "1", "id": "other"}])]
+        source = _make_source_for_load(
+            pages,
+            _base_config(field_mapping={"contactid": "id"}),
+        )
+        ctx = _mock_source_context()
+
+        with pytest.raises(ValueError, match="collision"):
+            list(source.load(ctx))

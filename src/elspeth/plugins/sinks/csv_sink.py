@@ -475,8 +475,15 @@ class CSVSink(BaseSink):
             )
             try:
                 row_writer.writerow(row)
+                # Trial-encode the produced text with the configured codec so a
+                # character that is unencodable in the target charset (e.g. an
+                # emoji when encoding='cp1252') is caught HERE as a per-row fault
+                # rather than later at file.write(), which would abort the whole
+                # batch. UnicodeEncodeError is a subclass of ValueError so the
+                # except clause below already classifies it correctly.
+                row_buffer.getvalue().encode(self._encoding)
             except (ValueError, csv.Error) as exc:
-                self._divert_row(row, row_index=row_index, reason=f"CSV serialization failed: {exc}")
+                self._divert_row(row, row_index=row_index, reason=f"CSV encoding ({self._encoding}) failed: {exc}")
                 continue
             staging_buffer.write(row_buffer.getvalue())
         return staging_buffer.getvalue()

@@ -237,6 +237,30 @@ class TestBatchExperimentCompare:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_single_value_group_reports_none_stdev_and_ci(self, ctx: PluginContext) -> None:
+        """n=1 stdev is undefined, se=0 -> CI bounds must be None (B4.5-a-experiment_compare)."""
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 3.0}),
+            _make_row({"variant": "treatment", "score": 5.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 1
+        # stdev undefined at n=1 -- honest None, never 0.0
+        assert result.row["baseline_stdev"] is None
+        assert result.row["variant_stdev"] is None
+        # standard_error=0 when both stdevs are None -> CI bounds undefined
+        assert result.row["z_score"] is None
+        assert result.row["confidence_95_low"] is None
+        assert result.row["confidence_95_high"] is None
+
 
 class TestBatchExperimentCompareConfig:
     @pytest.mark.parametrize("blank_field", ["", "   "])

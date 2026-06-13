@@ -149,6 +149,69 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ---
 
+## What Changed In 0.6.0
+
+0.6.0 is the single-worker-to-multi-worker transition (in progress; the line
+that will be cut as RC-0.6.0). Multiple cooperating processes on one host can
+now operate against a single run backed by one WAL SQLite audit database: one
+**leader** owns source ingest, barrier evaluation, checkpoints, finalization,
+and sink I/O, while any number of **claim-only followers** attach through a new
+`elspeth join` entry point. The deployment shape, its alternatives, and the
+operator requirements are recorded in
+[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md). The audit-database
+schema epoch advances to 21; per the delete-the-DB migration policy, operators
+delete the prior database before the first run on this version.
+
+Coordination deltas:
+
+- **`elspeth join <run_id>`** — attach a follower to a RUNNING run. Admission
+  is one atomic transaction gated on run status, pipeline-config-hash equality,
+  and a live leader seat, after a filesystem preflight that fails with an
+  operator-actionable error when the worker cannot write the database, its
+  directory, or the WAL sidecars. Racing `resume()` remains refused.
+- **Worker registry and heartbeat** — a dedicated heartbeat thread beats the
+  worker row and the leader seat in one transaction; liveness drives takeover
+  and reaping decisions.
+- **Dead-leader takeover** — a run left RUNNING under a dead leader is now
+  resumable via `elspeth resume` (previously a wedged, unrecoverable state); a
+  leader frozen holding the write lock surfaces an operator-actionable error
+  naming the process to terminate before resuming.
+- **Journal-first barrier buffers** — aggregation and coalesce acceptance is
+  durable in the scheduler journal before it enters executor memory, so barrier
+  state spans workers and survives takeover (ADR-029 amended).
+- **Epoch-fenced leader writes** — finalization, run-status changes,
+  checkpoints, barrier completion, lease recovery, and source ingest each
+  verify leadership inside their transaction; a superseded leader's writes are
+  refused, not applied.
+- **Liveness-aware lease recovery** — an expired item lease held by a worker
+  whose heartbeat is still live is revived, not reaped, so a long in-flight
+  model call is no longer mistaken for a dead worker.
+
+Plugin-boundary correctness (the plugins-subsystem remediation) — fixes that
+keep plugins honest at the trust boundary:
+
+- **`AzureBlobSource` parses CSV strictly** (`strict=True`), so a
+  malformed-quote row is quarantined with an audit record instead of being
+  silently coerced into adjacent fields.
+- **`batch_stats` skips and reports `None`** instead of raising and aborting
+  the run; an all-`None` group returns an audited validation error rather than
+  a fabricated `count=0`/`sum=0`.
+- **`batch_outlier_annotator` no longer fabricates `robust_z_score=0.0`** when
+  the median absolute deviation is zero — it falls back to a mean-absolute-
+  deviation modified z-score, or emits an honest `None` for a wholly identical
+  batch.
+- **The non-finite scanner uses `isinstance`**, so a `NaN`/`Infinity` nested
+  inside a `Mapping` or `tuple` subclass can no longer bypass the
+  source-boundary gate.
+- **`value_transform` retypes the output contract** when an overwrite changes a
+  field's runtime type, so the emitted row no longer fails its own contract.
+
+See the rewritten N>1 lease-recovery runbook at
+[`docs/runbooks/scheduler-lease-recovery.md`](docs/runbooks/scheduler-lease-recovery.md)
+and [CHANGELOG.md](CHANGELOG.md) for the full detail.
+
+---
+
 ## What Changed In RC-5
 
 RC-5 moves Elspeth from a CLI-first auditable pipeline engine to a dual-surface
@@ -589,7 +652,7 @@ paths over a single high-assurance substrate, richer run evidence, declared
 plugin contracts, a stronger terminal outcome model, and more mechanical CI
 policy around audit integrity.
 
-Current RC-5.3 behaviour:
+Current 0.6.0 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
@@ -598,6 +661,9 @@ Current RC-5.3 behaviour:
   than a standalone UI validator.
 - The executor still runs from runtime-assembled settings and graph objects, not
   from a persisted compiled artifact.
+- A run can be driven by a single process or by a leader plus claim-only
+  followers across multiple processes on one host (`elspeth join`), backed by
+  one WAL SQLite audit database.
 
 Direction after RC-5:
 
@@ -888,6 +954,16 @@ concurrency:
 ```
 
 This design ensures audit trail integrity while optimizing performance where it matters. See [ADR-001](docs/architecture/adr/001-plugin-level-concurrency.md) for rationale.
+
+As of 0.6.0, a run can additionally span **multiple cooperating processes on
+one host**: one leader (source ingest, barrier evaluation, checkpoints,
+finalization, sink I/O) and any number of claim-only followers attached via
+`elspeth join <run_id>`, all backed by one WAL SQLite audit database. The
+orchestrator's deterministic audit trail is preserved because the leader
+remains the single writer of ingest, barrier, and finalization state; followers
+only claim and process work items. See
+[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md) for the
+deployment shape and operator requirements.
 
 ### Rate Limiting
 

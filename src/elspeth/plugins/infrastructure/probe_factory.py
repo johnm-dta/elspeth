@@ -39,7 +39,9 @@ class ChromaCollectionProbe:
     def probe(self) -> CollectionReadinessResult:
         """Check collection existence and document count."""
         import chromadb  # ImportError crashes — missing package is a config bug, not "unreachable"
+        import httpx  # httpx transport errors inherit only from Exception, not ChromaError
 
+        client = None
         try:
             # Client construction CAN fail for infrastructure reasons (server down,
             # TLS errors, path permissions) — caught below as "unreachable".
@@ -78,15 +80,26 @@ class ChromaCollectionProbe:
                 count=None,
                 message=f"Collection '{self.collection_name}' not found",
             )
-        except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
+        except (chromadb.errors.ChromaError, ConnectionError, OSError, ValueError, httpx.HTTPError) as exc:
             # Infrastructure failures: server down, auth errors, TLS failures,
             # path permission errors, connection refused, etc.
+            # ValueError: chromadb 1.5.5 raises plain ValueError on unreachable HTTP server.
+            # httpx.HTTPError: httpx transport errors inherit only from Exception,
+            # not from ChromaError/ConnectionError/OSError.
             return CollectionReadinessResult(
                 collection=self.collection_name,
                 reachable=False,
                 count=None,
                 message=f"Collection '{self.collection_name}' unreachable: {type(exc).__name__}: {exc}",
             )
+        finally:
+            # Always release the httpx client. The concrete chromadb.Client
+            # exposes close() even though the abstract ClientAPI does not
+            # declare it. Guard with hasattr so mypy stays happy and the call
+            # is safe across any mode (persistent/http). If client construction
+            # itself failed, client remains None and we skip the close.
+            if client is not None and hasattr(client, "close"):
+                client.close()
 
 
 _PROBE_REGISTRY: dict[str, type] = {

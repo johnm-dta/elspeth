@@ -22,6 +22,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import chromadb
+import httpx
 from pydantic import BaseModel, field_validator, model_validator
 
 from elspeth.contracts.call_data import RawCallPayload
@@ -453,7 +454,10 @@ class ChromaSearchProvider:
                 count=count,
                 message=message,
             )
-        except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
+        except (chromadb.errors.ChromaError, ConnectionError, OSError, ValueError, httpx.HTTPError) as exc:
+            # ValueError: chromadb 1.5.5 raises plain ValueError on unreachable HTTP server.
+            # httpx.HTTPError: httpx transport errors inherit only from Exception,
+            # not from ChromaError/ConnectionError/OSError.
             return CollectionReadinessResult(
                 collection=collection_name,
                 reachable=False,

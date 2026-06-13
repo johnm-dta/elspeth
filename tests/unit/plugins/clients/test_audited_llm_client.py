@@ -272,6 +272,36 @@ class TestAuditedLLMClient:
         assert "API connection failed" in call_kwargs["error"].message
         assert call_kwargs["error"].retryable is False
 
+    def test_missing_usage_attribute_still_records_call(self) -> None:
+        """A success response lacking .usage records an ERROR call, never vanishes.
+
+        An OpenAI-compatible provider whose response omits .usage would otherwise
+        raise AttributeError on the success path BEFORE any guarded region, with no
+        Landscape record despite tokens being consumed — a call-index gap that
+        violates the file's own policy (plugins review Batch 4 item 1).
+        """
+        execution = self._create_mock_execution()
+        response = Mock(spec=["choices", "model", "model_dump"])  # no .usage attribute
+        response.choices = [Mock()]
+        response.model = "gpt-4"
+        response.model_dump = Mock(return_value={"id": "resp_123"})
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_123",
+            run_id="run_abc",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError):
+            client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Hi"}])
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args[1]["status"] == CallStatus.ERROR
+
     def test_rate_limit_error_marked_retryable(self) -> None:
         """Rate limit errors are marked as retryable."""
         execution = self._create_mock_execution()

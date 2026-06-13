@@ -471,13 +471,19 @@ class AuditedLLMClient(AuditedClientBase):
         # Capture the provider response once, then validate/normalize the Tier 3
         # fields from that snapshot. This keeps malformed responses on the
         # audited path instead of letting them leak into success handling.
-        usage = _extract_usage_from_provider_response(response.usage)
+        # Both the usage read and model_dump() are Tier-3 attribute accesses: an
+        # OpenAI-compatible provider whose response omits .usage would raise
+        # AttributeError here, so they share the guard. usage defaults to
+        # unknown() so the error handler can still run if the usage read is what
+        # failed (the LLM call happened — it must be recorded, not vanish).
+        usage = TokenUsage.unknown()
         try:
+            usage = _extract_usage_from_provider_response(response.usage)
             raw_response = response.model_dump()
         except (TypeError, ValueError, RecursionError, AttributeError) as dump_exc:
             # The LLM call happened — record it before re-raising so the
             # audit trail reflects the consumed tokens even though we can't
-            # fully serialize the response.
+            # fully read/serialize the response.
             self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
@@ -485,7 +491,7 @@ class AuditedLLMClient(AuditedClientBase):
                 request_data=request_dto,
                 error=LLMCallError(
                     type="ResponseProcessingError",
-                    message=f"Failed to serialize LLM response: {dump_exc}",
+                    message=f"Failed to read LLM response: {dump_exc}",
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
@@ -579,6 +585,13 @@ class AuditedLLMClient(AuditedClientBase):
             )
             raise LLMClientError(error_msg, retryable=False)
 
+        # NOTE: content/finish_reason extraction is deliberately OUTSIDE a guard.
+        # A missing .message/.content here is treated as an internal bug and is
+        # allowed to crash directly rather than be masked as an LLMClientError
+        # (Bug 4.6, TestBug4_6_SuccessPathOutsideTryExcept). Plugins-review Batch 4
+        # item 1 argued these should be recorded like the usage/model_dump reads
+        # above; that conflicts with the tested Bug-4.6 decision and is left for
+        # operator adjudication rather than silently re-litigated here.
         content = response.choices[0].message.content
         finish_reason = response.choices[0].finish_reason
         if content is None:

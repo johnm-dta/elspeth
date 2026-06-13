@@ -74,3 +74,14 @@ class SSRFBlockedError(WebScrapeError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, retryable=False)
+
+
+class ClientError(WebScrapeError):
+    """Generic HTTP 4xx client error not covered by a specific arm.
+
+    retryable=True for 408 Request Timeout (server may be temporarily
+    overloaded); retryable=False for all other unenumerated 4xx codes.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message, retryable=retryable)

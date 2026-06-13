@@ -1937,3 +1937,84 @@ class TestWebScrapeGuaranteedFieldsOptionKeyGuard:
         transform = WebScrapeTransform(degenerate_config)
         assert transform._content_field == "content_field"
         assert transform._fingerprint_field == "content_fingerprint"
+
+
+# ---------------------------------------------------------------------------
+# B3.9 -- unenumerated 4xx codes must not be fingerprinted as content
+# ---------------------------------------------------------------------------
+
+
+def _make_basic_transform() -> WebScrapeTransform:
+    """Minimal WebScrapeTransform for error-handling tests."""
+    return WebScrapeTransform(
+        {
+            "schema": {"mode": "observed"},
+            "url_field": "url",
+            "content_field": "page_content",
+            "fingerprint_field": "page_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "B3.9 regression test",
+            },
+        }
+    )
+
+
+@respx.mock
+def test_b3_9_http_400_returns_error_not_fingerprint(mock_ctx):
+    """HTTP 400 must return an error result - not fingerprint the error-page body (B3.9)."""
+    error_body = "<html><body><p>Bad Request</p></body></html>"
+    respx.get(f"https://{_TEST_IP}:443/bad").mock(return_value=httpx.Response(400, text=error_body))
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/bad"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for HTTP 400, got {result.status!r}"
+    # Must not have fabricated a fingerprint of the error-page body
+    assert "page_fingerprint" not in (result.row or {}), "HTTP 400 must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "HTTP 400 must not produce content"
+    # Error reason must record the HTTP status
+    assert "400" in result.reason.get("error", ""), f"Error reason should mention 400, got {result.reason}"
+
+
+@respx.mock
+def test_b3_9_http_410_returns_error_not_fingerprint(mock_ctx):
+    """HTTP 410 Gone must return an error result - not fingerprint the error-page body (B3.9).
+
+    410 is especially dangerous for long-running monitoring: the page is permanently
+    gone, but the old code would fingerprint the error-page body as if it were content,
+    corrupting change-detection.
+    """
+    error_body = "<html><body><p>This page is gone.</p></body></html>"
+    respx.get(f"https://{_TEST_IP}:443/gone").mock(return_value=httpx.Response(410, text=error_body))
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/gone"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for HTTP 410, got {result.status!r}"
+    assert "page_fingerprint" not in (result.row or {}), "HTTP 410 must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "HTTP 410 must not produce content"
+    assert "410" in result.reason.get("error", ""), f"Error reason should mention 410, got {result.reason}"
+
+
+@respx.mock
+def test_b3_9_http_408_returns_error_retryable(mock_ctx):
+    """HTTP 408 Request Timeout must be retryable (mirrors 429 behaviour) (B3.9)."""
+    respx.get(f"https://{_TEST_IP}:443/slow").mock(return_value=httpx.Response(408))
+
+    from elspeth.plugins.transforms.web_scrape_errors import ClientError
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()), pytest.raises(ClientError) as exc_info:
+        transform.process(make_pipeline_row({"url": "https://example.com/slow"}), mock_ctx)
+
+    assert exc_info.value.retryable is True, "HTTP 408 must be retryable"
+    assert "408" in str(exc_info.value)

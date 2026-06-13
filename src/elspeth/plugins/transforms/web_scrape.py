@@ -45,6 +45,7 @@ from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.web_scrape_errors import (
+    ClientError,
     ForbiddenError,
     InvalidURLError,
     NetworkError,
@@ -425,7 +426,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6dcfbbda0163c500"
+    source_file_hash: str | None = "sha256:5cb3e6f5eee3a530"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -851,8 +852,17 @@ class WebScrapeTransform(BaseTransform):
             elif 500 <= response.status_code < 600:
                 raise ServerError(f"HTTP {response.status_code}: {url}")
             elif 300 <= response.status_code < 400:
-                # Unresolved redirect (e.g. 3xx without Location header) — treat as error
+                # Unresolved redirect (e.g. 3xx without Location header) -- treat as error
                 raise InvalidURLError(f"Unresolved redirect HTTP {response.status_code}: {url} (missing or empty Location header)")
+            elif 400 <= response.status_code < 500:
+                # Catch-all for unenumerated 4xx codes (400, 402, 405, 406, 408,
+                # 410, 418, 451, ...). Without this arm the response would be
+                # returned and process() would fingerprint the error-page body as
+                # if it were real content -- corrupting change-detection (B3.9).
+                # 408 Request Timeout is retryable (transient server overload);
+                # all other unenumerated 4xx codes are non-retryable client errors.
+                retryable = response.status_code == 408
+                raise ClientError(f"HTTP {response.status_code}: {url}", retryable=retryable)
 
             return response, final_hostname_url, call
 

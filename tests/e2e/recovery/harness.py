@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, select, update
 
 from elspeth.contracts import Determinism, PipelineRow, PluginSchema, RunStatus
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
@@ -344,8 +344,16 @@ def _craft_crashed_lease(
     writes below goes through the same Tier-1 production writer the engine
     uses (RecorderFactory / TokenSchedulerRepository), never raw SQL.
 
+    Epoch-21 (ADR-030 slice 4): ``claim_ready`` is now membership-fenced —
+    the claimant must hold an active ``run_workers`` row.  The fictional
+    crashed worker is registered as ACTIVE before the claim (matching the
+    production lifecycle: every real worker registers before claiming) and
+    left as DEPARTED after — modelling a hard-kill that occurs before the
+    graceful departure ceremony.
+
     Returns the crashed token_id.
     """
+    now = crashed.clock.now_utc()
     data = {"id": ingest_sequence, "value": ingest_sequence * 10}
     row = crashed.factory.data_flow.create_row(
         run_id=crashed.run_id,
@@ -364,13 +372,30 @@ def _craft_crashed_lease(
         step_index=crashed.journal_step_index,
         ingest_sequence=ingest_sequence,
         row_payload_json=TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, _observed_contract(data))),
-        available_at=crashed.clock.now_utc(),
+        available_at=now,
     )
+    # Register the fictional crashed worker as ACTIVE so the membership fence
+    # in claim_ready admits it.  The heartbeat is set to exactly ``now`` (the
+    # registration instant) so it is already stale: once the test advances the
+    # clock by more than the liveness grace window the worker is DEAD and
+    # recover_expired_leases correctly reaps its in-flight leases.
+    with crashed.db.engine.begin() as conn:
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=lease_owner,
+                run_id=crashed.run_id,
+                role="leader",
+                status="active",
+                registered_at=now,
+                heartbeat_expires_at=now,
+                entry_point="harness",
+            )
+        )
     claimed = crashed.repo.claim_ready(
         run_id=crashed.run_id,
         lease_owner=lease_owner,
         lease_seconds=lease_seconds,
-        now=crashed.clock.now_utc(),
+        now=now,
     )
     assert claimed is not None and claimed.token_id == token.token_id
     crashed.crashed_token_ids[ingest_sequence] = token.token_id

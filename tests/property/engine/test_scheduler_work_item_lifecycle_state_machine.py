@@ -438,6 +438,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
                 token_id=token_id,
                 now=now,
                 expected_lease_owner=WORKERS[0],
+                coordination_token=LEADER_TOKEN,
             )
             assert terminalized == 0
             return
@@ -446,6 +447,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             token_id=token_id,
             now=now,
             expected_lease_owner=model.lease_owner,
+            coordination_token=LEADER_TOKEN,
         )
         assert terminalized == 1
         model.status = TokenWorkStatus.TERMINAL
@@ -824,6 +826,7 @@ def test_expired_pending_sink_lease_recovers_in_place_preserving_attempt_and_wor
             token_id=token_id,
             now=expired_at + timedelta(seconds=1),
             expected_lease_owner="worker-b",
+            coordination_token=LEADER_TOKEN,
         )
         == 1
     )

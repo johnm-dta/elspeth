@@ -405,6 +405,10 @@ class RunExecutionCore:
             # row-processor:{run_id}:{uuid} mint.
             scheduler_lease_owner=coordination_token.worker_id if coordination_token is not None else None,
             coordination_token=coordination_token,
+            # §C.2 path 1 (slice 4): leader housekeeping sweep — evict dead
+            # non-leader members then reap their expired item leases. None when
+            # no coordination substrate (direct repository-level construction).
+            run_coordination=factory.run_coordination if coordination_token is not None else None,
         )
 
         return processor, coalesce_node_map, coalesce_executor

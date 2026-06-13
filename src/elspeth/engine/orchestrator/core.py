@@ -87,6 +87,7 @@ from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import (
     export_landscape,
 )
+from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
 )
@@ -584,6 +585,26 @@ class Orchestrator:
         # token is carried by value, never re-read mid-run.
         self._checkpoints.bind_coordination(coordination_token)
 
+        # ADR-030 §A.3 (slice 4): start the dedicated heartbeat thread AFTER
+        # the seat is minted and the token is bound, BEFORE the run body's
+        # try/except block.  The thread beats both the run_workers row and the
+        # run_coordination seat in ONE BEGIN IMMEDIATE transaction so the two
+        # liveness clocks can never skew.
+        #
+        # Sequencing invariant (design §A.3 "joined before release_seat"): the
+        # thread must NOT beat the seat after release_seat vacates it — a beat
+        # on a vacant seat would re-set leader_heartbeat_expires_at and fool
+        # the entry guard's liveness check.  So stop() is called as the FIRST
+        # statement of every except arm that calls release_seat and in the
+        # success path just before release_seat; the finally block calls stop()
+        # again as an idempotent safety net for any path that exits without an
+        # explicit stop.
+        _heartbeat = RunHeartbeatThread(
+            factory.run_coordination,
+            token=coordination_token,
+        )
+        _heartbeat.start()
+
         run_completed = False
         run_start_time = time.perf_counter()
         try:
@@ -600,6 +621,13 @@ class Orchestrator:
                     payload_store=payload_store,
                     shutdown_event=active_event,
                     coordination_token=coordination_token,
+                    # ADR-030 §A.3 / §C.2: wire the heartbeat latch into the
+                    # per-row drain boundary so a deposed leader raises
+                    # RunWorkerEvictedError without waiting for the next fenced
+                    # write to refuse.  The latch is an optimization on top of the
+                    # epoch/membership fences — both independently refuse the same
+                    # writes — but the latch surfaces the condition proactively.
+                    check_coordination_latch=_heartbeat.check_and_raise,
                 )
 
             # ADR-030 §D (audit-derived terminal status on ALL paths — bug
@@ -625,6 +653,10 @@ class Orchestrator:
             # delete is epoch-fenced (ADR-030 §C.4 row 5), so it must run
             # BEFORE the seat release vacates the fence's CAS target.
             self._checkpoints.delete_checkpoints(run.run_id)
+
+            # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing the
+            # seat — the thread must not beat the seat after it is vacated.
+            _heartbeat.stop()
 
             # Seat hygiene (ADR-030 §D): the leader releases its seat AFTER
             # the terminal finalize succeeds. Best-effort — a failed release
@@ -680,6 +712,8 @@ class Orchestrator:
             return result
 
         except GracefulShutdownError as shutdown_exc:
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
                 self._ceremony.emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time, token=coordination_token)
                 # Seat hygiene: released only AFTER the INTERRUPTED finalize
@@ -689,6 +723,8 @@ class Orchestrator:
                 factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort(
                 "Failed/partial-result ceremony on run failure",
                 run_id=run.run_id,
@@ -729,6 +765,8 @@ class Orchestrator:
             # Outer broad-except: any unhandled exception type is a run failure
             # requiring a RunSummary. The inner ceremony is best-effort and must
             # not mask the original; the outer catch re-raises after.
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort(
                 "Generic failure ceremony on run failure",
                 run_id=run.run_id,
@@ -760,6 +798,10 @@ class Orchestrator:
                     factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # CRITICAL: Always re-raise - observability doesn't suppress errors
         finally:
+            # ADR-030 §A.3: safety-net stop (idempotent) — covers any exit
+            # path that did not already stop the thread (e.g. an exception
+            # raised before any except handler ran release_seat).
+            _heartbeat.stop()
             self._ceremony.safe_flush_telemetry()
 
     def _register_graph_nodes_and_edges(
@@ -996,12 +1038,23 @@ class Orchestrator:
         payload_store: PayloadStore,
         shutdown_event: threading.Event | None = None,
         coordination_token: CoordinationToken | None = None,
+        check_coordination_latch: Callable[[], None] | None = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
         Orchestrates the four phases: graph registration, context initialization,
         source+process loop, sink writes. Returns RunStatus.RUNNING — the public
         run() wrapper transitions to COMPLETED after finalize_run().
+
+        Parameters
+        ----------
+        check_coordination_latch:
+            Optional callable forwarded to the per-source processing loop.
+            Pass ``RunHeartbeatThread.check_and_raise`` from the enclosing
+            ``run()`` method so the drain loop surfaces
+            :class:`~elspeth.contracts.errors.RunWorkerEvictedError` at each
+            row boundary when the heartbeat thread detects seat deposition.
+            ``None`` disables latch polling (non-coordinated runs).
         """
         self._checkpoints.set_active_graph(graph)
 
@@ -1085,6 +1138,7 @@ class Orchestrator:
                     active_source=active_source,
                     shutdown_event=shutdown_event,
                     flush_end_of_input=source_ordinal == len(source_items) - 1,
+                    check_coordination_latch=check_coordination_latch,
                 )
                 if loop_result.interrupted:
                     break

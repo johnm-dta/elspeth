@@ -10,6 +10,7 @@ from sqlalchemy import insert, select
 
 import elspeth.core.landscape.database as database_module
 from elspeth.contracts import NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
@@ -18,12 +19,18 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     runs_table,
     token_outcomes_table,
     token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
+# Epoch-1 coordination seat token for the "run-1" test run.
+# The ratcheted verbs (mark_pending_sink_terminal*, terminalize_pending_sinks*)
+# require a non-None token; _insert_scheduler_prerequisites seeds the matching row.
+_COORD_TOKEN = CoordinationToken(run_id="run-1", worker_id="test-leader", leader_epoch=1)
 
 
 def test_scheduler_events_schema_is_required_run_scoped_contract() -> None:
@@ -492,6 +499,7 @@ def test_pending_sink_claim_and_terminalization_record_transition_events() -> No
         token_id="token-1",
         now=now + timedelta(seconds=4),
         expected_lease_owner="worker-b",
+        coordination_token=_COORD_TOKEN,
     )
 
     events = _scheduler_events(engine)
@@ -588,6 +596,7 @@ def test_pending_sink_batch_terminalization_records_per_token_events() -> None:
         token_ids=("token-1", "token-2"),
         now=now + timedelta(seconds=5),
         expected_lease_owner="worker-a",
+        coordination_token=_COORD_TOKEN,
     )
 
     events = _scheduler_events(engine)
@@ -615,6 +624,7 @@ def test_pending_sink_batch_terminalization_rejects_duplicate_token_ids() -> Non
             token_ids=(item.token_id, item.token_id),
             now=now + timedelta(seconds=3),
             expected_lease_owner="worker-a",
+            coordination_token=_COORD_TOKEN,
         )
 
 
@@ -633,6 +643,7 @@ def test_pending_sink_batch_terminalization_requires_every_requested_token() -> 
             token_ids=(item.token_id, "token-missing"),
             now=now + timedelta(seconds=3),
             expected_lease_owner="worker-a",
+            coordination_token=_COORD_TOKEN,
         )
 
 
@@ -658,6 +669,7 @@ def test_pending_sink_batch_terminalization_rejects_wrong_lease_owner() -> None:
             token_ids=("token-1",),
             now=now + timedelta(seconds=4),
             expected_lease_owner="worker-a",
+            coordination_token=_COORD_TOKEN,
         )
 
 
@@ -688,6 +700,7 @@ def test_pending_sink_with_terminal_outcome_is_repaired_without_reclaiming_sink(
         run_id="run-1",
         now=now + timedelta(seconds=4),
         caller_owner="resume-repair",
+        coordination_token=_COORD_TOKEN,
     )
 
     assert terminalized == 1
@@ -991,6 +1004,17 @@ def _insert_scheduler_prerequisites(engine: Tier1Engine, *, now: datetime) -> st
                 row_id="row-1",
                 run_id="run-1",
                 created_at=now,
+            )
+        )
+        # Epoch-1 coordination seat for mark_pending_sink_terminal* and
+        # terminalize_pending_sinks_with_terminal_outcomes (slice-4 REQUIRED).
+        conn.execute(
+            insert(run_coordination_table).values(
+                run_id="run-1",
+                leader_worker_id="test-leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=now + timedelta(hours=1),
+                updated_at=now,
             )
         )
     return row_payload_json

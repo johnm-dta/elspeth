@@ -310,13 +310,31 @@ def test_can_resume_rejects_completed_run(db: LandscapeDB, recovery_manager: Rec
     assert check.reason == "Run already completed successfully"
 
 
-def test_can_resume_rejects_running_run(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
+def test_can_resume_rejects_running_run_with_live_seat(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
+    """RUNNING + LIVE seat is refused: run is held by an active leader.
+
+    Slice-4 flip (§H test #2(c)): RUNNING + absent/expired seat is now
+    RESUMABLE (dead-leader takeover).  This test pins the live-seat refusal
+    that must remain — only the expired-seat arm flipped.
+    """
+    from elspeth.contracts.coordination import mint_worker_id
+    from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+
     with db.connection() as conn:
         _insert_run(conn, "run-running", status=RunStatus.RUNNING)
+    # Register a live leader seat so the guard fires the refusal.
+    leader_id = mint_worker_id("run-running")
+    RunCoordinationRepository(db.engine).register_run_leader(
+        run_id="run-running",
+        worker_id=leader_id,
+        now=datetime.now(UTC),
+        window_seconds=80.0,
+    )
 
     check = recovery_manager.can_resume("run-running", _create_graph())
     assert check.can_resume is False
-    assert check.reason == "Run is still in progress"
+    assert check.reason is not None
+    assert "in progress under live leader" in check.reason
 
 
 @pytest.mark.parametrize(

@@ -121,7 +121,11 @@ class TestCheckRunStatusResumable:
         ("status", "reason"),
         [
             (RunStatus.COMPLETED, "Run already completed successfully"),
-            (RunStatus.RUNNING, "Run is still in progress"),
+            # NOTE: RunStatus.RUNNING is NOT in this list — RUNNING is now
+            # seat-dependent: absent/expired seat → resumable (slice-4 flip,
+            # §H test #2(c)); live seat → refused with join reason.  The
+            # RUNNING+absent-seat case is covered by
+            # test_running_with_absent_seat_is_resumable_in_slice_4 below.
             (RunStatus.COMPLETED_WITH_FAILURES, "Run status 'completed_with_failures' is not resumable"),
             (RunStatus.EMPTY, "Run status 'empty' is not resumable"),
         ],
@@ -132,6 +136,18 @@ class TestCheckRunStatusResumable:
         assert run_status is status
         assert check.can_resume is False
         assert check.reason == reason
+
+    def test_running_with_absent_seat_is_resumable_in_slice_4(self, db: LandscapeDB) -> None:
+        """RUNNING + absent seat row → resumable (§H test #2(c) slice-4 flip).
+
+        A run whose seat was never minted (or was vacated) has no live leader;
+        the dead-leader takeover path admits it.
+        """
+        _insert_run(db, "run-x", status=RunStatus.RUNNING)
+        # NOTE: no register_run_leader call — seat row is absent entirely.
+        run_status, check = check_run_status_resumable(db, "run-x")
+        assert run_status is RunStatus.RUNNING
+        assert check.can_resume is True  # slice-4 flip: absent seat → resumable
 
     @pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.INTERRUPTED])
     def test_resumable_statuses_pass(self, db: LandscapeDB, status: RunStatus) -> None:
@@ -176,11 +192,27 @@ class TestCheckRunStatusResumable:
 class TestResumeEntryGuard:
     """resume() refusal semantics, pinned ahead of the first mutation."""
 
-    def test_refuses_running_run_before_rebase_sequence(self, db: LandscapeDB) -> None:
+    def test_refuses_running_run_with_live_seat_before_rebase_sequence(self, db: LandscapeDB) -> None:
+        """RUNNING + LIVE seat is refused at the entry guard before any mutation.
+
+        Slice-4 flip: RUNNING without a live seat is now RESUMABLE (dead-leader
+        takeover); this test verifies the refusal fires for the live-seat arm
+        and that no mutation occurs before the guard.
+        """
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
+
         _insert_run(db, "run-running", status=RunStatus.RUNNING)
+        leader_id = mint_worker_id("run-running")
+        RunCoordinationRepository(db.engine).register_run_leader(
+            run_id="run-running",
+            worker_id=leader_id,
+            now=datetime.now(UTC),
+            window_seconds=80.0,
+        )
         coordinator, checkpoints = _coordinator(db)
 
-        with pytest.raises(NonResumableRunError, match=r"Cannot resume run 'run-running': Run is still in progress") as exc_info:
+        with pytest.raises(NonResumableRunError, match=r"in progress under live leader") as exc_info:
             coordinator.resume(
                 _resume_point_for("run-running"),
                 cast(Any, None),
@@ -189,7 +221,7 @@ class TestResumeEntryGuard:
             )
 
         assert exc_info.value.run_id == "run-running"
-        assert exc_info.value.reason == "Run is still in progress"
+        assert "in progress" in exc_info.value.reason
         assert checkpoints.rebase_calls == [], "entry guard must fire BEFORE rebase_sequence (the first mutation)"
         assert _run_status_of(db, "run-running") == RunStatus.RUNNING.value
 
@@ -228,12 +260,21 @@ class TestResumeEntryGuard:
         assert checkpoints.rebase_calls == []
         assert _run_status_of(db, "run-live-leader") == RunStatus.RUNNING.value
 
-    def test_running_with_expired_seat_keeps_flat_refusal_in_slice_2(self, db: LandscapeDB) -> None:
-        """RUNNING + expired seat keeps today's flat refusal until slice 4.
+    def test_running_with_expired_seat_is_resumable_in_slice_4(self, db: LandscapeDB) -> None:
+        """RUNNING + expired seat is resumable in slice 4 (ADR-030 §H test #2 contract (c)).
 
-        The dead-leader takeover admission ("entry guard learns seat
-        liveness", test #2 contract (c)) is deliberately a slice-4 flip;
-        slice 2 only ships the live-seat precision arm above.
+        The dead-leader takeover admission ("entry guard learns seat liveness",
+        test #2 contract (c)) flips here in slice 4.  The previously-wedged
+        state — RUNNING with an expired/dead leader seat — is now admitted past
+        the entry guard so that ``acquire_run_leadership`` (the first durable
+        act of resume()) can perform the takeover CAS.
+
+        The post-guard tripwire (``checkpoint_manager=None``) raises
+        ``OrchestrationInvariantError("CheckpointManager is required")``
+        AFTER the guard passes, proving admission without exercising the full
+        resume reconstruction.  ``rebase_sequence`` is called (sequence
+        rebase from the checkpoint coordinator is the first mutation after the
+        takeover CAS) — the guard ADMITTED the run.
         """
         from datetime import timedelta
 
@@ -258,7 +299,10 @@ class TestResumeEntryGuard:
             )
         coordinator, checkpoints = _coordinator(db)
 
-        with pytest.raises(NonResumableRunError) as exc_info:
+        # Slice-4 flip: RUNNING + expired seat is NOW RESUMABLE.  The
+        # post-guard tripwire raises OrchestrationInvariantError to prove the
+        # guard admitted the run (not NonResumableRunError any more).
+        with pytest.raises(OrchestrationInvariantError, match="CheckpointManager is required"):
             coordinator.resume(
                 _resume_point_for("run-dead-leader"),
                 cast(Any, None),
@@ -266,8 +310,9 @@ class TestResumeEntryGuard:
                 payload_store=MockPayloadStore(),
             )
 
-        assert exc_info.value.reason == "Run is still in progress"
-        assert checkpoints.rebase_calls == []
+        # Admission confirmed: rebase_sequence was called (the guard did not
+        # refuse before the first mutation).
+        assert checkpoints.rebase_calls == [7]
 
     def test_refuses_missing_run_before_rebase_sequence(self, db: LandscapeDB) -> None:
         coordinator, checkpoints = _coordinator(db)

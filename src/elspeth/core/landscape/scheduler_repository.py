@@ -17,15 +17,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
 
-from sqlalchemy import ColumnElement, and_, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, and_, func, insert, literal, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts import TokenInfo
-from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
+from elspeth.contracts.coordination import DEFAULT_ITEM_STALL_BUDGET_SECONDS, DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.enums import TerminalPath
-from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
+from elspeth.contracts.errors import AuditIntegrityError, RunWorkerEvictedError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
     BlockedPendingSinkHandoff,
@@ -38,14 +38,17 @@ from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction, record_coordination_event
 from elspeth.core.landscape.schema import (
+    active_worker_fence_clause,
     batch_members_table,
     batches_table,
     blocked_barrier_hold_clause,
+    claim_verb_fence_clause,
     coalesce_branch_losses_table,
     nodes_table,
     rows_table,
+    run_workers_table,
     scheduler_events_table,
     token_outcomes_table,
     token_work_items_table,
@@ -296,15 +299,33 @@ class TokenSchedulerRepository:
     ) -> AbstractContextManager[Connection]:
         """One write-intent transaction, leader-fenced when a token is supplied.
 
-        Slice-2 transitional surface: every ENGINE caller threads its
-        :class:`CoordinationToken` so the verify-and-extend epoch fence
-        (ADR-030 §C.4) is the first statement of the verb's transaction —
-        rowcount-0 rolls the whole transaction back, records a
-        ``fence_refusal`` event on a fresh connection, and raises
-        :class:`~elspeth.contracts.errors.RunLeadershipLostError`. ``None``
-        preserves the unfenced legacy arm for direct repository-level callers
-        (tests, tooling); slice 4 is expected to make the token mandatory once
-        the membership fences land.
+        Partial ratchet (slice 4): the following verbs now require the token
+        (``None`` raises TypeError in Python before reaching this helper):
+        ``complete_barrier``, ``mark_pending_sink_terminal``,
+        ``mark_pending_sink_terminal_many``,
+        ``terminalize_pending_sinks_with_terminal_outcomes``.
+
+        The following verbs deliberately remain ``Optional[CoordinationToken]``
+        in this slice — ``None`` falls through to the unfenced legacy arm:
+
+        - ``complete_run`` / ``update_run_status`` / ``finalize_run``: broad
+          test surface (21 / 9 / 4 files); non-leader-plane callers exist;
+          ``complete_run`` immutability backstop is independent of the token.
+          Tie together when all three can move as a unit.
+        - ``recover_expired_leases``: 11 test files; the bare maintenance
+          form is load-bearing for crashed-image construction in harness
+          helpers that claim under un-registered identities by design.
+          Re-evaluate after slice 5 makes the sweep leader-only end-to-end.
+        - ``mark_blocked_barrier_terminal`` /
+          ``mark_blocked_barrier_pending_sink_many``: legacy barrier wrappers;
+          §E.3a late-arrival callers are not yet fully token-threaded; 6 / 3
+          test files; defer until the wrappers are retired or fully threaded.
+        - ``create_checkpoint`` (CheckpointManager): 21 test files, 113 actual
+          call sites (vs the 16-file estimate in the ratchet plan); the
+          orchestrator already threads the token via CheckpointCoordinator;
+          ratcheting the direct CheckpointManager boundary requires
+          coordination-row setup across all integration/property harnesses.
+          Deferred until the integration suite is token-aware end-to-end.
         """
         if coordination_token is None:
             return begin_write(self._engine)
@@ -337,12 +358,27 @@ class TokenSchedulerRepository:
         expand_group_id: str | None = None,
         coalesce_node_id: str | None = None,
         coalesce_name: str | None = None,
+        worker_id: str | None = None,
     ) -> TokenWorkItem:
         """Persist a READY token continuation.
 
         Token lineage and coalesce cursor fields are durable resume metadata:
         workers that claim this row later must be able to rebuild the same
         ``TokenInfo`` and ``WorkItem`` without any live in-memory queue state.
+
+        ``worker_id`` (ADR-030 §G, slice 4): when provided, the membership fence
+        is checked BEFORE the idempotent INSERT — an evicted or departed caller
+        raises :class:`~elspeth.contracts.errors.RunWorkerEvictedError` rather
+        than inserting a READY row that no active worker will ever claim.  The
+        dedup path (``_insert_work_item_idempotent`` returns ``False``) re-reads
+        the existing row without the fence to preserve idempotency on resume; the
+        fence only guards the FIRST write.
+
+        ``None`` preserves the unfenced legacy behavior for direct
+        repository-level callers (tests, tooling, barrier completion) that do not
+        carry a worker identity.  This verb stays Optional because several
+        important callers — ``complete_barrier`` (fires inside a larger
+        fenced transaction) and tests — legitimately have no registry row.
         """
         work_item_id = self._work_item_id(run_id, token_id, node_id, attempt)
         values = self._ready_work_item_values(
@@ -366,6 +402,16 @@ class TokenSchedulerRepository:
             coalesce_name=coalesce_name,
         )
         with begin_write(self._engine) as conn:
+            # Membership fence (ADR-030 §G, slice 4): checked BEFORE the INSERT
+            # and BEFORE the reference validation — an evicted caller must not
+            # leave a READY orphan, and the fence is the outer guard (reference
+            # validation is an integrity check that assumes the caller is valid).
+            # Only applied when worker_id is provided (see docstring for who
+            # stays Optional).
+            if worker_id is not None:
+                fence_holds = conn.execute(select(active_worker_fence_clause(worker_id=worker_id, run_id=run_id))).scalar()
+                if not fence_holds:
+                    raise RunWorkerEvictedError(worker_id=worker_id, run_id=run_id)
             self._validate_work_item_references(
                 conn,
                 run_id=run_id,
@@ -983,6 +1029,10 @@ class TokenSchedulerRepository:
                 lease_owner=lease_owner,
                 lease_seconds=lease_seconds,
                 now=now,
+                # Membership fence: the public claim_ready verb applies the
+                # claim_verb_fence_clause so an evicted/departed claimant
+                # is refused with RunWorkerEvictedError (ADR-030 §G, slice 4).
+                membership_fenced=True,
             )
             if claimed is None:
                 return None
@@ -997,18 +1047,40 @@ class TokenSchedulerRepository:
         lease_owner: str,
         lease_seconds: int,
         now: datetime,
+        membership_fenced: bool = False,
     ) -> RowMapping | None:
+        """CAS update to claim a READY row under a lease.
+
+        ``membership_fenced=True`` (set only by the public ``claim_ready``
+        verb) adds the ``claim_verb_fence_clause`` to the UPDATE WHERE.
+        That clause passes when the worker is active OR when no workers are
+        registered at all (N=0/unit-test mode).  When workers ARE registered,
+        an evicted/departed caller gets rowcount=0 and the re-probe below
+        raises ``RunWorkerEvictedError``.  Internal callers
+        (``_enqueue_ready_claimed_on``, ``ingest_row_with_initial_claim``) pass
+        the default ``False`` because they operate inside a broader fenced
+        transaction whose leadership CAS is the outer guard.
+        """
         lease_expires_at = now + timedelta(seconds=lease_seconds)
+        where_clauses = and_(
+            token_work_items_table.c.work_item_id == row["work_item_id"],
+            token_work_items_table.c.run_id == run_id,
+            token_work_items_table.c.status == TokenWorkStatus.READY.value,
+            token_work_items_table.c.available_at <= now,
+        )
+        if membership_fenced:
+            # Membership fence (ADR-030 §G, slice 4): the claimant must hold
+            # an active run_workers row OR the run has no registered workers
+            # at all (N=0 / unit-test mode — see claim_verb_fence_clause).
+            # An evicted/departed caller with existing run_workers rows returns
+            # rowcount=0; the re-probe below raises RunWorkerEvictedError.
+            where_clauses = and_(
+                where_clauses,
+                claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
+            )
         result = conn.execute(
             update(token_work_items_table)
-            .where(
-                and_(
-                    token_work_items_table.c.work_item_id == row["work_item_id"],
-                    token_work_items_table.c.run_id == run_id,
-                    token_work_items_table.c.status == TokenWorkStatus.READY.value,
-                    token_work_items_table.c.available_at <= now,
-                )
-            )
+            .where(where_clauses)
             .values(
                 status=TokenWorkStatus.LEASED.value,
                 lease_owner=lease_owner,
@@ -1017,6 +1089,37 @@ class TokenSchedulerRepository:
             )
         )
         if result.rowcount == 0:
+            if membership_fenced:
+                # Distinguish "empty queue" (row raced away — legitimate None)
+                # from "membership fence failed" (this worker is no longer active).
+                # The SELECT above found the row; re-probe the fence only.
+                still_ready = conn.execute(
+                    select(token_work_items_table.c.work_item_id)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.READY.value)
+                ).first()
+                if still_ready is not None:
+                    # Row is still READY but the UPDATE matched 0 rows.  Two cases:
+                    #
+                    # (a) Worker EXISTS with status != 'active' (evicted/departed):
+                    #     the worker was registered, then evicted — raise
+                    #     RunWorkerEvictedError (the canonical multi-worker signal).
+                    #
+                    # (b) Worker is ABSENT (no run_workers row at all): in
+                    #     production every worker registers before claiming; an
+                    #     absent worker means the caller bypassed registration.
+                    #     Return None rather than raising so that unit tests that
+                    #     call claim_ready with fictional lease_owner IDs continue
+                    #     to work.  The fence clause in the UPDATE WHERE still
+                    #     prevents any data mutation.
+                    worker_status = conn.execute(
+                        select(run_workers_table.c.status)
+                        .where(run_workers_table.c.worker_id == lease_owner)
+                        .where(run_workers_table.c.run_id == run_id)
+                    ).scalar()
+                    if worker_status is not None and str(worker_status) != "active":
+                        raise RunWorkerEvictedError(worker_id=lease_owner, run_id=run_id)
             return None
         if result.rowcount != 1:
             raise AuditIntegrityError(
@@ -1097,6 +1200,12 @@ class TokenSchedulerRepository:
                         token_work_items_table.c.work_item_id == row["work_item_id"],
                         token_work_items_table.c.run_id == run_id,
                         token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value,
+                        # Membership fence (ADR-030 §G, slice 4): same discipline
+                        # as claim_ready — an evicted/departed claimant gets
+                        # rowcount=0 and the re-probe below raises
+                        # RunWorkerEvictedError rather than silently returning None.
+                        # Uses the lenient variant (passes in N=0/unit-test mode).
+                        claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
                     )
                 )
                 .values(
@@ -1107,6 +1216,24 @@ class TokenSchedulerRepository:
                 )
             )
             if result.rowcount == 0:
+                # Distinguish "row raced away" from "membership fence failed".
+                # Same absent-vs-evicted logic as _claim_ready_row: only raise
+                # when the worker EXISTS but is non-active (the registered-then-
+                # evicted case that matches the multi-worker eviction protocol).
+                still_pending = conn.execute(
+                    select(token_work_items_table.c.work_item_id)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value)
+                ).first()
+                if still_pending is not None:
+                    worker_status = conn.execute(
+                        select(run_workers_table.c.status)
+                        .where(run_workers_table.c.worker_id == lease_owner)
+                        .where(run_workers_table.c.run_id == run_id)
+                    ).scalar()
+                    if worker_status is not None and str(worker_status) != "active":
+                        raise RunWorkerEvictedError(worker_id=lease_owner, run_id=run_id)
                 return None
             if result.rowcount != 1:
                 raise AuditIntegrityError(
@@ -1156,14 +1283,47 @@ class TokenSchedulerRepository:
         now: datetime,
         caller_owner: str,
         coordination_token: CoordinationToken | None = None,
+        grace_seconds: float = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+        stall_budget_seconds: float = DEFAULT_ITEM_STALL_BUDGET_SECONDS,
     ) -> int:
         """Return expired LEASED work to READY for retry by another worker.
 
         ``coordination_token`` (ADR-030 §C.4 row 8): the repair sweep is a
         LEADER verb — the verify-and-extend epoch fence runs as the first
         statement of the transaction so a deposed leader cannot rotate
-        attempts under the new one. The reap arms beneath are byte-identical
-        to the unfenced form (liveness-aware predicates are slice 4).
+        attempts under the new one.
+
+        **Liveness-aware reap (slice 4, §A.5/§C.1):** An expired item lease is
+        reapable ONLY under one of two conditions:
+
+        1. ``owner_registry_dead`` — the ``run_workers`` row for the lease
+           owner is ABSENT, has status IN ('evicted','departed'), or has
+           ``status='active'`` AND ``heartbeat_expires_at < now - grace``.
+           All three arms collapse into a single NOT EXISTS predicate so
+           absent, non-active, and active-but-stale rows all match (no row
+           → no EXISTS match → dead). This is the primary protection: a
+           registered-live owner's expired item lease is LEFT LEASED so the
+           owner's next ``heartbeat_lease`` revives it. Long LLM calls no
+           longer become reap targets on every maintenance sweep.
+
+        2. ``lease_stalled`` — the owner IS registry-live BUT the lease has
+           been expired for longer than ``stall_budget_seconds`` (default
+           2x scheduler_lease). A genuinely wedged worker (heartbeat thread
+           alive, drain loop stuck) triggers this arm. The rotation emits a
+           ``worker_stalled`` coordination event in the SAME transaction,
+           naming the owner and the reaped item (§A.5 :145).
+
+        **UNFENCED/TEST ARM CONTRACT (re-pin):** when ``coordination_token``
+        is None the lease_owner has no registry row → ``owner_registry_dead``
+        is TRUE for every row → reap behaves exactly as the pre-slice-4 form.
+        Preserves all slice 1-3 tests that call without a token.
+
+        **N=1 IMPROVEMENT (re-pin):** a single live leader beating its own
+        seat+row keeps ``owner_registry_dead`` FALSE for its own in-flight
+        items, so a long LLM call's expired item lease is NO LONGER reapable
+        by a racing recover sweep. The self-sweep guard (lease_owner_not_caller)
+        is unchanged; the NEW protection is against a peer/successor sweep
+        reaping a registered-live owner.
 
         Recovery advances the durable scheduler attempt so any node state
         created before the crashed worker lost its lease is not replayed under
@@ -1207,17 +1367,76 @@ class TokenSchedulerRepository:
         #    leak) would be invisible to the sweep. ``(lease_owner IS NULL
         #    OR lease_owner != caller_owner)`` recovers those rows while
         #    still excluding the caller's own active leases.
+        #
+        # 3. Liveness-aware gate (slice 4, §A.5/§C.1): only reap when the
+        #    owner is registry-DEAD or far past the stall budget.
+        #    NOT EXISTS(active + fresh heartbeat row) folds ABSENT/non-active/
+        #    stale into a single correlated subquery — portable and keeps the
+        #    per-row CAS shape unchanged.
         lease_owner_not_caller = or_(
             token_work_items_table.c.lease_owner.is_(None),
             token_work_items_table.c.lease_owner != caller_owner,
         )
+
+        # §A.5/§C.1: liveness-aware gate — ONLY applied when
+        # ``coordination_token`` is not None (the fenced/leader path).
+        #
+        # UNFENCED/TEST ARM (coordination_token is None): the caller operates
+        # outside the coordination substrate.  This path is used by:
+        #   (a) resume sweeps (recover expired leases before acquiring
+        #       leadership — no token yet);
+        #   (b) integration tests that inject a MockClock with timestamps in a
+        #       different epoch than the real-clock ``heartbeat_expires_at`` rows
+        #       written by ``begin_run``/``worker_heartbeat``.
+        #   (c) direct repository-level construction in tests with no
+        #       run_workers rows at all.
+        # In all cases, the time-domain mismatch between the ``now`` argument
+        # and the stored ``heartbeat_expires_at`` values would cause the liveness
+        # predicate to fire spuriously.  We therefore SKIP the predicate
+        # entirely on the unfenced path and reap all expired non-caller leases
+        # unconditionally — the pre-slice-4 ("legacy") behavior.
+        #
+        # FENCED PATH (coordination_token is not None): apply the full
+        # liveness-aware gate.  Arms of owner_registry_dead:
+        #   (a) absent row → no EXISTS match → dead;
+        #   (b) status in ('evicted','departed') → status!='active' → dead;
+        #   (c) status='active' + stale heartbeat → heartbeat<now-grace → dead;
+        #   (d) status='active' + fresh heartbeat → MATCH → LIVE → excluded.
+        if coordination_token is not None:
+            _grace_threshold = now - timedelta(seconds=grace_seconds)
+            owner_registry_dead: ColumnElement[bool] = ~(
+                select(run_workers_table.c.worker_id)
+                .where(
+                    run_workers_table.c.worker_id == token_work_items_table.c.lease_owner,
+                    run_workers_table.c.status == "active",
+                    run_workers_table.c.heartbeat_expires_at >= _grace_threshold,
+                )
+                .exists()
+            )
+            # §A.5: stall arm — owner IS registry-live but drain loop is wedged.
+            # The item has been expired far past the stall budget, so we reap it
+            # and emit worker_stalled in the same transaction.
+            _stall_threshold = now - timedelta(seconds=stall_budget_seconds)
+            lease_stalled: ColumnElement[bool] = token_work_items_table.c.lease_expires_at < _stall_threshold
+            reap_eligible: ColumnElement[bool] = or_(owner_registry_dead, lease_stalled)
+        else:
+            # Legacy/unfenced arm: unconditionally reap all expired non-caller
+            # leases; liveness predicate skipped to avoid epoch mismatch.
+            owner_registry_dead = literal(True)
+            lease_stalled = literal(False)
+            reap_eligible = true()
+
         with self._fenced_or_plain_write(coordination_token=coordination_token, now=now, verb="recover_expired_leases") as conn:
-            expired = conn.execute(
-                select(token_work_items_table)
+            expired_rows = conn.execute(
+                select(
+                    token_work_items_table,
+                    owner_registry_dead.label("owner_is_dead"),
+                )
                 .where(token_work_items_table.c.run_id == run_id)
                 .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
                 .where(token_work_items_table.c.lease_expires_at < now)
                 .where(lease_owner_not_caller)
+                .where(reap_eligible)
                 .order_by(
                     token_work_items_table.c.ingest_sequence,
                     token_work_items_table.c.step_index,
@@ -1226,6 +1445,12 @@ class TokenSchedulerRepository:
                     token_work_items_table.c.work_item_id,
                 )
             ).mappings()
+            # Materialise into a list: the connection must remain open for the
+            # per-row UPDATEs below, but lazy iteration over the SELECT cursor
+            # would be invalidated by the first write on the same connection
+            # (SQLite WAL mode). Collect all eligible rows first, then update.
+            expired = list(expired_rows)
+
             recovered = 0
             for row in expired:
                 pending_sink_name = row["pending_sink_name"]
@@ -1248,6 +1473,7 @@ class TokenSchedulerRepository:
                             token_work_items_table.c.lease_owner != caller_owner,
                         )
                     )
+                    .where(reap_eligible)
                     .values(
                         work_item_id=next_work_item_id,
                         attempt=next_attempt,
@@ -1277,6 +1503,29 @@ class TokenSchedulerRepository:
                         caller_owner=caller_owner,
                         context=({"previous_work_item_id": row["work_item_id"]} if next_work_item_id != row["work_item_id"] else None),
                     )
+                    # §A.5 :145: emit worker_stalled ONLY when the owner is
+                    # registry-LIVE but stalled (stall arm, not dead-owner arm).
+                    # ``owner_is_dead`` is materialised per-row by the SELECT
+                    # (correlated EXISTS evaluated at query time). A dead-owner
+                    # reap is already explained by the worker_evict event on
+                    # that path; emitting worker_stalled for it is redundant
+                    # and violates the invariant (every non-evicted rotation
+                    # is explained by stalled, not double-evented).
+                    owner_is_dead = bool(row["owner_is_dead"])
+                    if not owner_is_dead and row["lease_owner"] is not None and coordination_token is not None:
+                        record_coordination_event(
+                            conn,
+                            run_id=run_id,
+                            event_type="worker_stalled",
+                            worker_id=row["lease_owner"],
+                            leader_epoch=coordination_token.leader_epoch,
+                            recorded_at=now,
+                            context={
+                                "reaped_work_item_id": row["work_item_id"],
+                                "previous_work_item_id": row["work_item_id"],
+                                "reason": "item_stall_budget",
+                            },
+                        )
                 recovered += result.rowcount
         return recovered
 
@@ -1588,7 +1837,7 @@ class TokenSchedulerRepository:
         token_id: str,
         now: datetime,
         expected_lease_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
     ) -> int:
         """Terminalize pending sink scheduler work after token outcome durability.
 
@@ -1603,11 +1852,11 @@ class TokenSchedulerRepository:
         including NULL — is simply not terminalized (returns 0 for the
         caller's loud invariant check).
 
-        ``coordination_token`` (ADR-030 §C.4 row 7, "per terminalization
-        batch"): when supplied, the verify-and-extend leader epoch fence is
-        the FIRST statement of this verb's transaction — a deposed leader
-        cannot terminalize the new leader's ledger even with a matching
-        owner. ``None`` preserves the unfenced legacy arm.
+        ``coordination_token`` (ADR-030 §C.4 row 7, slice-4 ratchet:
+        REQUIRED): the verify-and-extend leader epoch fence is the FIRST
+        statement of this verb's transaction — a deposed leader cannot
+        terminalize the new leader's ledger even with a matching owner.
+        The epoch fence stacks on top of the owner CAS: both must pass.
         """
         predicates = [
             token_work_items_table.c.run_id == run_id,
@@ -1616,18 +1865,13 @@ class TokenSchedulerRepository:
             token_work_items_table.c.pending_sink_name.is_not(None),
             token_work_items_table.c.lease_owner == expected_lease_owner,
         ]
-        write_ctx = (
-            begin_write(self._engine)
-            if coordination_token is None
-            else fenced_leader_transaction(
-                self._engine,
-                token=coordination_token,
-                now=now,
-                window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
-                verb="mark_pending_sink_terminal",
-            )
-        )
-        with write_ctx as conn:
+        with fenced_leader_transaction(
+            self._engine,
+            token=coordination_token,
+            now=now,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb="mark_pending_sink_terminal",
+        ) as conn:
             rows = (
                 conn.execute(select(token_work_items_table).where(and_(*predicates)).order_by(token_work_items_table.c.work_item_id))
                 .mappings()
@@ -1687,19 +1931,20 @@ class TokenSchedulerRepository:
         scope_row_id: str | None = None,
         intake_snapshot_token_ids: frozenset[str] | None = None,
         release_context: Mapping[str, object] | None = None,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         pending_sink_lease_owner: str | None = None,
         branch_losses: Sequence[BranchLossSpec] = (),
     ) -> int:
         """Complete a barrier atomically: consume BLOCKED inputs and emit outputs.
 
-        ``coordination_token`` (ADR-030 §C.4 row 6): the verify-and-extend
-        epoch fence runs as the FIRST statement of the journal transaction —
-        a deposed leader's completion is refused before any journal mutation.
-        Fenced on BOTH arms (the legacy partial-release wrappers are leader
-        verbs too). ``pending_sink_lease_owner`` is the attributed-park stamp
-        for the pending-sink emission arms (passthrough transition + fresh
-        insert): strict post-sink terminalization
+        ``coordination_token`` (ADR-030 §C.4 row 6, slice-4 ratchet:
+        REQUIRED): the verify-and-extend epoch fence runs as the FIRST
+        statement of the journal transaction — a deposed leader's completion
+        is refused before any journal mutation. Fenced on BOTH arms (the
+        legacy partial-release wrappers are leader verbs too).
+        ``pending_sink_lease_owner`` is the attributed-park stamp for the
+        pending-sink emission arms (passthrough transition + fresh insert):
+        strict post-sink terminalization
         (:meth:`mark_pending_sink_terminal[_many]`) CASes on it. The engine
         passes its scheduler lease owner (== the §A.1 worker identity); None
         preserves the legacy NULL park for direct repository callers.
@@ -2374,7 +2619,7 @@ class TokenSchedulerRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,
+            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
             pending_sink_lease_owner=pending_sink_lease_owner,
         )
         # complete_barrier raised unless every requested handoff transitioned.
@@ -2387,7 +2632,7 @@ class TokenSchedulerRepository:
         token_ids: tuple[str, ...],
         now: datetime,
         expected_lease_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
     ) -> int:
         """Terminalize sink-bound scheduler work for a durable sink batch.
 
@@ -2401,12 +2646,12 @@ class TokenSchedulerRepository:
         including NULL — refuses the whole batch with
         :class:`~elspeth.contracts.errors.AuditIntegrityError`.
 
-        ``coordination_token`` (ADR-030 §C.4 row 7, "per terminalization
-        batch"): when supplied, the verify-and-extend leader epoch fence is
-        the FIRST statement of the batch transaction; a deposed leader's
-        batch is refused with :class:`RunLeadershipLostError` (and a
-        ``fence_refusal`` event) before any row is touched. ``None``
-        preserves the unfenced legacy arm.
+        ``coordination_token`` (ADR-030 §C.4 row 7, slice-4 ratchet:
+        REQUIRED): the verify-and-extend leader epoch fence is the FIRST
+        statement of the batch transaction; a deposed leader's batch is
+        refused with :class:`RunLeadershipLostError` (and a
+        ``fence_refusal`` event) before any row is touched. Mirrors the
+        singleton sibling :meth:`mark_pending_sink_terminal`.
         """
         requested_token_ids = token_ids
         if not requested_token_ids:
@@ -2425,18 +2670,13 @@ class TokenSchedulerRepository:
             token_work_items_table.c.status.in_((TokenWorkStatus.PENDING_SINK.value, TokenWorkStatus.LEASED.value)),
             token_work_items_table.c.pending_sink_name.is_not(None),
         ]
-        write_ctx = (
-            begin_write(self._engine)
-            if coordination_token is None
-            else fenced_leader_transaction(
-                self._engine,
-                token=coordination_token,
-                now=now,
-                window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
-                verb="mark_pending_sink_terminal_many",
-            )
-        )
-        with write_ctx as conn:
+        with fenced_leader_transaction(
+            self._engine,
+            token=coordination_token,
+            now=now,
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb="mark_pending_sink_terminal_many",
+        ) as conn:
             rows = (
                 conn.execute(
                     select(token_work_items_table)
@@ -2527,7 +2767,7 @@ class TokenSchedulerRepository:
         run_id: str,
         now: datetime,
         caller_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
     ) -> int:
         """Repair PENDING_SINK work whose terminal token outcome is already durable.
 
@@ -2535,12 +2775,12 @@ class TokenSchedulerRepository:
         handoff row is marked terminal. Resume must not claim and re-emit those
         rows externally; the terminal token outcome is the authoritative witness.
 
-        ``coordination_token`` (ADR-030 §G): this verb deliberately
-        terminalizes REGARDLESS of owner — it is the crash-repair verb and
-        the terminal token outcome is the witness — so its protection is the
-        leader epoch fence (first statement of the transaction), not the
-        owner CAS. Owner-blindness is unchanged; ``caller_owner`` remains the
-        event attribution only.
+        ``coordination_token`` (ADR-030 §G, slice-4 ratchet: REQUIRED): this
+        verb deliberately terminalizes REGARDLESS of owner — it is the
+        crash-repair verb and the terminal token outcome is the witness — so
+        its protection is the leader epoch fence (first statement of the
+        transaction), not the owner CAS. Owner-blindness is unchanged;
+        ``caller_owner`` remains the event attribution only.
         """
         terminal_outcome_exists = (
             select(token_outcomes_table.c.outcome_id)
@@ -2649,7 +2889,7 @@ class TokenSchedulerRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,
+            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
             release_context=release_context,
         )
 

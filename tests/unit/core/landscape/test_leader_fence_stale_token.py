@@ -489,7 +489,10 @@ class TestStrictPendingSinkOwnerCAS:
 
     def test_owner_mismatch_refuses_with_zero_mutation(self, db: LandscapeDB, token: CoordinationToken) -> None:
         repo, token_id = self._parked_handoff(db, owner=WORKER)
-        terminalized = repo.mark_pending_sink_terminal(run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner="some-other-worker")
+        # Epoch fence passes (valid token), owner CAS refuses (wrong owner) → 0.
+        terminalized = repo.mark_pending_sink_terminal(
+            run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner="some-other-worker", coordination_token=token
+        )
         assert terminalized == 0
         row = _work_item_row(db, token_id)
         assert row["status"] == TokenWorkStatus.PENDING_SINK.value
@@ -500,20 +503,26 @@ class TestStrictPendingSinkOwnerCAS:
         repo, token_id = self._parked_handoff(db, owner=WORKER)
         with db.engine.begin() as conn:
             conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(lease_owner=None))
-        terminalized = repo.mark_pending_sink_terminal(run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner=WORKER)
+        terminalized = repo.mark_pending_sink_terminal(
+            run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner=WORKER, coordination_token=token
+        )
         assert terminalized == 0, "the historical NULL-owner acceptance arm is deleted"
         assert _work_item_row(db, token_id)["status"] == TokenWorkStatus.PENDING_SINK.value
 
     def test_matching_owner_terminalizes(self, db: LandscapeDB, token: CoordinationToken) -> None:
         repo, token_id = self._parked_handoff(db, owner=WORKER)
-        terminalized = repo.mark_pending_sink_terminal(run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner=WORKER)
+        terminalized = repo.mark_pending_sink_terminal(
+            run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner=WORKER, coordination_token=token
+        )
         assert terminalized == 1
         assert _work_item_row(db, token_id)["status"] == TokenWorkStatus.TERMINAL.value
 
     def test_many_owner_mismatch_refuses_batch(self, db: LandscapeDB, token: CoordinationToken) -> None:
         repo, token_id = self._parked_handoff(db, owner=WORKER)
         with pytest.raises(AuditIntegrityError, match="strict owner CAS"):
-            repo.mark_pending_sink_terminal_many(run_id=RUN_ID, token_ids=(token_id,), now=NOW, expected_lease_owner="some-other-worker")
+            repo.mark_pending_sink_terminal_many(
+                run_id=RUN_ID, token_ids=(token_id,), now=NOW, expected_lease_owner="some-other-worker", coordination_token=token
+            )
         assert _work_item_row(db, token_id)["status"] == TokenWorkStatus.PENDING_SINK.value
 
     def test_many_null_park_refuses_batch(self, db: LandscapeDB, token: CoordinationToken) -> None:
@@ -521,7 +530,9 @@ class TestStrictPendingSinkOwnerCAS:
         with db.engine.begin() as conn:
             conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(lease_owner=None))
         with pytest.raises(AuditIntegrityError, match="strict owner CAS"):
-            repo.mark_pending_sink_terminal_many(run_id=RUN_ID, token_ids=(token_id,), now=NOW, expected_lease_owner=WORKER)
+            repo.mark_pending_sink_terminal_many(
+                run_id=RUN_ID, token_ids=(token_id,), now=NOW, expected_lease_owner=WORKER, coordination_token=token
+            )
 
     def test_reclaim_restores_attribution_for_reaped_handoff(self, db: LandscapeDB, token: CoordinationToken) -> None:
         """The reap arm parks NULL; claim_pending_sink restores attribution."""
@@ -530,7 +541,9 @@ class TestStrictPendingSinkOwnerCAS:
             conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(lease_owner=None))
         reclaimed = repo.claim_pending_sink(run_id=RUN_ID, lease_owner="resume-worker", lease_seconds=60, now=NOW)
         assert reclaimed is not None and reclaimed.token_id == token_id
-        terminalized = repo.mark_pending_sink_terminal(run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner="resume-worker")
+        terminalized = repo.mark_pending_sink_terminal(
+            run_id=RUN_ID, token_id=token_id, now=NOW, expected_lease_owner="resume-worker", coordination_token=token
+        )
         assert terminalized == 1
 
 

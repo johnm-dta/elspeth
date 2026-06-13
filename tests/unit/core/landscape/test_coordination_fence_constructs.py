@@ -206,21 +206,74 @@ class TestActiveWorkerFenceClause:
             )
             assert result.rowcount == expected_rowcount
 
-    def test_negative_pin_claim_verbs_are_not_membership_fenced_in_slice_2(self, db: LandscapeDB) -> None:
-        """Slice-scope pin (design :491): the clause is NOT yet compiled into
+    def test_membership_fence_compiled_into_claim_verbs_in_slice_4(self, db: LandscapeDB) -> None:
+        """Slice-4 flip (design :491): the clause IS compiled into
         ``claim_ready``/``claim_pending_sink``/``enqueue_ready`` — an EVICTED
-        worker can still claim in slice 2. When slice 4 lands the membership
-        fences, THIS test flips to the ``RunWorkerEvictedError`` contract."""
+        worker is refused with ``RunWorkerEvictedError`` for all three verbs.
+
+        Replaces the slice-2 negative pin (EVICTED worker could claim).
+        """
+        from elspeth.contracts.errors import RunWorkerEvictedError
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
         _insert_run(db, RUN_1)
         _insert_worker(db, worker_id="worker-evicted", run_id=RUN_1, status="evicted")
         _seed_ready_item(db, RUN_1)
-        claimed = TokenSchedulerRepository(db.engine).claim_ready(
-            run_id=RUN_1,
-            lease_owner="worker-evicted",
-            lease_seconds=60,
-            now=NOW,
-        )
-        assert claimed is not None, "slice 2 deliberately leaves fresh claims membership-unfenced"
+        repo = TokenSchedulerRepository(db.engine)
+
+        # claim_ready: evicted worker is refused
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            repo.claim_ready(run_id=RUN_1, lease_owner="worker-evicted", lease_seconds=60, now=NOW)
+        assert exc_info.value.worker_id == "worker-evicted"
+        assert exc_info.value.run_id == RUN_1
+
+        # The READY row is untouched (zero mutation on fence failure).
+        with db.engine.connect() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == RUN_1)
+            ).scalar_one()
+        assert status == TokenWorkStatus.READY.value
+
+        # enqueue_ready: evicted worker is refused (worker_id kwarg carries the fence).
+        # Re-use the same schema seed (different sequence to avoid work_item_id collision).
+        _seed_ready_item(db, RUN_1, sequence=1)
+        with pytest.raises(RunWorkerEvictedError):
+            repo.enqueue_ready(
+                run_id=RUN_1,
+                token_id="token-new",
+                row_id="row-new",
+                node_id=NODE_ID,
+                step_index=1,
+                ingest_sequence=99,
+                row_payload_json=TokenSchedulerRepository.serialize_row_payload(
+                    PipelineRow({"id": 99}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+                ),
+                available_at=NOW,
+                worker_id="worker-evicted",
+            )
+
+        # An ABSENT worker (no registry row at all) calling enqueue_ready with
+        # worker_id is also refused (absent → fence fails).
+        with pytest.raises(RunWorkerEvictedError) as exc_info2:
+            repo.enqueue_ready(
+                run_id=RUN_1,
+                token_id="token-absent",
+                row_id="row-absent",
+                node_id=NODE_ID,
+                step_index=1,
+                ingest_sequence=100,
+                row_payload_json=TokenSchedulerRepository.serialize_row_payload(
+                    PipelineRow({"id": 100}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+                ),
+                available_at=NOW,
+                worker_id="worker-absent",
+            )
+        assert exc_info2.value.worker_id == "worker-absent"
+
+        # An ACTIVE worker can still claim (positive control).
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        claimed = repo.claim_ready(run_id=RUN_1, lease_owner="worker-active", lease_seconds=60, now=NOW)
+        assert claimed is not None, "active worker must succeed"
 
 
 class TestVerifyAndExtendLeaderFence:

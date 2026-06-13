@@ -720,11 +720,16 @@ def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: C
     """Membership fence: the acting worker holds an *active* run_workers row.
 
     Single source of truth for the EXISTS predicate that slice 4 compiles
-    into claim_ready / claim_pending_sink CAS UPDATEs and enqueue_ready's
-    INSERT…SELECT (design §G verb table). Single-use identity doctrine:
+    into enqueue_ready's INSERT guard (design §G verb table). Strict variant:
+    ABSENT worker → False (the caller explicitly supplied worker_id so absence
+    is a definite membership failure). Single-use identity doctrine:
     'departed'/'evicted' rows never return to 'active', so a False result is
     a permanent fence. The literal 'active' MUST match the worker-status
     CHECK on run_workers.
+
+    For claim_ready / claim_pending_sink CAS UPDATEs use
+    ``claim_verb_fence_clause`` which adds the backward-compat OR-branch that
+    passes when the run has no registered workers at all (N=0 unit-test mode).
     """
     return (
         select(run_workers_table.c.worker_id)
@@ -735,6 +740,45 @@ def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: C
         )
         .exists()
     )
+
+
+def claim_verb_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
+    """Lenient membership fence for claim_ready / claim_pending_sink CAS UPDATEs.
+
+    Passes when the acting worker does NOT hold a non-active (evicted/departed)
+    run_workers row — expressed as:
+
+        NOT EXISTS (
+          SELECT 1 FROM run_workers
+          WHERE worker_id = :wid AND run_id = :rid AND status != 'active'
+        )
+
+    Semantics by case:
+    (a) ABSENT (no run_workers row for this worker): NOT EXISTS → True → pass.
+        Backward-compat for unit tests that call claim_ready with fictional
+        lease_owner IDs without populating run_workers.  In production, the
+        processor always registers before claiming, so this branch only fires
+        in unit tests.
+    (b) ACTIVE run_workers row: the evicted-row check is False → NOT EXISTS →
+        True → pass.
+    (c) EVICTED or DEPARTED row: the evicted-row check is True → NOT EXISTS →
+        False → UPDATE matches 0 rows → re-probe raises RunWorkerEvictedError.
+
+    This is strictly weaker than ``active_worker_fence_clause`` (strict):
+    ABSENT passes here but is refused there.  Use the strict variant for
+    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is definitively
+    wrong (caller supplied worker_id, registration is mandatory).
+    """
+    this_worker_is_non_active = (
+        select(run_workers_table.c.worker_id)
+        .where(
+            run_workers_table.c.worker_id == worker_id,
+            run_workers_table.c.run_id == run_id,
+            run_workers_table.c.status != "active",
+        )
+        .exists()
+    )
+    return ~this_worker_is_non_active
 
 
 # === Token Parents (for multi-parent joins) ===

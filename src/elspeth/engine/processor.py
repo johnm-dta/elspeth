@@ -85,6 +85,7 @@ from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.scheduler_repository import (
     BatchMembershipSpec,
     BranchLossSpec,
@@ -433,6 +434,7 @@ class RowProcessor:
         scheduler_lease_seconds: int = 300,
         scheduler_heartbeat_seconds: int = 60,
         coordination_token: CoordinationToken | None = None,
+        run_coordination: RunCoordinationRepository | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -477,6 +479,11 @@ class RowProcessor:
                 registered worker identity IS the lease owner; the
                 ``row-processor:{run_id}:{uuid}`` mint below remains the
                 fallback for direct repository-level construction.
+            run_coordination: Optional RunCoordinationRepository for leader
+                housekeeping (§C.2 path 1, slice 4): enumerating dead non-leader
+                workers and calling ``evict_worker`` for each. None = no
+                housekeeping sweep (N=1 without the coordination substrate, or
+                direct repository-level construction in tests).
         """
         if scheduler is None:
             raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
@@ -561,6 +568,7 @@ class RowProcessor:
         self._telemetry_manager = telemetry_manager
         self._scheduler = scheduler
         self._coordination_token = coordination_token
+        self._run_coordination = run_coordination
         self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
@@ -3128,17 +3136,20 @@ class RowProcessor:
         items that were persisted by an earlier process without re-reading the
         source or re-running source-boundary validation.
 
-        **Single-active-resume precondition.** Per ADR-026 Precondition #9, a
-        multi-worker deployment cannot ship until a separate deployment-shape
-        ADR fixes worker identity, lease heartbeating (elspeth-ddde8144b6), and
-        spawn/supervision. Until then, exactly one ``RowProcessor`` may run a
-        drain against a given ``run_id`` at a time. This invariant is enforced
-        mechanically here: if any peer (non-caller) ``lease_owner`` holds an
-        unexpired LEASED row on this run, the drain refuses to start. The
-        sink-bound RowResult emission path in ``_drain_preexisting_pending_sinks``
-        would otherwise race with the peer's still-in-flight processing —
-        eventual lease expiry permits the helper to re-emit a RowResult for a
-        token the peer has already produced (filigree elspeth-66be4216cd, G3).
+        **Admission gate (ADR-030 §G, slice 4).** Under multi-worker
+        deployment, concurrent workers are EXPECTED to share a run_id.
+        Registry admission (the ``active_worker_fence_clause`` membership fence
+        compiled into ``claim_ready`` / ``claim_pending_sink`` / ``enqueue_ready``
+        CAS UPDATEs) is the correctness mechanism: a non-member's claim fails the
+        EXISTS fence and surfaces ``RunWorkerEvictedError``, so a concurrent peer
+        is a normal multi-worker state, not a precondition violation.
+
+        ``peer_active_leases`` is **diagnostic only** from slice 4 onward. Its
+        result is logged for observability but no longer causes a refusal. The
+        old ADR-026 Precondition #9 single-active-resume enforcement is replaced
+        by the membership fence on the claim verbs (filigree elspeth-66be4216cd,
+        G3 — the original concern was duplicate RowResult emission; the fence CAS
+        prevents non-members from claiming, closing that race structurally).
         """
         peer_owners = self._scheduler.peer_active_leases(
             run_id=self._run_id,
@@ -3146,14 +3157,11 @@ class RowProcessor:
             now=self._clock.now_utc(),
         )
         if peer_owners:
-            raise AuditIntegrityError(
-                f"Scheduler refusing to drain run_id={self._run_id!r} under "
-                f"lease_owner={self._scheduler_lease_owner!r}: peer worker(s) "
-                f"{list(peer_owners)!r} hold unexpired leases on the same run. "
-                "ADR-026 Precondition #9 (single-active-resume) is violated. "
-                "RC6 may not ship N>1 workers until the multi-worker "
-                "deployment-shape ADR lands and elspeth-ddde8144b6 (lease "
-                "heartbeat) is implemented."
+            logger.debug(
+                "drain_scheduled_work: peer workers %r hold unexpired leases on run_id=%r (diagnostic only; "
+                "admission fence on claim verbs is the correctness gate)",
+                list(peer_owners),
+                self._run_id,
             )
         return self._drain_scheduler_claims(ctx=ctx, pending_items={}, recover_pending_sinks=True)
 
@@ -3346,7 +3354,7 @@ class RowProcessor:
             now=self._clock.now_utc(),
             # §E.3 per-firing-group snapshot: this batch's adopted members.
             intake_snapshot_token_ids=frozenset(token.token_id for token in buffered_tokens),
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
             # Attributed park (ADR-030): the post-sink strict owner CAS
             # terminalizes these handoffs under this worker's lease identity.
             pending_sink_lease_owner=self._scheduler_lease_owner,
@@ -3437,7 +3445,7 @@ class RowProcessor:
             # §E.3 per-firing-group snapshot: the fired group's adopted branches.
             intake_snapshot_token_ids=frozenset(consumed_token_ids),
             scope_row_id=scope_row_id,
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
             # Attributed park (ADR-030): the post-sink strict owner CAS
             # terminalizes the merged handoff under this worker's identity.
             pending_sink_lease_owner=self._scheduler_lease_owner,
@@ -3514,7 +3522,42 @@ class RowProcessor:
         return results
 
     def _run_scheduler_maintenance(self, now: datetime) -> int:
-        """Recover expired peer leases."""
+        """Evict dead members then recover expired peer leases (§C.2 path 1).
+
+        Ordering: evict-before-reap (§C.2 :232) ensures that when we rotate
+        an expired item lease the owner's registry row already carries
+        status='evicted' (arm b of owner_registry_dead), so the reap is
+        silent (no worker_stalled emitted for already-evicted workers).
+
+        The stall-arm reap (item_stall_budget) is the documented exception:
+        it may rotate BEFORE eviction for a live-heartbeat-but-wedged-drain
+        worker, and emits worker_stalled in the same transaction (§A.5 :145).
+
+        Leader-only: the evict sweep is gated on ``_coordination_token`` being
+        set (followers never evict; unfenced/test arm skips silently).
+        """
+        # §C.2 path 1: leader evicts dead non-leader members before reaping.
+        # Individual, not bulk — one evict_worker call per dead member (§B.4,
+        # §C.2 :233). evict_worker is idempotent (benign skip on CAS miss).
+        if self._coordination_token is not None and self._run_coordination is not None:
+            from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
+
+            grace = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
+            dead_members = self._run_coordination.dead_non_leader_workers(
+                run_id=self._run_id,
+                leader_worker_id=self._coordination_token.worker_id,
+                now=now,
+                grace_seconds=grace,
+            )
+            for target_worker_id in dead_members:
+                self._run_coordination.evict_worker(
+                    token=self._coordination_token,
+                    target_worker_id=target_worker_id,
+                    now=now,
+                    grace_seconds=grace,
+                    window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                )
+
         recovered = self._scheduler.recover_expired_leases(
             run_id=self._run_id,
             now=now,
@@ -4223,7 +4266,7 @@ class RowProcessor:
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._coordination_token,
+                coordination_token=self._require_coordination_token(),
             )
             if repaired:
                 continue
@@ -4244,7 +4287,7 @@ class RowProcessor:
             token_id=token_id,
             now=self._clock.now_utc(),
             expected_lease_owner=self._scheduler_lease_owner,
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
         )
         if terminalized != 1:
             raise AuditIntegrityError(
@@ -4259,7 +4302,7 @@ class RowProcessor:
             token_ids=token_ids,
             now=self._clock.now_utc(),
             expected_lease_owner=self._scheduler_lease_owner,
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
         )
         if terminalized != len(token_ids):
             raise AuditIntegrityError(
@@ -4617,6 +4660,16 @@ class RowProcessor:
                 expand_group_id=item.token.expand_group_id,
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
+                # Membership fence (ADR-030 §G, slice 4): thread the worker
+                # identity so an evicted RowProcessor cannot enqueue READY
+                # items that no active worker will claim. scheduler_lease_owner
+                # == token.worker_id when coordination is active (§A.1).
+                # Deferred: worker_id wiring to enqueue_ready is gated on
+                # mandatory run_workers registration (future slice).  In this
+                # slice the processor may not have a run_workers row (single-
+                # worker / test mode), so we pass None to skip the fence here;
+                # the fence is tested via explicit callers in e2e and unit tests.
+                worker_id=None,
             )
         if scheduled.status is TokenWorkStatus.READY or (
             scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner

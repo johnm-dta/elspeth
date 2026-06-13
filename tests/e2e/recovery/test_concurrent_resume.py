@@ -45,18 +45,18 @@ construction notes and the epoch-21 seat assumption.
 
 from __future__ import annotations
 
+import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 
 from elspeth.contracts import RunStatus
-from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.checkpoint.recovery import NonResumableRunError
-from elspeth.core.landscape.schema import run_coordination_table, runs_table
+from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
 from elspeth.engine.clock import MockClock
 from tests.e2e.recovery.harness import (
     _DEFAULT_LEASE_SECONDS,
@@ -171,29 +171,36 @@ class TestMidClaimCrashResume:
 class TestExpiredLeaseReclaimUnderContention:
     """Ticket item 2: a population of crashed leases with attempt offsets."""
 
-    def test_contended_reclaim_is_atomic_and_bumps_attempts_with_offset_identity(self, tmp_path: Path) -> None:
+    def test_contended_reclaim_partial_then_full_after_all_leases_expire(self, tmp_path: Path) -> None:
         """Two crashed workers' leases, different expiries and attempt history.
 
-        Construction (every journal transition written by the production
-        repository): worker-a dies holding token-3 at attempt=1 (300s lease).
-        token-4 was already recovered once during the prior process's own
-        maintenance sweep (a REAL recover_expired_leases call) and re-claimed
-        by worker-b at attempt=2 with a long 7200s lease before the kill.
+        Slice-4 demotion of peer_active_leases refusal to diagnostic:
+        a concurrent peer holding an UNEXPIRED lease is no longer a hard
+        refusal. Partial progress is now expected and correct.
 
-        Invariants pinned:
-        - PARTIAL expiry refuses ATOMICALLY: a resume at a time when token-3's
-          lease has expired but worker-b's is still live raises
-          AuditIntegrityError naming the live peer (ADR-026 Precondition #9),
-          and the refusal touches NEITHER journal row — worker-a's expired
-          lease is NOT half-recovered (still LEASED/attempt=1/owner intact);
-        - after all leases expire, one resume recovers BOTH: attempts bump
-          1->2 (token-3) and 2->3 (token-4), recovery events carry the dead
-          owners' identities, and recovery order follows ingest_sequence;
-        - attempt offsets land in the audit DB: the re-driven transform
-          node_state is recorded at attempt = journal_attempt - 1 (1 for
-          token-3, 2 for token-4) with no duplicate node_states identities;
+        Construction: worker-a dies holding token-3 at attempt=1 (300s lease).
+        token-4 was already recovered once and re-claimed by worker-b at
+        attempt=2 with a 7200s lease before the kill.
+
+        Invariants pinned (slice-4 behavior):
+        - Resume #1 at T+3600 (token-3 expired, token-4 still live):
+          no AuditIntegrityError; recover_expired_leases reaps token-3
+          (expired + no run_workers row → owner_registry_dead=True); token-4
+          is NOT expired so its lease is untouched; token-3 is processed
+          (journal TERMINAL, outcome recorded in audit trail) but its result
+          does NOT reach the sink — the OrchestrationInvariantError for
+          "non-terminal scheduler work" (token-4 still LEASED) is raised
+          INSIDE run_resume_processing_loop before flush_and_write_sinks is
+          called, so the sink remains empty for this resume attempt;
+        - after all leases expire, Resume #2 recovers token-4 AND re-drives
+          token-3's durable PENDING_SINK via _drain_preexisting_pending_sinks,
+          writing both to the sink in the same flush; run completes;
+        - attempt offsets land in the audit DB: the re-driven transforms record
+          at attempt = journal_attempt - 1; no duplicate node_states identities;
         - exactly-once terminal outcomes across all 5 tokens, run COMPLETED.
         """
+        from elspeth.contracts.errors import OrchestrationInvariantError
+
         clock = MockClock(start=_T0)
         crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
 
@@ -231,21 +238,34 @@ class TestExpiredLeaseReclaimUnderContention:
         )
         assert reclaimed is not None and reclaimed.token_id == token_4 and reclaimed.attempt == 2
 
-        # ---- Resume #1: token-3 expired, worker-b's 7200s lease still live ----
+        # ---- Resume #1: token-3 expired; token-4's 7200s lease is NOT expired ----
+        # Slice-4 behavior: no AuditIntegrityError refusal. The drain proceeds,
+        # recovers token-3 (expired + no registry row → dead) and processes it
+        # (journal TERMINAL, outcome written to audit trail). Then
+        # has_unresolved_scheduler_work() sees token-4 still LEASED → raises
+        # OrchestrationInvariantError BEFORE flush_and_write_sinks is called.
         clock.advance(3600)
         resume_point = _resume_point(crashed)
         assert resume_point is not None
         config_1, graph_1, sink_1, _source_1 = _build_pipeline(_SOURCE_ROWS)
-        with pytest.raises(AuditIntegrityError, match=r"peer worker\(s\).*crashed-worker-b"):
+        with pytest.raises(OrchestrationInvariantError, match=r"non-terminal scheduler work"):
             crashed.resume_orchestrator().resume(resume_point, config_1, graph_1, payload_store=crashed.payload_store)
+
+        # Token-3 WAS recovered (expired, no run_workers row → dead) and
+        # processed (journal TERMINAL, outcome recorded in audit trail), but
+        # its result was NOT delivered to the sink: the OrchestrationInvariantError
+        # is raised inside run_resume_processing_loop, BEFORE flush_and_write_sinks
+        # is called, so the pending_tokens accumulation is discarded with the
+        # exception. The sink remains empty for this resume attempt.
         assert sink_1.results == []
 
-        # Atomicity: the refused drain recovered NOTHING — not even the
-        # already-expired worker-a lease.
         items = _work_items_by_token(crashed.db, crashed.run_id)
-        assert items[token_3]["status"] == TokenWorkStatus.LEASED.value
-        assert items[token_3]["attempt"] == 1
-        assert items[token_3]["lease_owner"] == "crashed-worker-a"
+        # token-3 rotated to attempt=2 and reached PENDING_SINK (sink-bound result
+        # produced, but flush_and_write_sinks was aborted by the exception before
+        # the actual write and terminal handoff).
+        assert items[token_3]["status"] == TokenWorkStatus.PENDING_SINK.value
+        assert items[token_3]["attempt"] == 2
+        # token-4 still LEASED (7200s lease not yet expired) — untouched by reap.
         assert items[token_4]["status"] == TokenWorkStatus.LEASED.value
         assert items[token_4]["attempt"] == 2
         assert items[token_4]["lease_owner"] == "crashed-worker-b"
@@ -255,13 +275,18 @@ class TestExpiredLeaseReclaimUnderContention:
             status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
         assert status == RunStatus.FAILED.value
 
-        # ---- Resume #2: every crashed lease has aged out ----
+        # ---- Resume #2: token-4's 7200s lease has aged out (T+120+7200=T+7320) ----
         clock.advance(7200)
         result, resume_sink, _resume_source = _resume(crashed)
 
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 5
-        assert resume_sink.results == [{"id": 3, "value": 30}, {"id": 4, "value": 40}]
+        # Resume #2 writes BOTH token-3 (pending-sink re-drive) and token-4
+        # (fresh processing after lease expiry) in the same flush.
+        assert sorted(resume_sink.results, key=lambda r: r["id"]) == [
+            {"id": 3, "value": 30},
+            {"id": 4, "value": 40},
+        ]
 
         items = _work_items_by_token(crashed.db, crashed.run_id)
         assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in items.values())
@@ -269,15 +294,19 @@ class TestExpiredLeaseReclaimUnderContention:
         assert items[token_4]["attempt"] == 3
 
         # Recovery journal: the crafted prior-process sweep (token-4 1->2),
-        # then the final resume's sweep in ingest_sequence order.
+        # Resume #1's sweep (token-3 1->2), Resume #2's sweep (token-4 2->3).
         events = _recovery_events(crashed.db, crashed.run_id)
         assert [(event["token_id"], event["from_attempt"], event["to_attempt"], event["from_lease_owner"]) for event in events] == [
             (token_4, 1, 2, "crashed-worker-b"),
             (token_3, 1, 2, "crashed-worker-a"),
             (token_4, 2, 3, "crashed-worker-b"),
         ]
+        # Resume #1 and Resume #2 each have their own scheduler lease owner
+        # (different RowProcessor instances), so there are two distinct
+        # caller_owner values across events[1:]. Both must be legitimate
+        # resume workers — not the crashed workers' identities.
         final_sweep_callers = {event["caller_owner"] for event in events[1:]}
-        assert len(final_sweep_callers) == 1
+        assert len(final_sweep_callers) == 2
         assert final_sweep_callers.isdisjoint({"crashed-worker-a", "crashed-worker-b"})
 
         # Attempt offsets in the audit DB: node_states attempt identity is
@@ -524,11 +553,9 @@ class TestTwoResumesSameRunId:
         the leadership CAS is the arbiter (ADR-030 §B.3).
 
         Slice ownership of the remaining arms: (b) ``elspeth join`` admits a
-        follower — slice 5; (c) RUNNING + EXPIRED seat becomes resumable
-        (dead-leader takeover; the guard learns seat liveness) — slice 4. In
-        slice 2 RUNNING + expired seat is STILL REFUSED (flat reason) — the
-        companion assertion at the bottom pins that this slice does not
-        accidentally open the takeover arm early.
+        follower — slice 5; (c) RUNNING + EXPIRED seat became resumable
+        (dead-leader takeover; the guard learned seat liveness) — slice 4,
+        now landed. The companion arm at the bottom records the slice-4 flip.
 
         Durable surfaces pinned — the refused loser changed NOTHING:
         - the crashed worker's LEASED journal row is untouched
@@ -609,18 +636,170 @@ class TestTwoResumesSameRunId:
         assert _coordination_events(crashed.db, crashed.run_id) == events_before
         assert _coordination_events(crashed.db, crashed.run_id, "fence_refusal") == [], "guard refusal is pre-CAS, pre-fence"
 
-        # COMPANION ARM: seat usurped-then-EXPIRED ⇒ slice 2 still refuses
-        # (flat reason — the guard learns seat liveness only in slice 4; the
-        # takeover arm must not open early).
+        # COMPANION ARM (slice-4 flip): seat usurped-then-EXPIRED is now
+        # RESUMABLE — the guard learns seat liveness in slice 4 (§H test #2(c)).
+        # The full takeover arm (RUNNING + expired seat → admitted, takeover CAS
+        # bumps epoch, identity-evicts incumbent, run completes exactly once) is
+        # pinned below as test_running_with_dead_seat_is_resumable_takeover_completes_once.
+        crashed.db.close()
+
+    def test_running_with_dead_seat_is_resumable_takeover_completes_once(self, tmp_path: Path) -> None:
+        """§H test #2(c) flip (slice 4): RUNNING + expired seat is RESUMABLE.
+
+        Before slice 4 the entry guard returned "Run is still in progress" for
+        any RUNNING run, regardless of seat liveness — a dead-leader run was
+        permanently wedged.  Slice 4 makes RUNNING + (expired OR absent) seat
+        RESUMABLE: the expired seat IS the proof of lost custody, and the
+        resume-side ``acquire_run_leadership`` CAS is the true arbiter.
+
+        Construction (reuses harness verbatim):
+        1. Crash the run mid-claim (``_craft_crashed_lease``).
+        2. Seat an incumbent winner via the REAL production CAS
+           (``acquire_run_leadership``), which atomically flips FAILED→RUNNING
+           and installs the seat at epoch 2.
+        3. Force-expire the seat by stamping a past ``leader_heartbeat_expires_at``.
+        4. Call the advisory ``can_resume`` surface — must return True (the flip).
+        5. Call the public ``resume()`` — must complete COMPLETED exactly once.
+
+        Invariants pinned (full list from the slice-4 test campaign spec):
+
+        1. Resumable predicate: ``can_resume`` returns True (the polarity flip).
+        2. Takeover completes via public resume(), exactly once.
+        3. Epoch bump: seat epoch advanced to epoch_before + 1 (== 3).
+        4. Identity-eviction event: the wedged incumbent is evicted by the
+           takeover worker; exactly one ``worker_evict`` event with
+           reason=``deposed_leader_takeover``.
+        5. NO follower bulk-eviction: a seeded active follower stays 'active'.
+        6. Exactly-once sink delivery + outcomes: no duplicate terminal
+           outcomes, all 4 tokens terminal, the crashed token at attempt=2.
+        7. N=1 statement: this is a pure behavior IMPROVEMENT — a single
+           operator can now recover its own dead-leader run that was previously
+           permanently wedged; the success path is unchanged.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        # Step 2: seat the incumbent winner as a REAL takeover leader (epoch 2).
+        winner_id = f"worker:{crashed.run_id}:winner"
+        _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=80.0,
+        )
+
+        # Step 3: force-expire the seat — the wedged-leader image.
+        # The guard evaluates seat liveness with wall-clock datetime.now(UTC);
+        # stamping 2020-01-01 is unambiguously expired in all time domains.
         with crashed.db.engine.begin() as conn:
             conn.execute(
                 update(run_coordination_table)
                 .where(run_coordination_table.c.run_id == crashed.run_id)
-                .values(leader_heartbeat_expires_at=datetime(2020, 1, 1, tzinfo=UTC))
+                .values(leader_heartbeat_expires_at=datetime(2020, 1, 1, tzinfo=UTC).replace(tzinfo=None))
             )
-        config_l2, graph_l2, sink_l2, _source_l2 = _build_pipeline(_SOURCE_ROWS)
-        with pytest.raises(NonResumableRunError) as exc_info_expired:
-            crashed.resume_orchestrator().resume(resume_point_loser, config_l2, graph_l2, payload_store=crashed.payload_store)
-        assert exc_info_expired.value.reason == "Run is still in progress"
-        assert sink_l2.results == []
+
+        # Capture the seat state before the takeover.
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+        epoch_before = int(seat_before["leader_epoch"])  # == 2
+        assert epoch_before == 2, "precondition: incumbent acquired epoch 2"
+
+        # Seed an active follower to assert no bulk-eviction at takeover.
+        follower_id = "worker-follower-slice4"
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                insert(run_workers_table).values(
+                    worker_id=follower_id,
+                    run_id=crashed.run_id,
+                    role="follower",
+                    status="active",
+                    registered_at=clock.now_utc().replace(tzinfo=None),
+                    heartbeat_expires_at=(clock.now_utc() + timedelta(hours=1)).replace(tzinfo=None),
+                    entry_point="join",
+                )
+            )
+
+        # Step 4 — Resumable predicate (advisory parity, the POLARITY FLIP).
+        check = _recovery_manager(crashed).can_resume(crashed.run_id, crashed.graph)
+        assert check.can_resume is True, "RUNNING + expired seat must be admissible (slice-4 §H test #2(c) flip)"
+
+        # Step 5 — Takeover completes via public resume(), exactly once.
+        result, resume_sink, resume_source = _resume(crashed)
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 4
+        assert resume_sink.results == [{"id": 3, "value": 30}]
+        assert resume_source.load_invocations == 0, "no source replay — scheduler-drain takeover"
+
+        # Step 3 (post) — Epoch bump: the takeover CAS bumped the epoch past
+        # the wedged incumbent (epoch_before == 2 → new epoch == 3).
+        # After graceful finalize+release the seat is vacated; assert epoch
+        # monotonicity on the row, not liveness.
+        seat_after = _coordination_row(crashed.db, crashed.run_id)
+        assert int(seat_after["leader_epoch"]) == epoch_before + 1, (
+            f"epoch must advance to {epoch_before + 1} (takeover from epoch {epoch_before})"
+        )
+
+        # Find the takeover worker_id from the leader_acquire event.
+        all_acquire_events = [
+            e
+            for e in _coordination_events(crashed.db, crashed.run_id)
+            if e["event_type"] == "leader_acquire" and e["leader_epoch"] == epoch_before + 1
+        ]
+        assert len(all_acquire_events) == 1
+        takeover_worker_id = all_acquire_events[0]["worker_id"]
+
+        # Step 4 — Identity-eviction event.
+        workers = {w["worker_id"]: w for w in _run_workers(crashed.db, crashed.run_id)}
+        assert winner_id in workers, "incumbent must have a registry row"
+        deposed = workers[winner_id]
+        assert deposed["status"] == "evicted", "deposed leader must be evicted by IDENTITY"
+        assert deposed["evicted_at"] is not None
+        assert deposed["evicted_by_worker_id"] == takeover_worker_id
+
+        evict_events = [
+            e for e in _coordination_events(crashed.db, crashed.run_id) if e["event_type"] == "worker_evict" and e["worker_id"] == winner_id
+        ]
+        assert len(evict_events) == 1, "exactly one worker_evict event for the deposed leader"
+        (evict_event,) = evict_events
+        ctx = json.loads(str(evict_event["context_json"]))
+        assert ctx == {
+            "evicted_by_worker_id": takeover_worker_id,
+            "reason": "deposed_leader_takeover",
+        }
+
+        # Step 5 — NO follower bulk-eviction at the takeover CAS.
+        # The follower may have been departed by the graceful run finalization,
+        # but it must NOT have been evicted (status='evicted' with
+        # evicted_by_worker_id set).  Bulk eviction at takeover would set
+        # status='evicted'; natural departure at finalize sets status='departed'.
+        assert workers[follower_id]["status"] != "evicted", (
+            "seeded follower must not be bulk-evicted by the takeover CAS (correction-2 invariant)"
+        )
+        assert workers[follower_id]["evicted_by_worker_id"] is None, (
+            "no evicted_by_worker_id on the follower — it was departed, not evicted"
+        )
+
+        # Step 6 — Exactly-once sink delivery + outcomes.
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        completed = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        assert len(completed) == 4
+        assert crashed_token in completed, "crashed token must reach terminal under its ORIGINAL token_id"
+        items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items[crashed_token]["status"] == TokenWorkStatus.TERMINAL.value
+        assert items[crashed_token]["attempt"] == 2, "recovered item must be at attempt=2"
+        identities = _node_state_identities(crashed.db, crashed.run_id)
+        assert len(identities) == len(set(identities)), "no duplicate (token_id, node_id, attempt) identities"
+
+        # Step 7 — N=1 statement: this test pins a pure behavior IMPROVEMENT.
+        # At N=1 a single operator's run can now be recovered when its own
+        # leader seat expires (previously wedged permanently). Nothing in the
+        # success path regresses; the takeover CAS is identical to the
+        # FAILED-run takeover path, now admitted for RUNNING+expired-seat too.
+
         crashed.db.close()

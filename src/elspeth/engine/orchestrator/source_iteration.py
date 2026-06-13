@@ -16,7 +16,7 @@ import json
 import queue
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -678,6 +678,7 @@ class SourceIterationDriver:
         active_source: SourceProtocol,
         shutdown_event: threading.Event | None = None,
         flush_end_of_input: bool = True,
+        check_coordination_latch: Callable[[], None] | None = None,
     ) -> LoopResult:
         """Run the main processing loop: source iteration, quarantine, transform, flush.
 
@@ -687,6 +688,18 @@ class SourceIterationDriver:
 
         Final progress emission and PhaseCompleted(PROCESS) are emitted by the
         caller AFTER sink writes, using the timing state in LoopResult.
+
+        Parameters
+        ----------
+        check_coordination_latch:
+            Optional zero-argument callable that raises
+            :class:`~elspeth.contracts.errors.RunWorkerEvictedError` if the
+            heartbeat thread has detected seat deposition or registry eviction.
+            Called at the same boundary as the ``shutdown_event`` check — once
+            per row, after row processing completes.  Pass
+            ``RunHeartbeatThread.check_and_raise`` here.  ``None`` (the
+            default) disables latch polling (e.g. non-coordinated single-shot
+            runs or tests that do not start a heartbeat thread).
         """
 
         # Destructure loop_ctx for local access
@@ -814,6 +827,8 @@ class SourceIterationDriver:
                             source_id=source_id,
                             source_operation_id=source_operation_id,
                         )
+                        if check_coordination_latch is not None:
+                            check_coordination_latch()
                         if shutdown_event is not None and shutdown_event.is_set():
                             interrupted_by_shutdown = True
                             break
@@ -871,6 +886,17 @@ class SourceIterationDriver:
                         start_time,
                         last_progress_time,
                     )
+
+                    # ADR-030 §A.3 / §C.2: latch check — raises RunWorkerEvictedError
+                    # if the heartbeat thread detected seat deposition or registry
+                    # eviction.  Checked at the same per-row boundary as the
+                    # shutdown_event so the drain loop exits cleanly without
+                    # emitting further work.  The latch is an optimization on top of
+                    # the epoch/membership fences (§C.2 last sentence); the fences
+                    # independently refuse any write a deposed leader attempts, but
+                    # the latch surfaces the condition proactively between writes.
+                    if check_coordination_latch is not None:
+                        check_coordination_latch()
 
                     # Graceful shutdown — current row fully processed, safe to stop
                     if shutdown_event is not None and shutdown_event.is_set():

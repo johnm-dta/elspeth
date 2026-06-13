@@ -41,6 +41,7 @@ from sqlalchemy import insert, select
 
 import elspeth
 from elspeth.contracts import NodeType
+from elspeth.contracts.coordination import DEFAULT_RUN_HEARTBEAT_SECONDS
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import _SQLITE_PRAGMA_INVARIANTS_FILE, LandscapeDB
@@ -66,10 +67,8 @@ WORK_ITEMS = 64
 # _SQLITE_PRAGMA_INVARIANTS_FILE) — every cross-process waiter polls for up to
 # this long before BEGIN IMMEDIATE raises a retryable OperationalError.
 BUSY_TIMEOUT_MS = int(dict(_SQLITE_PRAGMA_INVARIANTS_FILE)["busy_timeout"])  # 5000
-# §A.3 heartbeat cadence (design :132: run_heartbeat_seconds = 15).  No code
-# constant exists until slice 4 lands the heartbeat thread; the design doc is
-# the authority.
-RUN_HEARTBEAT_MS = 15_000
+# §A.3 heartbeat cadence — imported from the module constant added in slice 4.
+RUN_HEARTBEAT_MS = int(DEFAULT_RUN_HEARTBEAT_SECONDS * 1000)  # 15_000
 # One beat "allotment": a beat issued at any point must land within its
 # interval plus the worst busy-timeout poll.
 BEAT_ALLOTMENT_MS = RUN_HEARTBEAT_MS + BUSY_TIMEOUT_MS  # 20_000

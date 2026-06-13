@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -69,6 +69,7 @@ from elspeth.engine.orchestrator.aggregation import (
 )
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
+from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     handle_coalesce_timeouts,
@@ -219,6 +220,7 @@ def run_resume_processing_loop(
     run_id: str,
     resume_checkpoint_id: str,
     shutdown_event: threading.Event | None = None,
+    check_coordination_latch: Callable[[], None] | None = None,
 ) -> bool:
     """Run the resume processing loop: iterate unprocessed rows, transform, flush, accumulate.
 
@@ -245,6 +247,18 @@ def run_resume_processing_loop(
     resume contract surface. Every ``ResumedRow`` carries a non-optional
     ``source_node_id``; missing entries are audit corruption and resume refuses
     instead of choosing a default.
+
+    Parameters
+    ----------
+    check_coordination_latch:
+        Optional zero-argument callable that raises
+        :class:`~elspeth.contracts.errors.RunWorkerEvictedError` if the
+        heartbeat thread has detected seat deposition or registry eviction.
+        Called at the same boundary as the ``shutdown_event`` check — once
+        per row, after row processing completes.  Pass
+        ``RunHeartbeatThread.check_and_raise`` here.  ``None`` (the default)
+        disables latch polling (non-coordinated runs or tests that do not start
+        a heartbeat thread).
 
     Returns:
         True if interrupted by shutdown, False otherwise.
@@ -396,6 +410,18 @@ def run_resume_processing_loop(
                 counters=counters,
                 pending_tokens=pending_tokens,
             )
+
+        # ─────────────────────────────────────────────────────────────
+        # COORDINATION LATCH CHECK (ADR-030 §A.3 / §C.2, slice 4)
+        # Poll the heartbeat thread's latch before the shutdown check so
+        # a deposed resume-takeover-leader raises RunWorkerEvictedError
+        # proactively at each row boundary, without waiting for the next
+        # fenced write to refuse.  An optimization on top of the
+        # epoch/membership fences — both independently refuse the same
+        # writes — but this surfaces the condition on the drain thread.
+        # ─────────────────────────────────────────────────────────────
+        if check_coordination_latch is not None:
+            check_coordination_latch()
 
         # ─────────────────────────────────────────────────────────────
         # GRACEFUL SHUTDOWN CHECK
@@ -722,6 +748,16 @@ class ResumeCoordinator:
         run_id = state.run_id
         factory = state.factory
         coordination_token = state.coordination_token
+        # acquire_run_leadership always returns a token (or raises), so
+        # coordination_token is never None at this point.  Assert here to
+        # narrow the type for the heartbeat thread constructor (which requires
+        # a non-optional CoordinationToken) and to surface bugs early.
+        if coordination_token is None:
+            raise OrchestrationInvariantError(
+                f"Resume for run '{state.run_id}': coordination_token is None after "
+                "reconstruct_resume_state — acquire_run_leadership must always return "
+                "a token or raise; a None result is an orchestration invariant violation."
+            )
         # Thread the token to the collaborators the slice-2 step-4 fences
         # consume (checkpoint writes, finalize, ceremonies).
         self._checkpoints.bind_coordination(coordination_token)
@@ -732,6 +768,24 @@ class ResumeCoordinator:
         recovery_manager = state.recovery_manager
         resume_checkpoint_id = resume_point.checkpoint.checkpoint_id
         resume_start_time = time.perf_counter()
+
+        # ADR-030 §A.3 (slice 4): start the dedicated heartbeat thread AFTER
+        # the seat is minted (coordination_token is live) and the token is
+        # bound, BEFORE the try/except block.  Mirrors the run() path in
+        # core.py.  The thread beats both the run_workers row and the
+        # run_coordination seat in ONE BEGIN IMMEDIATE transaction so the two
+        # liveness clocks cannot skew.
+        #
+        # Correct sequencing (design §A.3 "joined before release_seat"):
+        # stop() is called as the FIRST statement in every except handler that
+        # calls release_seat AND in the success path just before release_seat.
+        # The finally block additionally calls stop() as a safety net
+        # (idempotent) to cover any exit path that did not already stop.
+        _heartbeat = RunHeartbeatThread(
+            factory.run_coordination,
+            token=coordination_token,
+        )
+        _heartbeat.start()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
 
@@ -775,6 +829,11 @@ class ResumeCoordinator:
                 # the delete is epoch-fenced (ADR-030 §C.4 row 5) and must
                 # run BEFORE the seat release vacates the fence's CAS target.
                 self._checkpoints.delete_checkpoints(run_id)
+
+                # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing
+                # the seat — the thread must not beat the seat after it is
+                # vacated.
+                _heartbeat.stop()
 
                 # Seat hygiene (ADR-030 §D): release the seat AFTER the
                 # terminal finalize succeeded. Best-effort.
@@ -840,6 +899,7 @@ class ResumeCoordinator:
                     schema_contracts_by_source=schema_contracts_by_source,
                     shutdown_event=active_event,
                     coordination_token=coordination_token,
+                    check_coordination_latch=_heartbeat.check_and_raise,
                 )
 
             # 6. Complete the run with reproducibility grade
@@ -892,6 +952,10 @@ class ResumeCoordinator:
             # the seat release vacates the fence's CAS target.
             self._checkpoints.delete_checkpoints(run_id)
 
+            # ADR-030 §A.3: stop the heartbeat thread BEFORE releasing the
+            # seat — the thread must not beat the seat after it is vacated.
+            _heartbeat.stop()
+
             # Seat hygiene (ADR-030 §D): release the seat AFTER the terminal
             # finalize succeeded. Best-effort.
             with best_effort("Seat release after resume finalize", run_id=run_id):
@@ -931,6 +995,8 @@ class ResumeCoordinator:
 
             return result
         except GracefulShutdownError as shutdown_exc:
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
                 self._ceremony.emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time, token=coordination_token)
                 # Seat hygiene: only AFTER the INTERRUPTED finalize succeeded
@@ -940,6 +1006,8 @@ class ResumeCoordinator:
                     factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
                 self._ceremony.emit_failed_ceremony(
                     run_id,
@@ -956,6 +1024,8 @@ class ResumeCoordinator:
             # Finalize as FAILED to prevent the run from being stuck in RUNNING
             # permanently (which blocks future resume attempts). The outer broad-except
             # is justified — any unhandled exception during resume needs ceremony.
+            # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
+            _heartbeat.stop()
             with best_effort("Generic failure ceremony on resume", run_id=run_id):
                 self._ceremony.emit_failed_ceremony(run_id, factory, resume_start_time, token=coordination_token)
                 # Seat hygiene: after the FAILED finalize succeeded.
@@ -963,6 +1033,10 @@ class ResumeCoordinator:
                     factory.run_coordination.release_seat(token=coordination_token, now=datetime.now(UTC))
             raise
         finally:
+            # ADR-030 §A.3: safety-net stop (idempotent) — covers any exit
+            # path that did not already stop the thread (e.g. an exception
+            # raised before any except handler ran release_seat).
+            _heartbeat.stop()
             self._ceremony.safe_flush_telemetry()
 
     def process_resumed_rows(
@@ -982,6 +1056,7 @@ class ResumeCoordinator:
         schema_contracts_by_source: Mapping[NodeID, SchemaContract],
         shutdown_event: threading.Event | None = None,
         coordination_token: CoordinationToken | None = None,
+        check_coordination_latch: Callable[[], None] | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
 
@@ -1068,6 +1143,7 @@ class ResumeCoordinator:
                     source_id: config.sources[source_name].on_success for source_name, source_id in artifacts.source_id_map.items()
                 },
                 shutdown_event=shutdown_event,
+                check_coordination_latch=check_coordination_latch,
             )
 
             # 4. Flush + write sinks with checkpoint advancement

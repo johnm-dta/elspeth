@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import NodeType, RoutingMode
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.config import SourceSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
@@ -19,11 +20,15 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     run_sources_table,
     runs_table,
     token_work_items_table,
     tokens_table,
 )
+
+# Epoch-1 token for "run-1" — _insert_scheduler_owner_records seeds the matching seat.
+_COORD_TOKEN_RUN1 = CoordinationToken(run_id="run-1", worker_id="test-leader", leader_epoch=1)
 
 _SchedulerTransition = Literal["blocked", "terminal", "failed"]
 
@@ -2143,6 +2148,21 @@ def _insert_scheduler_owner_records(
                         created_at=now,
                     )
                 )
+        # Epoch-1 coordination seat for mark_pending_sink_terminal (slice-4 REQUIRED).
+        # Idempotent: only insert if no seat exists yet (multi-run tests call this helper twice).
+        if (
+            conn.execute(select(run_coordination_table.c.run_id).where(run_coordination_table.c.run_id == run_id)).scalar_one_or_none()
+            is None
+        ):
+            conn.execute(
+                insert(run_coordination_table).values(
+                    run_id=run_id,
+                    leader_worker_id="test-leader",
+                    leader_epoch=1,
+                    leader_heartbeat_expires_at=now + timedelta(hours=1),
+                    updated_at=now,
+                )
+            )
 
 
 def _enqueue_scheduler_test_item(repo, *, engine, now: datetime, token_id: str = "token-1", ingest_sequence: int = 0):
@@ -2623,6 +2643,7 @@ def test_scheduler_unresolved_work_excludes_durable_sink_handoffs() -> None:
         token_id="token-1",
         now=now + timedelta(seconds=3),
         expected_lease_owner="worker-b",
+        coordination_token=_COORD_TOKEN_RUN1,
     )
     assert terminalized == 1
     assert repo.count_unresolved_work(run_id="run-1") == 0

@@ -28,6 +28,8 @@ from typing import Final
 from uuid import uuid4
 
 __all__ = [
+    "DEFAULT_ITEM_STALL_BUDGET_SECONDS",
+    "DEFAULT_RUN_HEARTBEAT_SECONDS",
     "DEFAULT_RUN_LIVENESS_WINDOW_SECONDS",
     "CoordinationSnapshot",
     "CoordinationToken",
@@ -36,12 +38,26 @@ __all__ = [
     "mint_worker_id",
 ]
 
+# Run-level heartbeat cadence (design §A.3 :132: run_heartbeat_seconds = 15).
+# The slice-4 dedicated heartbeat thread sleeps this long between beats.
+# Must satisfy: window >= 4 x (beat + busy_timeout) = 4 x (15 + 5) = 80 s.
+DEFAULT_RUN_HEARTBEAT_SECONDS: Final[float] = 15.0
+
 # Run-level liveness window (design §A.3): window >= 4 x (beat interval +
 # busy_timeout) = 4 x (15 s + 5 s) = 80 s at defaults. Sized against
 # worst-case write-lock occupancy, NOT the longest LLM call — the slice-4
 # heartbeat thread keeps an idle leader live; until then every fenced verb
 # extends the seat as a side effect (identity+epoch fence, never expiry).
 DEFAULT_RUN_LIVENESS_WINDOW_SECONDS: Final[float] = 80.0
+
+# Item-level stall budget (design §A.5 :140): a registry-LIVE worker holding
+# an item far past its lease emits ``worker_stalled`` and the item is rotated.
+# Default = 2x scheduler_lease_seconds (the caller threads the configured
+# lease length; the constant here is the MULTIPLIER). Expressed as an absolute
+# seconds constant (not a multiplier) so it can be imported without the
+# scheduler module — callers that want a different budget pass it explicitly.
+# Equals 2x DEFAULT scheduler lease (300 s) = 600 s by default.
+DEFAULT_ITEM_STALL_BUDGET_SECONDS: Final[float] = 600.0
 
 
 def mint_worker_id(run_id: str) -> str:

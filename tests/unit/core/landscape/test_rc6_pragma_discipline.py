@@ -245,6 +245,7 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
         lease_owner: str,
         lease_seconds: int,
         now: datetime,
+        membership_fenced: bool = False,
     ) -> RowMapping | None:
         try:
             self.rival_outcome = self._rival.claim_ready(
@@ -262,6 +263,7 @@ class _RivalInterposingRepository(TokenSchedulerRepository):
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             now=now,
+            membership_fenced=membership_fenced,
         )
 
 

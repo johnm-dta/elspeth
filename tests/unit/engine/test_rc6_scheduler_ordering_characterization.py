@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import create_engine, insert, select
 
 from elspeth.contracts import NodeType
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
@@ -31,6 +32,7 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -38,6 +40,9 @@ from elspeth.core.landscape.schema import (
 )
 
 RUN_ID = "run-rc6-order"
+LEADER_WORKER_ID = "test-leader"
+# Epoch-1 token; _insert_run_and_nodes seeds the matching seat.
+COORD_TOKEN = CoordinationToken(run_id=RUN_ID, worker_id=LEADER_WORKER_ID, leader_epoch=1)
 
 
 def _make_scheduler_engine() -> Tier1Engine:
@@ -85,6 +90,16 @@ def _insert_run_and_nodes(engine: Tier1Engine, *, now: datetime) -> None:
                     registered_at=now,
                 )
             )
+        # Epoch-1 coordination seat for mark_pending_sink_terminal (slice-4 REQUIRED).
+        conn.execute(
+            insert(run_coordination_table).values(
+                run_id=RUN_ID,
+                leader_worker_id=LEADER_WORKER_ID,
+                leader_epoch=1,
+                leader_heartbeat_expires_at=now + timedelta(hours=1),
+                updated_at=now,
+            )
+        )
 
 
 def _insert_row_with_tokens(
@@ -370,6 +385,7 @@ def test_pending_sink_parked_token_does_not_block_later_tokens_and_drains_afterw
             token_id="token-1",
             now=now + timedelta(seconds=6),
             expected_lease_owner="worker-a",
+            coordination_token=COORD_TOKEN,
         )
         == 1
     )

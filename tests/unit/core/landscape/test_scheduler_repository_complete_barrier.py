@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import insert, select
 
 from elspeth.contracts import NodeType
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import BarrierEmission, SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -32,6 +33,7 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -41,6 +43,10 @@ from elspeth.core.landscape.schema import (
 RUN_ID = "R"
 BARRIER_KEY = "agg-1"
 NOW = datetime(2026, 6, 11, 4, 0, tzinfo=UTC)
+LEADER_WORKER_ID = "test-leader"
+# Epoch-1 seat token — seeded into run_coordination_table by _seed_run_grouped
+# so that complete_barrier's REQUIRED coordination_token is satisfied.
+COORD_TOKEN = CoordinationToken(run_id=RUN_ID, worker_id=LEADER_WORKER_ID, leader_epoch=1)
 
 
 def _make_scheduler_engine() -> Tier1Engine:
@@ -149,6 +155,16 @@ def _seed_run_grouped(
                     created_at=now,
                 )
             )
+        # Epoch-1 coordination seat so complete_barrier's REQUIRED token fence passes.
+        conn.execute(
+            insert(run_coordination_table).values(
+                run_id=run_id,
+                leader_worker_id=LEADER_WORKER_ID,
+                leader_epoch=1,
+                leader_heartbeat_expires_at=now + timedelta(hours=1),
+                updated_at=now,
+            )
+        )
     return row_payload_json
 
 
@@ -263,6 +279,7 @@ def test_complete_barrier_consumes_and_emits_atomically() -> None:
         ],
         emitted_ready=[],
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 3
@@ -309,6 +326,7 @@ def test_complete_barrier_refuses_partial_consumed_set() -> None:
             emitted_pending_sink=[],
             emitted_ready=[],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -326,6 +344,7 @@ def test_complete_barrier_refuses_consumed_tokens_missing_from_blocked_set() -> 
             emitted_pending_sink=[],
             emitted_ready=[],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -374,6 +393,7 @@ def test_complete_barrier_crash_atomicity() -> None:
             ],
             emitted_ready=[],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -403,6 +423,7 @@ def test_complete_barrier_passthrough_handoff_counts_toward_blocked_coverage() -
         ],
         emitted_ready=[],
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -434,6 +455,7 @@ def test_complete_barrier_snapshot_equal_to_durable_is_n1_parity() -> None:
         emitted_ready=[],
         now=NOW,
         intake_snapshot_token_ids=frozenset({"t1", "t2", "t3"}),
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 3
@@ -472,6 +494,7 @@ def test_complete_barrier_late_arrival_outside_snapshot_stays_blocked() -> None:
         ],
         now=NOW,
         intake_snapshot_token_ids=frozenset({"t1", "t2"}),
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -503,6 +526,7 @@ def test_complete_barrier_snapshot_minus_durable_is_tier1() -> None:
             emitted_ready=[],
             now=NOW,
             intake_snapshot_token_ids=frozenset({"t1", "t2", "t3", "t-ghost"}),
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -522,6 +546,7 @@ def test_complete_barrier_consumed_outside_snapshot_is_tier1() -> None:
             emitted_ready=[],
             now=NOW,
             intake_snapshot_token_ids=frozenset({"t1", "t2"}),
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -549,6 +574,7 @@ def test_complete_barrier_handed_off_outside_snapshot_is_tier1() -> None:
             emitted_ready=[],
             now=NOW,
             intake_snapshot_token_ids=frozenset({"t1", "t2"}),
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -570,6 +596,7 @@ def test_complete_barrier_snapshot_orphan_within_snapshot_is_tier1() -> None:
             emitted_ready=[],
             now=NOW,
             intake_snapshot_token_ids=frozenset({"t1", "t2", "t3"}),
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -598,6 +625,7 @@ def test_complete_barrier_explicit_none_snapshot_is_durable_universe_exhaustiven
             emitted_ready=[],
             now=NOW,
             intake_snapshot_token_ids=None,
+            coordination_token=COORD_TOKEN,
         )
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
 
@@ -609,6 +637,7 @@ def test_complete_barrier_explicit_none_snapshot_is_durable_universe_exhaustiven
         emitted_ready=[],
         now=NOW,
         intake_snapshot_token_ids=None,
+        coordination_token=COORD_TOKEN,
     )
     assert n == 3
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.TERMINAL.value}
@@ -633,6 +662,7 @@ def test_complete_barrier_leased_exclusion_token_id_parameter_is_deleted() -> No
             emitted_ready=[],
             now=NOW,
             leased_exclusion_token_id="t3",
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -658,6 +688,7 @@ def test_complete_barrier_emitted_ready_inserts_ready_rows_with_enqueue_events()
             )
         ],
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 3
@@ -688,6 +719,7 @@ def test_complete_barrier_rejects_duplicate_consumed_token_ids() -> None:
             emitted_pending_sink=[],
             emitted_ready=[],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -713,6 +745,7 @@ def test_complete_barrier_rejects_consumed_token_also_emitted() -> None:
             ],
             emitted_ready=[],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -810,6 +843,7 @@ def test_complete_barrier_scope_row_id_isolates_coalesce_group() -> None:
         emitted_ready=[],
         now=NOW,
         scope_row_id="r1",
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -832,6 +866,7 @@ def test_complete_barrier_scoped_group_still_catches_cross_group_consumed_token(
             emitted_ready=[],
             now=NOW,
             scope_row_id="r1",
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
@@ -851,6 +886,7 @@ def test_complete_barrier_scoped_group_still_catches_uncovered_blocked_row() -> 
             emitted_ready=[],
             now=NOW,
             scope_row_id="r1",
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
@@ -871,6 +907,7 @@ def test_complete_barrier_scope_row_id_requires_exhaustive_release() -> None:
             now=NOW,
             scope_row_id="r1",
             require_exhaustive_release=False,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
@@ -917,6 +954,7 @@ def test_complete_barrier_combined_lanes_one_call() -> None:
             )
         ],
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -967,6 +1005,7 @@ def test_complete_barrier_scoped_coalesce_fire_emits_merged_ready_child() -> Non
         ],
         now=NOW,
         scope_row_id="r1",
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -1009,6 +1048,7 @@ def test_complete_barrier_scoped_fire_rejects_emission_outside_scope_group() -> 
             ],
             now=NOW,
             scope_row_id="r1",
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
@@ -1029,6 +1069,7 @@ def test_complete_barrier_snapshot_requires_exhaustive_release() -> None:
             now=NOW,
             intake_snapshot_token_ids=frozenset({"t1", "t2"}),
             require_exhaustive_release=False,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}
@@ -1051,6 +1092,7 @@ def test_complete_barrier_cross_group_snapshot_token_is_tier1() -> None:
             now=NOW,
             scope_row_id="r1",
             intake_snapshot_token_ids=frozenset({"t1a", "t1b", "t2a"}),
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1a", "t1b", "t2a", "t2b"]) == {TokenWorkStatus.BLOCKED.value}
@@ -1073,6 +1115,7 @@ def test_complete_barrier_snapshot_isolates_sibling_coalesce_group() -> None:
         now=NOW,
         scope_row_id="r1",
         intake_snapshot_token_ids=frozenset({"t1a", "t1b"}),
+        coordination_token=COORD_TOKEN,
     )
 
     assert n == 2
@@ -1089,6 +1132,7 @@ def test_complete_barrier_snapshot_isolates_sibling_coalesce_group() -> None:
         now=NOW,
         scope_row_id="r2",
         intake_snapshot_token_ids=frozenset({"t2a", "t2b"}),
+        coordination_token=COORD_TOKEN,
     )
     assert n2 == 2
     assert _statuses(engine, ["t2a", "t2b"]) == {TokenWorkStatus.TERMINAL.value}
@@ -1161,6 +1205,7 @@ def test_complete_barrier_rejects_duplicate_ready_emissions() -> None:
                 ),
             ],
             now=NOW,
+            coordination_token=COORD_TOKEN,
         )
 
     assert _statuses(engine, ["t1", "t2", "t3"]) == {TokenWorkStatus.BLOCKED.value}

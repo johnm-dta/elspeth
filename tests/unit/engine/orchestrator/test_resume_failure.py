@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from elspeth.contracts import Checkpoint, NodeID, ResumedRow, ResumePoint, RoutingMode, RunStatus
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
+from elspeth.contracts.coordination import CoordinationSnapshot, CoordinationToken
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.payload_store import PayloadStore
@@ -44,6 +45,28 @@ from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_row_result, make_source_row
 from tests.fixtures.landscape import make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
+
+
+def _make_heartbeat_safe_token(run_id: str, mock_factory: MagicMock) -> CoordinationToken:
+    """Return a valid CoordinationToken and configure mock_factory.run_coordination so
+    the RunHeartbeatThread that resume() starts does not trip the latch.
+
+    ADR-030 §A.3 (slice 4): resume() now always starts a RunHeartbeatThread.
+    Unit tests that mock ``reconstruct_resume_state`` must supply a non-None
+    coordination_token in the returned ResumeState AND configure the mock repo
+    to return a healthy CoordinationSnapshot so the background thread's latch
+    is never set.
+    """
+    worker_id = f"worker-test:{run_id}"
+    token = CoordinationToken(run_id=run_id, worker_id=worker_id, leader_epoch=1)
+    healthy_snapshot = CoordinationSnapshot(
+        leader_worker_id=worker_id,
+        leader_epoch=1,
+        seat_live=True,
+        worker_active=True,
+    )
+    mock_factory.run_coordination.worker_heartbeat.return_value = healthy_snapshot
+    return token
 
 
 def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
@@ -962,6 +985,10 @@ class TestResumeFinalizesAsFailed:
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=object)
         mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
+        # ADR-030 §A.3 (slice 4): resume() always starts a RunHeartbeatThread.
+        # Provide a valid token and configure the mock repo to return a healthy
+        # snapshot so the thread's latch is never set during this test.
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-empty-journal",
@@ -985,6 +1012,7 @@ class TestResumeFinalizesAsFailed:
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "loaded"},
             has_restored_barrier_work=False,
+            coordination_token=coordination_token,
         )
 
         with (
@@ -1006,9 +1034,7 @@ class TestResumeFinalizesAsFailed:
 
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 3
-        # token=None: this unit test stubs reconstruct_resume_state, so no
-        # coordination seat exists and the threaded fencing token is None.
-        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED, token=None)
+        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED, token=coordination_token)
 
     def test_resume_with_only_journal_barrier_work_does_not_early_complete(self) -> None:
         """THE F1 TASK 3.2 TRAP: fully-buffered crashed run must not early-complete.
@@ -1032,6 +1058,8 @@ class TestResumeFinalizesAsFailed:
         mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
         mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
         scalars = BarrierScalars(
             aggregation={"agg-node": AggregationNodeScalars(count_fire_offset=1.0, condition_fire_offset=None)},
             coalesce={},
@@ -1061,6 +1089,7 @@ class TestResumeFinalizesAsFailed:
             source_lifecycle_by_source={NodeID("source"): "exhausted"},
             has_restored_barrier_work=True,
             batch_id_remap={"batch-dead": "batch-retry"},
+            coordination_token=coordination_token,
         )
         resumed_result = RunResult(
             run_id=run_id,
@@ -1119,6 +1148,8 @@ class TestResumeFinalizesAsFailed:
         # rows_coalesce_failed likewise derives from a dedicated query (DISTINCT
         # failed-barrier pairs over node_states); no coalesce failures here.
         mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
         mock_factory.query.get_all_token_outcomes_for_run.return_value = [
             _make_token_outcome(
                 run_id=run_id,
@@ -1196,6 +1227,7 @@ class TestResumeFinalizesAsFailed:
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "exhausted"},
             has_restored_barrier_work=False,
+            coordination_token=coordination_token,
         )
 
         with (
@@ -1236,6 +1268,8 @@ class TestResumeFinalizesAsFailed:
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 0
         mock_factory.query.count_failed_coalesce_barrier_rows.return_value = 0
+        # ADR-030 §A.3 (slice 4): provide a valid token + healthy heartbeat snapshot.
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-exhausted-source-engine-work",
@@ -1259,6 +1293,7 @@ class TestResumeFinalizesAsFailed:
             source_names_by_source={NodeID("source"): "source"},
             source_lifecycle_by_source={NodeID("source"): "exhausted"},
             has_restored_barrier_work=True,
+            coordination_token=coordination_token,
         )
         resumed_result = RunResult(
             run_id=run_id,
@@ -1497,3 +1532,212 @@ class TestCleanupPluginsReRaisesSystemExceptions:
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             cleanup_plugins(config, ctx)
+
+
+class TestResumeLoopCoordinationLatch:
+    """ADR-030 §A.3 (slice 4): check_coordination_latch is polled per-row in
+    run_resume_processing_loop, matching the run() drain-loop pattern in
+    source_iteration.py.
+
+    These tests drive the loop directly with a stub processor and a
+    configurable latch callable — no real DB, no real heartbeat thread.
+    Wall-clock sleeps: zero (latch is a synchronous callable).
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_loop_ctx(sink_name: str = "default") -> LoopContext:
+        """Minimal LoopContext with a MagicMock processor that succeeds."""
+        processor = MagicMock(spec=RowProcessor)
+        processor.has_scheduled_work.return_value = False
+        processor.has_unresolved_scheduler_work.return_value = False
+        # Return a single sink-bound row result for each process_existing_row call.
+        processor.process_existing_row.side_effect = lambda **kwargs: [make_row_result({"v": 1}, sink_name=sink_name)]
+        config = PipelineConfig(
+            sources={"primary": _specced_source()},
+            transforms=(),
+            sinks={sink_name: _specced_sink()},
+        )
+        return LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={sink_name: []},
+            processor=processor,
+            ctx=MagicMock(spec=PluginContext),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+    @staticmethod
+    def _one_row(source_node_id: str = "source") -> tuple[ResumedRow, ...]:
+        return (
+            ResumedRow(
+                row_id="row-latch-test",
+                row_index=0,
+                source_node_id=NodeID(source_node_id),
+                row_data={"v": 1},
+            ),
+        )
+
+    @staticmethod
+    def _schema_contracts(source_node_id: str = "source") -> dict[NodeID, MagicMock]:
+        return {NodeID(source_node_id): MagicMock(spec=SchemaContract)}
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_latch_callable_is_polled_once_per_row(self) -> None:
+        """check_coordination_latch is called exactly once after each row is processed.
+
+        With one unprocessed row the latch must be called exactly once.  With
+        zero rows it must not be called at all (the loop body never executes).
+        """
+
+        latch_calls: list[int] = []
+
+        def _counting_latch() -> None:
+            latch_calls.append(1)
+
+        # Zero rows — latch must NOT be called.
+        loop_ctx_0 = self._make_loop_ctx()
+        run_resume_processing_loop(
+            loop_ctx_0,
+            (),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            payload_store=MockPayloadStore(),
+            run_id="run-latch-zero",
+            resume_checkpoint_id="ckpt-0",
+            schema_contracts_by_source=self._schema_contracts(),
+            source_on_success_by_source={NodeID("source"): "default"},
+            check_coordination_latch=_counting_latch,
+        )
+        assert latch_calls == [], "latch must not be called when there are no rows"
+
+        # One row — latch must be called exactly once.
+        loop_ctx_1 = self._make_loop_ctx()
+        run_resume_processing_loop(
+            loop_ctx_1,
+            self._one_row(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            payload_store=MockPayloadStore(),
+            run_id="run-latch-one",
+            resume_checkpoint_id="ckpt-1",
+            schema_contracts_by_source=self._schema_contracts(),
+            source_on_success_by_source={NodeID("source"): "default"},
+            check_coordination_latch=_counting_latch,
+        )
+        assert len(latch_calls) == 1, f"latch must be called once per row; got {len(latch_calls)} calls"
+
+    def test_latch_raising_propagates_runworkerevictederror(self) -> None:
+        """If the latch callable raises RunWorkerEvictedError it propagates out of the loop.
+
+        This is the proactive-surfacing deliverable (b): a deposed resume-takeover-leader
+        raises RunWorkerEvictedError at the per-row boundary without waiting for the
+        next fenced write to refuse.
+        """
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        def _evicting_latch() -> None:
+            raise RunWorkerEvictedError(worker_id="worker-B", run_id="run-latch-evict")
+
+        loop_ctx = self._make_loop_ctx()
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            run_resume_processing_loop(
+                loop_ctx,
+                self._one_row(),
+                incomplete_by_row={},
+                recovery_manager=MagicMock(spec=RecoveryManager),
+                payload_store=MockPayloadStore(),
+                run_id="run-latch-evict",
+                resume_checkpoint_id="ckpt-evict",
+                schema_contracts_by_source=self._schema_contracts(),
+                source_on_success_by_source={NodeID("source"): "default"},
+                check_coordination_latch=_evicting_latch,
+            )
+        assert exc_info.value.worker_id == "worker-B"
+        assert exc_info.value.run_id == "run-latch-evict"
+
+    def test_none_latch_is_safe_no_poll(self) -> None:
+        """check_coordination_latch=None (the default) runs without polling — no AttributeError."""
+        loop_ctx = self._make_loop_ctx()
+        interrupted = run_resume_processing_loop(
+            loop_ctx,
+            self._one_row(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            payload_store=MockPayloadStore(),
+            run_id="run-latch-none",
+            resume_checkpoint_id="ckpt-none",
+            schema_contracts_by_source=self._schema_contracts(),
+            source_on_success_by_source={NodeID("source"): "default"},
+            check_coordination_latch=None,
+        )
+        assert interrupted is False
+
+    def test_latch_polled_after_row_results_accumulated(self) -> None:
+        """The latch fires AFTER the row is fully processed and outcomes accumulated.
+
+        This matches the source_iteration.py pattern: the latch is the LAST
+        step in the per-row boundary sequence, after coalesce timeouts and
+        before the shutdown check.  We verify ordering by asserting the
+        processor's process_existing_row was already called when the latch fires.
+        """
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        processing_order: list[str] = []
+
+        # Capture when process_existing_row is called.
+        processor = MagicMock(spec=RowProcessor)
+        processor.has_scheduled_work.return_value = False
+        processor.has_unresolved_scheduler_work.return_value = False
+
+        def _process(**kwargs: object) -> list[object]:
+            processing_order.append("process_existing_row")
+            return [make_row_result({"v": 1}, sink_name="default")]
+
+        processor.process_existing_row.side_effect = _process
+
+        config = PipelineConfig(
+            sources={"primary": _specced_source()},
+            transforms=(),
+            sinks={"default": _specced_sink()},
+        )
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"default": []},
+            processor=processor,
+            ctx=MagicMock(spec=PluginContext),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        def _ordering_latch() -> None:
+            processing_order.append("latch")
+            raise RunWorkerEvictedError(worker_id="w", run_id="run-latch-order")
+
+        with pytest.raises(RunWorkerEvictedError):
+            run_resume_processing_loop(
+                loop_ctx,
+                self._one_row(),
+                incomplete_by_row={},
+                recovery_manager=MagicMock(spec=RecoveryManager),
+                payload_store=MockPayloadStore(),
+                run_id="run-latch-order",
+                resume_checkpoint_id="ckpt-order",
+                schema_contracts_by_source=self._schema_contracts(),
+                source_on_success_by_source={NodeID("source"): "default"},
+                check_coordination_latch=_ordering_latch,
+            )
+
+        assert processing_order == ["process_existing_row", "latch"], (
+            f"process_existing_row must complete before latch fires; got: {processing_order}"
+        )

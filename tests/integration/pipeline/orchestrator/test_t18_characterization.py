@@ -195,6 +195,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # _execute_run returns RUNNING — run() wrapper sets COMPLETED
@@ -222,6 +223,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Output sink gets 3 valid rows (doubled)
@@ -257,6 +259,7 @@ class TestT18CharacterizationExecuteRun:
                 config=config,
                 graph=graph,
                 payload_store=payload_store,
+                coordination_token=leader_coordination_token(factory, run_id),
             )
 
         # All 3 valid rows should have been processed
@@ -286,6 +289,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Check that field resolution was recorded on the runs table
@@ -319,6 +323,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         assert db._engine is not None
@@ -453,6 +458,7 @@ class TestT18CharacterizationResumePath:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Retrieve the actual row_id and source_node_id created during the original run.
@@ -507,6 +513,7 @@ class TestT18CharacterizationResumePath:
             recovery_manager=MagicMock(),
             resume_checkpoint_id="t18-test-checkpoint",
             schema_contracts_by_source={source_node_id: resume_contract},
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # The transform must have seen the contract during process()
@@ -577,6 +584,7 @@ class TestT18CharacterizationResumePath:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Reset counters — we only care about resume behavior
@@ -626,6 +634,7 @@ class TestT18CharacterizationResumePath:
                 recovery_manager=MagicMock(),
                 resume_checkpoint_id="t18-test-checkpoint",
                 schema_contracts_by_source={source_node_id: schema_contract},
+                coordination_token=leader_coordination_token(factory, run_id),
             )
 
         # _process_resumed_rows also returns RUNNING (same as _execute_run)

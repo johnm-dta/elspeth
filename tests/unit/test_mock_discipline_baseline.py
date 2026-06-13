@@ -29,7 +29,13 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # test_llm_telemetry) and HTTP SSRF/redirect-context fakes (test_audited_http_client),
 # spread across ~13 burndown test files. These mock dynamically-shaped response
 # objects where spec= is brittle and low-value — matching the prior bump precedent.
-BASELINE_UNSPECCED_MOCK_TOTAL = 2617
+# Bumped 2617→2618 (2026-06-13): +1 net from the multi-source-token-scheduler
+# feat branch (slices 1-3 coordination substrate, journal barrier, finalize sweep).
+# New tests in that branch use a _StubRepo typed fake for RunHeartbeatThread; the
+# +1 comes from small pre-existing drift in test_execution_repository,
+# test_outcomes, test_read_only_audit_surfaces across the branch's accumulated
+# changes (no single new file; the new heartbeat tests contribute zero).
+BASELINE_UNSPECCED_MOCK_TOTAL = 2618
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

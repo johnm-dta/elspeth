@@ -952,6 +952,42 @@ class RunCoordinationRepository:
             )
         )
 
+    def dead_non_leader_workers(
+        self,
+        *,
+        run_id: str,
+        leader_worker_id: str,
+        now: datetime,
+        grace_seconds: float,
+    ) -> tuple[str, ...]:
+        """Return worker_ids of ACTIVE non-leader members whose heartbeat has expired.
+
+        Read-only (plain connection, no write lock). Used by the leader
+        housekeeping sweep (§C.2 path 1, slice 4) to enumerate candidates for
+        individual ``evict_worker`` calls. Only ``status='active'`` rows are
+        returned — departed/evicted rows are already done. The grace_seconds
+        MUST equal the value passed to ``evict_worker`` so the liveness
+        definition is consistent across the read (who to attempt to evict)
+        and the write (the CAS guard inside evict_worker).
+
+        Returns a tuple of worker_ids (deterministic order by registered_at).
+        The caller then calls ``evict_worker`` for each, which is idempotent
+        (benign skip if the worker heartbeated or holds a live lease).
+        """
+        grace_threshold = now - timedelta(seconds=grace_seconds)
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(run_workers_table.c.worker_id)
+                .where(
+                    run_workers_table.c.run_id == run_id,
+                    run_workers_table.c.status == "active",
+                    run_workers_table.c.worker_id != leader_worker_id,
+                    run_workers_table.c.heartbeat_expires_at < grace_threshold,
+                )
+                .order_by(run_workers_table.c.registered_at)
+            ).scalars()
+        return tuple(rows)
+
     def _read_registered_workers(self, run_id: str) -> tuple[RegisteredWorker, ...]:
         """Forensic registry read for the BUSY-takeover diagnostic (§B.4).
 

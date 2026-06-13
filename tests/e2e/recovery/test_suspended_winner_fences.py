@@ -50,6 +50,7 @@ from elspeth.contracts.errors import (
     AuditIntegrityError,
     OrchestrationInvariantError,
     RunLeadershipLostError,
+    RunWorkerEvictedError,
 )
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.landscape import LandscapeDB
@@ -808,4 +809,213 @@ class TestSuspendedWinnerFences:
         assert by_seq[evict_seq + 2]["event_type"] == "leader_acquire"
         assert by_seq[evict_seq + 2]["worker_id"] == "worker-new"
         assert by_seq[evict_seq + 2]["leader_epoch"] == token_new.leader_epoch
+        crashed.db.close()
+
+    # ── Slice-4 membership fence tests (design §G verb table, :491) ──────────
+    #
+    # The fence tests inject EVICTED/ABSENT workers directly via raw inserts
+    # to give explicit control over registry status.  To avoid _seed_journal_row
+    # and _craft_crashed_lease calling claim_ready with an unregistered owner,
+    # a fictional crashed worker is always registered as ACTIVE before the
+    # harness claim and then marked EVICTED before the fence assertion.
+
+    def _seed_ready_item_for_fence(self, crashed: _CrashedRun, *, ingest_sequence: int) -> tuple[str, str]:
+        """Seed a READY token_work_items row using _craft_crashed_lease with a
+        temporary active worker, then return (token_id, LEASED-to-READY) so
+        fence tests can claim with a different (evicted) identity.
+
+        Returns (token_id, registerd_lease_owner) — the owner is left ACTIVE
+        so callers can evict it explicitly for the negative test arm.
+        """
+        temp_owner = f"worker-temp-active-{ingest_sequence}"
+        token_id = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=ingest_sequence,
+            lease_owner=temp_owner,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        # _craft_crashed_lease leaves the row LEASED.  Return it to READY.
+        with crashed.db.engine.connect() as conn:
+            work_item_id = conn.execute(
+                select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.token_id == token_id)
+            ).scalar_one()
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                update(token_work_items_table)
+                .where(token_work_items_table.c.work_item_id == work_item_id)
+                .values(status=TokenWorkStatus.READY.value, lease_owner=None, lease_expires_at=None)
+            )
+        return token_id, temp_owner
+
+    def test_evicted_worker_claim_ready_raises_membership_fence(self, tmp_path: Path) -> None:
+        """Slice-4 (design §G): an EVICTED worker calling claim_ready is refused
+        with RunWorkerEvictedError and leaves the READY row untouched.
+
+        Contract: (i) RunWorkerEvictedError not AuditIntegrityError; (ii) zero
+        payload mutation — the row stays READY; (iii) positive control: an
+        ACTIVE worker claims it successfully.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        token_id, evicted_id = self._seed_ready_item_for_fence(crashed, ingest_sequence=5)
+        # Mark the temp owner as EVICTED so the fence fires.
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.worker_id == evicted_id)
+                .values(status="evicted", evicted_at=clock.now_utc())
+            )
+
+        item_before = _work_item(crashed.db, token_id)
+        assert item_before["status"] == TokenWorkStatus.READY.value
+
+        # EVICTED worker refused.
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            crashed.repo.claim_ready(
+                run_id=crashed.run_id,
+                lease_owner=evicted_id,
+                lease_seconds=_DEFAULT_LEASE_SECONDS,
+                now=clock.now_utc(),
+            )
+        assert not isinstance(exc_info.value, AuditIntegrityError)
+        assert exc_info.value.worker_id == evicted_id
+        assert exc_info.value.run_id == crashed.run_id
+
+        # Zero mutation: row is still READY.
+        item_after = _work_item(crashed.db, token_id)
+        assert item_after == item_before, "claim_ready with evicted worker left the READY row mutated"
+
+        # Positive control: an ACTIVE worker claims it successfully.
+        _seed_active_follower(crashed, worker_id=USURPER)
+        claimed = crashed.repo.claim_ready(
+            run_id=crashed.run_id,
+            lease_owner=USURPER,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+            now=clock.now_utc(),
+        )
+        assert claimed is not None and claimed.token_id == token_id
+        assert claimed.lease_owner == USURPER
+        crashed.db.close()
+
+    def test_evicted_worker_claim_pending_sink_raises_membership_fence(self, tmp_path: Path) -> None:
+        """Slice-4 (design §G): an EVICTED worker calling claim_pending_sink is
+        refused with RunWorkerEvictedError and leaves the PENDING_SINK row
+        untouched.
+
+        Contract: same (i)-(iii) as claim_ready above.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        # Use _takeover_image (which registers WORKER_OLD as ACTIVE) then run
+        # the production acquire_run_leadership with a second worker to evict it.
+        crashed2, _token_old = _takeover_image(tmp_path)
+        # Seed the PENDING_SINK row while WORKER_OLD is still ACTIVE.
+        token_id = _parked_pending_sink(crashed2, ingest_sequence=6, claim_back=False)
+        # Now run a real takeover CAS: evicts WORKER_OLD in run_workers.
+        clock2 = crashed2.clock
+        clock2.advance(_DEFAULT_LEASE_SECONDS + 10)  # seat is expired for the takeover
+        _coord(crashed2).acquire_run_leadership(
+            run_id=crashed2.run_id,
+            worker_id=USURPER,
+            now=clock2.now_utc(),
+            window_seconds=80.0,
+        )
+        workers = {w["worker_id"]: w for w in _run_workers(crashed2.db, crashed2.run_id)}
+        assert workers[WORKER_OLD]["status"] == "evicted", "precondition: production takeover evicted worker-old"
+        assert workers[USURPER]["status"] == "active"
+
+        item_before = _work_item(crashed2.db, token_id)
+        assert item_before["status"] == TokenWorkStatus.PENDING_SINK.value
+
+        # EVICTED worker refused.
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            crashed2.repo.claim_pending_sink(
+                run_id=crashed2.run_id,
+                lease_owner=WORKER_OLD,
+                lease_seconds=_DEFAULT_LEASE_SECONDS,
+                now=clock2.now_utc(),
+            )
+        assert not isinstance(exc_info.value, AuditIntegrityError)
+        assert exc_info.value.worker_id == WORKER_OLD
+        assert exc_info.value.run_id == crashed2.run_id
+
+        # Zero mutation.
+        item_after = _work_item(crashed2.db, token_id)
+        assert item_after == item_before, "claim_pending_sink with evicted worker mutated the row"
+
+        # Positive control: USURPER (now the active leader) claims it.
+        claimed = crashed2.repo.claim_pending_sink(
+            run_id=crashed2.run_id,
+            lease_owner=USURPER,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+            now=clock2.now_utc(),
+        )
+        assert claimed is not None and claimed.token_id == token_id
+        crashed.db.close()
+        crashed2.db.close()
+
+    def test_evicted_worker_enqueue_ready_raises_membership_fence(self, tmp_path: Path) -> None:
+        """Slice-4 (design §G): an EVICTED worker calling enqueue_ready with its
+        worker_id raises RunWorkerEvictedError BEFORE inserting any row.
+
+        The fence fires on the pre-INSERT membership probe; the dedup path
+        (existing work_item_id) is not reached.  An ABSENT worker (no registry
+        row) is also refused.  An ACTIVE worker succeeds.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+
+        # Seed an evicted worker row explicitly.
+        evicted_id = "worker-evicted-enq-slice4"
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                insert(run_workers_table).values(
+                    worker_id=evicted_id,
+                    run_id=crashed.run_id,
+                    role="leader",
+                    status="evicted",
+                    registered_at=clock.now_utc(),
+                    heartbeat_expires_at=clock.now_utc(),
+                    entry_point="resume",
+                    evicted_at=clock.now_utc(),
+                )
+            )
+
+        def _try_enqueue(worker_id: str, seq: int) -> None:
+            data = {"id": seq}
+            row = crashed.factory.data_flow.create_row(
+                run_id=crashed.run_id,
+                source_node_id=crashed.source_node_id,
+                row_index=seq,
+                data=data,
+                source_row_index=seq,
+                ingest_sequence=seq,
+            )
+            token = crashed.factory.data_flow.create_token(row_id=row.row_id)
+            crashed.repo.enqueue_ready(
+                run_id=crashed.run_id,
+                token_id=token.token_id,
+                row_id=row.row_id,
+                node_id=crashed.journal_node_id,
+                step_index=crashed.journal_step_index,
+                ingest_sequence=seq,
+                row_payload_json=TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, _observed_contract(data))),
+                available_at=clock.now_utc(),
+                worker_id=worker_id,
+            )
+
+        # Evicted worker refused.
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            _try_enqueue(evicted_id, seq=20)
+        assert not isinstance(exc_info.value, AuditIntegrityError)
+        assert exc_info.value.worker_id == evicted_id
+
+        # Absent worker (no registry row) also refused.
+        with pytest.raises(RunWorkerEvictedError) as exc_info2:
+            _try_enqueue("worker-phantom", seq=21)
+        assert exc_info2.value.worker_id == "worker-phantom"
+
+        # Positive control: USURPER (active) enqueues successfully.
+        _seed_active_follower(crashed, worker_id=USURPER)
+        _try_enqueue(USURPER, seq=22)  # must not raise
         crashed.db.close()

@@ -5438,26 +5438,22 @@ class TestDurableSchedulerResumeDrain:
             (token_id, "leased", "resume-worker") for token_id in flushed_token_ids
         }
 
-    def test_drain_refuses_when_peer_worker_holds_active_lease(self) -> None:
-        """A peer worker's unexpired lease must block a second drain on the same run.
+    def test_drain_scheduled_work_no_longer_refuses_on_peer_lease(self) -> None:
+        """Slice 4 demotion: peer unexpired leases are diagnostic, not refusals.
 
-        Regression for elspeth-66be4216cd (G3): ``_drain_preexisting_pending_sinks``
-        relied on a docstring-only single-active-resume-per-run invariant. Under
-        a hypothetical multi-worker resume, peer worker A claims a row (LEASED
-        under owner-A); peer worker B then enters ``drain_scheduled_work``. If
-        A's lease expires before A's sink-write callback runs (long LLM/HTTP
-        call), B's ``recover_expired_leases`` would flip the row back to
-        PENDING_SINK and B's ``claim_pending_sink`` would re-emit a RowResult
-        already produced by A — a duplicate audit-trail entry, a Tier-1
-        violation.
+        ADR-030 §G slice 4 demotes ``peer_active_leases`` from a hard refusal
+        to a debug-level diagnostic. The correctness gate is now the
+        ``active_worker_fence_clause`` membership fence compiled into the claim
+        verbs — a non-member's claim CAS fails the EXISTS fence. A concurrent
+        peer holding an unexpired lease is a NORMAL multi-worker state, not a
+        precondition violation (filigree elspeth-66be4216cd, G3).
 
-        Per ADR-026 Precondition #9, RC6 cannot ship N>1 workers until the
-        multi-worker deployment-shape ADR lands; until then, this precondition
-        check at ``drain_scheduled_work`` entry mechanically enforces the
-        invariant. Today no code path spawns concurrent ``RowProcessor``
-        instances on the same ``run_id``; this test simulates the violating
-        scenario by direct scheduler manipulation to prove the guard is
-        mechanical, not documentation.
+        This test was previously ``test_drain_refuses_when_peer_worker_holds_active_lease``
+        and asserted an ``AuditIntegrityError`` raise. It now asserts the
+        OPPOSITE: ``drain_scheduled_work`` must NOT raise. Worker B's drain
+        enters the claim loop, finds the row still LEASED under peer-worker-A
+        (``claim_ready`` returns None — no READY rows), and exits cleanly with
+        an empty result list.
         """
         db, factory = _make_factory()
         transform_node = NodeID("transform-1")
@@ -5503,9 +5499,7 @@ class TestDurableSchedulerResumeDrain:
         assert peer_claim is not None
         assert peer_claim.lease_owner == "peer-worker-A"
 
-        # Worker B constructs its processor with a distinct lease_owner and
-        # attempts to drain — the precondition must crash before any work
-        # claim or RowResult emission.
+        # Worker B's drain now logs the peer diagnostic but does NOT raise.
         worker_b_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
@@ -5516,11 +5510,12 @@ class TestDurableSchedulerResumeDrain:
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
-        with pytest.raises(AuditIntegrityError, match=r"peer worker\(s\) \['peer-worker-A'\]"):
-            worker_b_processor.drain_scheduled_work(ctx)
+        # No raise: peer lease is diagnostic, not a refusal.
+        results = worker_b_processor.drain_scheduled_work(ctx)
+        # claim_ready found no READY rows (row is LEASED under peer-worker-A).
+        assert results == []
 
-        # Defence-in-depth: the row is still owned by peer-worker-A and was
-        # never re-emitted; no terminal/sink-bound state recorded by B.
+        # Peer's row is still owned by peer-worker-A — B's drain was a no-op.
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
@@ -8127,6 +8122,9 @@ class TestReadyEmissionEnqueueParity:
         enqueue_kwargs = dict(captured)
         enqueue_kwargs["available_at"] = pinned_now
         enqueue_kwargs.setdefault("attempt", 1)
+        # worker_id is an enqueue_ready-only membership-fence kwarg; strip it
+        # before projecting through the journal-row mapper which does not accept it.
+        enqueue_kwargs.pop("worker_id", None)
         values_from_enqueue = factory.scheduler._ready_work_item_values(**enqueue_kwargs)
 
         # Mirror _insert_ready_emission's emission -> values mapping exactly.

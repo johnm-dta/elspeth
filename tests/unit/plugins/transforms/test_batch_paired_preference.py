@@ -246,6 +246,30 @@ class TestBatchPairedPreference:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_all_ties_reports_none_preference_rate(self, ctx: PluginContext) -> None:
+        """All-tie batch: wins+losses==0 -> preference_rate must be None (B4.5-b)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.5}),
+            _make_row({"case_id": "p2", "variant": "A", "score": 0.8}),
+            _make_row({"case_id": "p2", "variant": "B", "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["wins"] == 0
+        assert result.row["losses"] == 0
+        assert result.row["ties"] == 2
+        # preference_rate = wins/(wins+losses) is 0/0 -- honest None, never 0.0
+        assert result.row["preference_rate"] is None
+
     def test_single_compared_pair_reports_none_ci(self, ctx: PluginContext) -> None:
         """compared<=1 -> se=0 -> CI bounds must be None (B4.5-a-paired_pref-CI)."""
         from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference

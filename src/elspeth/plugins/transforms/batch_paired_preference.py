@@ -116,7 +116,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:603b2f206e45f7cd"
+    source_file_hash: str | None = "sha256:f547287eb536901d"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -350,7 +350,9 @@ class BatchPairedPreference(BaseTransform):
             return {}, TransformResult.error(aggregate_overflow_reason, retryable=False)
 
         preference_denominator = wins + losses
-        preference_rate = 0.0 if preference_denominator == 0 else wins / preference_denominator
+        # preference_rate = wins/(wins+losses) is 0/0 when all pairs tie --
+        # emit None (honest-absence), never 0.0 (B4.5-b)
+        preference_rate: float | None = None if preference_denominator == 0 else wins / preference_denominator
 
         result: BatchPairedPreferenceRow = {
             "pair_field": self._pair_field,

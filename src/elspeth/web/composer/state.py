@@ -1622,10 +1622,13 @@ def _check_schema_contracts(
         producer MODE — not guarantee-emptiness — avoids false rejection of the
         observed-source-with-auto-guaranteed-column case the runtime accepts.
         """
-        if producer.producer_id != "source":
+        if not is_source_producer_id(producer.producer_id):
             # transform/aggregation/gate/coalesce producers => dynamic effective
             # producer schema at runtime; the consumer's implicit requirement is
-            # not statically enforced against them.
+            # not statically enforced against them. Named sources mint
+            # ``source:<name>`` producer ids, so match on the predicate, not the
+            # literal "source" — else the parity check silently skips every
+            # named typed source (elspeth-3332619032).
             return False
         schema_config = get_raw_schema_config(producer.options, owner=_producer_owner(producer))
         return schema_config is not None and not schema_config.is_observed

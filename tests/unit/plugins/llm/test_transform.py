@@ -1896,8 +1896,17 @@ class TestMultiQuerySequentialRetryBehavior:
     successful queries.
     """
 
-    def test_retryable_error_returns_error_result_not_raises(self) -> None:
-        """Sequential mode catches retryable errors as TransformResult.error(retryable=True)."""
+    def test_transient_retryable_error_absorbed_without_rerunning_successes(self) -> None:
+        """A transient retryable error on a later query is absorbed by bounded local retry.
+
+        B3.7: sequential mode no longer bubbles a retryable error back to the
+        engine (which would re-run already-successful queries). Instead it
+        retries the *failing* query locally with bounded backoff, leaving the
+        earlier successful queries untouched. A transient error (one that clears
+        on retry) is therefore fully absorbed and the row SUCCEEDS, while the
+        successful q1 is executed exactly once — proving the no-wasteful-rerun
+        property the engine-level retry could not offer.
+        """
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
@@ -1910,10 +1919,14 @@ class TestMultiQuerySequentialRetryBehavior:
         )
         transform = LLMTransform(config)
         call_count = [0]
+        # Record (query order) of calls: q1 then q2 then q2-retry.
+        q2_attempts = [0]
 
         def mock_execute(messages, *, model, temperature, max_tokens, state_id, token_id, response_format=None):
             call_count[0] += 1
+            # Fail q2's first attempt only (call #2); its retry (call #3) succeeds.
             if call_count[0] == 2:
+                q2_attempts[0] += 1
                 raise RateLimitError("Rate limited on q2")
             return LLMQueryResult(
                 content="ok",
@@ -1926,14 +1939,14 @@ class TestMultiQuerySequentialRetryBehavior:
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
-        # Should NOT raise — should return TransformResult.error(retryable=True)
+        # Should NOT raise and should NOT divert — the transient failure is
+        # absorbed by the bounded local retry, so the row completes successfully.
         result = transform._process_row(_make_row(), _make_ctx())
-        assert result.status == "error"
-        assert result.retryable is True
-        assert result.reason is not None
-        assert result.reason["reason"] == "multi_query_failed"
-        assert result.reason["failed_query_name"] == "q2"
-        assert result.reason["discarded_successful_queries"] == 1
+        assert result.status == "success", f"Expected success after retry absorbed transient error, got {result.status} ({result.reason})"
+        # q1 (call 1) + q2 fail (call 2) + q2 retry success (call 3) = 3 calls total;
+        # crucially q1 is executed exactly once (no wasteful re-run on q2's retry).
+        assert call_count[0] == 3, f"Expected 3 provider calls (q1 once, q2 twice), got {call_count[0]}"
+        assert q2_attempts[0] == 1, "q2 should have failed exactly once before its retry succeeded"
 
     def test_non_retryable_error_returns_error_result(self) -> None:
         """Non-retryable errors still return error TransformResult(retryable=False)."""

@@ -95,7 +95,7 @@ class TestElspethSettings:
 
         with pytest.raises(ValidationError, match="duplicate collection_probes"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 collection_probes=[
                     {"collection": "docs", "provider": "chroma"},
@@ -107,7 +107,7 @@ class TestElspethSettings:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             collection_probes=[
                 {"collection": "docs", "provider": "chroma"},
@@ -3031,7 +3031,7 @@ sinks:
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "warehouse"},
+            sources={"primary": {"plugin": "csv", "on_success": "warehouse"}},
             sinks={
                 "warehouse": {
                     "plugin": "database",
@@ -3862,11 +3862,12 @@ class TestEnvVarExpansion:
 
         settings = load_settings_from_yaml_string(
             """
-source:
-  plugin: csv_local
-  on_success: output
-  options:
-    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
 sinks:
   output:
     plugin: json
@@ -3875,7 +3876,7 @@ sinks:
 """
         )
 
-        assert settings.source.options["prompt_template"] == "prefix-server-secret-value-suffix"
+        assert settings.sources["primary"].options["prompt_template"] == "prefix-server-secret-value-suffix"
 
     def test_load_settings_from_yaml_string_can_skip_env_expansion(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Opt-out keeps runtime-substituted ${VAR} literal so host secrets are not resolved.
@@ -3890,11 +3891,12 @@ sinks:
 
         settings = load_settings_from_yaml_string(
             """
-source:
-  plugin: csv_local
-  on_success: output
-  options:
-    prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      prompt_template: prefix-${INLINE_PROMPT_SECRET}-suffix
 sinks:
   output:
     plugin: json
@@ -3904,7 +3906,7 @@ sinks:
             expand_env_vars=False,
         )
 
-        assert settings.source.options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
+        assert settings.sources["primary"].options["prompt_template"] == "prefix-${INLINE_PROMPT_SECRET}-suffix"
 
 
 class TestSinkNameCasing:

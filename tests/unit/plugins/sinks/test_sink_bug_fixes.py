@@ -706,8 +706,15 @@ class TestAzureBlobSinkFieldValidation:
         with patch("elspeth.plugins.sinks.azure_blob_sink.AzureBlobSink._get_container_client") as mock:
             yield mock
 
-    def test_csv_extra_fields_rejected_in_fixed_mode(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
-        """Extra fields in fixed-mode CSV are rejected before serialization."""
+    def test_csv_extra_fields_in_fixed_mode_divert_only_bad_row(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """A fixed-mode row carrying a field outside the column lock is diverted, not raised.
+
+        B3.2-azure: AzureBlobSink mirrors CSVSink (see
+        TestCSVSinkAtomicBatchWrite.test_extra_field_in_batch_diverts_only_bad_row) —
+        a row with an extra field is a per-row data fault. The offending row is
+        diverted (recorded + routed per on_write_failure) and the surrounding good
+        rows still upload, rather than the whole batch aborting with a ValueError.
+        """
         from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 
         mock_blob_client = MagicMock()
@@ -727,17 +734,19 @@ class TestAzureBlobSinkFieldValidation:
             )
         )
 
-        with pytest.raises(ValueError, match="unexpected fields"):
-            sink.write(
-                [
-                    {"id": 1, "name": "alice"},
-                    {"id": 2, "name": "bob", "extra": "bad"},
-                ],
-                ctx,
-            )
+        result = sink.write(
+            [
+                {"id": 1, "name": "alice"},
+                {"id": 2, "name": "bob", "extra": "bad"},
+            ],
+            ctx,
+        )
 
-        # No upload should have happened
-        mock_blob_client.upload_blob.assert_not_called()
+        # The bad row is diverted (recorded, not lost); the good row uploads.
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"id": 2, "name": "bob", "extra": "bad"}
+        assert mock_blob_client.upload_blob.called
 
     def test_csv_valid_rows_still_upload(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Valid rows in fixed mode still upload successfully."""

@@ -45,7 +45,7 @@ def _field_literals(annotation: object) -> set[str]:
 
 def _submodels(annotation: object) -> list[type]:
     """Pydantic submodels reachable from an annotation (incl. ``Model | None``)."""
-    return [a for a in (annotation, *get_args(annotation)) if hasattr(a, "model_fields")]
+    return [a for a in (annotation, *get_args(annotation)) if isinstance(a, type) and issubclass(a, BaseModel)]
 
 
 def _literal_fields(config_model: type[BaseModel], prefix: str = "", depth: int = 0) -> dict[str, set[str]]:
@@ -72,7 +72,8 @@ def _iter_hint_bearing_plugins() -> list[tuple[str, type[BaseModel], PluginAssis
             assistance = get_assistance(issue_code=None)
             if assistance is None or not assistance.composer_hints:
                 continue
-            config_model = cls.get_config_model() if hasattr(cls, "get_config_model") else getattr(cls, "config_model", None)
+            get_config_model = getattr(cls, "get_config_model", None)
+            config_model = get_config_model() if get_config_model is not None else getattr(cls, "config_model", None)
             if config_model is None:  # e.g. NullSource
                 continue
             plugin_name = cast(str, cls.name)  # type: ignore[attr-defined]  # plugin base declares name

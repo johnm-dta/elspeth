@@ -1,0 +1,41 @@
+# ChaosLLM config for the multi_worker example.
+# Mirrors chaosllm_sentiment exactly; modest steady-state fault injection so
+# retries/quarantine are part of the demo and the join window stays open.
+
+server:
+  host: "127.0.0.1"
+  port: 8199
+  workers: 1
+
+metrics:
+  database: "file:chaosllm-metrics?mode=memory&cache=shared"
+
+response:
+  mode: preset
+  preset:
+    file: examples/multi_worker/responses.jsonl
+    selection: sequential
+
+latency:
+  base_ms: 30
+  jitter_ms: 20
+
+error_injection:
+  rate_limit_pct: 5.0
+  capacity_529_pct: 2.0
+  service_unavailable_pct: 1.0
+  internal_error_pct: 1.0
+  bad_gateway_pct: 1.0
+  gateway_timeout_pct: 1.0
+  retry_after_sec: [1, 2]
+  timeout_pct: 1.0
+  timeout_sec: [2, 4]
+  connection_reset_pct: 1.0
+  slow_response_pct: 1.0
+  slow_response_sec: [1, 3]
+  invalid_json_pct: 2.0
+  truncated_pct: 1.0
+  empty_body_pct: 1.0
+  missing_fields_pct: 1.0
+  burst:
+    enabled: false

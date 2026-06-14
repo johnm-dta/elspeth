@@ -1,0 +1,6 @@
+{"content": "{\"sentiment\": \"positive\", \"confidence\": 0.95, \"summary\": \"Strong positive sentiment with enthusiastic language.\"}"}
+{"content": "{\"sentiment\": \"negative\", \"confidence\": 0.92, \"summary\": \"Clearly negative experience with service complaints.\"}"}
+{"content": "{\"sentiment\": \"neutral\", \"confidence\": 0.78, \"summary\": \"Mixed signals, neither strongly positive nor negative.\"}"}
+{"content": "{\"sentiment\": \"positive\", \"confidence\": 0.89, \"summary\": \"Positive recommendation with high satisfaction.\"}"}
+{"content": "{\"sentiment\": \"negative\", \"confidence\": 0.94, \"summary\": \"Disappointment expressed with product quality issues.\"}"}
+{"content": "{\"sentiment\": \"positive\", \"confidence\": 0.82, \"summary\": \"Good value assessment with minor reservations.\"}"}

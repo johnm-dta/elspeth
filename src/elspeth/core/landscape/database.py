@@ -5,11 +5,13 @@ with appropriate settings for each.
 """
 
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NewType, Self, cast
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -96,6 +98,56 @@ class SchemaCompatibilityError(Exception):
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
 
 
+# StaticPool engines (``LandscapeDB.in_memory()``, tests only) share ONE DBAPI
+# connection across every thread (``check_same_thread=False`` + StaticPool).  When
+# a helper thread — e.g. the idle-timeout aggregation poller in
+# ``source_iteration.py`` — drives audit writes concurrently with the main source
+# thread (which may itself write audit rows via ``ctx.record_call`` during
+# ``next()``), both would drive that single shared connection at once and SQLite
+# raises "recursive use of cursors not allowed" / "cannot start a transaction
+# within a transaction".  File-backed production engines use the default
+# ``QueuePool`` (one connection PER thread) + WAL/BEGIN IMMEDIATE/busy_timeout, so
+# they are already safe and MUST NOT pay any app-level lock (it would regress the
+# epoch-21 multi-writer design).  We therefore serialize connection acquisition
+# with a per-engine reentrant lock that engages ONLY for StaticPool engines; every
+# other engine takes the no-op (lock-free) path.
+_SHARED_CONNECTION_LOCKS: "WeakKeyDictionary[Engine, threading.RLock]" = WeakKeyDictionary()
+_SHARED_CONNECTION_LOCKS_GUARD = threading.Lock()
+
+
+def _shared_connection_lock(engine: Engine) -> "threading.RLock | None":
+    """Return a serialization lock for engines whose pool shares one DBAPI
+    connection across threads (``StaticPool``); ``None`` for per-thread-connection
+    engines (the production ``QueuePool`` path), which need no app-level lock.
+
+    The lock is reentrant so a single thread that nests connection context
+    managers (e.g. ``connection()`` calling into ``write_connection()``) does not
+    self-deadlock, and per-engine so all callers sharing one StaticPool engine
+    contend on the same lock.
+    """
+    if not isinstance(engine.pool, StaticPool):
+        return None
+    with _SHARED_CONNECTION_LOCKS_GUARD:
+        lock = _SHARED_CONNECTION_LOCKS.get(engine)
+        if lock is None:
+            lock = threading.RLock()
+            _SHARED_CONNECTION_LOCKS[engine] = lock
+        return lock
+
+
+@contextmanager
+def _maybe_serialize_shared_connection(engine: Engine) -> Iterator[None]:
+    """Hold the StaticPool serialization lock for the duration of a transaction,
+    or do nothing on per-thread-connection (production) engines.
+    """
+    lock = _shared_connection_lock(engine)
+    if lock is None:
+        yield
+        return
+    with lock:
+        yield
+
+
 @contextmanager
 def begin_write(engine: Engine) -> Iterator[Connection]:
     """Drop-in replacement for ``engine.begin()`` that carries write intent.
@@ -117,7 +169,7 @@ def begin_write(engine: Engine) -> Iterator[Connection]:
     (e.g. ``TokenSchedulerRepository``); LandscapeDB holders should prefer
     :meth:`LandscapeDB.write_connection`.
     """
-    with engine.connect() as conn:
+    with _maybe_serialize_shared_connection(engine), engine.connect() as conn:
         conn.execution_options(**{WRITE_INTENT_OPTION: True})
         with conn.begin():
             yield conn
@@ -1290,7 +1342,7 @@ class LandscapeDB:
                 yield conn
             return
 
-        with self.engine.begin() as conn:
+        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
             yield conn
 
     @contextmanager
@@ -1330,7 +1382,7 @@ class LandscapeDB:
         yielding a writable transaction.
         """
         dialect_name = self.engine.dialect.name
-        with self.engine.begin() as conn:
+        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
             if dialect_name == "sqlite":
                 conn.execute(text("PRAGMA query_only = ON"))
             elif dialect_name == "postgresql":

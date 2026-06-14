@@ -1,0 +1,76 @@
+sources:
+  primary:
+    plugin: json
+    on_success: exploded
+    options:
+      path: examples/multi_worker/input.jsonl
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'items: any'
+      on_validation_failure: discard
+transforms:
+- name: explode
+  plugin: json_explode
+  input: exploded
+  on_success: llm_input
+  on_error: quarantine
+  options:
+    array_field: items
+    output_field: text
+    include_index: true
+    schema:
+      mode: observed
+- name: llm_0
+  plugin: llm
+  input: llm_input
+  on_success: output
+  on_error: quarantine
+  options:
+    provider: openrouter
+    api_key: fake-key-chaosllm-does-not-check
+    base_url: http://127.0.0.1:8199/v1
+    model: chaosllm/fake-gpt-4
+    timeout_seconds: 10
+    prompt_template: 'Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+
+      Text: {{ row.text }}
+
+
+      Respond with exactly this format (no other text):
+
+      {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+
+      '
+    temperature: 0.0
+    response_field: sentiment_analysis
+    required_input_fields:
+    - text
+    schema:
+      mode: observed
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/multi_worker/output/results.json
+      schema:
+        mode: observed
+      format: jsonl
+  quarantine:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/multi_worker/output/quarantined.json
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/multi_worker/runs/audit.db
+retry:
+  max_attempts: 5
+  initial_delay_seconds: 0.5
+  max_delay_seconds: 10.0
+  exponential_base: 2.0

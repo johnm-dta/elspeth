@@ -523,6 +523,8 @@ def run(
         raise typer.Exit(4) from e
 
     # Execute pipeline with pre-instantiated plugins
+    from elspeth.contracts.errors import RunWorkerEvictedError
+
     try:
         execution_result = _execute_pipeline_with_instances(
             config,
@@ -552,6 +554,25 @@ def run(
             typer.echo(f"\nPipeline interrupted after {e.rows_processed} rows.")
             typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
         raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
+    except RunWorkerEvictedError as e:
+        if output_format == "json":
+            import json as json_mod_evicted
+
+            typer.echo(
+                json_mod_evicted.dumps(
+                    {
+                        "event": "evicted",
+                        "run_id": e.run_id,
+                        "worker_id": e.worker_id,
+                        "message": str(e),
+                    }
+                ),
+                err=True,
+            )
+        else:
+            typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
+            typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
+        raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
     except contract_errors.TIER_1_ERRORS as e:
         # Tier 1 violations and framework bugs MUST be clearly distinguishable
         # from config errors. These indicate database corruption, tampering,
@@ -1918,7 +1939,10 @@ def resume(
     else:
         db_url = settings_config.landscape.url
         _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
-        typer.echo(f"Using database from settings.yaml: {db_url}")
+        # Informational banner only — suppress in JSON mode so stdout stays a
+        # clean JSON/JSONL stream for programmatic callers.
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
 
     # Resolve SQLCipher passphrase
     from elspeth.cli_helpers import resolve_audit_passphrase
@@ -2160,6 +2184,8 @@ def resume(
         )
 
         # Execute resume with execution graph (NullSource)
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
         try:
             result = _execute_resume_with_instances(
                 config=settings_config,
@@ -2197,6 +2223,25 @@ def resume(
             # changed between the can_resume pre-flight and --execute).
             _emit_not_resumable_event(e, output_format)
             raise typer.Exit(1) from e
+        except RunWorkerEvictedError as e:
+            if output_format == "json":
+                import json as json_mod_evicted
+
+                typer.echo(
+                    json_mod_evicted.dumps(
+                        {
+                            "event": "evicted",
+                            "run_id": e.run_id,
+                            "worker_id": e.worker_id,
+                            "message": str(e),
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
+                typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
+            raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
         except contract_errors.TIER_1_ERRORS as e:
             # Tier 1 violations and framework bugs MUST be clearly distinguishable
             # from config errors — same pattern as the `run` command handler.
@@ -2368,7 +2413,11 @@ def join(
     else:
         db_url = settings_config.landscape.url
         _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
-        typer.echo(f"Using database from settings.yaml: {db_url}")
+        # Informational banner only — suppress in JSON mode so stdout stays a
+        # clean JSON/JSONL stream for programmatic callers (the join command
+        # emits structured events on stdout in --format json).
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
 
     # Resolve SQLCipher passphrase.
     from elspeth.cli_helpers import resolve_audit_passphrase

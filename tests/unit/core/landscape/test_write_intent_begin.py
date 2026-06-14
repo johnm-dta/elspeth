@@ -381,6 +381,98 @@ class TestLockAtBegin:
 
 
 # ---------------------------------------------------------------------------
+# (b2) StaticPool shared-connection serialization
+# ---------------------------------------------------------------------------
+
+
+class TestStaticPoolConnectionSerialization:
+    """StaticPool engines share ONE DBAPI connection across all threads.
+
+    ``LandscapeDB.in_memory()`` (tests only) uses ``StaticPool`` +
+    ``check_same_thread=False``: every thread that opens a connection drives the
+    SAME underlying SQLite connection.  The idle-timeout aggregation poller
+    (``source_iteration.py``) runs audit writes on a helper thread CONCURRENTLY
+    with the main source thread, which may itself write audit rows during
+    ``next()`` (e.g. ``ctx.record_call``).  Without app-level serialization the
+    two threads drive one connection at once and SQLite raises "recursive use of
+    cursors not allowed" / "cannot start a transaction within a transaction".
+
+    File-backed production engines use the default ``QueuePool`` (one connection
+    per thread) + WAL/BEGIN IMMEDIATE/busy_timeout, so they are already safe and
+    take the no-op (lock-free) path; this serialization engages ONLY for
+    StaticPool engines.
+    """
+
+    def test_concurrent_write_connections_on_static_pool_do_not_collide(self) -> None:
+        """Two threads driving write_connection() on one StaticPool engine must
+        serialize, not collide on the shared connection.
+
+        Each thread holds its transaction open across a short sleep to force the
+        windows to overlap.  Pre-fix the second thread drives the shared
+        connection while the first is mid-transaction -> ProgrammingError
+        ("recursive use of cursors" / nested transaction).  Post-fix the
+        per-engine StaticPool lock serializes them so both commit cleanly.
+        """
+        db = LandscapeDB.in_memory()
+        start_barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def writer(run_id: str) -> None:
+            try:
+                start_barrier.wait(timeout=10)
+                with db.write_connection() as conn:
+                    conn.execute(insert(runs_table).values(**_run_values(run_id)))
+                    # Hold the transaction open to widen the overlap window so the
+                    # shared-connection collision is deterministic without the lock.
+                    time.sleep(0.05)
+            except BaseException as exc:
+                with errors_lock:
+                    errors.append(exc)
+
+        try:
+            threads = [threading.Thread(target=writer, args=(f"run-static-{i}",)) for i in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+                assert not thread.is_alive()
+
+            assert errors == [], f"concurrent StaticPool writes collided: {errors!r}"
+            with db.connection() as conn:
+                rows = conn.execute(select(runs_table.c.run_id).order_by(runs_table.c.run_id)).fetchall()
+            assert [row[0] for row in rows] == ["run-static-0", "run-static-1"]
+        finally:
+            db.close()
+
+    def test_file_backed_engine_takes_no_static_pool_lock(self, tmp_path: Path) -> None:
+        """Production (file-backed QueuePool) engines must NOT be given the
+        StaticPool serialization lock — they rely on per-thread connections +
+        WAL and must keep the epoch-21 multi-writer concurrency unchanged.
+        """
+        from elspeth.core.landscape.database import _shared_connection_lock
+
+        db = _open_file_db(tmp_path)
+        try:
+            assert _shared_connection_lock(db.engine) is None
+        finally:
+            db.close()
+
+    def test_in_memory_engine_has_a_static_pool_lock(self) -> None:
+        """In-memory StaticPool engines DO get a (stable, per-engine) lock."""
+        from elspeth.core.landscape.database import _shared_connection_lock
+
+        db = LandscapeDB.in_memory()
+        try:
+            lock = _shared_connection_lock(db.engine)
+            assert lock is not None
+            # Stable across calls — the same engine yields the same lock object.
+            assert _shared_connection_lock(db.engine) is lock
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
 # (c) Read-only engines: F10 closure
 # ---------------------------------------------------------------------------
 

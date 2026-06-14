@@ -1503,3 +1503,72 @@ class TestForkEndpoint:
         assert any("permission denied removing blob dir" in note for note in notes)
         # Note must identify the orphan session id so operators can clean up.
         assert any("manual cleanup" in note.lower() for note in notes)
+
+    @pytest.mark.asyncio
+    async def test_fork_top_level_blob_ref_without_copied_blob_fails_closed(self, tmp_path) -> None:
+        """sources[].options.blob_ref must be guarded even when blob_map is empty.
+
+        When copy_blobs_for_fork returns {} (because the referenced blob was
+        deleted from the source session before the fork), the per-source loop
+        was gated on ``blob_map`` being non-empty.  That made the inner guard
+        at ``if old_uuid not in blob_map: raise AuditIntegrityError(...)``
+        unreachable in exactly the case it protects: a source whose options
+        carry a stale blob_ref with no corresponding copied blob.
+
+        The fork must fail-closed with AuditIntegrityError rather than
+        silently carrying the stale cross-session blob_ref into the forked
+        session.  The archive/rollback machinery must clean up the partial
+        fork so the session list remains unchanged.
+        """
+        app, service, _blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+
+        # Persist a composition state whose source options carry a blob_ref
+        # for a blob that does NOT exist (simulating a deleted blob).
+        # No actual blob is created → copy_blobs_for_fork returns {}.
+        missing_blob_id = uuid.uuid4()
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "my_csv": {
+                        "plugin": "csv",
+                        "options": {
+                            "blob_ref": str(missing_blob_id),
+                            "path": "/data/deleted.csv",
+                        },
+                    }
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Process that instead",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "source blob was not copied" in message
+
+        # The partial fork session must have been archived so the list
+        # length is unchanged.
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1

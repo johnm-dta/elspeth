@@ -486,6 +486,134 @@ class TestFollowerEvicted:
 
 
 # ---------------------------------------------------------------------------
+# Tests: finalize-departure race — eviction raised mid-drain (elspeth-8690ef4bfd)
+# ---------------------------------------------------------------------------
+
+
+class TestFollowerEvictionFinalizeDepartureRace:
+    """When RunWorkerEvictedError is raised mid-drain (fence fires inside
+    _drain_scheduler_claims), the follower must distinguish:
+
+    (a) finalize-departure: complete_run stamped the run terminal AND departed
+        our row in ONE txn — so the fence fires but the run is COMPLETED.
+        Correct exit: return cleanly (exit 0), depart called once.
+
+    (b) true eviction: the fence fires and the run is still RUNNING.
+        Correct exit: propagate RunWorkerEvictedError (exit 3).
+
+    The bug (elspeth-8690ef4bfd): the old 'except RunWorkerEvictedError' arm
+    unconditionally re-raised without checking run status, so case (a) was
+    mis-reported as a true eviction (exit 3 instead of exit 0).
+    """
+
+    def test_mid_drain_eviction_with_terminal_run_returns_cleanly(self) -> None:
+        """RunWorkerEvictedError from _drain_scheduler_claims + run COMPLETED
+        → run() returns (no raise), depart called once.
+
+        This is the finalize-departure race: complete_run departed the row AND
+        stamped the run terminal in the same txn; the membership fence fires
+        inside the drain pass before the top-of-loop discrimination saw the
+        terminal status.
+        """
+
+        class _MidDrainEvictingProcessor:
+            """Raises RunWorkerEvictedError on the first _drain_scheduler_claims call."""
+
+            def __init__(self) -> None:
+                self.drain_calls: list[dict] = []
+
+            def _drain_scheduler_claims(self, *, ctx: Any, pending_items: Any, recover_pending_sinks: bool, **_kwargs: Any) -> list[Any]:
+                self.drain_calls.append({"recover_pending_sinks": recover_pending_sinks})
+                raise RunWorkerEvictedError(worker_id=WORKER_ID, run_id=RUN_ID)
+
+        processor = _MidDrainEvictingProcessor()
+        coord_repo = _StubRunCoordRepo()
+        # Heartbeat latch NOT set (evicted=False) — the exception comes from drain, not heartbeat.
+        heartbeat = _StubHeartbeat(evicted=False)
+
+        # get_run sequence: first call (top-of-loop check, returns RUNNING so loop continues),
+        # second call (in the except arm recheck, returns COMPLETED → clean exit).
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.enums import RunStatus
+
+        factory = _StubFactory(running=True)
+        run_result_running = MagicMock()
+        run_result_running.status = RunStatus.RUNNING
+        run_result_completed = MagicMock()
+        run_result_completed.status = RunStatus.COMPLETED
+        factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
+
+        token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
+        follower = FollowerProcessor(
+            processor=processor,  # type: ignore[arg-type]
+            token=token,
+            run_coordination=coord_repo,  # type: ignore[arg-type]
+            factory=factory,  # type: ignore[arg-type]
+            now_fn=lambda: NOW,
+            wait_fn=lambda _: None,
+        )
+
+        # Must return normally — NOT raise RunWorkerEvictedError.
+        with patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat):
+            follower.run(ctx=_ctx())  # must not raise
+
+        # Depart called once (best-effort hygiene).
+        assert len(coord_repo.depart_calls) == 1
+        assert coord_repo.depart_calls[0]["worker_id"] == WORKER_ID
+
+        # Heartbeat lifecycle clean.
+        assert heartbeat.start_called
+        assert heartbeat.stop_called
+
+    def test_mid_drain_true_eviction_still_raises(self) -> None:
+        """RunWorkerEvictedError from _drain_scheduler_claims + run still RUNNING
+        → RunWorkerEvictedError propagates (true eviction, not finalize-departure).
+
+        This is the negative/anti-regression test: we must NOT suppress true
+        evictions (which should surface as exit 3 at the CLI).
+        """
+
+        class _MidDrainEvictingProcessor:
+            def __init__(self) -> None:
+                self.drain_calls: list[dict] = []
+
+            def _drain_scheduler_claims(self, *, ctx: Any, pending_items: Any, recover_pending_sinks: bool, **_kwargs: Any) -> list[Any]:
+                self.drain_calls.append({"recover_pending_sinks": recover_pending_sinks})
+                raise RunWorkerEvictedError(worker_id=WORKER_ID, run_id=RUN_ID)
+
+        processor = _MidDrainEvictingProcessor()
+        coord_repo = _StubRunCoordRepo()
+        heartbeat = _StubHeartbeat(evicted=False)
+
+        # Run stays RUNNING for ALL get_run calls → true eviction.
+        factory = _StubFactory(running=True)
+
+        token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
+        follower = FollowerProcessor(
+            processor=processor,  # type: ignore[arg-type]
+            token=token,
+            run_coordination=coord_repo,  # type: ignore[arg-type]
+            factory=factory,  # type: ignore[arg-type]
+            now_fn=lambda: NOW,
+            wait_fn=lambda _: None,
+        )
+
+        # Must raise RunWorkerEvictedError.
+        with (
+            patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat),
+            pytest.raises(RunWorkerEvictedError) as exc_info,
+        ):
+            follower.run(ctx=_ctx())
+
+        assert exc_info.value.worker_id == WORKER_ID
+        assert exc_info.value.run_id == RUN_ID
+
+        # Depart still called (best-effort).
+        assert len(coord_repo.depart_calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # Tests: stop condition — SIGINT
 # ---------------------------------------------------------------------------
 

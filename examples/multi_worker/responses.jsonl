@@ -1,0 +1,6 @@
+{"content": "{\"sentiment\": \"positive\", \"confidence\": 0.9, \"summary\": \"clearly positive\"}"}
+{"content": "{\"sentiment\": \"negative\", \"confidence\": 0.85, \"summary\": \"clearly negative\"}"}
+{"content": "{\"sentiment\": \"neutral\", \"confidence\": 0.6, \"summary\": \"mixed signals\"}"}
+{"content": "{\"sentiment\": \"positive\", \"confidence\": 0.88, \"summary\": \"enthusiastic approval\"}"}
+{"content": "{\"sentiment\": \"negative\", \"confidence\": 0.92, \"summary\": \"strong dissatisfaction\"}"}
+{"content": "{\"sentiment\": \"neutral\", \"confidence\": 0.72, \"summary\": \"moderate assessment\"}"}

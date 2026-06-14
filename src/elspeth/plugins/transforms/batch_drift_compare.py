@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -127,7 +128,7 @@ class BatchDriftCompare(BaseTransform):
     name = "batch_drift_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b96cdf96069ddb27"
+    source_file_hash: str | None = "sha256:3efb65134bc8c78a"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 
@@ -204,6 +205,30 @@ class BatchDriftCompare(BaseTransform):
         current = self._augment_invariant_probe_row(probe, field_name=self._cohort_field, value="current")
         current = self._augment_invariant_probe_row(current, field_name=self._value_field, value=2.0)
         return [baseline, current]
+
+    @staticmethod
+    def _is_non_finite_group_key(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite cohort key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_group_key(row[self._cohort_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_group_key"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_group_key",
+            "field": self._cohort_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _collect_cohorts(self, rows: list[PipelineRow]) -> list[tuple[Any, list[PipelineRow]]]:
         cohorts: list[tuple[Any, list[PipelineRow]]] = []
@@ -445,6 +470,10 @@ class BatchDriftCompare(BaseTransform):
         """Compare baseline and current cohort distributions over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_group_key_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         grouped = self._collect_cohorts(rows)
         cohort_values = [(cohort, self._values_for(cohort, cohort_rows)) for cohort, cohort_rows in grouped]

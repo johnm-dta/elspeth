@@ -243,19 +243,29 @@ class TestAzureBlobSourceCSV:
         assert len(rows) == 1
         assert rows[0].row["name"] == "alice"
 
-    def test_csv_without_header(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
-        """CSV without header row uses numeric column names."""
+    def test_csv_without_header_with_explicit_columns(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
+        """Headerless CSV maps positional values onto explicitly-declared columns."""
         csv_data = b"1,alice,100\n2,bob,200\n"
         mock_client = MagicMock()
         mock_client.download_blob.return_value.readall.return_value = csv_data
         mock_blob_client.return_value = mock_client
 
-        source = AzureBlobSource(make_config(csv_options={"has_header": False}))
+        source = AzureBlobSource(make_config(csv_options={"has_header": False}, columns=["id", "name", "value"]))
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
-        # Without header, columns are 0, 1, 2
-        assert rows[0].row == {"0": "1", "1": "alice", "2": "100"}
+        # Explicit columns name the positional fields (no numeric-name fallback).
+        assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
+
+    def test_csv_without_header_and_no_columns_rejected_at_config(self) -> None:
+        """B4.4: headerless CSV with no columns and no schema fields is rejected at config time.
+
+        Numeric fallback names ("0","1",...) are not valid Python identifiers and
+        break the source-boundary all-fields-are-valid-identifiers invariant, so the
+        config is refused (fail-fast) rather than silently generating them.
+        """
+        with pytest.raises(PluginConfigError, match="columns"):
+            AzureBlobSource(make_config(csv_options={"has_header": False}))
 
     def test_csv_with_encoding(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """CSV with non-UTF8 encoding works correctly."""

@@ -116,3 +116,41 @@ def test_run_wide_duplicate_sweep_names_only_duplicated_tokens() -> None:
     )
 
     assert setup.factory.data_flow.find_duplicate_live_buffered_outcomes(setup.run_id) == [(token.token_id, 2)]
+
+
+def test_failed_unrouted_reconcile_read_scopes_to_failure_unrouted() -> None:
+    """The aggregation §E.3a reconcile signature (elspeth-55546a6fd6): only
+    completed (FAILURE, UNROUTED) tokens are returned. The success-path
+    BATCH_CONSUMED residual (elspeth-3977d8ab60, which still owes a sink output)
+    and a still-live BUFFERED token are BOTH excluded, so the restore reconcile
+    never silently releases a row that is not the failed-flush crash signature.
+    """
+    setup, _node_id, batch, failed_token = _setup_buffered_token()
+    df = setup.factory.data_flow
+    run_id = setup.run_id
+
+    # Token A: terminally FAILED via the failure-arm signature → swept.
+    df.record_token_outcome(
+        TokenRef(token_id=failed_token.token_id, run_id=run_id), TerminalOutcome.FAILURE, TerminalPath.UNROUTED, error_hash="deadbeef"
+    )
+
+    # Token B: BATCH_CONSUMED success residual → NOT swept.
+    row_b = df.create_row(run_id, setup.source_node_id, 1, {"id": 2}, source_row_index=1, ingest_sequence=1)
+    token_b = df.create_token(row_id=row_b.row_id)
+    df.record_token_outcome(
+        TokenRef(token_id=token_b.token_id, run_id=run_id), TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, batch_id=batch.batch_id
+    )
+
+    # Token C: still live BUFFERED → NOT swept.
+    row_c = df.create_row(run_id, setup.source_node_id, 2, {"id": 3}, source_row_index=2, ingest_sequence=2)
+    token_c = df.create_token(row_id=row_c.row_id)
+    df.record_token_outcome(TokenRef(token_id=token_c.token_id, run_id=run_id), None, TerminalPath.BUFFERED, batch_id=batch.batch_id)
+
+    result = df.get_failed_unrouted_terminal_token_ids(run_id, [failed_token.token_id, token_b.token_id, token_c.token_id])
+
+    assert result == frozenset({failed_token.token_id})
+
+
+def test_failed_unrouted_reconcile_read_empty_input_short_circuits() -> None:
+    setup, _node_id, _batch, _token = _setup_buffered_token()
+    assert setup.factory.data_flow.get_failed_unrouted_terminal_token_ids(setup.run_id, []) == frozenset()

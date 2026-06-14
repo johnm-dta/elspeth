@@ -3387,15 +3387,21 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         source_options: dict[str, Any],
         consumer_options: dict[str, Any],
         output_options: dict[str, Any],
+        source_name: str = "source",
     ) -> CompositionState:
+        # ``source_name`` defaults to the unnamed default source (producer_id
+        # "source"); pass a name to mint a NAMED source (producer_id
+        # "source:<name>") — the multi-source headline shape that exercises the
+        # ``is_source_producer_id`` predicate rather than the literal "source".
         state = self._empty_state()
-        state = state.with_source(
+        state = state.with_named_source(
+            source_name,
             SourceSpec(
                 plugin="csv",
                 on_success="t1",
                 options=source_options,
                 on_validation_failure="quarantine",
-            )
+            ),
         )
         state = state.with_node(
             NodeSpec(
@@ -3425,7 +3431,7 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         state = state.with_edge(
             EdgeSpec(
                 id="e1",
-                from_node="source",
+                from_node=source_name,
                 to_node="t1",
                 edge_type="on_success",
                 label=None,
@@ -3513,6 +3519,63 @@ class TestComposerRuntimeFixedModeImplicitRequiredAgreement:
         composer_result = state.validate()
         assert not composer_result.is_valid, (
             "Composer should reject: fixed consumer implicitly requires 'teal_pairing_rating' which the typed source does not guarantee."
+        )
+        assert any(
+            "schema contract violation" in entry.message.lower() and "teal_pairing_rating" in entry.message
+            for entry in composer_result.errors
+        ), [e.message for e in composer_result.errors]
+
+        with pytest.raises(GraphValidationError) as exc_info:
+            self._build_runtime_graph(
+                source_options=source_options,
+                consumer_options=consumer_options,
+                output_options=output_options,
+            )
+        assert "teal_pairing_rating" in str(exc_info.value)
+
+    def test_reject_fixed_consumer_implicit_required_over_named_typed_source(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """(A-named) Same as (A) but the producer is a NAMED source
+        (producer_id ``source:customers``), the headline multi-source shape.
+
+        Regression for elspeth-3332619032: ``_producer_is_typed_source`` gated on
+        the literal ``producer_id != "source"`` and returned False for any
+        ``source:<name>`` producer, so the implicit-required parity check never
+        fired for named sources — composer green / runtime red, exactly the
+        divergence this suite forbids. The explicit-required path one block up
+        already used ``is_source_producer_id`` and rejected correctly, proving
+        the intended coverage. Pre-fix this asserts-False at
+        ``assert not composer_result.is_valid``.
+        """
+        csv_path = tmp_path / "in.csv"
+        csv_path.write_text("color\nred\n", encoding="utf-8")
+        output_path = tmp_path / "out.csv"
+
+        source_options = {
+            "path": str(csv_path),
+            "schema": {"mode": "fixed", "fields": ["color: str"]},
+        }
+        consumer_options = {
+            "operations": [{"target": "out", "expression": "row['color']"}],
+            "schema": {
+                "mode": "fixed",
+                "fields": ["color: str", "teal_pairing_rating: str"],
+            },
+        }
+        output_options = {"path": str(output_path), "schema": {"mode": "observed"}}
+
+        state = self._state(
+            source_options=source_options,
+            consumer_options=consumer_options,
+            output_options=output_options,
+            source_name="customers",
+        )
+        composer_result = state.validate()
+        assert not composer_result.is_valid, (
+            "Composer should reject: fixed consumer implicitly requires "
+            "'teal_pairing_rating' which the NAMED typed source 'customers' does not guarantee."
         )
         assert any(
             "schema contract violation" in entry.message.lower() and "teal_pairing_rating" in entry.message

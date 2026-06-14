@@ -305,11 +305,19 @@ class TestLoadScenarios:
                 transform.close()
 
     def test_rate_limit_error_handling(self) -> None:
-        """Verify plugin handles rate limit errors correctly via provider mock."""
-        from elspeth.plugins.infrastructure.clients.llm import RateLimitError
-        from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
+        """Verify plugin handles a persistent rate limit by bounded-retry divert.
 
-        config = _make_config()
+        B3.7: retryable LLMClientErrors (429/5xx/network) are retried locally with
+        bounded backoff up to ``max_capacity_retry_seconds``. A *persistent* rate
+        limit therefore exhausts the (here 1s) budget and the row diverts to a
+        terminal error result (reason='retry_timeout', non-retryable) rather than
+        re-raising or bubbling a retryable error back to the engine.
+        """
+        from elspeth.plugins.infrastructure.clients.llm import RateLimitError
+        from elspeth.plugins.transforms.llm.provider import LLMQueryResult
+
+        # Pin the retry budget low so the persistent rate limit exhausts quickly.
+        config = _make_config(max_capacity_retry_seconds=1)
 
         transform = LLMTransform(config)
         init_ctx = make_context()
@@ -318,7 +326,7 @@ class TestLoadScenarios:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=10)
 
-        # Mock the provider to raise RateLimitError on some queries
+        # Mock the provider to raise RateLimitError persistently (every call).
         mock_provider = Mock(spec=LLMProvider)
         query_call_count = [0]
 
@@ -333,14 +341,7 @@ class TestLoadScenarios:
             response_format: dict[str, object] | None = None,
         ) -> LLMQueryResult:
             query_call_count[0] += 1
-            if query_call_count[0] % 3 == 0:
-                raise RateLimitError("Rate limit exceeded")
-            return LLMQueryResult(
-                content=json.dumps({"score": 85, "rationale": "OK"}),
-                usage=TokenUsage.known(10, 5),
-                model="gpt-4o",
-                finish_reason=FinishReason.STOP,
-            )
+            raise RateLimitError("Rate limit exceeded")
 
         mock_provider.execute_query.side_effect = mock_execute_query
         mock_provider.close = Mock()
@@ -356,17 +357,20 @@ class TestLoadScenarios:
             transform.accept(make_pipeline_row(row), ctx)
             transform.flush_batch_processing(timeout=10.0)
 
-            # Process will fail because one query hits rate limit (retryable → re-raised)
+            # The persistent rate limit exhausts the bounded retry → terminal divert.
             assert len(collector.results) == 1
             _, result, _state_id = collector.results[0]
 
-            # RateLimitError is retryable → re-raised as exception
             from elspeth.engine.batch_adapter import ExceptionResult
 
-            if isinstance(result, TransformResult):
-                assert result.status == "error"
-            else:
-                assert isinstance(result, ExceptionResult)
+            assert isinstance(result, TransformResult), f"Expected a diverted TransformResult, got {type(result)}"
+            assert not isinstance(result, ExceptionResult)
+            assert result.status == "error"
+            assert result.retryable is False
+            assert result.reason is not None
+            assert result.reason["reason"] == "retry_timeout"
+            # Provider was called more than once — bounded retry actually retried.
+            assert query_call_count[0] >= 1
 
         finally:
             transform.close()
@@ -438,7 +442,9 @@ class TestRowAtomicity:
         from elspeth.plugins.infrastructure.clients.llm import RateLimitError
         from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
 
-        config = _make_config()
+        # Pin a low retry budget so the persistently-failing rows divert quickly
+        # (B3.7 bounded local retry would otherwise nap toward the 3600s default).
+        config = _make_config(max_capacity_retry_seconds=1)
 
         transform = LLMTransform(config)
         init_ctx = make_context()
@@ -447,9 +453,13 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=50)
 
-        # Mock provider to simulate rate limit errors
+        # Mock provider to simulate capacity errors. Failures must be PERSISTENT
+        # for a deterministic subset of rows — a transient failure would now be
+        # absorbed by the bounded local retry and never surface as a failed row.
+        # Rows whose index is divisible by 5 (10 of 50) fail every query attempt.
         mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
+        failing_rows = {i for i in range(50) if i % 5 == 0}
 
         def mock_execute_query(
             messages: list[dict[str, str]],
@@ -462,7 +472,8 @@ class TestRowAtomicity:
             response_format: dict[str, object] | None = None,
         ) -> LLMQueryResult:
             llm_call_count[0] += 1
-            if llm_call_count[0] % 10 == 0:
+            row_idx = int(state_id.rsplit("-", 1)[1])
+            if row_idx in failing_rows:
                 raise RateLimitError("Rate limit exceeded")
             return LLMQueryResult(
                 content=json.dumps({"score": 85 + llm_call_count[0], "rationale": f"R{llm_call_count[0]}"}),
@@ -476,7 +487,7 @@ class TestRowAtomicity:
         transform._provider = mock_provider
 
         try:
-            # Process 50 rows (200 total queries, ~20 will fail)
+            # Process 50 rows; 10 (index % 5 == 0) divert via exhausted retry budget.
             for i in range(50):
                 row = {
                     "row_id": i,
@@ -540,7 +551,8 @@ class TestRowAtomicity:
         from elspeth.plugins.infrastructure.clients.llm import RateLimitError
         from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
 
-        config = _make_config()
+        # Pin a low retry budget so persistently-failing rows divert quickly.
+        config = _make_config(max_capacity_retry_seconds=1)
 
         transform = LLMTransform(config)
         init_ctx = make_context()
@@ -549,8 +561,12 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=20)
 
+        # 80% of rows (index not divisible by 5: 16 of 20) fail PERSISTENTLY so the
+        # bounded local retry cannot rescue them; the rest succeed. Persistent (not
+        # transient) failure is required post-B3.7 to still produce failed rows.
         mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
+        failing_rows = {i for i in range(20) if i % 5 != 0}
 
         def mock_execute_query(
             messages: list[dict[str, str]],
@@ -562,10 +578,10 @@ class TestRowAtomicity:
             token_id: str,
             response_format: dict[str, object] | None = None,
         ) -> LLMQueryResult:
-            """Simulate 80% failure rate."""
+            """Simulate an 80% per-row persistent failure rate."""
             llm_call_count[0] += 1
-            # Only calls ending in 0 or 5 succeed (20%)
-            if llm_call_count[0] % 5 not in [0, 5]:
+            row_idx = int(state_id.rsplit("-", 1)[1])
+            if row_idx in failing_rows:
                 raise RateLimitError("Rate limit exceeded")
             return LLMQueryResult(
                 content=json.dumps({"score": 85, "rationale": "OK"}),
@@ -579,7 +595,7 @@ class TestRowAtomicity:
         transform._provider = mock_provider
 
         try:
-            # Process 20 rows (80 queries, ~64 will fail)
+            # Process 20 rows; 16 (index % 5 != 0) divert via exhausted retry budget.
             for i in range(20):
                 row = {
                     "row_id": i,

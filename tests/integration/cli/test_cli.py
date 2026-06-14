@@ -609,3 +609,201 @@ class TestJoinCommand:
         combined = result.output
         # Should mention the run was joined and departed cleanly.
         assert run_id in combined
+
+    def test_join_json_format_suppresses_db_banner(self, tmp_path: Path) -> None:
+        """join --format json must NOT print the settings-derived DB banner to stdout.
+
+        Regression: the settings-derived database path emitted an unconditional
+        ``typer.echo("Using database from settings.yaml: ...")`` to stdout BEFORE the
+        JSON events.  A caller parsing stdout as JSON/JSONL would choke on that
+        non-JSON line.  The banner is informational and must be suppressed in JSON
+        mode, matching the ``resume`` command's ``if output_format != "json"``
+        convention.  It still appears in (default) console mode.
+
+        The banner fires during DB resolution — ahead of admission — so a RUNNING
+        run with no live leader is sufficient to reach the banner site; admission
+        refusing afterwards (exit 1) does not affect the assertion.
+        """
+        from elspeth.cli import app
+
+        run_id = "run-json-banner-005"
+        settings_path = _make_minimal_settings(tmp_path)
+        _seed_running_run(tmp_path, run_id=run_id, config_hash="any", live_leader=False)
+
+        banner = "Using database from settings.yaml"
+
+        # Console mode (default): banner expected on stdout.
+        console_result = runner.invoke(app, ["join", run_id, "--settings", str(settings_path)])
+        assert banner in console_result.output, f"Console mode should print the banner.\nOutput:\n{console_result.output}"
+
+        # JSON mode: banner must NOT pollute stdout.
+        json_result = runner.invoke(app, ["join", run_id, "--settings", str(settings_path), "--format", "json"])
+        assert banner not in json_result.output, f"JSON mode must suppress the banner.\nOutput:\n{json_result.output}"
+
+
+# ===========================================================================
+# Eviction handling tests — elspeth-c6da3d69f1
+# Verify that ``run`` and ``resume`` emit event=evicted / exit 3 (not
+# event=error / exit 4) when RunWorkerEvictedError escapes the execution seam.
+# ===========================================================================
+
+
+def _make_jsonl_settings(tmp_path: Path) -> Path:
+    """Write a minimal settings.yaml using a JSONL sink (supports resume) and return the path."""
+    sample_csv = tmp_path / "data.csv"
+    sample_csv.write_text("id,name\n1,alice\n")
+    config = {
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "default",
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        },
+        "sinks": {
+            "default": {
+                "plugin": "json",
+                "on_write_failure": "discard",
+                "options": {
+                    "path": str(tmp_path / "output.jsonl"),
+                    "schema": {"mode": "observed"},
+                },
+            },
+        },
+        "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
+        "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
+    }
+    (tmp_path / "payloads").mkdir(exist_ok=True)
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(yaml.dump(config))
+    return settings_path
+
+
+class TestRunResumeEviction:
+    """Verify that RunWorkerEvictedError is caught by dedicated 'except' arms in
+    'run' and 'resume', emitting event=evicted / exit 3 (not event=error / exit 4).
+
+    Regression for elspeth-c6da3d69f1: before the fix these commands fell
+    through to 'except Exception' and emitted event=error with a traceback.
+    """
+
+    def test_run_evicted_emits_evicted_event(self, tmp_path: Path) -> None:
+        """``elspeth run --format json`` exits 3 and emits event=evicted when
+        RunWorkerEvictedError escapes _execute_pipeline_with_instances.
+
+        PRE-FIX behaviour: exit 4, event=error (falls through to except Exception).
+        POST-FIX behaviour: exit 3, event=evicted (dedicated arm before TIER_1_ERRORS).
+        """
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        settings_path = _make_minimal_settings(tmp_path)
+
+        eviction_exc = RunWorkerEvictedError(worker_id="worker:run-x:abc", run_id="run-x")
+
+        with patch(
+            "elspeth.cli._execute_pipeline_with_instances",
+            side_effect=eviction_exc,
+        ):
+            result = runner.invoke(
+                app,
+                ["run", "--settings", str(settings_path), "--execute", "--format", "json"],
+            )
+
+        # Must exit 3 (evicted / interrupted-style), not 4 (unhandled exception).
+        assert result.exit_code == 3, f"Expected exit 3 for eviction but got {result.exit_code}.\nOutput:\n{result.output}"
+
+        # Combined stdout+stderr from CliRunner — find the evicted JSON line.
+        combined = result.output
+        evicted_lines = [line for line in combined.splitlines() if '"event"' in line and '"evicted"' in line]
+        assert evicted_lines, f"Expected a JSON line with event=evicted, got none.\nOutput:\n{combined}"
+
+        event = json.loads(evicted_lines[0])
+        assert event["event"] == "evicted"
+        assert event.get("run_id") == "run-x"
+        assert event.get("worker_id") == "worker:run-x:abc"
+        assert "message" in event
+
+        # Must NOT emit event=error or a Python traceback.
+        assert '"event": "error"' not in combined and '"event":"error"' not in combined, f"Must not emit event=error.\nOutput:\n{combined}"
+        assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
+
+    def test_resume_evicted_emits_evicted_event(self, tmp_path: Path) -> None:
+        """``elspeth resume --execute --format json`` exits 3 and emits event=evicted
+        when RunWorkerEvictedError escapes _execute_resume_with_instances.
+
+        PRE-FIX behaviour: exit 4, event=error (falls through to except Exception).
+        POST-FIX behaviour: exit 3, event=evicted (dedicated arm before TIER_1_ERRORS).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.checkpoint import ResumeCheck
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        run_id = "run-evict-resume-001"
+        settings_path = _make_jsonl_settings(tmp_path)
+
+        # Seed the landscape DB so LandscapeDB.from_url succeeds and the
+        # schema-inspection guard passes.
+        from elspeth.core.landscape import LandscapeDB
+
+        db_path = tmp_path / "landscape.db"
+        seed_db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=True)
+        seed_db.close()
+
+        eviction_exc = RunWorkerEvictedError(worker_id="worker:resume-x:xyz", run_id=run_id)
+
+        mock_resume_point = MagicMock()
+        mock_resume_point.sequence_number = 0
+        mock_resume_point.barrier_scalars = None
+
+        with (
+            patch(
+                "elspeth.core.checkpoint.recovery.RecoveryManager.can_resume",
+                return_value=ResumeCheck(can_resume=True),
+            ),
+            patch(
+                "elspeth.core.checkpoint.recovery.RecoveryManager.get_resume_point",
+                return_value=mock_resume_point,
+            ),
+            patch(
+                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_rows",
+                return_value=[],
+            ),
+            patch(
+                "elspeth.core.checkpoint.recovery.RecoveryManager.count_blocked_barrier_items",
+                return_value=0,
+            ),
+            patch(
+                "elspeth.cli._execute_resume_with_instances",
+                side_effect=eviction_exc,
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["resume", run_id, "--settings", str(settings_path), "--execute", "--format", "json"],
+            )
+
+        # Must exit 3 (evicted / interrupted-style), not 4 (unhandled exception).
+        assert result.exit_code == 3, f"Expected exit 3 for eviction but got {result.exit_code}.\nOutput:\n{result.output}"
+
+        combined = result.output
+        evicted_lines = [line for line in combined.splitlines() if '"event"' in line and '"evicted"' in line]
+        assert evicted_lines, f"Expected a JSON line with event=evicted, got none.\nOutput:\n{combined}"
+
+        event = json.loads(evicted_lines[0])
+        assert event["event"] == "evicted"
+        assert event.get("run_id") == run_id
+        assert event.get("worker_id") == "worker:resume-x:xyz"
+        assert "message" in event
+
+        # Must NOT emit event=error or a Python traceback.
+        assert '"event": "error"' not in combined and '"event":"error"' not in combined, f"Must not emit event=error.\nOutput:\n{combined}"
+        assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"

@@ -272,6 +272,36 @@ class TestAuditedLLMClient:
         assert "API connection failed" in call_kwargs["error"].message
         assert call_kwargs["error"].retryable is False
 
+    def test_missing_usage_attribute_still_records_call(self) -> None:
+        """A success response lacking .usage records an ERROR call, never vanishes.
+
+        An OpenAI-compatible provider whose response omits .usage would otherwise
+        raise AttributeError on the success path BEFORE any guarded region, with no
+        Landscape record despite tokens being consumed — a call-index gap that
+        violates the file's own policy (plugins review Batch 4 item 1).
+        """
+        execution = self._create_mock_execution()
+        response = Mock(spec=["choices", "model", "model_dump"])  # no .usage attribute
+        response.choices = [Mock()]
+        response.model = "gpt-4"
+        response.model_dump = Mock(return_value={"id": "resp_123"})
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_123",
+            run_id="run_abc",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError):
+            client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Hi"}])
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args[1]["status"] == CallStatus.ERROR
+
     def test_rate_limit_error_marked_retryable(self) -> None:
         """Rate limit errors are marked as retryable."""
         execution = self._create_mock_execution()
@@ -922,13 +952,19 @@ class TestAuditedLLMClient:
         assert call_kwargs["response_data"].to_dict()["choices"][0]["message"]["content"] == ["part1", "part2"]
 
 
-class TestBug4_6_SuccessPathOutsideTryExcept:
-    """Bug 4.6: Internal processing errors in success path crash directly.
+class TestBug4_1_ContentExtractionRecordsBeforeReraising:
+    """B4.1: content/finish_reason extraction must record the call before re-raising.
 
-    Previously, the success path (content extraction, usage building,
-    audit recording) was inside the same try/except that caught SDK errors.
-    This meant an AttributeError in our code would be misclassified as an
-    LLMClientError. Now the success path is OUTSIDE the try/except block.
+    Operator decision (2026-06-14): a missing .message/.content or
+    .finish_reason on the success path is an audit gap -- the LLM call
+    consumed a call_index and provider tokens, so it MUST appear in the
+    audit trail. The call is recorded as ERROR (with the raw response
+    captured) and then LLMClientError is re-raised, giving callers a typed
+    boundary error consistent with every other failure branch in this method.
+
+    This supersedes the prior Bug-4.6 doctrine (direct AttributeError crash,
+    no record) which was tested in TestBug4_6_SuccessPathOutsideTryExcept.
+    That class has been renamed here to reflect B4.1 (2026-06-14).
     """
 
     @staticmethod
@@ -938,18 +974,24 @@ class TestBug4_6_SuccessPathOutsideTryExcept:
         execution.record_call = Mock()
         return execution
 
-    def test_internal_error_in_success_path_crashes_directly(self) -> None:
-        """Bug in success processing crashes as AttributeError, not LLMClientError.
+    def test_content_extraction_failure_records_call_before_raising(self) -> None:
+        """Missing .content on success path: call recorded as ERROR, LLMClientError raised.
 
-        If response.choices[0].message has no 'content' attribute (simulating
-        an internal processing bug), it should raise AttributeError directly,
-        NOT get caught and wrapped as LLMClientError.
+        B4.1 (supersedes Bug-4.6): if response.choices[0].message has no 'content'
+        attribute (AttributeError at the Tier-3 boundary), the implementation must:
+          1. Record the call as ERROR in the audit trail (record_call called once).
+          2. Re-raise as LLMClientError (not AttributeError) so callers get a typed
+             boundary error consistent with all other failure branches.
+          3. Preserve raw_response in response_data so audit completeness is maintained.
+
+        Prior doctrine (Bug-4.6): AttributeError propagated directly with NO record_call,
+        creating an unexplained audit gap. Superseded by operator decision 2026-06-14.
         """
         execution = self._create_mock_execution()
 
-        # Create a response where .choices[0].message.content raises AttributeError
-        # This simulates a bug in our success path processing
-        message = Mock(spec=[])  # Empty spec means no attributes at all
+        # Create a response where .choices[0].message.content raises AttributeError.
+        # Mock(spec=[]) has no attributes, so any attribute access raises AttributeError.
+        message = Mock(spec=[])  # Empty spec -- no attributes at all
         choice = Mock()
         choice.message = message  # message.content will raise AttributeError
 
@@ -964,20 +1006,81 @@ class TestBug4_6_SuccessPathOutsideTryExcept:
         openai_client = MagicMock()
         openai_client.chat.completions.create.return_value = response
 
+        emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
             execution=execution,
-            state_id="state_bug46",
-            run_id="run_bug46",
-            telemetry_emit=lambda event: None,
+            state_id="state_b41",
+            run_id="run_b41",
+            telemetry_emit=lambda event: emitted_events.append(event),
             underlying_client=openai_client,
         )
 
-        # Should raise AttributeError directly (not LLMClientError)
-        with pytest.raises(AttributeError):
+        # B4.1: must raise LLMClientError (typed boundary error), NOT AttributeError
+        with pytest.raises(LLMClientError):
             client.chat_completion(
                 model="gpt-4",
                 messages=[{"role": "user", "content": "Hello"}],
             )
+
+        # The call MUST be recorded despite the AttributeError -- audit integrity
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["call_type"] == CallType.LLM
+        assert call_kwargs["state_id"] == "state_b41"
+        # Error must be present, non-retryable, and name the failure
+        assert call_kwargs["error"] is not None
+        assert call_kwargs["error"].retryable is False
+        assert call_kwargs["error"].message  # non-empty description
+        # Raw response must be captured so audit has evidence of what was returned
+        assert call_kwargs["response_data"] is not None
+
+    def test_content_extraction_failure_emits_telemetry_before_raising(self) -> None:
+        """Missing .content must emit ExternalCallCompleted(ERROR) before re-raising.
+
+        B4.1: telemetry dashboards need the ExternalCallCompleted event to avoid
+        undercounting content-extraction failures alongside the other error branches
+        (elspeth-a960d22540).
+        """
+        execution = self._create_mock_execution()
+
+        message = Mock(spec=[])  # No attributes -- .content raises AttributeError
+        choice = Mock()
+        choice.message = message
+
+        response = Mock()
+        response.choices = [choice]
+        response.model = "gpt-4"
+        response.usage = Mock()
+        response.usage.prompt_tokens = 10
+        response.usage.completion_tokens = 5
+        response.model_dump = Mock(return_value={"id": "resp_telemetry_b41"})
+
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        emitted_events: list[ExternalCallCompleted] = []
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_b41_tel",
+            run_id="run_b41_tel",
+            telemetry_emit=lambda event: emitted_events.append(event),
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+
+        # Exactly one ExternalCallCompleted emitted with ERROR status
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.status == CallStatus.ERROR
+        assert event.call_type == CallType.LLM
+        assert event.state_id == "state_b41_tel"
+        assert event.run_id == "run_b41_tel"
 
 
 class TestContentFabrication:

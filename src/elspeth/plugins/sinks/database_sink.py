@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, field_validator
 from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -108,7 +108,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7b35aa9be26c361e"
+    source_file_hash: str | None = "sha256:c169a1decc2eb757"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -194,15 +194,27 @@ class DatabaseSink(BaseSink):
         For observed-mode schemas, ALL fields are checked since any field
         could contain a complex value when the schema is inferred.
 
+        For flexible-mode schemas, ALL fields are also checked: declared fields
+        have their configured types, but extra columns are added as plain Text
+        at table-creation time and never enter _any_typed_fields -- so a dict/list
+        value in an extra column would hit the driver raw and raise ProgrammingError.
+        Serializing all fields in flexible mode mirrors the observed-mode path.
+
         Scalar values (str, int, float, bool, None) are left unchanged.
         """
-        if not self._any_typed_fields and not self._schema_config.is_observed:
+        is_flexible = self._schema_config.mode == "flexible"
+        if not self._any_typed_fields and not self._schema_config.is_observed and not is_flexible:
             return rows
 
         result = []
         for row in rows:
             new_row = dict(row)
-            fields_to_check = self._any_typed_fields if self._any_typed_fields else set(row.keys())
+            # Observed and flexible modes must check every key: any column may
+            # hold a complex value that the Text column cannot accept raw.
+            if self._schema_config.is_observed or is_flexible:
+                fields_to_check: frozenset[str] | set[str] = set(row.keys())
+            else:
+                fields_to_check = self._any_typed_fields
             for field in fields_to_check:
                 if field in new_row:
                     value = new_row[field]
@@ -685,9 +697,12 @@ class DatabaseSink(BaseSink):
             try:
                 conn.execute(insert(table), insert_rows)
                 batch_savepoint.commit()
-            except IntegrityError:
+            except (IntegrityError, DataError):
                 # Per-row-attributable: re-execute row-by-row to identify the
                 # offending row(s). Roll the failed batch attempt back first.
+                # DataError (e.g. integer overflow on a typed column) is a sibling
+                # of IntegrityError under DatabaseError -- both are row-attributable
+                # faults that must divert the bad row rather than crash the batch.
                 batch_savepoint.rollback()
                 written_rows = []
                 for i, sql_row in enumerate(insert_rows):
@@ -696,7 +711,7 @@ class DatabaseSink(BaseSink):
                         conn.execute(insert(table), [sql_row])
                         row_savepoint.commit()
                         written_rows.append(sql_row)
-                    except IntegrityError as exc:
+                    except (IntegrityError, DataError) as exc:
                         row_savepoint.rollback()
                         self._divert_row(
                             rows[i],
@@ -737,12 +752,12 @@ class DatabaseSink(BaseSink):
             return PluginAssistance(
                 plugin_name="database",
                 issue_code=None,
-                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write modes: insert, upsert, replace.",
+                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write behaviour is set by if_exists: 'append' (default) or 'replace'.",
                 composer_hints=(
-                    "write_mode: 'insert' (default, append-only), 'upsert' (requires unique key constraint), 'replace' (drops + recreates table at run start — destructive).",
+                    "if_exists: 'append' (default — insert into the existing table, creating it if missing) or 'replace' (drops and recreates the table on the FIRST write — destructive). These are the only two values; there is no insert/upsert mode.",
                     "url is sanitised and audit-recorded — never put credentials inline; use the secrets store.",
                     "Schema fields map to column types: string→TEXT, int→Integer, float→Float, bool→Boolean. Other types need explicit type_coerce upstream.",
-                    "table-replace mode is irreversible mid-run. Confirm with the operator before declaring 'replace' on existing data.",
+                    "if_exists='replace' is irreversible — it drops the table on first write. Confirm with the operator before declaring 'replace' on existing data.",
                     "on_write_failure routes per-row constraint violations (UNIQUE / NOT NULL / CHECK / foreign-key) — the offending row is diverted and the rest of the batch commits. Batch-integrity failures (connection loss, lock timeout, bad SQL) are not row-attributable and crash the run.",
                 ),
             )
@@ -756,14 +771,8 @@ class DatabaseSink(BaseSink):
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
         hints: list[str] = []
-        if "write_mode" in config_snapshot:
-            write_mode = config_snapshot["write_mode"]
-            if write_mode == "replace":
-                hints.append(
-                    "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
-                )
-            elif write_mode == "upsert":
-                hints.append(
-                    "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
-                )
+        if config_snapshot.get("if_exists") == "replace":
+            hints.append(
+                "if_exists: 'replace' DROPS and recreates the target table on the first write. Confirm with the operator that the existing data is expendable before running."
+            )
         return tuple(hints)

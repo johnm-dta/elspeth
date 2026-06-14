@@ -290,16 +290,20 @@ class TestAzureBlobSourceCSV:
         assert len(rows) == 2
         assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
 
-    def test_headerless_no_columns_uses_numeric(self, ctx: PluginContext) -> None:
-        """Headerless CSV without columns uses numeric column names."""
-        csv_bytes = b"1,alice,100\n2,bob,200\n"
-        source = _make_source(_base_config(csv_options={"has_header": False}))
+    def test_headerless_no_columns_no_schema_rejected_at_config(self) -> None:
+        """B4.4: headerless CSV with no columns and no schema fields must be rejected at
+        config time, not silently generate non-identifier numeric field names ("0","1",...).
 
-        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
-            rows = list(source.load(ctx))
+        "0".isidentifier() is False -- numeric names break the all-fields-are-valid-
+        Python-identifiers source-boundary invariant, violate validate_field_names
+        everywhere, and skip field-resolution audit recording entirely.
 
-        assert len(rows) == 2
-        assert rows[0].row == {"0": "1", "1": "alice", "2": "100"}
+        Option B (fail-fast): mirror csv_source which structurally requires 'columns'
+        for headerless mode and has no numeric-name fallback.
+        """
+        cfg = _base_config(csv_options={"has_header": False})
+        with pytest.raises(PluginConfigError, match="columns"):
+            _make_source(cfg)
 
     def test_column_count_mismatch_quarantines_row(self, ctx: PluginContext) -> None:
         """Column count mismatch quarantines individual row, continues processing."""
@@ -317,6 +321,34 @@ class TestAzureBlobSourceCSV:
         assert len(quarantined) == 1
         assert "expected" in quarantined[0].quarantine_error
         assert quarantined[0].quarantine_destination == QUARANTINE_SINK
+
+    def test_malformed_quote_quarantined_not_silently_coerced(self, ctx: PluginContext) -> None:
+        """A row with broken quoting is quarantined with an audit record, never coerced.
+
+        ``4,"bad"quote,6`` has data after a closing quote. Without strict=True the
+        csv module silently merges it into ``badquote`` — a 3-field row whose count
+        still matches, so it passed through as valid with NO quarantine and NO audit
+        record (silent Tier-3 coercion). strict=True makes it raise csv.Error at the
+        source boundary so the existing handler quarantines it (plugins review C1).
+        Rows parsed before the fault survive; processing then stops because csv.Error
+        leaves the parser state untrustworthy (matching CSVSource).
+        """
+        csv_bytes = b'id,name,value\n1,alice,100\n4,"bad"quote,6\n7,carol,300\n'
+        source = _make_source(_base_config())
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+            rows = list(source.load(ctx))
+
+        valid = [r for r in rows if not r.is_quarantined]
+        quarantined = [r for r in rows if r.is_quarantined]
+
+        # The malformed-quote row is quarantined with an audit record, not coerced.
+        assert len(quarantined) == 1
+        assert "csv parse error" in quarantined[0].quarantine_error.lower()
+        assert quarantined[0].quarantine_destination == QUARANTINE_SINK
+        # The clean row before the fault survives; none carries the coerced value.
+        assert any(r.row.get("name") == "alice" for r in valid)
+        assert all(r.row.get("name") != "badquote" for r in valid)
 
     def test_empty_file_quarantines(self, ctx: PluginContext) -> None:
         """Empty CSV file quarantines (no header row)."""
@@ -835,6 +867,41 @@ class TestAzureBlobSourceSchemaValidation:
         assert second_contract is not None
         assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
         assert second_contract.get_field("b").original_name == "b"
+
+
+class TestAzureBlobSourceFieldResolutionUnion:
+    """B4.3: field resolution after heterogeneous sparse rows must be the UNION."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_operation_context(plugin_name="azure_blob")
+
+    def test_field_resolution_is_union_across_heterogeneous_rows(self, ctx: PluginContext) -> None:
+        """B4.3: get_field_resolution() must be the UNION of all keys seen across rows.
+
+        When row1={id, name} is followed by row2={id, email}, the resolution
+        must contain {id, name, email} -- not just {id, email} (the last row).
+        Before the fix the rebuild used list(row.keys()) on the NEW row only,
+        discarding 'name' from the Landscape field-resolution audit record.
+        Mirrors test_field_resolution_is_union_across_heterogeneous_rows in
+        test_json_source.py and test_dataverse_source.py.
+        """
+        blob_bytes = b'{"id": 1, "name": "alice"}\n{"id": 2, "email": "bob@example.com"}\n'
+        source = _make_source(_base_config(format="jsonl"))
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(blob_bytes)):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        # Union: all keys from both rows must be present
+        assert "name" in mapping, "field 'name' from row 1 was lost after row 2 rebuilt the resolution"
+        assert "email" in mapping, "field 'email' from row 2 must be present"
+        assert "id" in mapping
 
 
 # ---------------------------------------------------------------------------

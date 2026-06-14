@@ -365,7 +365,7 @@ def register_session_routes(router: APIRouter) -> None:
                         f"before fork blob rewrite for session {new_session.id}."
                     )
 
-                if sources_dict is not None and blob_map:
+                if sources_dict is not None:
                     for source_name, source_dict in sources_dict.items():
                         if type(source_dict) is not dict:
                             raise AuditIntegrityError(

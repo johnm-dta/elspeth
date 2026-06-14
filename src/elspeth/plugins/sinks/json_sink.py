@@ -104,7 +104,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f901bcbaf8a7c658"
+    source_file_hash: str | None = "sha256:aaa586501df65381"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -534,10 +534,10 @@ class JSONSink(BaseSink):
                 summary="Write rows as JSON-array or JSONL (newline-delimited). Configurable collision_policy, encoding, and on_write_failure routing.",
                 composer_hints=(
                     "Choose format: 'jsonl' for resumable output. JSON-array rewrites the entire file on every checkpoint — not resumable.",
-                    "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
+                    "collision_policy: 'fail_if_exists', 'auto_increment', or 'append_or_create' (only with mode: append). Unset is the default and OVERWRITES an existing file — set it deliberately to protect prior runs.",
                     "JSON sink writes the row it receives; schema, format, sink name, and output name do not drop fields. Use field_mapper before the sink when the user wants to remove or whitelist fields.",
                     "For web_scrape results saved without raw page bodies, route the final path through field_mapper(select_only=true) before this sink; a sink named cleanup is not a cleanup transform.",
-                    "Set on_write_failure to a quarantine sink (or 'discard') so single-row write errors don't crash the run.",
+                    "on_write_failure is REQUIRED (no default): set 'discard' (drop with an audit record) or a quarantine sink name so single-row write errors don't crash the run; omitting it fails validation.",
                     "path templating supports {run_id}, {date}, {sink_name} — use these to avoid collision in concurrent or scheduled runs.",
                 ),
             )
@@ -558,6 +558,6 @@ class JSONSink(BaseSink):
             )
         if "on_write_failure" not in config_snapshot:
             hints.append(
-                "on_write_failure is not set. The default routes write errors to 'discard'; set it to a quarantine sink if write failures should be audited rather than dropped."
+                "on_write_failure is not set, but it is REQUIRED — there is no default. Set it to 'discard' to drop failed rows (with an audit record) or to a quarantine sink name to divert and audit them; a run without it fails validation."
             )
         return tuple(hints)

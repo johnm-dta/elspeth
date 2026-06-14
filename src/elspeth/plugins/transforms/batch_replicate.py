@@ -98,7 +98,7 @@ class BatchReplicate(BaseTransform):
     name = "batch_replicate"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8af0f1d050828429"
+    source_file_hash: str | None = "sha256:3e9b08173c506ade"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
@@ -262,12 +262,15 @@ class BatchReplicate(BaseTransform):
                 # Value-level validation: copies must be >= 1 and <= max_copies
                 # Tier 2 operation safety - type is correct but value is unsafe
                 if raw_copies < 1 or raw_copies > self._max_copies:
+                    # Record the row INDEX for traceability, never the row body:
+                    # row.to_dict() is Tier-2/3 content and must not leak into the
+                    # audit success_reason (prior row-content-leak bug family).
                     quarantined.append(
                         {
                             "reason": "invalid_copies",
                             "field": self._copies_field,
                             "value": raw_copies,
-                            "row_data": row.to_dict(),
+                            "row_index": row_index,
                         }
                     )
                     quarantined_indices.append(row_index)
@@ -300,7 +303,7 @@ class BatchReplicate(BaseTransform):
                 {
                     "reason": "all_rows_failed",
                     "error": f"All {len(quarantined)} rows quarantined: invalid copies values",
-                    "row_errors": [{"row_index": i, "reason": q["reason"]} for i, q in enumerate(quarantined)],
+                    "row_errors": [{"row_index": q["row_index"], "reason": q["reason"]} for q in quarantined],
                 },
                 retryable=False,
             )

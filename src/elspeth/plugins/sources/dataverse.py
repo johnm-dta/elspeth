@@ -37,6 +37,7 @@ from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     FieldResolution,
     normalize_field_name,
     resolve_field_names,
@@ -206,7 +207,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:24de6a391a45041c"
+    source_file_hash: str | None = "sha256:c9ad2888b4cfdc64"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -448,13 +449,17 @@ class DataverseSource(BaseSource):
                 has_unmapped_fields = True
             result[normalized_name] = v
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild from the
+        # UNION of previously-seen keys and this row's new keys. Using only
+        # list(row.keys()) would REPLACE the mapping with just the current row's
+        # fields, discarding keys from earlier rows and corrupting the Landscape
+        # field-resolution audit record (B4.3, elspeth-594221617d).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
@@ -625,14 +630,18 @@ class DataverseSource(BaseSource):
                             )
                         continue
 
-                    # Normalize field names — Tier 3 boundary: field names from
-                    # Dataverse can be arbitrary strings. normalize_field_name()
-                    # raises ValueError if a name normalizes to empty string
-                    # (e.g., all-special-character field names). Quarantine the
-                    # row rather than crashing the entire load.
+                    # Normalize field names -- Tier-3 boundary: field names from
+                    # Dataverse can be arbitrary strings. Catch only
+                    # ExternalHeaderError (data faults: header normalizes to empty,
+                    # normalization collision in the entity's own field names).
+                    # Plain ValueError (config faults: bad field_mapping collision,
+                    # mapping keys not found, non-identifier mapping value) must
+                    # propagate and crash -- they signal OUR config error, not bad
+                    # source data. Mirrors azure_blob_source.py _validate_and_yield
+                    # and the CSV _load_csv path (elspeth-594221617d).
                     try:
                         normalized_row = self._normalize_row_fields(cleaned_row, is_first_row)
-                    except ValueError as e:
+                    except ExternalHeaderError as e:
                         quarantine_count += 1
                         ctx.record_validation_error(
                             row=cleaned_row,

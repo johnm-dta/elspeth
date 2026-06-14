@@ -218,10 +218,12 @@ def test_batch_replicate_mixed_valid_invalid_excludes_quarantined():
     for row in result.rows:
         assert "_replicate_error" not in row
 
-    # Quarantine info in success_reason.metadata
+    # Quarantine info in success_reason.metadata records row INDICES, not row
+    # bodies — Tier-2/3 content must not leak into audit metadata (Batch 4 item 6).
     assert result.success_reason["metadata"]["quarantined_count"] == 2
-    assert result.success_reason["metadata"]["quarantined"][0]["row_data"]["id"] == 1
-    assert result.success_reason["metadata"]["quarantined"][1]["row_data"]["id"] == 3
+    assert result.success_reason["metadata"]["quarantined"][0]["row_index"] == 0  # id=1
+    assert result.success_reason["metadata"]["quarantined"][1]["row_index"] == 2  # id=3
+    assert all("row_data" not in q for q in result.success_reason["metadata"]["quarantined"])
 
 
 def test_batch_replicate_contract_excludes_quarantined_only_fields():

@@ -514,3 +514,55 @@ class TestExhaustedSourceEOFResume:
         assert output_sink.results == []
         assert transform.batch_calls == 0
         assert source.load_invocations == 1
+
+    def test_completed_run_persists_exhausted_terminal_state(self, tmp_path: Any) -> None:
+        """A naturally-completing run must persist lifecycle_state='exhausted', not 'loaded'.
+
+        Regression for elspeth-5c5980d6c1 (exhausted-clobber): after
+        finalize_source_iteration writes 'exhausted', the post-finalize
+        record_run_source_lifecycle call must NOT overwrite it with 'loaded'
+        when source_exhausted=True and interrupted_by_shutdown=False.
+
+        Pre-fix: the ternary ``INTERRUPTED if interrupted_by_shutdown else
+        LOADED`` always wrote LOADED on normal completion, clobbering the
+        'exhausted' state that finalize_source_iteration had just written.
+
+        Post-fix: the write is skipped entirely when source_exhausted=True
+        (the EXHAUSTED record from finalize_source_iteration is the durable
+        terminal state and must not be downgraded).
+        """
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        checkpoint_mgr = CheckpointManager(db)
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+
+        # No shutdown_event or interrupt_after — source drains naturally to StopIteration.
+        source = _LoadCountingSource(
+            [{"value": 10}, {"value": 20}, {"value": 30}],
+            on_success="batch_in",
+        )
+        # fail_first_batch=False so the EOF flush completes and the run finishes COMPLETED.
+        transform = _FailOnceEOFBatchTransform(fail_first_batch=False)
+        config, graph, _output_sink = _build_eof_aggregation_pipeline(source, transform)
+
+        orchestrator = Orchestrator(
+            db=db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        result = orchestrator.run(config, graph=graph, payload_store=payload_store)
+
+        assert result.status == RunStatus.COMPLETED, f"Expected COMPLETED run, got {result.status}"
+
+        run_id = _single_run_id(db)
+
+        # Core assertion: finalize_source_iteration wrote 'exhausted' and the
+        # subsequent post-finalize call must NOT have clobbered it with 'loaded'.
+        assert _run_sources_states(db, run_id) == {"primary": "exhausted"}, (
+            "Expected lifecycle_state='exhausted' after natural source drain; "
+            "got 'loaded' — post-finalize record_run_source_lifecycle unconditionally "
+            "overwrote the terminal EXHAUSTED state (elspeth-5c5980d6c1)"
+        )

@@ -291,7 +291,7 @@ def test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline(
         await session_service.save_composition_state(
             record.id,
             CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],

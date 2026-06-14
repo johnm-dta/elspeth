@@ -1,5 +1,6 @@
 """Tests for BatchDriftCompare aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -252,6 +253,26 @@ class TestBatchDriftCompare:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    @pytest.mark.parametrize("cohort_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, cohort_value: float) -> None:
+        """Non-finite cohort key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+        transform = BatchDriftCompare({"schema": DYNAMIC_SCHEMA, "cohort_field": "cohort", "value_field": "score"})
+        rows = [
+            _make_row({"cohort": "baseline", "score": 1.0}),
+            _make_row({"cohort": cohort_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "cohort"
+        assert not result.retryable
+
 
 class TestBatchDriftCompareConfig:
     @pytest.mark.parametrize("field_name", ["cohort_field", "value_field"])
@@ -320,3 +341,19 @@ class TestBatchDriftCompareConfig:
                 "value_type",
             }
         )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+    guard = BatchDriftCompare._is_non_finite_group_key
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

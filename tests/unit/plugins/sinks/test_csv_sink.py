@@ -815,3 +815,98 @@ class TestCSVSinkPerRowDiversion:
             sink.write([{"id": "1", "name": "alice", "rogue": "x"}], ctx)
 
         sink.close()
+
+    # ------------------------------------------------------------------
+    # B3.2-csv: per-row codec encoding faults must be diverted, not batch-aborting
+    # ------------------------------------------------------------------
+
+    def test_encoding_fault_first_batch_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A row with a non-encodable char (emoji in cp1252) is diverted; good rows write.
+
+        The trial-encode in _stage_rows_per_row must apply the configured codec to
+        each row's text BEFORE committing it to the staging buffer. A UnicodeEncodeError
+        for one row is a per-row Tier-2 data fault -- divert it and write the rest.
+        Previously, StringIO staging never exercised the codec so the fault fired later
+        in file.write(), aborting the WHOLE batch.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "encoding": "cp1252", "schema": {"mode": "observed"}}))
+
+        # Middle row carries a character not representable in cp1252.
+        emoji_row = {"v": "hi \U0001f600"}
+        result = sink.write(
+            [
+                {"v": "hello"},
+                emoji_row,
+                {"v": "world"},
+            ],
+            ctx,
+        )
+        sink.close()
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == emoji_row
+
+        # Re-read in the configured encoding: only the two good rows must be present.
+        with open(output_file, encoding="cp1252") as f:
+            reader = csv.DictReader(f)
+            written = list(reader)
+        assert [r["v"] for r in written] == ["hello", "world"]
+
+    def test_encoding_fault_append_batch_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """On the append path the codec-failing row is still diverted, good rows appended.
+
+        Covers the separate code path at csv_sink.py line 404 (append/subsequent
+        batch file.write) to ensure both first-batch and later batches divert
+        codec faults per-row rather than aborting.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "encoding": "cp1252", "schema": {"mode": "observed"}}))
+
+        # First batch is clean -- establishes the column lock and the file.
+        sink.write([{"v": "first"}], ctx)
+
+        # Second batch has the emoji row in the middle.
+        emoji_row = {"v": "hi \U0001f600"}
+        result = sink.write(
+            [
+                {"v": "second"},
+                emoji_row,
+                {"v": "third"},
+            ],
+            ctx,
+        )
+        sink.close()
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == emoji_row
+
+        with open(output_file, encoding="cp1252") as f:
+            reader = csv.DictReader(f)
+            written = list(reader)
+        assert [r["v"] for r in written] == ["first", "second", "third"]
+
+    def test_encoding_fault_hash_reflects_only_written_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """content_hash after a codec diversion matches the actual bytes on disk."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "encoding": "cp1252", "schema": {"mode": "observed"}}))
+
+        result = sink.write(
+            [
+                {"v": "hello"},
+                {"v": "hi \U0001f600"},  # diverted
+            ],
+            ctx,
+        )
+        sink.close()
+
+        expected_hash = hashlib.sha256(output_file.read_bytes()).hexdigest()
+        assert result.artifact.content_hash == expected_hash

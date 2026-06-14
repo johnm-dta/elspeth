@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -116,7 +117,7 @@ class BatchPairedPreference(BaseTransform):
     name = "batch_paired_preference"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:48862b640e0de744"
+    source_file_hash: str | None = "sha256:89304d51f94ab298"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -216,6 +217,30 @@ class BatchPairedPreference(BaseTransform):
 
         return _ScoreEntry(variant=variant, score=raw_score)
 
+    @staticmethod
+    def _is_non_finite_variant(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite variant key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_variant(row[self._variant_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_variant"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_variant",
+            "field": self._variant_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
+
     def _collect_pairs(self, rows: list[PipelineRow]) -> tuple[list[tuple[Any, list[_ScoreEntry]]], list[Any]]:
         pairs: list[tuple[Any, list[_ScoreEntry]]] = []
         variants: list[Any] = []
@@ -236,6 +261,32 @@ class BatchPairedPreference(BaseTransform):
         return pairs, variants
 
     @staticmethod
+    def _has_duplicate_variants(entries: list[_ScoreEntry]) -> bool:
+        seen: list[Any] = []
+        for entry in entries:
+            for seen_variant in seen:
+                if same_scalar_bucket_value(entry.variant, seen_variant):
+                    return True
+            seen.append(entry.variant)
+        return False
+
+    def _duplicate_variant_in_pair_error(self, pairs: list[tuple[Any, list[_ScoreEntry]]]) -> TransformResult | None:
+        """Return an error if any pair contains two entries with the same variant (B4.5-e)."""
+        dup_pairs: list[str] = []
+        for pair_id, entries in pairs:
+            if self._has_duplicate_variants(entries):
+                dup_pairs.append(str(pair_id))
+        if not dup_pairs:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "duplicate_variant_in_pair",
+            "field": self._variant_field,
+            "duplicate_pair_ids": dup_pairs,
+        }
+        return TransformResult.error(reason, retryable=False)
+
+    @staticmethod
     def _find_variant_entry(entries: list[_ScoreEntry], variant: Any) -> _ScoreEntry | None:
         for entry in entries:
             if same_scalar_bucket_value(entry.variant, variant):
@@ -247,9 +298,10 @@ class BatchPairedPreference(BaseTransform):
         return sum(values) / len(values)
 
     @staticmethod
-    def _standard_error(values: list[float]) -> float:
+    def _standard_error(values: list[float]) -> float | None:
         if len(values) <= 1:
-            return 0.0
+            # se undefined at n<=1 -- emit None, never 0.0 (B4.5-a)
+            return None
         return statistics.stdev(values) / math.sqrt(len(values))
 
     @staticmethod
@@ -323,11 +375,22 @@ class BatchPairedPreference(BaseTransform):
 
         try:
             mean_delta = self._require_finite(sum(deltas) / compared_count, operation="mean_paired_delta")
-            standard_error = self._require_finite(self._standard_error(deltas), operation="standard_error_delta")
             baseline_mean = self._require_finite(self._mean(baseline_scores), operation="baseline_mean")
             variant_mean = self._require_finite(self._mean(variant_scores), operation="variant_mean")
-            confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
-            confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
+            # _standard_error returns None when n<=1 (undefined) -- CI bounds are
+            # also undefined in that case; emit None (honest-absence, B4.5-a)
+            se_raw = self._standard_error(deltas)
+            standard_error_delta: float | None
+            confidence_95_low: float | None
+            confidence_95_high: float | None
+            if se_raw is None:
+                standard_error_delta = None
+                confidence_95_low = None
+                confidence_95_high = None
+            else:
+                standard_error_delta = self._require_finite(se_raw, operation="standard_error_delta")
+                confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error_delta, operation="confidence_95_low")
+                confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error_delta, operation="confidence_95_high")
         except OverflowError as exc:
             aggregate_overflow_reason: TransformErrorReason = {
                 "reason": "float_overflow",
@@ -338,7 +401,9 @@ class BatchPairedPreference(BaseTransform):
             return {}, TransformResult.error(aggregate_overflow_reason, retryable=False)
 
         preference_denominator = wins + losses
-        preference_rate = 0.0 if preference_denominator == 0 else wins / preference_denominator
+        # preference_rate = wins/(wins+losses) is 0/0 when all pairs tie --
+        # emit None (honest-absence), never 0.0 (B4.5-b)
+        preference_rate: float | None = None if preference_denominator == 0 else wins / preference_denominator
 
         result: BatchPairedPreferenceRow = {
             "pair_field": self._pair_field,
@@ -362,7 +427,7 @@ class BatchPairedPreference(BaseTransform):
             "loss_rate": losses / compared_count,
             "tie_rate": ties / compared_count,
             "preference_rate": preference_rate,
-            "standard_error_delta": standard_error,
+            "standard_error_delta": standard_error_delta,
             "confidence_95_low": confidence_95_low,
             "confidence_95_high": confidence_95_high,
         }
@@ -393,7 +458,16 @@ class BatchPairedPreference(BaseTransform):
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
 
+        non_finite_error = self._non_finite_variant_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
+
         pairs, variants = self._collect_pairs(rows)
+
+        dup_error = self._duplicate_variant_in_pair_error(pairs)
+        if dup_error is not None:
+            return dup_error
+
         baseline_variant = self._baseline_variant if self._baseline_variant is not None else variants[0]
         if not scalar_bucket_contains(variants, baseline_variant):
             return TransformResult.error(

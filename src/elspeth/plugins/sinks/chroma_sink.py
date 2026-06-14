@@ -176,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:28377799dbf12e83"
+    source_file_hash: str | None = "sha256:76723bd7e35c4f2f"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -188,7 +188,7 @@ class ChromaSink(BaseSink):
                 issue_code=None,
                 summary="Writes rows to a ChromaDB collection as embedded documents with metadata.",
                 composer_hints=(
-                    "Set field_mapping.document_field and id_field to string fields; non-string required fields are diverted per row.",
+                    "Set field_mapping.id_field and document_field to row fields holding string values; Chroma requires str ids and documents. A row missing either required field is diverted per row, but a present-yet-non-string id or document is an upstream type error that aborts the whole batch.",
                     "metadata_fields may contain only Chroma-compatible scalar values: str, int, float, bool, or None.",
                     "Use mode=persistent with persist_directory for local storage, or mode=client with host/port/ssl for a server.",
                     "Choose on_duplicate as overwrite, skip, or error before running; the default overwrites document IDs.",

@@ -59,8 +59,8 @@ class TestStep1Handler:
 
         assert isinstance(result, StepHandlerResult)
         assert result.tool_result.success is True
-        assert result.state.source is not None
-        assert result.state.source.plugin == "csv"
+        assert result.state.sources.get("source") is not None
+        assert result.state.sources["source"].plugin == "csv"
         assert result.session.step_1_result is not None
         assert result.session.step_1_result.plugin == "csv"
         # Session step pointer is NOT advanced here — the dispatcher does that.
@@ -283,7 +283,7 @@ class TestStep25Handler:
         )
 
         assert result.tool_result.success is True, f"recipe application failed: {getattr(result.tool_result, 'data', result.tool_result)}"
-        assert result.state.source is not None
+        assert result.state.sources.get("source") is not None
         assert len(result.state.outputs) >= 1
         assert result.session.terminal is not None
         assert result.session.terminal.kind is TerminalKind.COMPLETED
@@ -390,8 +390,8 @@ class TestStep3Handler:
         assert result.state.nodes[0].plugin == "passthrough"
         assert result.state.nodes[0].input == "chain_in"
         assert result.state.nodes[0].on_success == "main"
-        assert result.state.source is not None
-        assert result.state.source.on_success == "chain_in"  # rewired
+        assert result.state.sources.get("source") is not None
+        assert result.state.sources["source"].on_success == "chain_in"  # rewired
         assert result.session.terminal is not None
         assert result.session.terminal.kind == TerminalKind.COMPLETED
         assert result.session.terminal.reason is None

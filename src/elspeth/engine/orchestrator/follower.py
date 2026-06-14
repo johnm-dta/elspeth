@@ -236,7 +236,21 @@ class FollowerProcessor:
         try:
             self._drain_loop(ctx, heartbeat)
         except RunWorkerEvictedError:
-            # Best-effort depart; the row may already be evicted.
+            # The membership fence can raise mid-drain-pass when the leader's
+            # complete_run departed our run_workers row in the SAME txn that
+            # stamped the run terminal (finalize-departure, design case a).
+            # The top-of-loop discrimination only covers the heartbeat-latch
+            # path; recheck run status here before reporting a true eviction.
+            if self._run_is_terminal():
+                logger.info(
+                    "follower %r: eviction raised mid-drain but run %r is terminal (finalize-departure) — exiting cleanly",
+                    self._token.worker_id,
+                    self._token.run_id,
+                )
+                self._best_effort_depart()
+                return
+            # True eviction: leader's housekeeping sweep evicted us while the
+            # run is still RUNNING (design case b). Propagate (CLI exit 3).
             self._best_effort_depart()
             raise
         except KeyboardInterrupt:
@@ -432,10 +446,40 @@ def build_follower_processor(
         A :class:`FollowerProcessor` ready to drive via :meth:`FollowerProcessor.run`.
     """
     from elspeth.contracts.coordination import CoordinationToken
+    from elspeth.contracts.errors import OrchestrationInvariantError
     from elspeth.contracts.types import NodeID
-    from elspeth.engine.orchestrator.graph_wiring import build_dag_traversal_context
+    from elspeth.engine.orchestrator.graph_wiring import assign_plugin_node_ids, build_dag_traversal_context
     from elspeth.engine.processor import RowProcessor
     from elspeth.engine.spans import SpanFactory
+
+    # Assign node_id to all plugin instances before building the traversal
+    # context.  build_dag_traversal_context requires transform.node_id to be
+    # set on every transform; the leader does this via run_core.py's
+    # assign_plugin_node_ids call, but the follower path omitted it (slice 5
+    # bug: build_follower_processor never called assign_plugin_node_ids).
+    #
+    # Mirrors the leader's source_id_map construction (core.py:840-854):
+    # iterate graph.get_sources() and read config["source_name"] from each
+    # source node's info dict.
+    source_id_map: dict[str, NodeID] = {}
+    for candidate_source_id in graph.get_sources():
+        source_info = graph.get_node_info(candidate_source_id)
+        if "source_name" not in source_info.config:
+            raise OrchestrationInvariantError(
+                f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
+                f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+            )
+        source_id_map[str(source_info.config["source_name"])] = candidate_source_id
+
+    assign_plugin_node_ids(
+        sources=config.sources,
+        transforms=config.transforms,
+        sinks=config.sinks,
+        source_id_map=source_id_map,
+        transform_id_map=graph.get_transform_id_map(),
+        sink_id_map=graph.get_sink_id_map(),
+    )
 
     # Build the traversal context (node_step_map, node_to_plugin, etc.)
     # using the existing graph-wiring helper.  config_gate_id_map is required

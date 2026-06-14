@@ -360,6 +360,8 @@ TransformErrorCategory = Literal[
     "rate_limited",
     # Content extraction errors (Tier 3 boundary - external HTML/text parsing)
     "content_extraction_failed",
+    "non_text_content_type",  # Response content-type is not text/* -- refused before extraction
+    "body_too_large",  # Response body exceeds configured max_body_bytes limit
     # Retrieval errors (RAG retrieval transform)
     "retrieval_failed",
     "no_results",
@@ -540,6 +542,8 @@ class TransformErrorReason(TypedDict):
     response_keys: NotRequired[list[str] | None]
     body_preview: NotRequired[str]  # HTTP body preview; absent = empty/unavailable
     content_type: NotRequired[str]
+    body_size: NotRequired[int]  # Actual response body size in bytes (body_too_large errors)
+    max_body_bytes: NotRequired[int]  # Configured limit in bytes (body_too_large errors)
 
     # Type validation context
     expected: NotRequired[str]
@@ -590,6 +594,7 @@ class TransformErrorReason(TypedDict):
     errors: NotRequired[list[str | ErrorDetail]]  # Error messages or structured errors
     skipped_non_finite: NotRequired[int]  # Count of NaN/Inf values skipped
     skipped_non_finite_indices: NotRequired[list[int]]  # Row indices with non-finite values
+    duplicate_pair_ids: NotRequired[list[str]]  # Pair IDs with duplicate variant entries (B4.5-e)
 
 
 class SourceQuarantineReason(TypedDict):

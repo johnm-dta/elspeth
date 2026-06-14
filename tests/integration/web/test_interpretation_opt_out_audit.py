@@ -107,7 +107,7 @@ async def test_opted_out_session_still_records_surface_specific_rows(composer_te
     state = await service.save_composition_state(
         session_id,
         CompositionStateData(
-            source=state_dict["source"],
+            sources=state_dict["sources"],
             nodes=state_dict["nodes"],
             metadata_=state_dict["metadata"],
             is_valid=True,

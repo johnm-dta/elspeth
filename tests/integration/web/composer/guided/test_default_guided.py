@@ -24,7 +24,7 @@ def test_helper_attaches_initial_guided_session() -> None:
 
     state = _initial_composition_state_with_guided_session()
 
-    assert state.source is None
+    assert state.sources.get("source") is None
     assert state.nodes == ()
     assert state.edges == ()
     assert state.outputs == ()

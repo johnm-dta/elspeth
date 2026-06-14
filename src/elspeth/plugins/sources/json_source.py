@@ -25,6 +25,7 @@ from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     FieldResolution,
     normalize_field_name,
     resolve_field_names,
@@ -147,7 +148,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:99dbd0ba5e471f28"
+    source_file_hash: str | None = "sha256:3ced4e16556eba78"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -425,7 +426,11 @@ class JSONSource(BaseSource):
         try:
             row_items = list(row.items())
         except AttributeError:
-            raise ValueError(f"Expected JSON object, got {type(row).__name__}") from None
+            # Tier-3 data fault: a non-object element in the JSON array/JSONL stream.
+            # Raise ExternalHeaderError (not plain ValueError) so _validate_and_yield
+            # catches it and quarantines the row rather than crashing the run.
+            # Mirrors azure_blob_source.py:_normalize_row_keys (elspeth-bdcdce6f58).
+            raise ExternalHeaderError(f"Expected JSON object, got {type(row).__name__}") from None
 
         raw_keys = [key for key, _ in row_items]
 
@@ -469,13 +474,17 @@ class JSONSource(BaseSource):
                 normalized[final_name] = value
                 has_unmapped_fields = True
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild field
+        # resolution from the UNION of all previously-seen keys and this row's
+        # new keys. Using only list(row.keys()) would REPLACE the mapping with
+        # just the current row's fields, discarding keys from earlier rows and
+        # corrupting the Landscape field-resolution audit record (B4.3).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
@@ -498,10 +507,16 @@ class JSONSource(BaseSource):
         Yields:
             SourceRow.valid() if valid, SourceRow.quarantined() if invalid
         """
-        # Normalize JSON keys at the source boundary (Tier 3 → Tier 2)
+        # Normalize JSON keys at the source boundary (Tier 3 -> Tier 2)
+        # Catch only ExternalHeaderError (Tier-3 data faults: non-object row,
+        # external-header collision after normalization, header normalizes to empty).
+        # Plain ValueError (config faults: bad field_mapping collision, mapping keys
+        # not found, non-identifier mapping value) must propagate and crash -- they
+        # signal OUR config error, not bad source data.  Mirrors azure_blob_source.py
+        # _validate_and_yield (elspeth-bdcdce6f58) and the CSV _load_csv path.
         try:
             normalized_row = self._normalize_row_keys(row)
-        except ValueError as exc:
+        except ExternalHeaderError as exc:
             quarantined = self._record_validation_failure(
                 ctx=ctx,
                 row=row,

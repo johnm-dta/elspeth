@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
@@ -122,7 +123,7 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0f59970e8c643a24"
+    source_file_hash: str | None = "sha256:25204a1f415379a1"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 
@@ -215,6 +216,30 @@ class BatchExperimentCompare(BaseTransform):
         )
         return [baseline, candidate]
 
+    @staticmethod
+    def _is_non_finite_variant(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite variant key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_variant(row[self._variant_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_variant"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_variant",
+            "field": self._variant_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
+
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[Any, list[tuple[int, PipelineRow]]]]:
         """Partition rows by variant while preserving first-seen order."""
         groups: list[tuple[Any, list[tuple[int, PipelineRow]]]] = []
@@ -283,9 +308,10 @@ class BatchExperimentCompare(BaseTransform):
         return sum(stats.values) / stats.count
 
     @staticmethod
-    def _stdev(stats: _VariantStats) -> float:
+    def _stdev(stats: _VariantStats) -> float | None:
         if stats.count == 1:
-            return 0.0
+            # stdev is undefined at n=1 -- emit None, never 0.0 (B4.5-a)
+            return None
         return statistics.stdev(stats.values)
 
     @staticmethod
@@ -304,24 +330,31 @@ class BatchExperimentCompare(BaseTransform):
         try:
             baseline_mean = self._require_finite(self._mean(baseline), operation="baseline_mean")
             variant_mean = self._require_finite(self._mean(variant), operation="variant_mean")
+            # _stdev returns None at n=1 (undefined); _require_finite propagates None
             baseline_stdev = self._require_finite(self._stdev(baseline), operation="baseline_stdev")
             variant_stdev = self._require_finite(self._stdev(variant), operation="variant_stdev")
             assert baseline_mean is not None
             assert variant_mean is not None
-            assert baseline_stdev is not None
-            assert variant_stdev is not None
 
             mean_delta = self._require_finite(variant_mean - baseline_mean, operation="mean_delta")
             assert mean_delta is not None
             relative_lift = None if baseline_mean == 0 else mean_delta / abs(baseline_mean)
             relative_lift = self._require_finite(relative_lift, operation="relative_lift")
-            variance_term = (baseline_stdev**2 / baseline.count) + (variant_stdev**2 / variant.count)
+            # When stdev is None (n=1) the stdev^2/count term is 0, treat as 0.0
+            baseline_stdev_val = baseline_stdev if baseline_stdev is not None else 0.0
+            variant_stdev_val = variant_stdev if variant_stdev is not None else 0.0
+            variance_term = (baseline_stdev_val**2 / baseline.count) + (variant_stdev_val**2 / variant.count)
             standard_error = self._require_finite(math.sqrt(variance_term), operation="standard_error")
             assert standard_error is not None
             z_score = None if standard_error == 0 else mean_delta / standard_error
             z_score = self._require_finite(z_score, operation="z_score")
-            confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
-            confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
+            # When se==0 the CI is a degenerate point interval -- emit None (B4.5-a)
+            if standard_error == 0:
+                confidence_95_low: float | None = None
+                confidence_95_high: float | None = None
+            else:
+                confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
+                confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
         except OverflowError as exc:
             reason: TransformErrorReason = {
                 "reason": "float_overflow",
@@ -390,6 +423,10 @@ class BatchExperimentCompare(BaseTransform):
         """Compare experiment variants over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_variant_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         grouped = self._group_rows(rows)
         stats_by_variant: list[_VariantStats] = [

@@ -80,6 +80,13 @@ class QueryBuilder:
 
     def build(self, row_data: dict[str, Any]) -> QueryResult:
         """Construct a search query from row data."""
+        if self._query_field not in row_data:
+            return QueryResult(
+                error=TransformErrorReason(
+                    reason="missing_field",
+                    field=self._query_field,
+                )
+            )
         extracted = row_data[self._query_field]
 
         if extracted is None:

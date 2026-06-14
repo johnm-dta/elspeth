@@ -57,6 +57,56 @@ See the rewritten `docs/runbooks/scheduler-lease-recovery.md` for N>1
 recovery procedures and operator guidance (worker count, lease sizing,
 shared group/clock requirements, per-worker forensic journals).
 
+### Fixed
+
+Plugin-boundary correctness — the plugins-subsystem remediation. Each of
+these defects let a plugin coerce, fabricate, or self-contradict at the
+trust boundary without an honest audit record; the fixes keep the boundary
+truthful (no silent Tier-3 coercion, no fabricated statistics, no
+fail-open scanning, no row that fails its own contract).
+
+- **`AzureBlobSource` CSV parses strictly** — the source built its
+  `csv.reader` without `strict=True`, so malformed quoting (data after a
+  closing quote) was silently merged into adjacent fields and, when the
+  field count still matched, passed through as a valid row with no
+  quarantine and no audit record. It now parses with `strict=True` like
+  `CSVSource`: the malformed row is recorded and quarantined, and
+  processing stops because the parser state is no longer trustworthy
+  (elspeth-ebe13515f4).
+- **`batch_stats` skips and reports `None` instead of crashing the run** —
+  a `None` value field raised `TypeError`, which the aggregation executor
+  records FAILED and re-raises, aborting the whole run; an all-`None` group
+  additionally hit a `mean = 0/0` `ZeroDivisionError`. `None` is now
+  skipped and reported in `skipped_missing` / `skipped_missing_indices`
+  (mirroring `skipped_non_finite`), and a group with no aggregatable values
+  returns an audited `validation_failed` error naming each skipped row
+  rather than a fabricated `count=0`/`sum=0`. Genuine wrong types still
+  raise at the boundary (elspeth-e62478e5db).
+- **`batch_outlier_annotator` no longer fabricates `robust_z_score=0.0`
+  when MAD=0** — any batch where more than half the values are identical
+  (common for score/count data) drove the median absolute deviation to
+  zero, which the annotator reported as a robust z-score of `0.0`,
+  silently disabling outlier detection exactly when it mattered. It now
+  applies the Iglewicz–Hoaglin mean-absolute-deviation modified z-score
+  when spread is still present, and emits an honest `None` (never `0.0`)
+  for a wholly identical batch (elspeth-a46c6e361f).
+- **Non-finite scanner uses `isinstance`, not exact-type checks** —
+  `_find_non_finite_value_path` gated container recursion on exact type, so
+  a `NaN`/`Infinity` nested inside a `Mapping` subclass (e.g. `OrderedDict`)
+  or a `tuple` subclass (e.g. a namedtuple) bypassed the source-boundary
+  non-finite gate entirely — a fail-open leak into audit hashing. The
+  float, mapping, sequence, and ndarray checks now use `isinstance`; `bool`
+  stays excluded and masked-array `NaN` is still treated as absent.
+- **`value_transform` retypes the output contract on a typed-field
+  overwrite** — overwriting an existing typed field with a
+  different-typed result (e.g. an `int` price recomputed as a `float`) left
+  the stale `FieldContract.python_type` in place, so the emitted row failed
+  its own `out.contract.validate(...)` — a self-contradictory audit record.
+  An overwrite whose runtime type differs from the declared type now
+  rebuilds that field's contract to the value's type, preserving
+  `original_name` / `required` / `source` / `nullable`; `object`/`any`
+  fields are left untouched.
+
 ---
 
 ## [0.5.4] - Unreleased

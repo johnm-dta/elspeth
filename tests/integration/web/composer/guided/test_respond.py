@@ -211,8 +211,8 @@ class TestStep1Advance:
 
         cs = body["composition_state"]
         assert cs is not None
-        assert cs["source"] is not None
-        assert cs["source"]["plugin"] == "csv"
+        assert cs["sources"].get("source") is not None
+        assert cs["sources"]["source"]["plugin"] == "csv"
 
     def test_step_2_single_select_lists_sink_plugins(self, composer_test_client: TestClient) -> None:
         """The step-2 initial turn is single_select listing registered sink plugins."""
@@ -1179,7 +1179,7 @@ class TestStep1InspectAndConfirmAccept:
         new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
         state_d = state.to_dict()
         state_data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],

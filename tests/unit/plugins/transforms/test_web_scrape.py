@@ -1937,3 +1937,182 @@ class TestWebScrapeGuaranteedFieldsOptionKeyGuard:
         transform = WebScrapeTransform(degenerate_config)
         assert transform._content_field == "content_field"
         assert transform._fingerprint_field == "content_fingerprint"
+
+
+# ---------------------------------------------------------------------------
+# B3.9 -- unenumerated 4xx codes must not be fingerprinted as content
+# ---------------------------------------------------------------------------
+
+
+def _make_basic_transform() -> WebScrapeTransform:
+    """Minimal WebScrapeTransform for error-handling tests."""
+    return WebScrapeTransform(
+        {
+            "schema": {"mode": "observed"},
+            "url_field": "url",
+            "content_field": "page_content",
+            "fingerprint_field": "page_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "B3.9 regression test",
+            },
+        }
+    )
+
+
+@respx.mock
+def test_b3_9_http_400_returns_error_not_fingerprint(mock_ctx):
+    """HTTP 400 must return an error result - not fingerprint the error-page body (B3.9)."""
+    error_body = "<html><body><p>Bad Request</p></body></html>"
+    respx.get(f"https://{_TEST_IP}:443/bad").mock(return_value=httpx.Response(400, text=error_body))
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/bad"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for HTTP 400, got {result.status!r}"
+    # Must not have fabricated a fingerprint of the error-page body
+    assert "page_fingerprint" not in (result.row or {}), "HTTP 400 must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "HTTP 400 must not produce content"
+    # Error reason must record the HTTP status
+    assert "400" in result.reason.get("error", ""), f"Error reason should mention 400, got {result.reason}"
+
+
+@respx.mock
+def test_b3_9_http_410_returns_error_not_fingerprint(mock_ctx):
+    """HTTP 410 Gone must return an error result - not fingerprint the error-page body (B3.9).
+
+    410 is especially dangerous for long-running monitoring: the page is permanently
+    gone, but the old code would fingerprint the error-page body as if it were content,
+    corrupting change-detection.
+    """
+    error_body = "<html><body><p>This page is gone.</p></body></html>"
+    respx.get(f"https://{_TEST_IP}:443/gone").mock(return_value=httpx.Response(410, text=error_body))
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/gone"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for HTTP 410, got {result.status!r}"
+    assert "page_fingerprint" not in (result.row or {}), "HTTP 410 must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "HTTP 410 must not produce content"
+    assert "410" in result.reason.get("error", ""), f"Error reason should mention 410, got {result.reason}"
+
+
+@respx.mock
+def test_b3_9_http_408_returns_error_retryable(mock_ctx):
+    """HTTP 408 Request Timeout must be retryable (mirrors 429 behaviour) (B3.9)."""
+    respx.get(f"https://{_TEST_IP}:443/slow").mock(return_value=httpx.Response(408))
+
+    from elspeth.plugins.transforms.web_scrape_errors import ClientError
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()), pytest.raises(ClientError) as exc_info:
+        transform.process(make_pipeline_row({"url": "https://example.com/slow"}), mock_ctx)
+
+    assert exc_info.value.retryable is True, "HTTP 408 must be retryable"
+    assert "408" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# B3.10 -- no response size cap / no content-type guard
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_b3_10_oversized_response_returns_error_not_fingerprint(mock_ctx):
+    """A response exceeding max_body_bytes must return error, not a fingerprinted body (B3.10)."""
+    # 5 MB of 'A' -- well over any reasonable default
+    big_body = "A" * (5 * 1024 * 1024)
+    respx.get(f"https://{_TEST_IP}:443/huge").mock(return_value=httpx.Response(200, text=big_body, headers={"content-type": "text/html"}))
+
+    # Configure a small limit (1 KB) so the 5 MB body triggers the cap
+    transform = WebScrapeTransform(
+        {
+            "schema": {"mode": "observed"},
+            "url_field": "url",
+            "content_field": "page_content",
+            "fingerprint_field": "page_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "B3.10 size cap test",
+                "max_body_bytes": 1024,
+            },
+        }
+    )
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/huge"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for oversized response, got {result.status!r}"
+    assert "page_fingerprint" not in (result.row or {}), "Oversized response must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "Oversized response must not produce content"
+    reason = result.reason
+    assert "body_too_large" in reason.get("reason", "") or "body_too_large" in reason.get("error", ""), (
+        f"Error reason should indicate body too large, got {reason}"
+    )
+
+
+@respx.mock
+def test_b3_10_binary_content_type_returns_error(mock_ctx):
+    """A binary content-type (application/octet-stream) must return error, not a fingerprint (B3.10)."""
+    binary_body = bytes(range(256)) * 100  # 25.6 KB of raw bytes
+    respx.get(f"https://{_TEST_IP}:443/binary").mock(
+        return_value=httpx.Response(200, content=binary_body, headers={"content-type": "application/octet-stream"})
+    )
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/binary"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for binary content-type, got {result.status!r}"
+    assert "page_fingerprint" not in (result.row or {}), "Binary response must not produce a fingerprint"
+    assert "page_content" not in (result.row or {}), "Binary response must not produce content"
+    reason = result.reason
+    assert "non_text_content_type" in reason.get("reason", "") or "content_type" in reason.get("error", "").lower(), (
+        f"Error reason should indicate non-text content type, got {reason}"
+    )
+
+
+@respx.mock
+def test_b3_10_image_content_type_returns_error(mock_ctx):
+    """An image content-type (image/png) must return error, not a fingerprint (B3.10)."""
+    respx.get(f"https://{_TEST_IP}:443/img").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG\r\n", headers={"content-type": "image/png"})
+    )
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/img"}), mock_ctx)
+
+    assert result.status == "error", f"Expected error for image content-type, got {result.status!r}"
+    assert "page_fingerprint" not in (result.row or {}), "Image response must not produce a fingerprint"
+
+
+@respx.mock
+def test_b3_10_text_html_passes_content_type_guard(mock_ctx):
+    """text/html responses must pass the content-type guard and succeed normally (B3.10)."""
+    html = "<html><body><p>Hello</p></body></html>"
+    respx.get(f"https://{_TEST_IP}:443/page").mock(
+        return_value=httpx.Response(200, text=html, headers={"content-type": "text/html; charset=utf-8"})
+    )
+
+    transform = _make_basic_transform()
+    transform.on_start(mock_ctx)
+
+    with patch("socket.getaddrinfo", _mock_getaddrinfo()):
+        result = transform.process(make_pipeline_row({"url": "https://example.com/page"}), mock_ctx)
+
+    assert result.status == "success", f"text/html should succeed, got {result.status!r}: {result.reason}"
+    assert result.row["page_fingerprint"] is not None

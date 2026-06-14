@@ -925,14 +925,24 @@ class SourceIterationDriver:
                     flush_end_of_input=flush_end_of_input,
                     active_source=active_source,
                 )
-                self.record_run_source_lifecycle(
-                    factory,
-                    run_id,
-                    source_id,
-                    active_source_name,
-                    active_source,
-                    RunSourceLifecycleState.INTERRUPTED if interrupted_by_shutdown else RunSourceLifecycleState.LOADED,
-                )
+                if interrupted_by_shutdown:
+                    self.record_run_source_lifecycle(
+                        factory,
+                        run_id,
+                        source_id,
+                        active_source_name,
+                        active_source,
+                        RunSourceLifecycleState.INTERRUPTED,
+                    )
+                elif not source_exhausted:
+                    self.record_run_source_lifecycle(
+                        factory,
+                        run_id,
+                        source_id,
+                        active_source_name,
+                        active_source,
+                        RunSourceLifecycleState.LOADED,
+                    )
 
             except Exception as e:
                 self._ceremony.emit_phase_error(PipelinePhase.PROCESS, e, target=active_source.name)

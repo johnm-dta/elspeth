@@ -48,7 +48,16 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # RowProcessor and wiring a full engine stack; low-value spec for integration
 # harness stubs. The real follower routing (barrier/branch-loss/sink) is
 # covered by the processor-level drain tests, not these lifecycle stubs.
-BASELINE_UNSPECCED_MOCK_TOTAL = 2630
+# Bumped 2630→2652 (2026-06-14): +22 total on fix/plugins-subsystem-remediation.
+# +20 belong to this branch's plugin-remediation test additions (changed test
+# files went 321→341 unspecced mocks): external-SDK/provider response-shape
+# fakes (test_audited_llm_client, llm/test_transform, azure_multi_query_retry)
+# and source/transform stubs (test_dataverse_source, rag/test_transform,
+# transforms/azure/test_blob_source) where spec= is brittle/low-value — matching
+# the prior-bump precedent. The remaining +2 is pre-existing drift already on
+# release/0.6.0 (its actual count is 2632 vs the 2630 constant — operator-owed,
+# inherited, flagged separately).
+BASELINE_UNSPECCED_MOCK_TOTAL = 2652
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

@@ -794,6 +794,58 @@ class RowProcessor:
                 )
                 completed_flush_count = sum(1 for node_batch in node_batches if node_batch.status is BatchStatus.COMPLETED)
                 node_scalars = scalars.aggregation.get(str(node_id), AggregationNodeScalars(None, None))
+                # ---- ADR-030 §E.3a aggregation reconcile (elspeth-55546a6fd6) ---
+                # A FAILED out-of-claim flush records terminal FAILURE/UNROUTED
+                # token_outcomes for every buffered token (_handle_flush_error)
+                # and THEN releases their BLOCKED scheduler rows in a SEPARATE
+                # transaction (_mark_buffered_scheduler_work_terminal). A crash
+                # between the two strands durable BLOCKED rows whose tokens are
+                # already terminally failed: they carry NO live BUFFERED outcome,
+                # so _derive_restored_batch_id below would refuse loudly and
+                # brick EVERY resume attempt. Mirror the coalesce §E.3a holdless
+                # path: the tokens are done — journal-release their orphaned
+                # BLOCKED rows here (under this leader's coordination token) and
+                # drop them from the restore set so the deriver sees only live
+                # tokens. A fully-reconciled node then falls through to the
+                # counter-only branch below ("flushes all FAILED" — exactly the
+                # state that branch already anticipates).
+                #
+                # Scoped to (FAILURE, UNROUTED): the success-path BATCH_CONSUMED
+                # crash residual (elspeth-3977d8ab60) still owes a sink output
+                # and is NOT swept here — it keeps hitting the loud refusal.
+                if node_items:
+                    failed_terminal_ids = self._data_flow.get_failed_unrouted_terminal_token_ids(
+                        self._run_id, [item.token_id for item in node_items]
+                    )
+                    if failed_terminal_ids:
+                        reconciled = [item for item in node_items if item.token_id in failed_terminal_ids]
+                        released = self._scheduler.mark_blocked_barrier_terminal(
+                            run_id=self._run_id,
+                            barrier_key=str(node_id),
+                            token_ids=tuple(item.token_id for item in reconciled),
+                            now=now,
+                            coordination_token=self._coordination_token,
+                            release_context={
+                                "reason": "failed_flush_crash_reconcile",
+                                "released_by": self._scheduler_lease_owner,
+                                "restore_reconcile": True,
+                            },
+                        )
+                        if released != len(reconciled):
+                            raise AuditIntegrityError(
+                                f"Restore §E.3a aggregation reconcile: FAILED-flush release at aggregation node "
+                                f"{node_id!r} (run {self._run_id!r}, resume checkpoint {restore.resume_checkpoint_id!r}) "
+                                f"terminalized {released} rows; expected exactly {len(reconciled)} orphaned "
+                                "terminally-failed BLOCKED row(s)."
+                            )
+                        logger.info(
+                            "barrier journal restore: §E.3a aggregation reconcile released %d orphaned BLOCKED row(s) "
+                            "with terminal FAILURE/UNROUTED outcomes at node %s (run %s)",
+                            len(reconciled),
+                            node_id,
+                            self._run_id,
+                        )
+                        node_items = [item for item in node_items if item.token_id not in failed_terminal_ids]
                 if node_items:
                     batch_id = self._derive_restored_batch_id(node_id, node_items, restore)
                     agg_plans.append(

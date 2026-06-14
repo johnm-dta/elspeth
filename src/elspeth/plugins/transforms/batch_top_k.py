@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, cast
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -78,7 +80,7 @@ class BatchTopK(BaseTransform):
     name = "batch_top_k"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3f736dc3434a46f8"
+    source_file_hash: str | None = "sha256:e66e55bfc71e3d82"
     config_model = BatchTopKConfig
     is_batch_aware = True
 
@@ -158,6 +160,32 @@ class BatchTopK(BaseTransform):
                 value="probe",
             )
         ]
+
+    @staticmethod
+    def _is_non_finite_group_key(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite group_by key (B4.5-d)."""
+        if self._group_by is None:
+            return None
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_group_key(row[self._group_by]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_group_key"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_group_key",
+            "field": self._group_by,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[object | None, list[tuple[int, PipelineRow]]]]:
         """Partition rows by group_by value while preserving first-seen order."""
@@ -263,6 +291,10 @@ class BatchTopK(BaseTransform):
         """Compute top-k frequency rows over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_error = self._non_finite_group_key_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         results = [self._top_k_row_for(group_value, grouped_rows) for group_value, grouped_rows in self._group_rows(rows)]
         output_contract = self._output_contract_for(results)

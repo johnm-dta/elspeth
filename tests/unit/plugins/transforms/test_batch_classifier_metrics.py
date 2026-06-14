@@ -176,21 +176,38 @@ class TestBatchClassifierMetrics:
         assert result.reason["batch_size"] == 1
         assert result.reason["row_errors"] == [{"row_index": 0, "reason": "missing_label"}]
 
-    def test_positive_label_missing_returns_error(self, ctx: PluginContext) -> None:
+    def test_positive_label_absent_computes_honest_none(self, ctx: PluginContext) -> None:
+        """A configured positive_label absent from the batch is legitimate data.
+
+        Rare-positive monitoring (e.g. fraud, defects) is the whole reason to set
+        positive_label, so an all-negative batch is expected, not a config fault.
+        The binary metrics are computed honestly: tp=0, fn=0, tn=count, with
+        precision/recall undefined (None) rather than fabricated 0.0 or an error
+        (plugins review Batch 3 item 11).
+        """
         from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
 
         transform = BatchClassifierMetrics(
             {"schema": DYNAMIC_SCHEMA, "actual_field": "actual", "predicted_field": "predicted", "positive_label": "maybe"}
         )
 
-        result = transform.process([_make_row({"actual": "yes", "predicted": "no"})], ctx)
+        result = transform.process(
+            [
+                _make_row({"actual": "yes", "predicted": "no"}),
+                _make_row({"actual": "no", "predicted": "no"}),
+            ],
+            ctx,
+        )
 
-        assert result.status == "error"
-        assert result.reason is not None
-        assert result.reason["reason"] == "validation_failed"
-        assert result.reason["cause"] == "positive_label_missing"
-        assert result.reason["expected"] == "maybe"
-        assert result.reason["errors"] == ["yes", "no"]
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["positive_label"] == "maybe"
+        assert result.row["binary_tp"] == 0
+        assert result.row["binary_fn"] == 0
+        assert result.row["binary_tn"] == 2
+        assert result.row["binary_precision"] is None
+        assert result.row["binary_recall"] is None
+        assert result.row["binary_f1"] is None
 
     def test_non_scalar_labels_raise_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics

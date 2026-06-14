@@ -50,8 +50,11 @@ transforms:
       '
     temperature: 0.0
     response_field: sentiment_analysis
-    required_input_fields:
-    - text
+    # required_input_fields is empty here because the DAG validator cannot see
+    # through a named queue's dynamic schema to the fixed CSV source declarations.
+    # The 'text' field is enforced structurally: both CSV sources declare
+    # 'text: str' in their fixed schema, so any row reaching the llm carries it.
+    required_input_fields: []
     schema:
       mode: observed
 

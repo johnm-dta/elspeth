@@ -51,6 +51,17 @@ These examples demonstrate Retrieval-Augmented Generation using ChromaDB as a ve
 | [`chroma_rag_qa`](chroma_rag_qa/) | RAG + LLM — retrieve context then generate answers via OpenRouter (requires `OPENROUTER_API_KEY`) |
 | [`chroma_rag_indexed`](chroma_rag_indexed/) | **Pipeline dependencies** — `depends_on` runs an indexing pipeline first, commencement gate verifies the collection, then query pipeline retrieves context. Entry point: `query_pipeline.yaml` |
 
+### 0.6.0 — Multi-Worker & Concurrent Scheduling
+
+New in 0.6.0: examples that demonstrate concurrent in-process token scheduling
+(ADR-026) and multi-worker packs (ADR-030, `elspeth join`).
+
+| Example | What It Demonstrates |
+|---------|---------------------|
+| [`concurrent_scheduler`](concurrent_scheduler/) | Count-6 two-source rendezvous — proves the scheduler holds multiple token lifecycles open at once (pure-data, self-verifying) |
+| [`multi_worker`](multi_worker/) | `elspeth join` — leader + follower(s) share one RUNNING run; asserts ≥2 workers shared the rows (ChaosLLM, self-verifying) |
+| [`multi_worker_showcase`](multi_worker_showcase/) | 4-worker swarm spectacle with live stats card — demonstrative only, no assertion (ChaosLLM) |
+
 ### OpenRouter LLM (real API — requires `OPENROUTER_API_KEY`)
 
 These examples call the real OpenRouter API. Set your API key first:

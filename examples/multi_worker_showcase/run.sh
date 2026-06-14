@@ -172,16 +172,23 @@ if [ -n "$RUN_ID" ]; then
     printf "  Wall-clock:        %ss\n" "$ELAPSED"
     printf "  Aggregate rows/s:  %s\n" "$ROWS_PER_SEC"
     echo ""
-    echo "  Per-worker attribution:"
+    echo "  Per-worker attribution (scheduler_events / from_lease_owner):"
+    # NOTE: token_work_items.lease_owner is NULLed on terminal/failed; in
+    # multi-worker mode the leader also drains follower PENDING_SINK rows under
+    # its own lease_owner, so mark_pending_sink_terminal always shows the leader.
+    # We attribute via mark_pending_sink (LEASED→PENDING_SINK) and mark_failed,
+    # which record from_lease_owner = the worker that processed the row.
     sqlite3 "file:${DB}?mode=ro" <<SQL
 PRAGMA query_only = ON;
 SELECT
-  '  ' || COALESCE(w.role, 'unknown') || '  ' || COALESCE(t.lease_owner, 'null') ||
-  '  completed=' || COUNT(CASE WHEN t.status IN ('terminal', 'failed') THEN 1 END)
-FROM token_work_items t
-LEFT JOIN run_workers w ON w.worker_id = t.lease_owner AND w.run_id = t.run_id
-WHERE t.run_id = '$RUN_ID'
-GROUP BY t.lease_owner, w.role
+  '  ' || COALESCE(w.role, 'unknown') || '  ' || se.from_lease_owner ||
+  '  completed=' || COUNT(*)
+FROM scheduler_events se
+LEFT JOIN run_workers w ON w.worker_id = se.from_lease_owner AND w.run_id = se.run_id
+WHERE se.run_id = '$RUN_ID'
+  AND se.event_type IN ('mark_pending_sink', 'mark_failed')
+  AND se.from_lease_owner IS NOT NULL
+GROUP BY se.from_lease_owner, w.role
 ORDER BY w.role DESC, COUNT(*) DESC;
 SQL
 else

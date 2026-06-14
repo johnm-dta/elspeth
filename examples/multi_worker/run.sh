@@ -119,11 +119,17 @@ done
 # --- Attribution query (read-only): per-worker completed rows ---
 # NOTE: token_work_items.lease_owner is cleared to NULL when an item transitions
 # to terminal/failed (the mark_terminal / mark_failed write sets lease_owner=NULL).
-# Attribution therefore comes from scheduler_events: the MARK_PENDING_SINK_TERMINAL
-# and MARK_FAILED events record from_lease_owner = the worker that held the lease
-# before the final transition.  Items flow LEASED->PENDING_SINK->TERMINAL via
-# mark_pending_sink then mark_pending_sink_terminal; the from_lease_owner on the
-# latter is the correct per-worker attribution source.
+# Attribution comes from scheduler_events:
+#
+#   mark_pending_sink (LEASED→PENDING_SINK): emitted by the worker that ran the
+#     transform and handed off to sink.  from_lease_owner = that worker.  This is
+#     the correct per-worker attribution source in multi-worker mode because the
+#     leader later drains follower PENDING_SINK rows and terminates them under the
+#     leader's lease_owner — so mark_pending_sink_terminal always shows the leader
+#     even for rows the follower actually processed.
+#
+#   mark_failed (LEASED→FAILED): emitted by the worker that had the lease when
+#     the item failed. from_lease_owner = that worker.
 echo ""
 echo "Per-worker attribution (scheduler_events grouped by from_lease_owner):"
 sqlite3 "file:${DB}?mode=ro" <<SQL
@@ -135,7 +141,7 @@ SELECT
 FROM scheduler_events se
 LEFT JOIN run_workers w ON w.worker_id = se.from_lease_owner AND w.run_id = se.run_id
 WHERE se.run_id = '$RUN_ID'
-  AND se.event_type IN ('mark_pending_sink_terminal', 'mark_failed')
+  AND se.event_type IN ('mark_pending_sink', 'mark_failed')
   AND se.from_lease_owner IS NOT NULL
 GROUP BY se.from_lease_owner, w.role
 ORDER BY w.role DESC, completed_rows DESC;
@@ -143,7 +149,7 @@ SQL
 
 # --- Assertion: >=2 distinct workers each completed >=1 row ---
 WORKER_COUNT="$(sqlite3 "file:${DB}?mode=ro" \
-  "PRAGMA query_only=ON; SELECT COUNT(*) FROM (SELECT from_lease_owner FROM scheduler_events WHERE run_id='$RUN_ID' AND event_type IN ('mark_pending_sink_terminal','mark_failed') AND from_lease_owner IS NOT NULL GROUP BY from_lease_owner HAVING COUNT(*) >= 1);" 2>/dev/null || echo 0)"
+  "PRAGMA query_only=ON; SELECT COUNT(*) FROM (SELECT from_lease_owner FROM scheduler_events WHERE run_id='$RUN_ID' AND event_type IN ('mark_pending_sink','mark_failed') AND from_lease_owner IS NOT NULL GROUP BY from_lease_owner HAVING COUNT(*) >= 1);" 2>/dev/null || echo 0)"
 TOTAL_ROWS="$(sqlite3 "file:${DB}?mode=ro" \
   "PRAGMA query_only=ON; SELECT COUNT(*) FROM token_work_items WHERE run_id='$RUN_ID' AND status IN ('terminal','failed');" 2>/dev/null || echo 0)"
 

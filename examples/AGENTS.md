@@ -148,3 +148,27 @@ If a pipeline is interrupted, resume with the command shown in the output.
 - **OpenRouter timeout:** Use `timeout <seconds>` wrapper, then `elspeth resume <run_id> --execute`
 - **Permission denied on `/app/`:** You're running a container example outside Docker
 - **Missing errorworks commands:** Run `uv pip install --force-reinstall errorworks` to regenerate entry points
+
+### 0.6.0 — Multi-Worker & Concurrent Scheduling
+
+`concurrent_scheduler` is pure-data (no server). `multi_worker` and
+`multi_worker_showcase` start their own ChaosLLM server inside `run.sh` (with
+`--workers 1`) and orchestrate a leader + `elspeth join` follower(s); run them
+via their `run.sh`, not a bare `elspeth run`. (`elspeth join` takes no
+`--execute` flag — only `elspeth run` does.)
+
+```bash
+.venv/bin/elspeth run --settings examples/concurrent_scheduler/settings.yaml --execute
+./examples/multi_worker/run.sh                      # leader + 1 follower (self-verifying)
+WORKERS=3 ./examples/multi_worker_showcase/run.sh   # 1 leader + 3 followers = 4-way (demo only)
+```
+
+Do not gate dogfood completion on `multi_worker_showcase` (~200 rows × 4
+workers — the heaviest of the three). For a bounded smoke, run `multi_worker`
+(leader + 1 follower) instead.
+
+| Example | Rows / Work units | Notes |
+|---------|-------------------|-------|
+| `concurrent_scheduler` | 6 (2×3 CSV rows) | Count-6 rendezvous; proves concurrent scheduling; `elspeth run` only |
+| `multi_worker` | ~600 (1 JSONL row → 600 exploded items) | `elspeth join` leader+follower; asserts ≥2 workers shared rows; `WORKERS` env |
+| `multi_worker_showcase` | ~200 (2×100 CSV rows) | 4-worker swarm + stats card; demonstrative only; NOT for dogfood gate |

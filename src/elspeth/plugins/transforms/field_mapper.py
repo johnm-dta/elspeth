@@ -117,7 +117,7 @@ class FieldMapper(BaseTransform):
     name = "field_mapper"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:094ed8bdcfa87771"
+    source_file_hash: str | None = "sha256:9920962925e0e6df"
     config_model = FieldMapperConfig
 
     @classmethod
@@ -357,7 +357,8 @@ class FieldMapper(BaseTransform):
                 issue_code=None,
                 summary="Rename, drop, or reorder row fields. Stateless and shape-changing — declares new field names in output_schema.",
                 composer_hints=(
-                    "Config keys are 'mapping' (dict of source->target), 'select_only' (bool, default false), 'strict' (bool, default false), plus 'schema'. Rename with {old: new}; keep a field with {x: x}; drop a field by omitting it under select_only: true. There are no 'drop'/'include'/'rename_only' keys.",
+                    "Config keys are 'mapping' (dict of source->target), 'select_only' (bool, default false), 'strict' (bool, default false), plus 'schema'. Rename with {old: new}; keep a field with {x: x}; drop a field by omitting it under select_only: true.",
+                    "field_mapper has no 'drop'/'include'/'rename_only' keys — dropping is done by omitting the field under select_only: true.",
                     "Use select_only: true when cleanup means 'save only these fields'; with select_only true, mapping should whitelist exactly the saved output fields.",
                     "For scraped-content cleanup before a user-facing sink, field_mapper is the only utility transform that actually removes raw fields. Place it immediately before the sink and omit raw content and fingerprint fields from mapping.",
                     "For web_scrape content enriched by an LLM and saved without raw page bodies, the final topology is source -> web_scrape -> llm -> field_mapper(cleanup) -> sink. A JSON sink named cleanup is not a cleanup transform.",

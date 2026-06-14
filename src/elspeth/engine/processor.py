@@ -3266,6 +3266,45 @@ class RowProcessor:
         """Return whether this run has non-terminal durable scheduler work."""
         return self._scheduler.count_active_work(run_id=self._run_id) > 0
 
+    def has_peer_active_leases(self) -> bool:
+        """Return True if any peer worker holds an unexpired LEASED item.
+
+        ADR-030 multi-worker: the leader polls this after its source loop to
+        detect follower workers that are still processing items (LEASED).  The
+        leader must not call finalize_run while followers still hold leases,
+        because those items will become PENDING_SINK and block the quiescence
+        predicate in complete_run.
+        """
+        return bool(
+            self._scheduler.peer_active_leases(
+                run_id=self._run_id,
+                caller_owner=self._scheduler_lease_owner,
+                now=self._clock.now_utc(),
+            )
+        )
+
+    def peer_active_lease_owners(self) -> tuple[str, ...]:
+        """Return the distinct peer lease_owners holding unexpired LEASED rows.
+
+        Diagnostic surface for the leader's bounded peer-wait: names the peers
+        still blocking finalization when the wait times out.
+        """
+        return self._scheduler.peer_active_leases(
+            run_id=self._run_id,
+            caller_owner=self._scheduler_lease_owner,
+            now=self._clock.now_utc(),
+        )
+
+    def reap_expired_peer_leases(self) -> int:
+        """Drive lease maintenance once so dead peers are actively reaped.
+
+        ADR-030: the leader's bounded peer-wait calls this each iteration so a
+        peer that died mid-lease (heartbeat stopped, lease expired) is recovered
+        to READY within the liveness window instead of waiting out the full item
+        lease TTL.  Returns the number of leases recovered this pass.
+        """
+        return self._run_scheduler_maintenance(self._clock.now_utc())
+
     def active_scheduled_row_ids(self) -> frozenset[str]:
         """Return row IDs currently represented by active scheduler work."""
         return self._scheduler.active_row_ids(run_id=self._run_id)
@@ -4215,6 +4254,68 @@ class RowProcessor:
                     if recovered:
                         continue
                 if pending_items:
+                    # ADR-030 multi-worker: peer followers may have claimed some of
+                    # the READY children enqueued by this leader (e.g. json_explode
+                    # or per-LLM-call continuations).  Once a peer claims a child, the
+                    # leader's in-memory pending entry can no longer be claimed READY:
+                    # the peer drives it LEASED → PENDING_SINK (lease_owner kept) →
+                    # TERMINAL/FAILED.  The leader may relinquish such peer-owned
+                    # continuations, but ONLY under a discriminator that keeps the
+                    # single-worker invariant and the audit backstops intact:
+                    #
+                    #   (1) NONE of the pending items are still READY
+                    #       (count_ready_in_set == 0) — a still-READY item is a
+                    #       genuine stranded continuation and must raise; and
+                    #   (2) NONE of the pending items are FAILED
+                    #       (count_failed_in_set == 0) — FAILED is the ONLY status
+                    #       absent from BOTH backstops (count_active_work AND
+                    #       complete_run's quiescence CAS cover READY/LEASED/BLOCKED/
+                    #       PENDING_SINK but NOT FAILED), so a self-FAILED stray would
+                    #       be silently lost; refusing on any FAILED pending row keeps
+                    #       it loud (this is the M1 residual fix, and it lands at N=1
+                    #       where the leader's OWN item is FAILED with no peer); and
+                    #   (3) a peer is/was carrying work — has_peer_owned_work: some
+                    #       OTHER lease_owner holds a LEASED or PENDING_SINK row on
+                    #       this run.  PENDING_SINK is included because
+                    #       mark_pending_sink KEEPS the claimant's lease_owner, so a
+                    #       follower that has already parked all its claims as
+                    #       PENDING_SINK and let its active LEASES lapse is STILL
+                    #       detectable (the in-claim drain races AGAINST this: by the
+                    #       time the leader's claim_ready returns None, the follower
+                    #       may hold zero active leases yet own many PENDING_SINK
+                    #       rows).  An N=1 leader's own rows carry the leader's owner
+                    #       (BLOCKED rows carry none), so has_peer_owned_work is False
+                    #       for a solo leader → it never relinquishes → its
+                    #       self-stranded LEASED/BLOCKED/PENDING_SINK rows still hit
+                    #       the raise here or the run-level backstop — never silent.
+                    #
+                    # The surviving relinquish set is therefore exactly "non-READY,
+                    # non-FAILED continuations a peer is carrying" — every one of
+                    # which is covered by the run-level and quiescence backstops if
+                    # the peer somehow fails to finish it.
+                    if self._scheduler_lease_owner_registered:
+                        pending_ids = list(pending_items.keys())
+                        ready_count = self._scheduler.count_ready_in_set(run_id=self._run_id, work_item_ids=pending_ids)
+                        failed_count = self._scheduler.count_failed_in_set(run_id=self._run_id, work_item_ids=pending_ids)
+                        if (
+                            ready_count == 0
+                            and failed_count == 0
+                            and self._scheduler.has_peer_owned_work(run_id=self._run_id, caller_owner=self._scheduler_lease_owner)
+                        ):
+                            relinquished = {
+                                work_item_id: f"{item.token.token_id}@{item.current_node_id}"
+                                for work_item_id, item in pending_items.items()
+                            }
+                            logger.info(
+                                "Relinquishing %d non-READY/non-FAILED pending continuation(s) to a peer worker "
+                                "(run_id=%r, work_item_ids=%r, observed_statuses=%r)",
+                                len(pending_items),
+                                self._run_id,
+                                list(relinquished.keys()),
+                                self._scheduler.summarize_active_work(run_id=self._run_id),
+                            )
+                            pending_items.clear()
+                            break
                     stranded = ", ".join(f"{item.token.token_id}@{item.current_node_id}" for item in pending_items.values())
                     active = "; ".join(self._scheduler.summarize_active_work(run_id=self._run_id)) or "<none>"
                     raise OrchestrationInvariantError(

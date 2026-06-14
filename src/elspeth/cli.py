@@ -2616,6 +2616,15 @@ def join(
             payload_store=payload_store,
         )
 
+        # Call on_start for all transforms and sinks — mirrors the leader's
+        # _build_run_context lifecycle.  Without this, plugins raise
+        # PluginContractViolation("Transform 'X' was called before on_start()")
+        # on the first process() call.
+        for _follower_transform in follower_transforms:
+            _follower_transform.on_start(ctx)
+        for _follower_sink in plugins.sinks.values():
+            _follower_sink.on_start(ctx)
+
         try:
             follower_proc.run(ctx)
         except RunWorkerEvictedError as e:
@@ -2675,6 +2684,23 @@ def join(
             else:
                 typer.echo(f"\nFollower {worker_id} interrupted (SIGINT). Departed from run {run_id}.")
             raise typer.Exit(3)  # noqa: B904 — interrupted
+        finally:
+            # Mirror the leader's teardown via the canonical cleanup_plugins:
+            # on_complete then close, each hook individually guarded so one
+            # plugin's failure does not block the others — BUT TIER_1_ERRORS
+            # (AuditIntegrityError / FrameworkBugError) PROPAGATE (cleanup.py
+            # re-raises them before the broad catch), and every swallowed
+            # non-Tier-1 failure is LOGGED with plugin name + phase.  The bare
+            # `except Exception: pass` this replaces silently hid Tier-1
+            # audit-integrity corruption during follower teardown.
+            #
+            # include_source=False: the follower is a drain-only worker — it
+            # never opened/on_start'd sources (the on_start loop above covers
+            # only transforms + sinks), so source teardown must be skipped
+            # (mirrors the resume path's include_source=False).
+            from elspeth.engine.orchestrator.cleanup import cleanup_plugins as _cleanup_plugins
+
+            _cleanup_plugins(pipeline_config, ctx, include_source=False)
 
         # Clean departure (run reached terminal state).
         if output_format == "json":

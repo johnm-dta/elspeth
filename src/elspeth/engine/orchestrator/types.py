@@ -113,6 +113,18 @@ class RowProcessorHandle(Protocol):
         """Return whether scheduler work remains short of a durable sink handoff."""
         ...
 
+    def has_peer_active_leases(self) -> bool:
+        """Return whether any peer worker holds an unexpired LEASED item (ADR-030)."""
+        ...
+
+    def peer_active_lease_owners(self) -> tuple[str, ...]:
+        """Return the distinct peer lease_owners holding unexpired LEASED rows (ADR-030)."""
+        ...
+
+    def reap_expired_peer_leases(self) -> int:
+        """Drive lease maintenance once so dead peers are reaped; return count recovered (ADR-030)."""
+        ...
+
     def summarize_unresolved_scheduler_work(self) -> tuple[str, ...]:
         """Return grouped unresolved scheduler work for invariant diagnostics."""
         ...

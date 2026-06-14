@@ -3228,6 +3228,99 @@ class TokenSchedulerRepository:
             )
         return tuple(owner for owner in owners if owner is not None)
 
+    def count_ready_in_set(self, *, run_id: str, work_item_ids: Sequence[str]) -> int:
+        """Count how many of the given work item IDs are in READY status.
+
+        Returns the number of the supplied ``work_item_ids`` whose
+        ``token_work_items`` row is currently ``READY``. Scoped to ``run_id``
+        like every sibling verb; an ID belonging to another run does not count.
+        A non-READY (or missing) row is simply not counted — this verb proves
+        only "how many are still READY", NOT why the others are not (that could
+        be LEASED, PENDING_SINK, TERMINAL, FAILED, or absent). An empty input
+        returns 0.
+        """
+        if not work_item_ids:
+            return 0
+        # Bound each ``.in_()`` so a large explode fan-out (>999 siblings)
+        # cannot exceed SQLITE_MAX_VARIABLE_NUMBER. One extra bind slot is used
+        # by the run_id parameter, so keep the chunk comfortably under the
+        # historical 999 limit.
+        chunk_size = 900
+        ids = list(work_item_ids)
+        total = 0
+        with self._engine.connect() as conn:
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start : start + chunk_size]
+                result = conn.execute(
+                    select(func.count())
+                    .select_from(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.work_item_id.in_(chunk))
+                    .where(token_work_items_table.c.status == TokenWorkStatus.READY.value)
+                ).scalar_one()
+                total += int(result)
+        return total
+
+    def count_failed_in_set(self, *, run_id: str, work_item_ids: Sequence[str]) -> int:
+        """Count how many of the given work item IDs are in FAILED status.
+
+        Companion to :meth:`count_ready_in_set` for the ADR-030 M1 relinquish
+        discriminator. FAILED is the ONLY ``token_work_items`` status absent from
+        BOTH the run-level backstop (:meth:`count_active_work` →
+        ``has_unresolved_scheduler_work``) AND ``complete_run``'s quiescence CAS
+        (which both cover READY/LEASED/BLOCKED/PENDING_SINK). So a leader that
+        relinquished a self-FAILED pending continuation would lose it with no
+        backstop. The leader uses this verb to REFUSE to relinquish whenever ANY
+        pending row is FAILED — keeping a self-FAILED stray loud. Scoped to
+        ``run_id`` like every sibling verb; chunked for
+        ``SQLITE_MAX_VARIABLE_NUMBER``. An empty input returns 0.
+        """
+        if not work_item_ids:
+            return 0
+        chunk_size = 900
+        ids = list(work_item_ids)
+        total = 0
+        with self._engine.connect() as conn:
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start : start + chunk_size]
+                result = conn.execute(
+                    select(func.count())
+                    .select_from(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.work_item_id.in_(chunk))
+                    .where(token_work_items_table.c.status == TokenWorkStatus.FAILED.value)
+                ).scalar_one()
+                total += int(result)
+        return total
+
+    def has_peer_owned_work(self, *, run_id: str, caller_owner: str) -> bool:
+        """Return True if any non-terminal row is owned by a DIFFERENT worker.
+
+        ADR-030 M1 relinquish discriminator, arm (3): proves a PEER (some
+        ``lease_owner`` other than ``caller_owner``) is/was carrying work on this
+        run. A row counts if it is LEASED or PENDING_SINK with a non-NULL
+        ``lease_owner`` that differs from ``caller_owner``. PENDING_SINK is
+        included deliberately: ``mark_pending_sink`` KEEPS the claimant's
+        ``lease_owner`` (unlike mark_terminal/mark_failed/mark_blocked, which NULL
+        it), so a follower that has already parked all its claims as PENDING_SINK
+        and dropped its active LEASES is STILL detectable here — the in-claim drain
+        must see that the work was legitimately taken by a peer even after the
+        peer's leases lapse. An N=1 leader's own rows carry the leader's owner (and
+        BLOCKED rows carry no owner), so this returns False for a solo leader,
+        keeping its self-stranded continuations loud. Scoped to ``run_id`` like
+        every sibling verb.
+        """
+        with self._engine.connect() as conn:
+            found = conn.execute(
+                select(token_work_items_table.c.work_item_id)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.status.in_((TokenWorkStatus.LEASED.value, TokenWorkStatus.PENDING_SINK.value)))
+                .where(token_work_items_table.c.lease_owner.is_not(None))
+                .where(token_work_items_table.c.lease_owner != caller_owner)
+                .limit(1)
+            ).first()
+        return found is not None
+
     def count_active_work(self, *, run_id: str) -> int:
         """Count non-terminal scheduler work for a run."""
         active_statuses = (

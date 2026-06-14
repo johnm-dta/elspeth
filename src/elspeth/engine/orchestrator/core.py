@@ -44,7 +44,11 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.config import RuntimeRetryConfig
-from elspeth.contracts.coordination import CoordinationToken, mint_worker_id
+from elspeth.contracts.coordination import (
+    DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+    CoordinationToken,
+    mint_worker_id,
+)
 from elspeth.contracts.declaration_contracts import (
     EXPECTED_CONTRACT_SITES,
     contract_sites,
@@ -95,6 +99,7 @@ from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
 )
+from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.run_status import (
@@ -1149,6 +1154,73 @@ class Orchestrator:
 
             if loop_result is None:
                 raise OrchestrationInvariantError("Pipeline has no sources to process")
+
+            # 4b-pre. ADR-030 multi-worker: BEFORE checking for unresolved scheduler
+            # work, wait for peer followers to finish any in-flight LEASED items.
+            # A follower that claimed an item just before the leader's source loop
+            # exited will still hold a LEASED row (pending_sink_name IS NULL) that
+            # has_unresolved_scheduler_work() counts as unresolved.  Waiting here
+            # ensures followers complete their claims (LEASED → PENDING_SINK) before
+            # the invariant check fires.  In the single-worker case,
+            # has_peer_active_leases() returns False immediately and the loop is
+            # skipped.
+            #
+            # The wait is BOUNDED (a small multiple of the liveness window, NOT the
+            # multi-minute item-lease TTL): a wedged-but-alive peer that keeps its
+            # lease refreshed must not hang a deposed/interrupted leader forever.
+            # Each iteration also (a) honours the in-scope shutdown_event (SIGINT)
+            # and check_coordination_latch (epoch deposition) so the leader can break
+            # out, and (b) drives lease maintenance so a peer that DIED mid-lease is
+            # actively reaped to READY within the liveness window rather than waiting
+            # out the full item TTL.  On timeout we fall through to the existing
+            # has_unresolved_scheduler_work raise, which names the still-leased peers.
+            def _shutdown_during_wait() -> GracefulShutdownError:
+                """Build the canonical INTERRUPTED signal from the live counters.
+
+                A SIGINT observed while waiting on / draining peer work must surface
+                the same resumable GracefulShutdownError the source loop and sink
+                flush raise (counter-bearing, run_id-scoped), not a bare message.
+                """
+                _c = loop_ctx.counters
+                return GracefulShutdownError(
+                    rows_processed=_c.rows_processed,
+                    run_id=run_id,
+                    rows_succeeded=_c.rows_succeeded,
+                    rows_failed=_c.rows_failed,
+                    rows_quarantined=_c.rows_quarantined,
+                    rows_routed_success=_c.rows_routed_success,
+                    rows_routed_failure=_c.rows_routed_failure,
+                    routed_destinations=dict(_c.routed_destinations),
+                )
+
+            if not loop_result.interrupted:
+                peer_wait_deadline = time.monotonic() + (3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS)
+                while loop_ctx.processor.has_peer_active_leases():
+                    # SIGINT during the wait: surface the graceful-shutdown path
+                    # rather than spinning.
+                    if shutdown_event is not None and shutdown_event.is_set():
+                        raise _shutdown_during_wait()
+                    # Epoch deposition during the wait: check_and_raise surfaces
+                    # RunWorkerEvictedError so the deposed leader runs its
+                    # INTERRUPTED ceremony instead of spinning.
+                    if check_coordination_latch is not None:
+                        check_coordination_latch()
+                    # Actively reap a dead peer's expired lease (recovers it to
+                    # READY within the liveness window).
+                    loop_ctx.processor.reap_expired_peer_leases()
+                    if not loop_ctx.processor.has_peer_active_leases():
+                        break
+                    if time.monotonic() >= peer_wait_deadline:
+                        still_leased = loop_ctx.processor.peer_active_lease_owners()
+                        slog.warning(
+                            "Bounded peer-lease wait timed out; falling through to the unresolved-work invariant",
+                            run_id=run_id,
+                            still_leased_peers=list(still_leased),
+                            waited_seconds=3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                        )
+                        break
+                    time.sleep(0.5)
+
             if not loop_result.interrupted and loop_ctx.processor.has_unresolved_scheduler_work():
                 active_work = "; ".join(loop_ctx.processor.summarize_unresolved_scheduler_work()) or "<unknown>"
                 raise OrchestrationInvariantError(
@@ -1168,6 +1240,72 @@ class Orchestrator:
                 loop_result.interrupted,
                 on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
             )
+
+            # 4b. ADR-030 multi-worker: after the leader's own sink writes are done
+            # (all leader PENDING_SINK rows are now TERMINAL), drain the PENDING_SINK
+            # rows produced by follower workers and write those to sinks.  In the
+            # single-worker case, has_scheduled_work() returns False immediately
+            # (no follower PENDING_SINK rows exist) and the loop body never runs.
+            #
+            # LOOP (not single-pass): a follower that transitions LEASED→PENDING_SINK
+            # AFTER drain_scheduled_work's claim loop returns would leave a late
+            # PENDING_SINK row.  We re-drain until BOTH has_peer_active_leases() (no
+            # peer still holds an in-flight lease that could become PENDING_SINK) and
+            # has_scheduled_work() (no undrained PENDING_SINK row) are false.  The
+            # wait is bounded by the same liveness-multiple deadline as 4b-pre and
+            # honours shutdown/deposition each iteration; on timeout we stop draining
+            # and rely on complete_run's quiescence arm as the backstop (a residual
+            # PENDING_SINK row makes the run FAIL loudly — the correct, resumable
+            # exactly-once fail-direction — never a silent lost row).
+            if not loop_result.interrupted:
+                drain_deadline = time.monotonic() + (3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS)
+                while loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work():
+                    if shutdown_event is not None and shutdown_event.is_set():
+                        raise _shutdown_during_wait()
+                    if check_coordination_latch is not None:
+                        check_coordination_latch()
+
+                    if loop_ctx.processor.has_scheduled_work():
+                        follower_results = loop_ctx.processor.drain_scheduled_work(loop_ctx.ctx)
+                        if follower_results:
+                            # Clear pending_tokens before re-flush: write_pending_to_sinks
+                            # does NOT consume entries (it iterates without clearing), so the
+                            # leader's already-written tokens remain.  Accumulating follower
+                            # results on top of them would cause the next flush to re-write
+                            # every leader token → UNIQUE constraint on node_states.
+                            for _sink_list in loop_ctx.pending_tokens.values():
+                                _sink_list.clear()
+                            accumulate_row_outcomes(follower_results, loop_ctx.counters, loop_ctx.pending_tokens)
+                            self._run_core.flush_and_write_sinks(
+                                factory,
+                                run_id,
+                                loop_ctx,
+                                artifacts.sink_id_map,
+                                artifacts.edge_map,
+                                interrupted_by_shutdown=False,
+                                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                            )
+                            # Made progress this iteration; re-check immediately.
+                            continue
+
+                    # No drainable work this pass but a peer still holds a lease that
+                    # could yet produce a PENDING_SINK row.  Actively reap a dead
+                    # peer, then wait briefly — bounded.
+                    if not (loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work()):
+                        break
+                    loop_ctx.processor.reap_expired_peer_leases()
+                    if not (loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work()):
+                        break
+                    if time.monotonic() >= drain_deadline:
+                        slog.warning(
+                            "Bounded follower-drain wait timed out; relying on complete_run quiescence backstop",
+                            run_id=run_id,
+                            still_leased_peers=list(loop_ctx.processor.peer_active_lease_owners()),
+                            has_scheduled_work=loop_ctx.processor.has_scheduled_work(),
+                            waited_seconds=3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                        )
+                        break
+                    time.sleep(0.5)
 
             # ADR-019 Phase 4: deferred cross-table invariant sweep.
             #
@@ -1360,7 +1498,6 @@ class Orchestrator:
             JoinRefusedError: Filesystem preflight failed, run is not RUNNING,
                 config hash mismatch, or no live leader seat.
         """
-        from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 
         _now = now if now is not None else datetime.now(UTC)
         _window = window_seconds if window_seconds is not None else DEFAULT_RUN_LIVENESS_WINDOW_SECONDS

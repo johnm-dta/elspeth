@@ -398,7 +398,7 @@ def _seed_session_with_state(
         await session_service.save_composition_state(
             record.id,
             CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
@@ -538,7 +538,7 @@ def _seed_session_with_mismatched_auth_provider(
         await session_service.save_composition_state(
             record.id,
             CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],

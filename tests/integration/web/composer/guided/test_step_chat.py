@@ -444,8 +444,8 @@ class TestStep1SourceResolution:
         assert body["guided_session"]["step"] == "step_2_sink"
         assert body["next_turn"]["type"] == "single_select"
         assert body["next_turn"]["step_index"] == 1
-        assert body["composition_state"]["source"]["plugin"] == "csv"
-        source_options = body["composition_state"]["source"]["options"]
+        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"
         assert source_options["path"].endswith("_teal_colours.csv")
 

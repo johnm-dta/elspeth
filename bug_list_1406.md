@@ -39,41 +39,36 @@
   - tests/unit/plugins/llm/test_openrouter_multi_query.py: test_process_row_rate_limit_returns_retryable_error, test_process_row_server_error_returns_retryable_error, test_process_row_network_error_returns_retryable_error, TestHTTPSpecificBehavior::test_handles_connection_error
   - tests/unit/plugins/llm/test_azure_multi_query_profiling.py: TestLoadScenarios::test_rate_limit_error_handling, TestRowAtomicity::test_row_atomicity_high_failure_rate, TestRowAtomicity::test_row_atomicity_under_capacity_errors
   - tests/unit/plugins/llm/test_transform.py::TestMultiQuerySequentialRetryBehavior::test_retryable_error_returns_error_result_not_raises
-- [ ] **B — field_mapper composer_hint > 280 chars**.
-  tests/unit/contracts/test_plugin_assistance_coverage.py::test_builtin_plugin_publishes_discovery_hints[transform-field_mapper]
-  (hint reworked on this branch; trim to <=280).
-- [ ] **H — plugin sink/source/transform behavior**.
-  - tests/unit/plugins/sinks/test_sink_bug_fixes.py::TestAzureBlobSinkFieldValidation::test_csv_extra_fields_rejected_in_fixed_mode
-  - tests/unit/plugins/transforms/azure/test_blob_source.py::TestAzureBlobSourceCSV::test_csv_without_header
-  - tests/integration/web/test_composer_tools.py::test_post_call_hints_envelope_populated_for_hinted_plugins[sink-database-...unique constraint]
-- [ ] **E — elspeth_lints gate drift (source_file_hash / allowlist)**. Co-land
-  source-hash refresh for edited plugin files. Baseline/HMAC re-sign is
-  OPERATOR-OWNED — do not blind-regen.
-  - tests/unit/elspeth_lints/test_allowlist_loader_unification.py::test_baseline_capture_is_self_consistent
-  - tests/unit/elspeth_lints/test_audit_evidence_rules.py::test_audit_evidence_json_mode_succeeds_on_current_codebase
-  - tests/unit/elspeth_lints/test_immutability_rules.py::test_existing_yaml_loads_with_core_loader
-  - tests/unit/elspeth_lints/test_trust_tier_model_rule.py::TestR1SourceRegressions::test_source_boundary_non_r5_findings_are_site_allowlisted
-- [ ] **G — discipline guard tests** (verify whether this branch tripped them).
-  - tests/unit/test_mock_discipline_baseline.py::test_unspecced_mock_baseline_does_not_increase
-  - tests/unit/test_no_hasattr_branching.py::test_hasattr_in_tests_is_limited_to_direct_surface_assertions
+- [x] **B — field_mapper composer_hint > 280 chars**. DONE (commit 03268a124): split hint + re-pinned source_file_hash.
+- [x] **H — plugin sink/source/transform behavior**. DONE (commit 345156ad7): B4.4 headerless-CSV reject split; B3.2 azure extra-field divert.
+- [x] **G — discipline guards**. DONE: hasattr→getattr/isinstance (345156ad7); mock ratchet 2630→2652 with attribution (f96a860f1).
+- [x] **C/D/J — web/composer source→sources migration** (PRE-EXISTING, not this branch). DONE (commit 27324a773): 45 tests; CompositionState.source→.sources across fixtures/attrs/response bodies.
+- [x] **F — core config source→sources (ADR-025)** (PRE-EXISTING). DONE (commit e8d66da00): 5 tests.
+- [x] **I — audit/ADR durability** (PRE-EXISTING, release/0.6.0 multi-worker). DONE (commit 4f1a3f9b8): epoch-21 create_row identity + check_coordination_latch mock.
 
-### Pre-existing (NOT this branch — triage: real bug vs environmental)
+### OPERATOR-OWNED GATE SET — NOT fixed here (require HMAC key / tier judgment)
 
-- [ ] **C — web integration ERRORs (23)**. Root cause: `KeyError: 'source'` at
-  tests/integration/web/conftest.py:401 — `composition_state.to_dict()` lacks
-  `source`. Single shared fixture fault. Files: test_audit_readiness_routes.py,
-  test_completion_flow_e2e.py, test_shareable_reviews_routes.py,
-  test_yaml_export_audit_event.py.
-- [ ] **D — composer guided integration FAILs (~18)**.
-  tests/integration/web/composer/guided/* (default_guided, error_paths,
-  get_guided, progressive_disclosure, respond, step_chat, step_handlers).
-- [ ] **F — core config FAILs (5)**. tests/unit/core/test_config.py
-  (collection probes, env-var expansion, secret-field fingerprint).
-- [ ] **I — audit/ADR durability FAILs**.
-  - tests/integration/audit/test_exporter_batch_queries.py::TestExporterBatchQueryIntegrity::test_export_run_is_isolated_from_sibling_run_records
-  - tests/integration/test_adr_019_sweep_durability.py::test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses[I1c], [I3]
-- [ ] **J — interpretation / execute-pipeline FAILs** (likely same fixture
-  family as C/D).
-  - tests/integration/web/test_interpretation_opt_out_audit.py::test_opted_out_session_still_records_surface_specific_rows
-  - tests/integration/web/test_execute_pipeline.py: TestEndToEndPipelineExecution::test_csv_passthrough_csv, TestGateRoutedPipelineExecution::test_gate_routed_pipeline_classifies_as_completed_via_api
-  - tests/integration/web/test_audit_readiness_routes.py::test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline
+> Per project doctrine: autoroll source-hashes OK, NEVER baseline/allowlist
+> snapshots; operator holds the red-gate deliberately. Reconciled at merge.
+
+- [ ] **#3 trust-tier R1/R6 fingerprint drift** — this branch's source edits
+  (dataverse B3.1 etc.) drifted tier-model allowlist fingerprints
+  (`dataverse.py:R6:DataverseSource:load:fp=…`). Owed: operator fp re-pin/justify at merge.
+- [ ] **baseline_capture_is_self_consistent** — pre-existing operator HMAC re-pin (known red).
+- [ ] **immutability `8 vs 9` live entries** — allowlist-snapshot drift; operator-owned.
+- [ ] **FollowerSeatDeadError undecorated** (audit_evidence gate) — needs a
+  tier-1/tier-2 classification in `contracts/errors.py`; follower-epic + tier-model
+  decision (pre-existing on release/0.6.0). NOT this branch.
+
+## Final tally
+
+Run2 baseline: **52 failed + 23 errors**. Fixed in commits f98195b10,
+03268a124, 345156ad7, f96a860f1, 27324a773, e8d66da00, 4f1a3f9b8:
+- Branch-caused: A (8 tests, the hang), B (field_mapper hint), H (azure CSV
+  reject/divert), G (hasattr + mock ratchet).
+- Pre-existing test-infra (source→sources / ADR-025 / epoch-21), fixed for a
+  green suite: C+D+J (45), F (5), I (3).
+
+Remaining = the OPERATOR-OWNED GATE SET only (4 tests above). These require the
+operator HMAC key and/or a tier-model classification decision and are
+reconciled at merge — deliberately not touched.

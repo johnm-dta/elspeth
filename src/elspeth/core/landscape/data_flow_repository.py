@@ -1415,6 +1415,38 @@ class DataFlowRepository:
         )
         return [self._token_outcome_loader.load(row) for row in self._ops.execute_fetchall(query)]
 
+    def get_failed_unrouted_terminal_token_ids(self, run_id: str, token_ids: Sequence[str]) -> frozenset[str]:
+        """Token ids (from ``token_ids``) holding a terminal FAILURE/UNROUTED outcome.
+
+        The restore-side aggregation reconcile signature (ADR-030 §E.3a
+        aggregation mirror, elspeth-55546a6fd6). A FAILED out-of-claim
+        aggregation flush records a completed FAILURE/UNROUTED token_outcome for
+        every buffered token (``_handle_flush_error``) and THEN releases their
+        BLOCKED scheduler rows in a SEPARATE transaction
+        (``_mark_buffered_scheduler_work_terminal``). A crash between the two
+        strands durable BLOCKED rows whose tokens are already terminally failed:
+        they hold no live BUFFERED outcome, so ``_derive_restored_batch_id``
+        cannot proceed, yet they are genuinely done. The barrier restore
+        reconcile journal-releases exactly these tokens instead of bricking the
+        resume.
+
+        Scoped to the ``(FAILURE, UNROUTED)`` pair so the success-path
+        BATCH_CONSUMED crash residual (elspeth-3977d8ab60, which still owes a
+        sink output and must NOT be silently released) is excluded — any other
+        terminal-while-BLOCKED state keeps hitting the loud restore refusal.
+        """
+        if not token_ids:
+            return frozenset()
+        query = (
+            select(token_outcomes_table.c.token_id)
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.token_id.in_(tuple(token_ids)))
+            .where(token_outcomes_table.c.completed == 1)
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.FAILURE.value)
+            .where(token_outcomes_table.c.path == TerminalPath.UNROUTED.value)
+        )
+        return frozenset(row.token_id for row in self._ops.execute_fetchall(query))
+
     def find_duplicate_live_buffered_outcomes(self, run_id: str) -> list[tuple[str, int]]:
         """Run-wide sweep: token_ids holding >1 live BUFFERED outcome.
 

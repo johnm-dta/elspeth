@@ -169,6 +169,8 @@ def _seed_exporter_isolation_records(db: LandscapeDB, run_id: str, label: str) -
         source_node_id,
         row_index=10_000,
         data={"seed": label},
+        source_row_index=10_000,
+        ingest_sequence=10_000,
         row_id=f"audit-extra-row-{label}",
     )
     parent_token = factory.data_flow.create_token(row.row_id, token_id=f"audit-extra-token-{label}")

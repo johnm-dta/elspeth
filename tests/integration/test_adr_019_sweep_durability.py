@@ -519,6 +519,7 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
         active_source,
         shutdown_event=None,
         flush_end_of_input=True,
+        check_coordination_latch=None,
     ):
         captured["run_id"] = run_id
         sink = factory.data_flow.register_node(

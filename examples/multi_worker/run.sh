@@ -109,11 +109,27 @@ for i in $(seq 1 "$WORKERS"); do
     FOLLOWER_PIDS+=("$!")
 done
 
-# --- Reap leader + followers ---
-wait "$LEADER_PID"; LEADER_EXIT=$?
+# --- Reap leader + followers; fold every non-zero exit into the final verdict ---
+# A clean run has the leader AND every follower exit 0 (README "Exit-code
+# semantics": 0 = clean departure; 1-4 are all failures). `wait` is guarded by
+# `if` so a non-zero exit does not trip `set -e` before we can record it.
+WORKER_FAILED=0
+if wait "$LEADER_PID"; then
+    LEADER_EXIT=0
+else
+    LEADER_EXIT=$?
+    echo "WARNING: leader exited non-zero ($LEADER_EXIT)." >&2
+    WORKER_FAILED=1
+fi
 echo "Leader exited ($LEADER_EXIT)."
 for pid in "${FOLLOWER_PIDS[@]}"; do
-    wait "$pid" || echo "Follower $pid exited non-zero ($?) (see exit-code semantics in README)."
+    if wait "$pid"; then
+        echo "Follower $pid exited cleanly (0)."
+    else
+        follower_exit=$?
+        echo "Follower $pid exited non-zero ($follower_exit) (see exit-code semantics in README)." >&2
+        WORKER_FAILED=1
+    fi
 done
 
 # --- Attribution query (read-only): per-worker completed rows ---
@@ -154,7 +170,14 @@ TOTAL_ROWS="$(sqlite3 "file:${DB}?mode=ro" \
   "PRAGMA query_only=ON; SELECT COUNT(*) FROM token_work_items WHERE run_id='$RUN_ID' AND status IN ('terminal','failed');" 2>/dev/null || echo 0)"
 
 echo ""
-if [ "${WORKER_COUNT:-0}" -ge 2 ]; then
+# PASS requires BOTH signals: the attribution assertion (>=2 workers each
+# completed a row) AND every worker process exiting cleanly. Either alone is
+# insufficient -- a non-zero worker exit means the demonstration did not run
+# cleanly even if >=2 workers happened to record rows first.
+if [ "$WORKER_FAILED" -ne 0 ]; then
+    echo "✗ FAIL: a worker process exited non-zero (see warnings above); the run did not complete cleanly." >&2
+    exit 1
+elif [ "${WORKER_COUNT:-0}" -ge 2 ]; then
     echo "✓ PASS: leader + $((WORKER_COUNT-1)) follower(s) shared $TOTAL_ROWS rows across $WORKER_COUNT workers"
     exit 0
 else

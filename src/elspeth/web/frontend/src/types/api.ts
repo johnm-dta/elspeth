@@ -122,7 +122,7 @@ export interface RunAuditStoryResponse {
   run_id: string;
   session_id: string;
   llm_call_count: number;
-  output_file_hash: string;
+  source_data_hash: string;
   started_at: string;
   plugin_versions: Record<string, string>;
   seeded_from_cache: boolean;

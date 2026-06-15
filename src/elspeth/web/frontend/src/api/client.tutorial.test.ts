@@ -70,7 +70,7 @@ describe("api/client tutorial helpers", () => {
           run_id: "run-1",
           session_id: "session-1",
           llm_call_count: 5,
-          output_file_hash: "cafe",
+          source_data_hash: "cafe",
           started_at: "2026-05-19T12:00:00Z",
           plugin_versions: { web_scrape: "1.0.0" },
           seeded_from_cache: true,

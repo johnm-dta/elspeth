@@ -509,7 +509,7 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
           run_id: "run-1",
           session_id: tutorialSession.id,
           llm_call_count: 5,
-          output_file_hash: "cafe1234567890",
+          source_data_hash: "a7f3e2fullhash",
           started_at: "2026-05-19T12:05:00Z",
           plugin_versions: { web_scrape: "1.0.0", llm_rate: "1.0.0" },
           seeded_from_cache: false,

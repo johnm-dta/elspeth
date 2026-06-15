@@ -8,7 +8,6 @@ const COPY_FEEDBACK_DURATION_MS = 2_000;
 interface TutorialTurn5AuditStoryProps {
   sessionId: string;
   runId: string;
-  sourceDataHash: string;
   onContinue: () => void;
   onBack: () => void;
 }
@@ -16,7 +15,6 @@ interface TutorialTurn5AuditStoryProps {
 export function TutorialTurn5AuditStory({
   sessionId,
   runId,
-  sourceDataHash,
   onContinue,
   onBack,
 }: TutorialTurn5AuditStoryProps): JSX.Element {
@@ -70,17 +68,8 @@ export function TutorialTurn5AuditStory({
               <dt>Source data hash</dt>
               <dd>
                 <HashWithCopy
-                  hash={sourceDataHash}
+                  hash={summary.source_data_hash}
                   label="source data hash"
-                />
-              </dd>
-            </div>
-            <div>
-              <dt>Output file hash</dt>
-              <dd>
-                <HashWithCopy
-                  hash={summary.output_file_hash}
-                  label="output file hash"
                 />
               </dd>
             </div>
@@ -103,7 +92,7 @@ export function TutorialTurn5AuditStory({
           </dl>
           <p>
             If someone asks why a page received its score, the run has the
-            prompt, response, model details, input hash, output hash, and plugin
+            prompt, response, model details, source hash, and plugin
             versions tied together.
           </p>
           <div className="tutorial-actions">

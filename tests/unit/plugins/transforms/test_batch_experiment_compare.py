@@ -277,7 +277,42 @@ class TestBatchExperimentCompare:
         # stdev undefined at n=1 -- honest None, never 0.0
         assert result.row["baseline_stdev"] is None
         assert result.row["variant_stdev"] is None
-        # standard_error=0 when both stdevs are None -> CI bounds undefined
+        # Both arms n=1 -> two-sample SE is undefined, NOT zero. Emit None so no
+        # z-score or CI is fabricated from a zero-variance assumption.
+        assert result.row["standard_error"] is None
+        assert result.row["z_score"] is None
+        assert result.row["confidence_95_low"] is None
+        assert result.row["confidence_95_high"] is None
+
+    def test_singleton_arm_emits_no_inferential_stats(self, ctx: PluginContext) -> None:
+        """One arm with n=1 has UNDEFINED variance; the asymmetric (1-vs-N) case
+        must NOT fabricate SE/z/CI from the other arm's variance alone.
+
+        Regression for the divergence where _stdev() returns None at n=1 but
+        _comparison_row() coerced that None to 0.0 in the variance term, yielding
+        a real standard_error / z_score / 95% CI even though one arm's variance is
+        undefined (B4.5-b-experiment_compare).
+        """
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 3.0}),  # n=1 -> stdev undefined
+            _make_row({"variant": "treatment", "score": 5.0}),  # n=2 -> stdev defined
+            _make_row({"variant": "treatment", "score": 7.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 2
+        # baseline (n=1) stdev undefined; variant (n=2) stdev is a real value
+        assert result.row["baseline_stdev"] is None
+        assert result.row["variant_stdev"] is not None
+        # One arm's variance is undefined -> SE undefined -> no z, no CI.
+        assert result.row["standard_error"] is None
         assert result.row["z_score"] is None
         assert result.row["confidence_95_low"] is None
         assert result.row["confidence_95_high"] is None

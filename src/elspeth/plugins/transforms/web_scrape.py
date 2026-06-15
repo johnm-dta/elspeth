@@ -435,7 +435,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f41b69a4d749b1d9"
+    source_file_hash: str | None = "sha256:2d54e2b6cc87abaf"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -755,8 +755,16 @@ class WebScrapeTransform(BaseTransform):
             )
 
         # Body-size guard: reject responses that exceed the configured limit (B3.10).
-        # The body is already buffered by AuditedHTTPClient; this guard prevents
-        # extract_content and payload_store from processing a hostile large body.
+        #
+        # LIMITATION: this is a POST-buffer guard. AuditedHTTPClient does a
+        # non-streaming GET, so by the time we get here the full body is already
+        # downloaded into response.content AND audit-captured (body_size +
+        # base64 payload). This guard therefore bounds only EXTRACTION and
+        # fingerprinting of a hostile body -- it does NOT bound download time,
+        # peak memory, or audit-payload size. A true pre-buffer cap requires a
+        # streaming byte-cap (early abort) in AuditedHTTPClient, which is a
+        # shared-client change with its own audit-semantics + test surface.
+        # Tracked: filigree elspeth-a6f246d02a (operator-deferred 2026-06-15).
         body_size = len(response.content)
         if body_size > self._max_body_bytes:
             return TransformResult.error(

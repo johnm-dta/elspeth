@@ -115,7 +115,7 @@ class BatchEffectSize(BaseTransform):
     name = "batch_effect_size"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5d9429c66e7bea92"
+    source_file_hash: str | None = "sha256:ead9c6381cdb2985"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
 
@@ -316,8 +316,13 @@ class BatchEffectSize(BaseTransform):
             mean_delta = self._require_finite(variant_mean - baseline_mean, operation="mean_delta")
             assert mean_delta is not None
             pooled_variance_denominator = baseline.count + variant.count - 2
+            pooled_stdev: float | None
             if pooled_variance_denominator <= 0:
-                pooled_stdev = 0.0
+                # Both groups are singletons (n1+n2-2 <= 0): the pooled dispersion
+                # is UNDEFINED, not zero. Emit None rather than a misleading real
+                # 0.0 -- consistent with baseline_stdev/variant_stdev being None at
+                # n=1 (B4.5-b). cohens_d stays None (guarded below).
+                pooled_stdev = None
             else:
                 # When stdev is None (n=1) the (count-1)*stdev^2 term is 0*? = 0,
                 # so treat None as 0.0 only for the pooled intermediate.
@@ -330,7 +335,7 @@ class BatchEffectSize(BaseTransform):
                 assert pooled_stdev_candidate is not None
                 pooled_stdev = pooled_stdev_candidate
 
-            cohens_d = None if pooled_stdev == 0 else mean_delta / pooled_stdev
+            cohens_d = None if (pooled_stdev is None or pooled_stdev == 0) else mean_delta / pooled_stdev
             cohens_d = self._require_finite(cohens_d, operation="cohens_d")
             hedges_denominator = (4 * (baseline.count + variant.count)) - 9
             if cohens_d is None or hedges_denominator <= 0:

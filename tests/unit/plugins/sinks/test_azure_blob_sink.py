@@ -406,6 +406,67 @@ class TestAzureBlobSinkWrite:
         data_lines = lines[1:]
         assert all("hello" in ln or "world" in ln for ln in data_lines)
 
+    def test_write_csv_does_not_divert_row_with_valid_later_extra_field(self) -> None:
+        """A later row carrying a valid extra field must NOT be diverted.
+
+        The real CSV serializer computes fieldnames cumulatively across ALL rows
+        (_get_fieldnames_from_schema_or_rows), so in observed/flexible mode an
+        extra field that first appears in a later row is legitimate. The per-row
+        probe previously trial-encoded each row against only rows[0].keys(), so
+        DictWriter's extrasaction='raise' wrongly diverted the later row to failsink
+        before the accepting serializer ran -- silent data loss. The probe must use
+        the SAME schema-aware field set the serializer uses, so a valid extra is not
+        mistaken for an out-of-lock field.
+        """
+        sink = inject_write_failure(AzureBlobSink(_base_config(format="csv", schema=DYNAMIC_SCHEMA)))
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write(
+                [
+                    {"a": "1"},  # first row: narrow key set
+                    {"a": "2", "b": "extra"},  # valid extra field in observed mode
+                ],
+                ctx,
+            )
+
+        # Nothing diverted: in observed mode the later extra field is a valid
+        # column the serializer folds in across all rows.
+        assert len(result.diversions) == 0
+        assert mock_blob.upload_blob.called
+        uploaded: bytes = mock_blob.upload_blob.call_args[0][0]
+        text = uploaded.decode("utf-8")
+        # The extra-field row survived to the serializer and was written.
+        assert "extra" in text
+
+    def test_write_csv_fixed_mode_out_of_lock_field_diverts_per_row(self) -> None:
+        """In FIXED mode a field outside the column lock is a per-row data fault:
+        the probe diverts that row (recorded + routed), the good rows still upload.
+
+        Locks the encoding-probe fix against over-correction. The probe legitimately
+        makes a field-shape decision -- it must KEEP diverting genuine fixed-mode
+        out-of-lock fields (mirrors test_sink_bug_fixes
+        .test_csv_extra_fields_in_fixed_mode_divert_only_bad_row) while no longer
+        diverting VALID later-appearing extras in flexible/observed mode.
+        """
+        sink = inject_write_failure(AzureBlobSink(_base_config(format="csv", schema=FIXED_SCHEMA)))
+        ctx = _make_sink_ctx()
+        mock_service, mock_blob = _mock_blob_upload()
+
+        with patch(PATCH_AUTH, return_value=mock_service):
+            result = sink.write(
+                [
+                    {"id": "1", "name": "a"},
+                    {"id": "2", "name": "b", "rogue": "x"},  # out-of-lock field -> divert
+                ],
+                ctx,
+            )
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert mock_blob.upload_blob.called
+
     def test_write_csv_codec_diversion_content_hash_is_sha256_of_uploaded_bytes(self) -> None:
         """content_hash after a csv codec diversion matches the actually-uploaded bytes."""
         sink = inject_write_failure(

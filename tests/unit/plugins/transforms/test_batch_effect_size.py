@@ -129,6 +129,11 @@ class TestBatchEffectSize:
         # stdev undefined at n=1 -- honest None, never 0.0
         assert result.row["baseline_stdev"] is None
         assert result.row["variant_stdev"] is None
+        # Both groups n=1 -> pooled dispersion denominator (n1+n2-2) is 0, so the
+        # pooled stdev is UNDEFINED, not zero. Emit None rather than a misleading
+        # real 0.0 (B4.5-b-effect_size-pooled). cohens_d stays None.
+        assert result.row["pooled_stdev"] is None
+        assert result.row["cohens_d"] is None
 
 
 class TestBatchEffectSizeConfig:

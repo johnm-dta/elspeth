@@ -106,6 +106,40 @@ fail-open scanning, no row that fails its own contract).
   rebuilds that field's contract to the value's type, preserving
   `original_name` / `required` / `source` / `nullable`; `object`/`any`
   fields are left untouched.
+- **`AzureBlobSink` CSV no longer diverts valid rows in flexible/observed
+  mode** — the per-row staging probe trial-encoded each row against only
+  the first row's keys, while the real serializer computes field names
+  cumulatively across all rows. A later row carrying a valid extra field
+  (legitimate in flexible/observed mode) tripped `DictWriter`'s
+  `extrasaction='raise'` and was routed to the failure sink before the
+  serializer that would have accepted it ever ran — silent data loss. The
+  probe now uses the same schema-aware field set as the serializer, so a
+  valid late-appearing field is kept while a genuine fixed-mode
+  column-lock violation is still diverted per-row.
+- **`batch_experiment_compare` no longer fabricates inferential statistics
+  for a singleton arm** — `stdev` is undefined at n=1 and was reported as
+  an honest `None`, but the comparison then coerced that `None` to `0.0`
+  in the standard-error term, so an arm with a single value still produced
+  a real `standard_error`, `z_score`, and 95% confidence interval from a
+  zero-variance assumption. When either arm has undefined variance the
+  standard error, z-score, and interval are now all `None`.
+- **`batch_effect_size` emits `None` pooled dispersion for two singletons**
+  — when both groups had a single value the pooled-variance denominator
+  (`n₁+n₂−2`) is zero and the pooled standard deviation is undefined, but
+  it was reported as a real `0.0` (while the per-group stdevs and Cohen's
+  *d* were correctly `None`). The pooled standard deviation is now `None`
+  in that case, consistent with the other undefined dispersion statistics.
+
+The shipped `examples/multi_worker` harness also had its pass/fail verdict
+corrected: a follower exiting non-zero was logged but not folded into the
+final decision, so the run could print PASS after a worker failed. The
+verdict now requires both the attribution assertion (≥2 workers each
+completed a row) and a clean exit from the leader and every follower.
+
+A follow-up is tracked for `web_scrape`'s `max_body_bytes`, which is
+enforced only after `AuditedHTTPClient` has already buffered and
+audit-captured the full body; a true pre-buffer cap belongs in the shared
+client as a streaming byte-limit (elspeth-a6f246d02a).
 
 ---
 

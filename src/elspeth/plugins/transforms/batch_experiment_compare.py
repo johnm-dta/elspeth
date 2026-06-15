@@ -123,7 +123,7 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:25204a1f415379a1"
+    source_file_hash: str | None = "sha256:9b9c77585ce0c57b"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 
@@ -340,21 +340,31 @@ class BatchExperimentCompare(BaseTransform):
             assert mean_delta is not None
             relative_lift = None if baseline_mean == 0 else mean_delta / abs(baseline_mean)
             relative_lift = self._require_finite(relative_lift, operation="relative_lift")
-            # When stdev is None (n=1) the stdev^2/count term is 0, treat as 0.0
-            baseline_stdev_val = baseline_stdev if baseline_stdev is not None else 0.0
-            variant_stdev_val = variant_stdev if variant_stdev is not None else 0.0
-            variance_term = (baseline_stdev_val**2 / baseline.count) + (variant_stdev_val**2 / variant.count)
-            standard_error = self._require_finite(math.sqrt(variance_term), operation="standard_error")
-            assert standard_error is not None
-            z_score = None if standard_error == 0 else mean_delta / standard_error
-            z_score = self._require_finite(z_score, operation="z_score")
-            # When se==0 the CI is a degenerate point interval -- emit None (B4.5-a)
-            if standard_error == 0:
-                confidence_95_low: float | None = None
-                confidence_95_high: float | None = None
+            standard_error: float | None
+            confidence_95_low: float | None
+            confidence_95_high: float | None
+            if baseline_stdev is None or variant_stdev is None:
+                # At least one arm has n=1, so its variance is UNDEFINED -- the
+                # two-sample standard error is undefined too. Emit None rather than
+                # coercing the missing stdev to 0.0, which would fabricate a real
+                # SE / z-score / CI from a zero-variance assumption (B4.5-b).
+                standard_error = None
+                z_score = None
+                confidence_95_low = None
+                confidence_95_high = None
             else:
-                confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
-                confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
+                variance_term = (baseline_stdev**2 / baseline.count) + (variant_stdev**2 / variant.count)
+                standard_error = self._require_finite(math.sqrt(variance_term), operation="standard_error")
+                assert standard_error is not None
+                z_score = None if standard_error == 0 else mean_delta / standard_error
+                z_score = self._require_finite(z_score, operation="z_score")
+                # When se==0 the CI is a degenerate point interval -- emit None (B4.5-a)
+                if standard_error == 0:
+                    confidence_95_low = None
+                    confidence_95_high = None
+                else:
+                    confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
+                    confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
         except OverflowError as exc:
             reason: TransformErrorReason = {
                 "reason": "float_overflow",

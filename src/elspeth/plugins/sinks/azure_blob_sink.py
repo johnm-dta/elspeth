@@ -309,7 +309,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d5bfc00f78b7b2dd"
+    source_file_hash: str | None = "sha256:f7d25a366d121488"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -642,7 +642,19 @@ class AzureBlobSink(BaseSink):
             # Per-row trial: serialize the row into a throwaway StringIO then encode.
             # Mirrors the json.dumps trial above and the csv_sink._stage_rows_per_row pattern.
             encodable_rows: list[dict[str, Any]] = []
-            trial_fieldnames = list(rows[0].keys()) if rows else []
+            # Use the SAME schema-aware fieldnames the real serializer computes
+            # (_serialize_csv -> _get_fieldnames_from_schema_or_rows), NOT just
+            # rows[0].keys(). The probe legitimately diverts a row whose fields fall
+            # outside the established set (fixed-mode column-lock violation -> per-row
+            # data fault, mirroring CSVSink / audit finding #6) via DictWriter's
+            # extrasaction='raise'. But rows[0].keys() under-counts the valid field
+            # set in flexible/observed mode, where a VALID extra field may first
+            # appear in a later row -- so that row was wrongly diverted before the
+            # serializer (which folds the extra in) ran. Computing fieldnames across
+            # all rows in schema order fixes the false divert while preserving the
+            # fixed-mode divert contract: in fixed mode the set is declared-only, so
+            # a genuine out-of-lock field still raises here and is diverted per-row.
+            trial_fieldnames = self._get_fieldnames_from_schema_or_rows(rows)
             for i, row in enumerate(rows):
                 row_buf = io.StringIO()
                 trial_writer = csv.DictWriter(row_buf, fieldnames=trial_fieldnames)

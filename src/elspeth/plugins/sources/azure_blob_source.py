@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
-from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -1131,6 +1131,20 @@ class AzureBlobSource(BaseSource):
                     return
 
             yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
+        except ContractFieldLimitExceeded as e:
+            ctx.record_validation_error(
+                row=row_to_validate,
+                error=str(e),
+                schema_mode=self._schema_config.mode,
+                destination=self._on_validation_failure,
+            )
+            if self._on_validation_failure != "discard":
+                yield SourceRow.quarantined(
+                    row=row_to_validate,
+                    error=str(e),
+                    destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
+                )
         except ValidationError as e:
             # Record validation failure in audit trail
             # This is a trust boundary: external data may be invalid

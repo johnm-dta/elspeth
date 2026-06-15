@@ -18,7 +18,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
-from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
@@ -580,6 +580,15 @@ class JSONSource(BaseSource):
                     return
 
             yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
+        except ContractFieldLimitExceeded as e:
+            quarantined = self._record_validation_failure(
+                ctx=ctx,
+                row=normalized_row,
+                error_msg=str(e),
+                source_row_index=source_row_index,
+            )
+            if quarantined is not None:
+                yield quarantined
         except ValidationError as e:
             quarantined = self._record_validation_failure(
                 ctx=ctx,

@@ -1581,6 +1581,35 @@ class TestJSONSourceKeyNormalization:
         assert {field.normalized_name for field in second_contract.fields} == {"a", "b"}
         assert second_contract.get_field("b").original_name == "b"
 
+    def test_observed_sparse_keys_are_quarantined_after_contract_field_cap(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unbounded sparse JSON field growth must stop at the source boundary."""
+        import elspeth.contracts.contract_builder as contract_builder
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        monkeypatch.setattr(contract_builder, "_MAX_INFERRED_CONTRACT_FIELDS", 2, raising=False)
+
+        json_file = tmp_path / "data.jsonl"
+        json_file.write_text('{"a": 1}\n{"b": 2}\n{"c": 3}\n')
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert [row.is_quarantined for row in rows] == [False, False, True]
+        assert "exceeds maximum inferred schema fields" in rows[2].quarantine_error
+
     def test_first_row_quarantined_key_rebuild(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When first row is quarantined and second row has different keys, resolution rebuilds.
 

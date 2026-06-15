@@ -20,7 +20,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
-from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -703,10 +703,26 @@ class DataverseSource(BaseSource):
                         # metadata before validation and yield.
                         if self._field_resolution is None:
                             raise ValueError("field_resolution must be established before sparse-field contract inference")
-                        contract = self._contract_builder.process_sparse_fields(
-                            validated_row,
-                            self._field_resolution.resolution_mapping,
-                        )
+                        try:
+                            contract = self._contract_builder.process_sparse_fields(
+                                validated_row,
+                                self._field_resolution.resolution_mapping,
+                            )
+                        except ContractFieldLimitExceeded as e:
+                            ctx.record_validation_error(
+                                row=validated_row,
+                                error=str(e),
+                                schema_mode=self._schema_config.mode,
+                                destination=self._on_validation_failure,
+                            )
+                            if self._on_validation_failure != "discard":
+                                yield SourceRow.quarantined(
+                                    row=validated_row,
+                                    error=str(e),
+                                    destination=self._on_validation_failure,
+                                    source_row_index=current_source_row_index,
+                                )
+                            continue
                         self.set_schema_contract(contract)
 
                     if contract.locked:

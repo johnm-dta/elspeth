@@ -2,10 +2,22 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Session-Only Schema Cutover
+## Current Cutover: 0.6.0 (two-DB reset)
 
-P3 of `elspeth-fdebcaa79a` adds `blob_inline_resolutions` to the web
-session DB and bumps `SESSION_SCHEMA_EPOCH` to 12. This is a
+0.6.0 advances **both** epochs: `SESSION_SCHEMA_EPOCH` to 19 and the
+Landscape audit DB `SQLITE_SCHEMA_EPOCH` to 21. Per the rule above, this
+is a **two-DB reset** — run the staging procedure below *and* the
+[Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same
+service-stop window. 0.6.0 boot fails closed on a stale session DB with
+`SessionSchemaError: Session DB schema version 18 does not match
+SESSION_SCHEMA_EPOCH=19. Pre-release ELSPETH does not migrate session
+databases. Delete the session DB file and restart.` `auth.db` is a
+separate file and is NOT reset — local user accounts survive.
+
+### Earlier cutover (historical)
+
+P3 of `elspeth-fdebcaa79a` added `blob_inline_resolutions` to the web
+session DB and bumped `SESSION_SCHEMA_EPOCH` to 12. That was a
 session-only schema cutover: delete/recreate the session DB with this
 runbook before deploying the build, but do not reset the Landscape DB
 unless the same deploy also changes `SQLITE_SCHEMA_EPOCH`.

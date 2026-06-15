@@ -289,6 +289,30 @@ enforced only after `AuditedHTTPClient` has already buffered and
 audit-captured the full body; a true pre-buffer cap belongs in the shared
 client as a streaming byte-limit (elspeth-a6f246d02a).
 
+### Operational
+
+- **The web session database also resets on upgrade (in addition to the
+  audit DB above)** — the session database schema epoch advances to 19
+  (`SESSION_SCHEMA_EPOCH`). It is not migrated in place: 0.6.0 boot fails
+  closed on a pre-0.6.0 session DB with `SessionSchemaError: Session DB
+  schema version 18 does not match SESSION_SCHEMA_EPOCH=19. Pre-release
+  ELSPETH does not migrate session databases. Delete the session DB file
+  and restart.` Before first start on 0.6.0, stop `elspeth-web.service`,
+  back up and remove `data/sessions.db` (and its `-wal`/`-shm` sidecars),
+  and restart; the bootstrap recreates the schema on first start.
+  `data/auth.db` is a SEPARATE file — local user accounts survive the
+  reset. Procedure: `docs/runbooks/staging-session-db-recreation.md`.
+- **Ship a frontend dist rebuilt from this release's source** — the web UI
+  is served from `src/elspeth/web/frontend/dist/`, which is gitignored and
+  built out of band (`cd src/elspeth/web/frontend && npm run build`); it is
+  produced by neither CI nor the Docker image. Producing the 0.6.0 web
+  deploy MUST rebuild the dist from `release/0.6.0` HEAD rather than reuse a
+  prebuilt bundle. A dist built before `ebbf90fcd` (the ADR-025
+  plural-`sources` migration) reads the dropped singular `state.source` and
+  crashes the chat panel with `TypeError: Cannot read properties of
+  undefined (reading 'options')` on guided source-select and on reloading
+  any composed session.
+
 ---
 
 ## [0.5.4] - Unreleased

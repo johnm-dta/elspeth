@@ -2,8 +2,8 @@
 
 The build-push workflow uses this gate before publishing images for a commit.
 It reads the active repository ruleset, extracts the required status-check
-contexts, and then verifies that the image SHA has a successful check run or
-legacy commit status for every required context.
+contexts and optional GitHub App integration bindings, and then verifies that
+the image SHA has successful trusted evidence for every required context.
 
 GitHub ruleset contexts are not always identical to the check-run names exposed
 by the Checks API. In the current repository, the ruleset context ``CodeQL`` is
@@ -34,6 +34,14 @@ DEFAULT_CONTEXT_ALIASES: Mapping[str, tuple[str, ...]] = MappingProxyType(
 
 
 @dataclass(frozen=True, slots=True)
+class RequiredCheckSpec:
+    """Ruleset-required status check plus optional GitHub App provenance."""
+
+    context: str
+    integration_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CheckRun:
     """Normalized GitHub check-run data used for release proof."""
 
@@ -41,6 +49,7 @@ class CheckRun:
     status: str
     conclusion: str | None
     html_url: str | None
+    app_id: int | None = None
     completed_at: str | None = None
     started_at: str | None = None
 
@@ -67,7 +76,12 @@ class RequiredCheckResult:
 
 def extract_required_contexts(ruleset: Mapping[str, Any]) -> tuple[str, ...]:
     """Extract required status-check contexts from a repository ruleset payload."""
-    contexts: list[str] = []
+    return tuple(spec.context for spec in extract_required_checks(ruleset))
+
+
+def extract_required_checks(ruleset: Mapping[str, Any]) -> tuple[RequiredCheckSpec, ...]:
+    """Extract required status-check contexts and app bindings from a ruleset payload."""
+    required: list[RequiredCheckSpec] = []
     rules = ruleset.get("rules")
     if not isinstance(rules, list):
         raise ValueError("ruleset payload does not contain a rules list")
@@ -87,25 +101,30 @@ def extract_required_contexts(ruleset: Mapping[str, Any]) -> tuple[str, ...]:
             context = item.get("context")
             if not isinstance(context, str) or not context:
                 raise ValueError("required status check entry has invalid context")
-            contexts.append(context)
+            integration_id = item.get("integration_id")
+            if integration_id is not None and type(integration_id) is not int:
+                raise ValueError("required status check entry has invalid integration_id")
+            required.append(RequiredCheckSpec(context=context, integration_id=integration_id))
 
-    if not contexts:
+    if not required:
         raise ValueError("ruleset does not define any required status-check contexts")
-    return tuple(dict.fromkeys(contexts))
+    return tuple(dict.fromkeys(required))
 
 
 def evaluate_required_checks(
     *,
-    required_contexts: Sequence[str],
+    required_contexts: Sequence[str | RequiredCheckSpec],
     check_runs: Sequence[CheckRun],
     statuses: Sequence[CommitStatus],
     context_aliases: Mapping[str, Sequence[str]] = DEFAULT_CONTEXT_ALIASES,
 ) -> tuple[RequiredCheckResult, ...]:
     """Evaluate whether every required context has successful commit evidence."""
     results: list[RequiredCheckResult] = []
-    for context in required_contexts:
+    for required in required_contexts:
+        spec = _coerce_required_check(required)
+        context = spec.context
         accepted_check_names = (context, *tuple(context_aliases.get(context, ())))
-        check_run = _latest_check_run(check_runs, accepted_check_names)
+        check_run = _latest_check_run(check_runs, accepted_check_names, integration_id=spec.integration_id)
         if check_run is not None:
             results.append(
                 RequiredCheckResult(
@@ -117,17 +136,18 @@ def evaluate_required_checks(
             )
             continue
 
-        status = _latest_status(statuses, context)
-        if status is not None:
-            results.append(
-                RequiredCheckResult(
-                    context=context,
-                    matched_name=status.context,
-                    state=status.state,
-                    url=status.target_url,
+        if spec.integration_id is None:
+            status = _latest_status(statuses, context)
+            if status is not None:
+                results.append(
+                    RequiredCheckResult(
+                        context=context,
+                        matched_name=status.context,
+                        state=status.state,
+                        url=status.target_url,
+                    )
                 )
-            )
-            continue
+                continue
 
         results.append(RequiredCheckResult(context=context, matched_name=None, state="missing", url=None))
     return tuple(results)
@@ -184,6 +204,7 @@ def fetch_check_runs(*, repo: str, sha: str, token: str) -> tuple[CheckRun, ...]
                     status=_required_str(item, "status"),
                     conclusion=_optional_str(item.get("conclusion")),
                     html_url=_optional_str(item.get("html_url")),
+                    app_id=_optional_app_id(item.get("app")),
                     completed_at=_optional_str(item.get("completed_at")),
                     started_at=_optional_str(item.get("started_at")),
                 )
@@ -229,10 +250,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     ruleset = fetch_ruleset_by_name(repo=args.repo, ruleset_name=args.ruleset_name, token=token)
-    contexts = extract_required_contexts(ruleset)
+    required_checks = extract_required_checks(ruleset)
     check_runs = fetch_check_runs(repo=args.repo, sha=args.sha, token=token)
     statuses = fetch_commit_statuses(repo=args.repo, sha=args.sha, token=token)
-    results = evaluate_required_checks(required_contexts=contexts, check_runs=check_runs, statuses=statuses)
+    results = evaluate_required_checks(required_contexts=required_checks, check_runs=check_runs, statuses=statuses)
 
     print(f"Required contexts from active ruleset {args.ruleset_name!r}:")
     for result in results:
@@ -255,8 +276,19 @@ def _check_run_state(check_run: CheckRun) -> str:
     return check_run.conclusion or check_run.status
 
 
-def _latest_check_run(check_runs: Sequence[CheckRun], accepted_names: Sequence[str]) -> CheckRun | None:
-    matches = [run for run in check_runs if run.name in accepted_names]
+def _coerce_required_check(required: str | RequiredCheckSpec) -> RequiredCheckSpec:
+    if isinstance(required, RequiredCheckSpec):
+        return required
+    return RequiredCheckSpec(context=required)
+
+
+def _latest_check_run(
+    check_runs: Sequence[CheckRun],
+    accepted_names: Sequence[str],
+    *,
+    integration_id: int | None,
+) -> CheckRun | None:
+    matches = [run for run in check_runs if run.name in accepted_names and (integration_id is None or run.app_id == integration_id)]
     if not matches:
         return None
     return max(matches, key=lambda run: run.completed_at or run.started_at or "")
@@ -335,6 +367,19 @@ def _optional_str(value: Any) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"GitHub payload optional string field had invalid value {value!r}")
     return value
+
+
+def _optional_app_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(f"GitHub check run app field had invalid value {value!r}")
+    app_id = value.get("id")
+    if app_id is None:
+        return None
+    if type(app_id) is not int:
+        raise ValueError(f"GitHub check run app.id had invalid value {app_id!r}")
+    return app_id
 
 
 if __name__ == "__main__":

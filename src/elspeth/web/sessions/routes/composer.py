@@ -2733,7 +2733,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         if not handler_result.tool_result.success:
                             raise HTTPException(
                                 status_code=400,
-                                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                                detail="Step 1 source commit failed",
                             )
 
                         turn_response: TurnResponse = {

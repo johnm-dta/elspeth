@@ -2855,6 +2855,119 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 500
 
+    def test_guided_chat_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
+        """Step-1 chat source commit failures must not return ToolResult reprs."""
+        from elspeth.contracts.blobs import BlobRecord
+        from elspeth.contracts.enums import CreationModality
+        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+        from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
+        from elspeth.web.composer.tools import ToolResult
+
+        app, _ = _make_app(tmp_path)
+        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog.list_sources.return_value = [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+        ]
+        catalog.list_sinks.return_value = []
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV source",
+            json_schema={"title": "CSV", "type": "object", "properties": {}},
+            knob_schema={"fields": []},
+        )
+        app.state.catalog_service = catalog
+        app.state.blob_service = MagicMock()
+        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        app.state.blob_service.create_blob = AsyncMock(
+            return_value=BlobRecord(
+                id=uuid.uuid4(),
+                session_id=uuid.uuid4(),
+                filename="source.csv",
+                mime_type="text/csv",
+                size_bytes=18,
+                content_hash="0" * 64,
+                storage_path="sessions/raw-secret-source.csv",
+                created_at=datetime.now(UTC),
+                created_by="assistant",
+                source_description="test",
+                status="ready",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
+            )
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided chat source failure"})
+        session_id = uuid.UUID(resp.json()["id"])
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+        choose_source_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"]},
+        )
+        assert choose_source_resp.status_code == 200
+        assert choose_source_resp.json()["next_turn"]["type"] == "schema_form"
+
+        raw_row_secret = "raw-customer-ssn-123-45-6789"
+        tool_result_private_detail = "REDACTED tool result detail"
+        failing_tool_result = ToolResult(
+            success=False,
+            updated_state=_EMPTY_STATE,
+            validation=ValidationSummary(is_valid=False, errors=()),
+            affected_nodes=(),
+            data={"internal_detail": tool_result_private_detail},
+        )
+
+        with (
+            patch(
+                "elspeth.web.sessions.routes.composer.solve_step_chat_with_auto_drop",
+                new=AsyncMock(
+                    return_value=StepChatResult(
+                        assistant_message="I can use that source.",
+                        status=ComposerChatTurnStatus.SUCCESS,
+                        latency_ms=5,
+                        error_class=None,
+                    )
+                ),
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.maybe_resolve_step_1_source_chat",
+                new=AsyncMock(
+                    return_value=Step1SourceChatResolution(
+                        assistant_message="I created the source.",
+                        plugin="csv",
+                        filename="source.csv",
+                        mime_type="text/csv",
+                        content="name,value\nalice,1\n",
+                        options={"path": "inline://source.csv"},
+                        observed_columns=("name", "value"),
+                        sample_rows=({"name": raw_row_secret, "value": "1"},),
+                    )
+                ),
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.handle_step_1_source",
+                return_value=MagicMock(tool_result=failing_tool_result),
+            ),
+        ):
+            send_resp = client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "Use this source", "step_index": "step_1_source"},
+            )
+
+        assert send_resp.status_code == 400
+        detail = send_resp.json()["detail"]
+        assert detail == "Step 1 source commit failed"
+        assert "ToolResult(" not in detail
+        assert raw_row_secret not in detail
+        assert tool_result_private_detail not in detail
+
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
         """Concurrent sends must not compose against an in-flight partial transcript."""

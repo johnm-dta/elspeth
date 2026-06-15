@@ -194,7 +194,7 @@ def test_per_source_provenance_is_durable_in_audit_database(tmp_path: Path) -> N
 
     # run_sources lifecycle reached its terminal state for BOTH sources, and
     # each source carries its own persisted schema contract.
-    assert [rec.lifecycle_state for rec in run_sources] == ["loaded", "loaded"]
+    assert [rec.lifecycle_state for rec in run_sources] == ["exhausted", "exhausted"]
     assert all(rec.schema_contract_json for rec in run_sources)
 
     # Every row attributes to a registered source node (NOT NULL is structural;

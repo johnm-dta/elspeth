@@ -645,7 +645,7 @@ class TestMultiSourceCrashResume:
 
         lifecycle_by_source = {str(row.source_name): str(row.lifecycle_state) for row in lifecycle_rows}
         assert lifecycle_by_source == {
-            "orders": "loaded",
+            "orders": "exhausted",
             "refunds": "interrupted",
         }
         with pytest.raises(IncompleteSourceResumeError, match=r"source.*refunds.*interrupted"):

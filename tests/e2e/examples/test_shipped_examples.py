@@ -293,8 +293,8 @@ class TestShippedExamples:
             assert result["rows_processed"] == 4
             run_sources, rows = self._audit_source_rows(db, str(result["run_id"]))
             assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
-                ("signups", "loaded"),
-                ("tickets", "loaded"),
+                ("signups", "exhausted"),
+                ("tickets", "exhausted"),
             ]
             node_to_source = {node_id: source_name for source_name, node_id, _state in run_sources}
             assert [
@@ -330,8 +330,8 @@ class TestShippedExamples:
             assert result["rows_processed"] == 3
             run_sources, rows = self._audit_source_rows(db, str(result["run_id"]))
             assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
-                ("orders", "loaded"),
-                ("refunds", "loaded"),
+                ("orders", "exhausted"),
+                ("refunds", "exhausted"),
             ]
             node_to_source = {node_id: source_name for source_name, node_id, _state in run_sources}
             assert [

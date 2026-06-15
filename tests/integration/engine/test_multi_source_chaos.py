@@ -880,7 +880,7 @@ def test_source_plugin_exception_mid_stream_aborts_run_as_failed(tmp_path: Path)
                 select(run_sources_table.c.source_name, run_sources_table.c.lifecycle_state).where(run_sources_table.c.run_id == run_id)
             )
         }
-    assert lifecycle == {"orders": "loaded", "exploding": "loading"}
+    assert lifecycle == {"orders": "exhausted", "exploding": "loading"}
 
     # All four ingested rows (3 surviving + 1 pre-crash) are durably parked
     # PENDING_SINK — present, attributed, and non-terminal: the exact shape a
@@ -1024,7 +1024,7 @@ sinks:
                 select(run_sources_table.c.source_name, run_sources_table.c.lifecycle_state).where(run_sources_table.c.run_id == run_id)
             )
         }
-    assert lifecycle == {"refunds": "loaded", "orders": "loaded"}
+    assert lifecycle == {"refunds": "exhausted", "orders": "exhausted"}
 
     # Quarantine provenance is attributed to refunds only; orders untouched.
     outcomes = _outcomes_by_source(db, run_id)

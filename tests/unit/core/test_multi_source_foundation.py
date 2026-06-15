@@ -857,7 +857,7 @@ sinks:
     assert [row.ingest_sequence for row in rows] == [0, 1, 2]
     assert rows[0].source_node_id == rows[1].source_node_id
     assert rows[2].source_node_id != rows[0].source_node_id
-    assert source_records == [("orders", "loaded"), ("refunds", "loaded")]
+    assert source_records == [("orders", "exhausted"), ("refunds", "exhausted")]
     assert [work.status for work in scheduled_work] == ["terminal", "terminal", "terminal"]
     assert [work.ingest_sequence for work in scheduled_work] == [0, 1, 2]
     scrubbed_payloads = [json.loads(work.row_payload_json) for work in scheduled_work]

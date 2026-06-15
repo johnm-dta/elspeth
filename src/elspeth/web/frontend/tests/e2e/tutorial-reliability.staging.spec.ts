@@ -123,7 +123,7 @@ function substantiveRowCount(
 }
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
-  test.setTimeout(720_000); // real compose + tutorial run; raised for provider latency under load
+  test.setTimeout(900_000); // real compose + tutorial run; headroom for the draft-wait (≤420s) + run-wait (≤360s) below
 
   // --- per-run state (Task 5 capture targets; all consumed in the record) ---
   let sessionId: string | null = null;
@@ -230,7 +230,12 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     // Turn 2b: review assumptions, accept all, continue.
     await expect(
       page.getByText(/Here is what the composer drafted/i),
-    ).toBeVisible({ timeout: 300_000 }); // raised for LLM-provider latency under load
+      // Headroom over the 270s backend composer_timeout + UI settle. The
+      // tutorial's heavy 5-source prompt drives many composer turns PLUS the
+      // mandatory opus advisor checkpoints (early plan-review + end sign-off,
+      // up to 2 passes each), so a healthy-but-slow compose can approach the
+      // backend cap before Turn 2b renders. 300s flagged those as failures.
+    ).toBeVisible({ timeout: 420_000 });
     await acceptAllAssumptions(page);
     await page.getByRole("button", { name: "Looks good" }).click();
 

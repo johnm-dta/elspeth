@@ -78,6 +78,7 @@ from elspeth.web.composer.llm_response_parsing import (
     token_usage_from_response,
 )
 from elspeth.web.composer.progress import (
+    advisor_checkpoint_progress_event,
     convergence_progress_event,
     emit_progress,
     model_call_progress_event,
@@ -2416,6 +2417,7 @@ class ComposerServiceImpl:
                                 state=state,
                                 session_id=session_id,
                                 recorder=recorder,
+                                progress=progress,
                             )
                             if (not verdict.ok) or verdict.blocking:
                                 # Advisor-blocked TERMINAL return on the P5
@@ -2708,6 +2710,7 @@ class ComposerServiceImpl:
                     state=state,
                     session_id=session_id,
                     recorder=recorder,
+                    progress=progress,
                 )
                 is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
                 if (not verdict.ok) or (verdict.blocking and is_last_pass):
@@ -3232,6 +3235,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 llm_messages=llm_messages,
                 recorder=recorder,
+                progress=progress,
             )
             persist = await self._persist_turn_audit(
                 tool_outcomes=dispatch.tool_outcomes,
@@ -4145,6 +4149,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         session_id: str | None,
         recorder: BufferingRecorder | None,
+        progress: ComposerProgressSink | None = None,
     ) -> AdvisorCheckpointVerdict:
         """Backend-initiated deterministic advisor checkpoint (early|end).
 
@@ -4159,7 +4164,12 @@ class ComposerServiceImpl:
         ``CLEAN`` (case-insensitive) is non-blocking. ``session_id`` is part of
         the checkpoint contract (threaded by callers and consumed downstream);
         it is intentionally not forwarded into the advisor call here.
+
+        ``progress`` (when threaded by the caller) receives a ``calling_model``
+        event before the advisor call so the snapshot is not frozen on its
+        previous phase while the model-distinct advisor runs.
         """
+        await emit_progress(progress, advisor_checkpoint_progress_event(phase))
         arguments = self._build_checkpoint_arguments(phase=phase, state=state)
         attempts = 2  # bounded retry; the underlying call wraps its own timeout
         last_exc: Exception | None = None
@@ -4196,6 +4206,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         llm_messages: list[dict[str, Any]],
         recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None = None,
     ) -> bool:
         """Run the EARLY advisory checkpoint on the empty->non-empty pipeline
         TRANSITION (structurally <= once per session). Advisory only: inject the
@@ -4205,7 +4216,9 @@ class ComposerServiceImpl:
             return False
         if not _state_is_structurally_empty(prev_state):
             return False  # pipeline was already non-empty before this turn (or resumed session)
-        verdict = await self._run_advisor_checkpoint(phase="early", state=state, session_id=session_id, recorder=recorder)
+        verdict = await self._run_advisor_checkpoint(
+            phase="early", state=state, session_id=session_id, recorder=recorder, progress=progress
+        )
         if verdict.ok and verdict.blocking:
             llm_messages.append(
                 {

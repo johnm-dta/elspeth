@@ -32,6 +32,7 @@ from elspeth.web.composer.tools import is_discovery_tool
 __all__ = [
     "ComposerProgressRegistry",
     "ComposerProgressSnapshot",
+    "advisor_checkpoint_progress_event",
     "client_cancelled_progress_event",
     "convergence_progress_event",
     "emit_progress",
@@ -275,6 +276,29 @@ def model_call_progress_event(message: str) -> ComposerProgressEvent:
         headline=headline,
         evidence=("The composer is using the prepared prompt and visible pipeline state.",),
         likely_next="The model may answer directly or request safe pipeline tools.",
+    )
+
+
+def advisor_checkpoint_progress_event(checkpoint: str) -> ComposerProgressEvent:
+    """Progress for a deterministic advisor (model-distinct reviewer) checkpoint.
+
+    Emitted so the advisor call is visible like every other model call —
+    otherwise the snapshot stays frozen on its previous phase while the
+    (slower, frontier) advisor model runs, which is indistinguishable from a
+    stall to a poller or a watching user. ``checkpoint`` is "early" (plan
+    review) or "end" (sign-off).
+    """
+    if checkpoint == "early":
+        headline = "I'm asking the advisor model to review the plan."
+        likely_next = "The advisor may suggest changes before the composer continues."
+    else:
+        headline = "I'm asking the advisor model to sign off on the pipeline."
+        likely_next = "The advisor may approve the pipeline or flag changes before finalizing."
+    return ComposerProgressEvent(
+        phase="calling_model",
+        headline=headline,
+        evidence=("A second, model-distinct advisor is reviewing the pipeline.",),
+        likely_next=likely_next,
     )
 
 

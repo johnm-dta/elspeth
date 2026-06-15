@@ -159,7 +159,7 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
     ),
     "model": SlotSpec(
         slot_type="str",
-        description="LLM model identifier (e.g., 'anthropic/claude-3.5-sonnet'); use list_models to discover",
+        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
     ),
     "api_key_secret": SlotSpec(
         slot_type="str",

@@ -264,7 +264,7 @@ test.describe("composer-guided — recipe-match happy path", () => {
         await page
           .getByLabel(/classifier_template/i)
           .fill("Classify {{ row['name'] }} as widget or gadget.");
-        await page.getByLabel(/^model\b/i).fill("anthropic/claude-3-5-sonnet");
+        await page.getByLabel(/^model\b/i).fill("anthropic/claude-sonnet-4.6");
         // api_key_secret carries the NAME of an inventory secret_ref, not a
         // raw credential.  The input is type="text" (not password) by design.
         await page.getByLabel(/api_key_secret/i).fill("openrouter-api-key");

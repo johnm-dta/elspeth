@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import types
 import typing
 from pathlib import Path
@@ -406,6 +407,20 @@ class TestSecretKeyGuard:
             shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.secret_key == "change-me-in-production"
+
+    def test_default_secret_key_rejected_on_loopback_outside_test_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delitem(sys.modules, "pytest", raising=False)
+        monkeypatch.delenv("ELSPETH_ENV", raising=False)
+
+        with pytest.raises(ValidationError, match="secret_key must be set"):
+            WebSettings(
+                host="127.0.0.1",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\xab\xcd" * 16,
+            )
 
     def test_custom_secret_key_allowed_on_any_host(self) -> None:
         # DC-2 FIX-L: non-loopback hosts also need a non-weak signing key.

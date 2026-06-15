@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +28,10 @@ _DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS = 30.0
 # docs/composer/ux-redesign-2026-05/14a-phase-2a-backend.md
 # §"Retention default divergence guard".
 _DEFAULT_PAYLOAD_STORE_RETENTION_DAYS: int = PayloadStoreSettings.model_fields["retention_days"].default
+
+
+def _allow_insecure_test_keys(host: str) -> bool:
+    return host in _LOCAL_HOSTS and ("pytest" in sys.modules or os.environ.get("ELSPETH_ENV") == "test")
 
 
 class WebSettings(BaseModel):
@@ -529,46 +535,45 @@ class WebSettings(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_secret_key_in_production(self) -> WebSettings:
-        """Reject default or undersized JWT HMAC keys on non-loopback hosts."""
-        if self.host in _LOCAL_HOSTS:
+        """Reject default or undersized JWT HMAC keys outside explicit test contexts."""
+        if _allow_insecure_test_keys(self.host):
             return self
         if self.secret_key == "change-me-in-production":
             raise ValueError(
-                "secret_key must be set to a secure value for non-local deployments "
-                "(host is not a loopback address). Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
+                "secret_key must be set to a secure value outside explicit test contexts. "
+                "Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
             )
         secret_key_bytes = self.secret_key.encode("utf-8")
         if len(secret_key_bytes) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES:
             raise ValueError(
-                f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes for non-local deployments "
-                "(host is not a loopback address). Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
+                f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes outside explicit test contexts. "
+                "Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
             )
         return self
 
     @model_validator(mode="after")
     def _reject_known_weak_signing_key(self) -> WebSettings:
-        """Refuse uniform-byte placeholder signing keys on non-loopback hosts.
+        """Refuse uniform-byte placeholder signing keys outside explicit test contexts.
 
         Test fixtures across the suite use ``b'\\x00' * 32`` and ``b'0' * 32``
         as convenient 32-byte placeholders. Those values are operationally
         indistinguishable from "the operator forgot to generate a real key" —
-        on a non-loopback host that is a security incident waiting to happen.
-        Mirrors the shape of ``_enforce_secret_key_in_production`` above.
+        outside an explicit test context that is a security incident waiting to
+        happen. Mirrors the shape of ``_enforce_secret_key_in_production`` above.
 
         A real key from ``openssl rand -base64 32`` is uniformly distributed;
         a single repeated byte (any value) is the signature of a placeholder.
         The check is intentionally simple — "all bytes identical" — to avoid
         false positives on legitimate (if unusual) high-entropy keys.
         """
-        if self.host in _LOCAL_HOSTS:
+        if _allow_insecure_test_keys(self.host):
             return self
         raw_key = self.shareable_link_signing_key.get_secret_value()
         if len(set(raw_key)) == 1:
             raise ValueError(
                 "shareable_link_signing_key is a known-weak placeholder "
                 "(uniform-byte pattern detected); generate a real key with "
-                "``openssl rand -base64 32`` for non-loopback deployments. "
-                f"Host '{self.host}' is not a loopback address."
+                "``openssl rand -base64 32`` outside explicit test contexts."
             )
         return self
 

@@ -141,15 +141,14 @@ class TestCreateApp:
         )
         assert len(list(cache_dir.glob("*.json"))) == 1
 
-    def test_loopback_default_secret_key_allowed_without_pytest_module(self, tmp_path, monkeypatch) -> None:
-        """Loopback startup must follow the WebSettings contract outside pytest too."""
+    def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
+        """Loopback bind is not proof the service is unreachable behind a proxy."""
         settings = _settings(tmp_path, host="127.0.0.1")
         monkeypatch.delitem(sys.modules, "pytest", raising=False)
         monkeypatch.delenv("ELSPETH_ENV", raising=False)
 
-        app = create_app(settings)
-
-        assert app is not None
+        with pytest.raises(SystemExit, match="secret_key is set to the default value"):
+            create_app(settings)
 
     def test_abandoned_app_disposes_session_engine(self, tmp_path, monkeypatch) -> None:
         """Unit tests often instantiate ``create_app`` without running lifespan."""

@@ -58,7 +58,7 @@ from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
-from elspeth.web.config import _LOCAL_HOSTS, WebSettings
+from elspeth.web.config import WebSettings, _allow_insecure_test_keys
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.routes import create_execution_router
@@ -764,12 +764,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
 
     # W16/S3: Secret key production guard -- hard crash
-    if (
-        settings.secret_key == "change-me-in-production"
-        and settings.host not in _LOCAL_HOSTS
-        and "pytest" not in sys.modules
-        and os.environ.get("ELSPETH_ENV") != "test"
-    ):
+    if settings.secret_key == "change-me-in-production" and not _allow_insecure_test_keys(settings.host):
         raise SystemExit(
             "FATAL: WebSettings.secret_key is set to the default value. "
             "Set a secure secret_key before starting the web server. "

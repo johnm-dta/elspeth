@@ -18,7 +18,7 @@ import yaml
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import CallType, NodeType
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -370,11 +370,13 @@ def _count_calls_for_run(conn: Any, landscape_run_id: str) -> int:
         select(func.count())
         .select_from(calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id))
         .where(node_states_table.c.run_id == landscape_run_id)
+        .where(calls_table.c.call_type == CallType.LLM.value)
     ).scalar_one()
     operation_call_count = conn.execute(
         select(func.count())
         .select_from(calls_table.join(operations_table, calls_table.c.operation_id == operations_table.c.operation_id))
         .where(operations_table.c.run_id == landscape_run_id)
+        .where(calls_table.c.call_type == CallType.LLM.value)
     ).scalar_one()
     return int(state_call_count) + int(operation_call_count)
 

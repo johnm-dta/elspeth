@@ -38,10 +38,12 @@ Invocation environment (from `playwright.staging.config.ts` header):
 ```bash
 cd src/elspeth/web/frontend
 export STAGING_BASE_URL=https://elspeth.foundryside.dev
-export STAGING_USERNAME=dta_user
-export STAGING_PASSWORD=dta_pass
+export STAGING_USERNAME=<staging-username>
+export STAGING_PASSWORD=<staging-password>
 export PLAYWRIGHT_BACKEND_BASE_URL=https://elspeth.foundryside.dev
 ```
+
+Load `STAGING_USERNAME` and `STAGING_PASSWORD` from the operator's out-of-repo secret channel. Do not commit live staging credentials to this plan or to harness fixtures. The previously exposed shared staging credential must be rotated before relying on this harness for staging isolation.
 
 The auth token is written to `tests/e2e/.auth/staging-user.json` by `tests/e2e/setup/staging-global-setup.ts` (already exists). Helpers read it with `tokenFromStorageState` from `helpers/api.ts`.
 
@@ -387,7 +389,7 @@ test.describe("tutorial reliability skeleton", () => {
 Run:
 ```bash
 cd src/elspeth/web/frontend
-STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=dta_user STAGING_PASSWORD=dta_pass \
+STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=<staging-username> STAGING_PASSWORD=<staging-password> \
 PLAYWRIGHT_BACKEND_BASE_URL=https://elspeth.foundryside.dev \
 npx playwright test --config=playwright.staging.config.ts tutorial-reliability.staging.spec.ts
 ```
@@ -605,7 +607,7 @@ Run:
 ```bash
 cd src/elspeth/web/frontend
 HARNESS_BATCH_ID=verify-2 HARNESS_BATCH_SIZE=2 \
-STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=dta_user STAGING_PASSWORD=dta_pass \
+STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=<staging-username> STAGING_PASSWORD=<staging-password> \
 PLAYWRIGHT_BACKEND_BASE_URL=https://elspeth.foundryside.dev \
 npx playwright test --config=playwright.staging.config.ts tutorial-reliability.staging.spec.ts
 ls tests/e2e/.harness-results/verify-2/
@@ -718,7 +720,7 @@ Run:
 ```bash
 cd src/elspeth/web/frontend
 HARNESS_BATCH_ID=batch-2026-06-06 HARNESS_BATCH_SIZE=10 \
-STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=dta_user STAGING_PASSWORD=dta_pass \
+STAGING_BASE_URL=https://elspeth.foundryside.dev STAGING_USERNAME=<staging-username> STAGING_PASSWORD=<staging-password> \
 PLAYWRIGHT_BACKEND_BASE_URL=https://elspeth.foundryside.dev \
 npx playwright test --config=playwright.staging.config.ts tutorial-reliability.staging.spec.ts
 ```

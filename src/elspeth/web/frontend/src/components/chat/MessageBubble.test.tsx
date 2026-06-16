@@ -1,8 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MessageBubble } from "./MessageBubble";
 import type { ChatMessage, CompositionProposal } from "@/types/api";
+
+const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+
+function extractCssRule(selectorPattern: RegExp, selectorName: string): string {
+  const match = selectorPattern.exec(chatCss);
+  if (!match) {
+    throw new Error(`Could not find ${selectorName} rule in chat.css`);
+  }
+  return match[1];
+}
 
 function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -87,6 +98,17 @@ describe("MessageBubble", () => {
   });
 
   describe("copy button", () => {
+    it("keeps bubble action buttons visibly discoverable before hover or focus", () => {
+      const actionButtonRule = extractCssRule(
+        /\.bubble-copy-btn,\s*\n\.bubble-edit-btn\s*\{([\s\S]*?)\n\}/,
+        ".bubble-copy-btn/.bubble-edit-btn",
+      );
+
+      expect(actionButtonRule).toContain("opacity: 0.3;");
+      expect(actionButtonRule).not.toContain("opacity: 0;");
+      expect(actionButtonRule).not.toContain("visibility: hidden;");
+    });
+
     it("renders a copy button on user messages", () => {
       render(<MessageBubble message={makeMessage()} />);
       expect(screen.getByLabelText("Copy message")).toBeInTheDocument();

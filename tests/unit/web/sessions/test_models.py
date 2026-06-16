@@ -16,6 +16,7 @@ from elspeth.web.sessions.models import (
     run_events_table,
     runs_table,
     sessions_table,
+    user_secrets_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 
@@ -241,6 +242,42 @@ class TestSessionForeignKeys:
 
 class TestCheckConstraints:
     """Verify CHECK constraints reject invalid values."""
+
+    def test_auth_provider_type_constraints_exist(self, engine) -> None:
+        inspector = inspect(engine)
+        session_checks = {check["name"] for check in inspector.get_check_constraints("sessions")}
+        user_secret_checks = {check["name"] for check in inspector.get_check_constraints("user_secrets")}
+
+        assert "ck_sessions_auth_provider_type" in session_checks
+        assert "ck_user_secrets_auth_provider_type" in user_secret_checks
+
+    def test_invalid_session_auth_provider_type_rejected(self, engine) -> None:
+        with engine.begin() as conn, pytest.raises(IntegrityError):
+            conn.execute(
+                insert(sessions_table).values(
+                    id=str(uuid.uuid4()),
+                    user_id="alice",
+                    auth_provider_type="saml",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+    def test_invalid_user_secret_auth_provider_type_rejected(self, engine) -> None:
+        with engine.begin() as conn, pytest.raises(IntegrityError):
+            conn.execute(
+                insert(user_secrets_table).values(
+                    id=str(uuid.uuid4()),
+                    name="api-key",
+                    user_id="alice",
+                    auth_provider_type="saml",
+                    encrypted_value=b"ciphertext",
+                    salt=b"salt",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
 
     def test_invalid_chat_message_role_rejected(self, engine) -> None:
         session_id = str(uuid.uuid4())

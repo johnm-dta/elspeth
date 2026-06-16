@@ -107,10 +107,14 @@ from sqlalchemy.types import JSON
 #   20 → ``sessions.forked_from_message_id`` gains an ON DELETE SET NULL
 #        foreign key to ``chat_messages.id`` so source-message deletion cannot
 #        leave dangling fork provenance.
-SESSION_SCHEMA_EPOCH = 20
+#   21 → ``sessions.auth_provider_type`` and
+#        ``user_secrets.auth_provider_type`` gain closed-list CHECK
+#        constraints for the supported auth-provider namespaces.
+SESSION_SCHEMA_EPOCH = 21
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
+_AUTH_PROVIDER_TYPE_CHECK = "auth_provider_type IN ('local', 'oidc', 'entra')"
 
 
 def _sql_non_blank_text(column_name: str, *, dialect: Literal["sqlite", "postgresql"]) -> str:
@@ -260,6 +264,10 @@ sessions_table = Table(
     CheckConstraint(
         "density_default IN ('high', 'medium', 'low')",
         name="ck_sessions_density_default",
+    ),
+    CheckConstraint(
+        _AUTH_PROVIDER_TYPE_CHECK,
+        name="ck_sessions_auth_provider_type",
     ),
 )
 
@@ -1426,6 +1434,10 @@ user_secrets_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("name", "user_id", "auth_provider_type", name="uq_user_secret_name_user_provider"),
+    CheckConstraint(
+        _AUTH_PROVIDER_TYPE_CHECK,
+        name="ck_user_secrets_auth_provider_type",
+    ),
 )
 Index("ix_user_secrets_user_provider", user_secrets_table.c.user_id, user_secrets_table.c.auth_provider_type)
 

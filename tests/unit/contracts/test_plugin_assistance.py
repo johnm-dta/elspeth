@@ -45,6 +45,60 @@ class TestPluginAssistanceExampleFreeze:
         assert example.before["format"] == "text"
 
 
+class TestPluginAssistanceSecretHygiene:
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [
+            ("summary", "Fetch https://example.test/private.csv before configuring the plugin.", "raw URL"),
+            ("suggested_fixes", ("Set Authorization: Bearer sk-testsecret1234567890.",), "credential"),
+            ("composer_hints", ("Read /home/john/private/input.csv and copy the headers.",), "file path"),
+            ("summary", "Provider failed with BadRequestError: API key abc123 was rejected.", "exception string"),
+        ],
+    )
+    def test_assistance_text_fields_reject_unsafe_content(self, field: str, value: object, match: str) -> None:
+        kwargs: dict[str, object] = {
+            "plugin_name": "p",
+            "issue_code": None,
+            "summary": "Safe summary.",
+        }
+        kwargs[field] = value
+
+        with pytest.raises(ValueError, match=match):
+            PluginAssistance(**kwargs)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"before": {"headers": {"Authorization": "Bearer sk-testsecret1234567890"}}}, "raw headers"),
+            ({"after": {"rows": [{"email": "user@example.test"}]}}, "raw row data"),
+            ({"before": {"prompt": "Classify this raw customer complaint: ..."}}, "raw prompt"),
+        ],
+    )
+    def test_example_mappings_reject_unsafe_content(self, kwargs: dict[str, object], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            PluginAssistanceExample(title="unsafe", **kwargs)  # type: ignore[arg-type]
+
+    def test_safe_option_names_and_placeholder_templates_are_allowed(self) -> None:
+        example = PluginAssistanceExample(
+            title="Use a placeholder template",
+            before={
+                "prompt_template": "Summarize {{ row.content }}.",
+                "api_key_secret": "openrouter",
+                "required_input_fields": ["content"],
+            },
+            after={"response_field": "summary"},
+        )
+        assistance = PluginAssistance(
+            plugin_name="llm",
+            issue_code=None,
+            summary="Call an LLM provider on each row and write the response into a field.",
+            composer_hints=("Use api_key_secret to name a configured secret; never paste a raw key.",),
+            examples=(example,),
+        )
+
+        assert assistance.examples == (example,)
+
+
 class TestPluginAssistanceFreeze:
     def test_examples_field_freezes_inner_dicts(self) -> None:
         example = PluginAssistanceExample(title="t", before={"k": "v"})

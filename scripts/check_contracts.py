@@ -185,25 +185,26 @@ def find_type_definitions(file_path: Path) -> list[tuple[str, int, str]]:
         if isinstance(node, ast.ClassDef):
             # Check for @dataclass decorator
             for decorator in node.decorator_list:
-                is_dataclass_name = isinstance(decorator, ast.Name) and decorator.id == "dataclass"
-                is_dataclass_call = (
-                    isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "dataclass"
-                )
-                if is_dataclass_name or is_dataclass_call:
+                decorator_target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                decorator_name = _dotted_name(decorator_target)
+                if decorator_name is not None and decorator_name.rsplit(".", 1)[-1] == "dataclass":
                     definitions.append((node.name, node.lineno, "dataclass"))
 
             # Check for TypedDict, NamedTuple, Enum base classes
             for base in node.bases:
-                if isinstance(base, ast.Name):
-                    if base.id == "TypedDict":
-                        definitions.append((node.name, node.lineno, "TypedDict"))
-                    elif base.id == "NamedTuple":
-                        definitions.append((node.name, node.lineno, "NamedTuple"))
-                    elif base.id == "Enum":
-                        definitions.append((node.name, node.lineno, "Enum"))
-                    elif base.id in ("BaseModel", "PluginSchema"):
-                        # Pydantic models in config are OK (trust boundary)
-                        pass
+                base_name = _dotted_name(base)
+                if base_name is None:
+                    continue
+                base_leaf = base_name.rsplit(".", 1)[-1]
+                if base_leaf == "TypedDict":
+                    definitions.append((node.name, node.lineno, "TypedDict"))
+                elif base_leaf == "NamedTuple":
+                    definitions.append((node.name, node.lineno, "NamedTuple"))
+                elif base_leaf == "Enum":
+                    definitions.append((node.name, node.lineno, "Enum"))
+                elif base_leaf in ("BaseModel", "PluginSchema"):
+                    # Pydantic models in config are OK (trust boundary)
+                    pass
 
     return definitions
 

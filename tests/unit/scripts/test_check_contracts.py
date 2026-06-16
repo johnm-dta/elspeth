@@ -110,6 +110,47 @@ class MyTuple(NamedTuple):
     assert definitions[0][2] == "NamedTuple"
 
 
+def test_finds_qualified_type_definitions(tmp_path: Path) -> None:
+    """Finds valid qualified decorator and base-class forms."""
+    test_file = tmp_path / "test.py"
+    test_file.write_text("""
+import dataclasses
+import enum
+import typing
+
+@dataclasses.dataclass
+class QualifiedData:
+    name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class QualifiedFrozen:
+    value: int
+
+
+class QualifiedEnum(enum.Enum):
+    A = "a"
+
+
+class QualifiedDict(typing.TypedDict):
+    name: str
+
+
+class QualifiedTuple(typing.NamedTuple):
+    x: int
+""")
+
+    definitions = find_type_definitions(test_file)
+
+    assert {(name, kind) for name, _, kind in definitions} == {
+        ("QualifiedData", "dataclass"),
+        ("QualifiedFrozen", "dataclass"),
+        ("QualifiedEnum", "Enum"),
+        ("QualifiedDict", "TypedDict"),
+        ("QualifiedTuple", "NamedTuple"),
+    }
+
+
 def test_ignores_pydantic_basemodel(tmp_path: Path) -> None:
     """Does not flag Pydantic BaseModel classes."""
     test_file = tmp_path / "test.py"

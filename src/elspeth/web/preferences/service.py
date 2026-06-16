@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from opentelemetry import metrics
 from sqlalchemy import String, select
@@ -281,37 +281,8 @@ class PreferencesService:
         banner_in_payload = "banner_dismissed_at" in payload.model_fields_set
         payload_is_empty = payload.default_mode is None and not banner_in_payload and not tutorial_in_payload
 
-        def _sync() -> tuple[ComposerMode, datetime | None, datetime | None, bool, ComposerPreferences | None]:
-            """Returns (resolved_mode, resolved_banner_dismissed_at, resolved_tutorial_completed_at, wrote, prior_prefs).
-
-            Race window — TRACKED, not fixed in this commit. The
-            read-then-decide-to-upsert structure has a TOCTOU window:
-            between the empty-PATCH existence check (and the read of
-            existing_raw/resolved_banner below) and the INSERT...ON
-            CONFLICT, another writer on a concurrent connection could
-            interpose. The race outcomes are *benign at the DB layer*
-            because the ON CONFLICT update_clause only includes fields
-            the caller actually set, so concurrent writes don't clobber
-            each other's mode/banner values. The only observable effect
-            is that an HTTP response may carry momentarily-stale
-            resolved_banner from another writer's interleaved write —
-            the next GET returns the correct row.
-
-            The robust fix (single-statement upsert with COALESCE +
-            BEGIN IMMEDIATE for the no-row existence check) is
-            explicitly coupled with the deferred sessions/engine.py
-            PRAGMA work (journal_mode=WAL, busy_timeout,
-            synchronous=NORMAL) per the Phase 1A panel's MAJOR 4
-            finding — both land together when PRAGMA discipline is
-            scheduled. Filing a tracked filigree issue under
-            sessions/engine.py rather than landing a half-fix here
-            (SQLAlchemy's SQLite dialect rejects isolation_level=
-            "IMMEDIATE" via execution_options; the per-engine
-            ``do_begin`` event listener is the correct mechanism but
-            affects every write transaction on the sessions DB, not
-            just preferences — that warrants its own commit and
-            review).
-            """
+        def _sync() -> tuple[ComposerPreferences, bool, ComposerPreferences | None]:
+            """Returns (current_prefs, wrote, prior_prefs)."""
             with self._engine.begin() as conn:
                 # B2 (load-bearing): load the prior row inside the same
                 # transaction as the upsert. The result is `None` if no
@@ -329,40 +300,31 @@ class PreferencesService:
                 # Panel C2 guard: empty PATCH against a no-row user is a
                 # no-write no-op. Check existence BEFORE the upsert so we
                 # can skip the INSERT entirely. The B2 prior-load above
-                # already SELECTed the row; reuse that result to decide.
-                # Benign race documented above: a concurrent writer
-                # interposing between this check and a downstream PATCH
-                # affects only response staleness, not DB integrity.
+                # already SELECTed the row under the sessions engine's
+                # BEGIN IMMEDIATE write transaction; no concurrent writer can
+                # interpose between the existence check and the downstream
+                # upsert.
                 if payload_is_empty and prior_row is None:
-                    return _DEFAULT_MODE, None, None, False, prior_prefs
+                    return (
+                        ComposerPreferences(
+                            default_mode=_DEFAULT_MODE,
+                            banner_dismissed_at=None,
+                            tutorial_completed_at=None,
+                            updated_at=None,
+                        ),
+                        False,
+                        prior_prefs,
+                    )
 
                 # Determine the mode to insert (NOT NULL column). On
                 # conflict, only fields the caller set are updated.
                 insert_mode: ComposerMode
                 if payload.default_mode is not None:
                     insert_mode = payload.default_mode
+                elif prior_prefs is not None:
+                    insert_mode = prior_prefs.default_mode
                 else:
-                    existing_raw = conn.execute(
-                        select(user_preferences_table.c.default_composer_mode).where(user_preferences_table.c.user_id == user_id)
-                    ).scalar_one_or_none()
-                    if existing_raw is None:
-                        insert_mode = _DEFAULT_MODE
-                    elif existing_raw in _VALID_MODES:
-                        # Panel S3: mypy does NOT narrow `Any in frozenset[T]`
-                        # (no TypeGuard available for `in`-membership); the
-                        # runtime conditional is the actual guard, and the
-                        # explicit cast makes the type contract visible
-                        # instead of relying on Any → ComposerMode being
-                        # silently accepted. The earlier "mypy narrows…"
-                        # comment was inaccurate cargo-cult risk.
-                        insert_mode = cast(ComposerMode, existing_raw)
-                    else:
-                        # Tier-1 read guard parity with _row_to_prefs:
-                        # both read paths raise the same named exception
-                        # on corruption. The earlier bare RuntimeError
-                        # was asymmetric (the GET path raised; this PATCH
-                        # read path raised a less-informative type).
-                        raise CorruptPreferencesError(user_id, existing_raw)
+                    insert_mode = _DEFAULT_MODE
 
                 # banner_dismissed_at uses `model_fields_set` to distinguish
                 # "absent from JSON" (preserve existing) from "explicit null"
@@ -370,10 +332,10 @@ class PreferencesService:
                 # Symmetric with tutorial_completed_at; see models.py docstring.
                 if banner_in_payload:
                     resolved_banner: datetime | None = payload.banner_dismissed_at
+                elif prior_prefs is not None:
+                    resolved_banner = prior_prefs.banner_dismissed_at
                 else:
-                    resolved_banner = conn.execute(
-                        select(user_preferences_table.c.banner_dismissed_at).where(user_preferences_table.c.user_id == user_id)
-                    ).scalar_one_or_none()
+                    resolved_banner = None
 
                 if tutorial_in_payload:
                     resolved_tutorial: datetime | None = payload.tutorial_completed_at
@@ -398,11 +360,25 @@ class PreferencesService:
                 if tutorial_in_payload:
                     update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
                 stmt = stmt.on_conflict_do_update(index_elements=["user_id"], set_=update_clause)
-                conn.execute(stmt)
+                row = conn.execute(
+                    stmt.returning(
+                        user_preferences_table.c.default_composer_mode,
+                        user_preferences_table.c.banner_dismissed_at,
+                        sql_cast(user_preferences_table.c.tutorial_completed_at, String).label("tutorial_completed_at"),
+                        user_preferences_table.c.updated_at,
+                    )
+                ).one()
 
-            return insert_mode, resolved_banner, resolved_tutorial, True, prior_prefs
+            returned = self._row_to_prefs(row, user_id)
+            current = ComposerPreferences(
+                default_mode=payload.default_mode if payload.default_mode is not None else returned.default_mode,
+                banner_dismissed_at=payload.banner_dismissed_at if banner_in_payload else returned.banner_dismissed_at,
+                tutorial_completed_at=payload.tutorial_completed_at if tutorial_in_payload else returned.tutorial_completed_at,
+                updated_at=now,
+            )
+            return current, True, prior_prefs
 
-        written_mode, written_banner, written_tutorial, wrote, prior_prefs = await run_sync_in_worker(_sync)
+        current, wrote, prior_prefs = await run_sync_in_worker(_sync)
         # Panel S1: operational telemetry only — no Landscape (user state,
         # not pipeline decision boundary). See module-level comment for
         # the no-Landscape rationale and the future-promote criterion.
@@ -426,14 +402,4 @@ class PreferencesService:
                 record_tutorial_completed_path("retake")
             elif prior_tutorial is not None and payload.tutorial_completed_at is not None:
                 record_tutorial_completed_path("repeat")
-        current = ComposerPreferences(
-            default_mode=written_mode,
-            banner_dismissed_at=written_banner,
-            tutorial_completed_at=written_tutorial,
-            # Panel U1 corollary: when the empty-PATCH guard short-circuits
-            # (no row exists, no fields supplied) no `updated_at` was
-            # written or read; return None to match the no-row GET semantic
-            # rather than a fabricated `now`.
-            updated_at=now if wrote else None,
-        )
         return ComposerPreferencesTransition(prior=prior_prefs, current=current)

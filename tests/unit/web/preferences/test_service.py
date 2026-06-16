@@ -16,10 +16,11 @@ in-memory database as the test-thread setup. Same pattern as the
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
@@ -696,3 +697,90 @@ def test_empty_user_id_rejected_by_check_constraint(engine):
                 updated_at=datetime(2026, 5, 16, tzinfo=UTC),
             )
         )
+
+
+def test_concurrent_partial_patches_return_serialized_current_state(tmp_path):
+    """Concurrent mode/banner PATCH responses must reflect a serialized row.
+
+    The old implementation read preserved fields before its upsert. This test
+    blocks the mode-only writer after it has resolved its stale banner value but
+    before its INSERT...ON CONFLICT runs, then lets a banner-only writer race.
+    Correct SQLite write-intent discipline either serializes the banner writer
+    until after the mode writer commits, or the upsert returns the row after the
+    conflict update. In both cases one response must show both partial updates.
+    """
+    engine = create_session_engine(f"sqlite:///{tmp_path / 'preferences-race.db'}")
+    metadata.create_all(engine)
+    service = PreferencesService(engine, now=lambda: datetime(2026, 5, 16, tzinfo=UTC))
+    user = "alice-concurrent-partial-return"
+    stamp = datetime(2026, 5, 16, 12, 30, tzinfo=UTC)
+
+    mode_writer_ready = threading.Event()
+    release_mode_writer = threading.Event()
+    blocked_once = False
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _block_mode_upsert(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        nonlocal blocked_once
+        normalized = statement.lstrip().upper()
+        if (
+            not blocked_once
+            and normalized.startswith("INSERT INTO USER_PREFERENCES")
+            and user in repr(parameters)
+            and "freeform" in repr(parameters)
+        ):
+            blocked_once = True
+            mode_writer_ready.set()
+            if not release_mode_writer.wait(timeout=5.0):
+                raise TimeoutError("timed out waiting to release blocked mode preferences writer")
+
+    results: dict[str, object] = {}
+    errors: dict[str, BaseException] = {}
+
+    def _run_patch(name: str, payload: UpdateComposerPreferencesRequest) -> None:
+        try:
+            results[name] = asyncio.run(service.update_composer_preferences(user, payload))
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            errors[name] = exc
+
+    mode_thread = threading.Thread(
+        target=_run_patch,
+        args=("mode", UpdateComposerPreferencesRequest(default_mode="freeform")),
+        name="preferences-mode-writer",
+    )
+    banner_thread = threading.Thread(
+        target=_run_patch,
+        args=("banner", UpdateComposerPreferencesRequest(banner_dismissed_at=stamp)),
+        name="preferences-banner-writer",
+    )
+
+    mode_thread.start()
+    assert mode_writer_ready.wait(timeout=5.0), "mode writer did not reach the upsert gate"
+    banner_thread.start()
+    banner_thread.join(timeout=0.3)
+    release_mode_writer.set()
+    mode_thread.join(timeout=5.0)
+    banner_thread.join(timeout=5.0)
+    assert not mode_thread.is_alive()
+    assert not banner_thread.is_alive()
+    if errors:
+        raise AssertionError(errors)
+
+    with engine.connect() as conn:
+        row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user)).one()
+    assert row.default_composer_mode == "freeform"
+    got_banner = row.banner_dismissed_at
+    if got_banner.tzinfo is None:
+        got_banner = got_banner.replace(tzinfo=UTC)
+    assert got_banner == stamp
+
+    def _response_has_both(value: object) -> bool:
+        current = value.current  # type: ignore[attr-defined]
+        banner = current.banner_dismissed_at
+        if banner is not None and banner.tzinfo is None:
+            banner = banner.replace(tzinfo=UTC)
+        return current.default_mode == "freeform" and banner == stamp
+
+    assert any(_response_has_both(value) for value in results.values()), (
+        "At least one concurrent PATCH response must reflect the serialized row with both the mode and banner updates."
+    )

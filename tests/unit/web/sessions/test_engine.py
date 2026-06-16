@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
@@ -115,6 +117,63 @@ def test_create_session_engine_reapplies_sqlite_pragmas_after_reconnect(
         "synchronous": 1,
     }
     assert second == first
+
+
+def _attach_trace(engine: Engine) -> list[str]:
+    captured: list[str] = []
+    raw = engine.raw_connection()
+    try:
+        driver_conn = raw.driver_connection
+        assert driver_conn is not None
+        driver_conn.set_trace_callback(captured.append)
+    finally:
+        raw.close()
+    return captured
+
+
+def _begin_statements(trace: list[str]) -> list[str]:
+    return [statement.strip() for statement in trace if statement.strip().upper().startswith("BEGIN")]
+
+
+def test_session_engine_begin_uses_begin_immediate(file_db_url: str) -> None:
+    """Session write transactions take the SQLite write lock at BEGIN.
+
+    A plain SQLAlchemy ``engine.begin()`` must emit exactly one
+    ``BEGIN IMMEDIATE`` before the first write. This prevents the
+    read-then-write lock-upgrade race that the preferences PATCH path hit
+    under concurrent writers.
+    """
+    engine = create_session_engine(
+        file_db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE begin_probe (id INTEGER PRIMARY KEY)"))
+
+    trace = _attach_trace(engine)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO begin_probe (id) VALUES (1)"))
+
+    assert _begin_statements(trace) == ["BEGIN IMMEDIATE"]
+    begin_idx = next(index for index, statement in enumerate(trace) if statement.strip().upper() == "BEGIN IMMEDIATE")
+    insert_idx = next(index for index, statement in enumerate(trace) if statement.lstrip().upper().startswith("INSERT"))
+    assert begin_idx < insert_idx
+
+
+def test_session_engine_connect_read_does_not_use_begin_immediate(file_db_url: str) -> None:
+    """Bare read connections must not take the sessions DB write lock."""
+    engine = create_session_engine(
+        file_db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    trace = _attach_trace(engine)
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1")).all()
+
+    assert "BEGIN IMMEDIATE" not in _begin_statements(trace)
 
 
 def test_initialize_session_schema_stamps_application_id_and_user_version(

@@ -387,6 +387,19 @@ class TestBuildSystemPrompt:
         assert "For row-file routing/splitting requests, default outputs to the source row format" in flattened
         assert "CSV source means CSV sinks unless the user explicitly asks for JSON/JSONL" in flattened
 
+    def test_core_skill_rejects_plugin_contract_whiplash(self) -> None:
+        """Plugin schema facts must remain stable across self-correction turns."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Plugin schema facts are stable across turns" in flattened
+        assert "Do not reinterpret a missing config option as a missing output field" in flattened
+        assert "`batch_stats` always emits `count` and `sum`" in flattened
+        assert "`compute_mean` only controls whether `mean` is also emitted" in flattened
+        assert "Never propose `compute_sum` or `compute_count`" in flattened
+        assert "If the state is unchanged and validation passed" in flattened
+        assert "do not reverse a prior plugin-contract conclusion from visible options alone" in flattened
+
     def test_core_skill_treats_authored_rubrics_as_reviewable(self) -> None:
         """LLM-authored scoring semantics must create vague-term review cards."""
         result = build_system_prompt(None)

@@ -429,6 +429,20 @@ is not obvious. Do not skip utility transforms just because the user did not nam
 them; if the output contract requires a shaped row, the utility node is the node
 that implements that decision.
 
+### Plugin Contract Stability
+
+Plugin schema facts are stable across turns. Do not reinterpret a missing config
+option as a missing output field after a plugin schema or plugin assistance has
+established the contract. If the state is unchanged and validation passed, do
+not reverse a prior plugin-contract conclusion from visible options alone; re-read
+`get_plugin_schema`, `get_plugin_assistance`, or `preview_pipeline` before
+contradicting a validated state.
+
+For `batch_stats`, `batch_stats` always emits `count` and `sum`; `compute_mean`
+only controls whether `mean` is also emitted. Never propose `compute_sum` or
+`compute_count`, and never tell the user count/sum are missing merely because no
+such options appear in the YAML.
+
 ### Field Wiring
 
 Every downstream field dependency must be backed by an upstream schema guarantee

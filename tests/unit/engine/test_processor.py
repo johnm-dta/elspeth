@@ -93,6 +93,24 @@ def _make_source_row(data: dict[str, Any] | None = None) -> SourceRow:
     return make_source_row(data or {"value": 42}, contract=contract)
 
 
+def test_aggregation_restore_plan_freezes_sequence_fields() -> None:
+    from elspeth.contracts.barrier_scalars import AggregationNodeScalars
+    from elspeth.engine.processor import _AggregationRestorePlan
+
+    plan = _AggregationRestorePlan(
+        node_id=NodeID("agg"),
+        items=[],
+        member_order=["left", "right"],
+        batch_id="batch-1",
+        accepted_count_total=2,
+        completed_flush_count=0,
+        scalars=AggregationNodeScalars(count_fire_offset=None, condition_fire_offset=None),
+    )
+
+    assert plan.items == ()
+    assert plan.member_order == ("left", "right")
+
+
 def _persist_token_for_scheduler(
     factory: RecorderFactory,
     token: TokenInfo,

@@ -181,8 +181,9 @@ class CoalescePendingScalars:
     lost_branches: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.lost_branches, Mapping):
-            raise TypeError(f"CoalescePendingScalars.lost_branches must be a Mapping, got {type(self.lost_branches).__name__}")
+        lost_branches = self.lost_branches
+        if not isinstance(lost_branches, Mapping):
+            raise TypeError(f"CoalescePendingScalars.lost_branches must be a Mapping, got {type(lost_branches).__name__}")
         freeze_fields(self, "lost_branches")
 
     def to_dict(self) -> dict[str, Any]:
@@ -251,12 +252,14 @@ class BarrierScalars:
     coalesce: Mapping[tuple[str, str], CoalescePendingScalars]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.aggregation, Mapping):
-            raise TypeError(f"BarrierScalars.aggregation must be a Mapping, got {type(self.aggregation).__name__}")
-        if not isinstance(self.coalesce, Mapping):
-            raise TypeError(f"BarrierScalars.coalesce must be a Mapping, got {type(self.coalesce).__name__}")
+        aggregation = self.aggregation
+        coalesce = self.coalesce
+        if not isinstance(aggregation, Mapping):
+            raise TypeError(f"BarrierScalars.aggregation must be a Mapping, got {type(aggregation).__name__}")
+        if not isinstance(coalesce, Mapping):
+            raise TypeError(f"BarrierScalars.coalesce must be a Mapping, got {type(coalesce).__name__}")
         # Validate aggregation keys are non-empty strings
-        for key in self.aggregation:
+        for key in aggregation:
             if not isinstance(key, str):
                 raise TypeError(f"BarrierScalars.aggregation key must be a str, got {type(key).__name__}: {key!r}")
             if not key:
@@ -264,7 +267,7 @@ class BarrierScalars:
         # Validate coalesce keys are (str, str) tuples (runtime guard — from_dict also
         # validates, but direct construction bypasses from_dict).
         raw_key: Any
-        for raw_key in self.coalesce:
+        for raw_key in coalesce:
             if not isinstance(raw_key, tuple) or len(raw_key) != 2 or not all(isinstance(s, str) for s in raw_key):
                 raise TypeError(f"BarrierScalars.coalesce key must be a (str, str) tuple, got {type(raw_key).__name__}: {raw_key!r}")
         freeze_fields(self, "aggregation", "coalesce")

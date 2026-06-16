@@ -25,18 +25,6 @@ per_file_rules:
   reason: RuntimeRateLimitConfig.services uses MappingProxyType(dict()) — values are RuntimeServiceRateLimit (frozen DCs)
   expires: null
   max_hits: 1
-- pattern: contracts/coalesce_checkpoint.py
-  rules:
-  - FG2
-  reason: isinstance type guards validate checkpoint data structure at Tier 1 boundary (crash on wrong type)
-  expires: null
-  max_hits: 2
-- pattern: contracts/aggregation_checkpoint.py
-  rules:
-  - FG2
-  reason: isinstance type guards validate checkpoint data structure at Tier 1 boundary (crash on wrong type)
-  expires: null
-  max_hits: 3
 - pattern: contracts/checkpoint.py
   rules:
   - FG2

@@ -167,6 +167,10 @@ class _AggregationRestorePlan:
     completed_flush_count: int
     scalars: AggregationNodeScalars
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", deep_freeze(self.items))
+        object.__setattr__(self, "member_order", deep_freeze(self.member_order))
+
 
 @dataclass(frozen=True, slots=True)
 class _LiveBarrierHold:

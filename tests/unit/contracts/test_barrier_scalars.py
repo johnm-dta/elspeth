@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -221,8 +222,6 @@ class TestCoalescePendingScalarsValidation:
 
     def test_lost_branches_is_frozen_after_construction(self) -> None:
         """lost_branches mapping must be read-only after construction."""
-        from types import MappingProxyType
-
         s = CoalescePendingScalars(lost_branches={"k": "v"})
         assert isinstance(s.lost_branches, MappingProxyType)
 
@@ -300,6 +299,15 @@ class TestBarrierScalarsRoundTrips:
     def test_has_state_true_when_coalesce_nonempty(self) -> None:
         s = BarrierScalars(aggregation={}, coalesce={("a", "b"): _coalesce()})
         assert s.has_state
+
+    def test_container_fields_are_frozen_after_construction(self) -> None:
+        s = BarrierScalars(
+            aggregation={"agg": _agg()},
+            coalesce={("merge", "row"): _coalesce({"branch": "lost"})},
+        )
+
+        assert isinstance(s.aggregation, MappingProxyType)
+        assert isinstance(s.coalesce, MappingProxyType)
 
 
 class TestBarrierScalarsFromDictErrors:

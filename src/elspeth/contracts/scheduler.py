@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from elspeth.contracts.freeze import require_int
+from elspeth.contracts.freeze import freeze_fields, require_int
 
 
 class TokenWorkStatus(StrEnum):
@@ -61,6 +61,9 @@ class BufferedOutcomeSpec:
 
     batch_id: str
     context: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "context")
 
 
 @dataclass(frozen=True)

@@ -2694,6 +2694,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         plugin_hint=plugin_hint,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
+                        recorder=recorder,
                     )
                     if source_resolution is not None:
                         finished_at = datetime.now(UTC)
@@ -2920,6 +2921,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         user_message=body.message,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
+                        recorder=recorder,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)
@@ -3095,6 +3097,13 @@ def register_composer_routes(router: APIRouter) -> None:
                         state_record_out.id if state_record_out is not None else None,
                         plugin_crash_pending=False,
                     )
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                        plugin_crash_pending=False,
+                    )
                     await _persist_chat_turns(
                         service,
                         session_id,
@@ -3128,6 +3137,25 @@ def register_composer_routes(router: APIRouter) -> None:
                                 user_id=user.user_id,
                                 site="post_guided_chat",
                                 channel="tool_invocations",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
+                    try:
+                        await _persist_llm_calls(
+                            service,
+                            session_id,
+                            recorder.llm_calls,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=True,
+                        )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_chat",
+                                channel="llm_calls",
                                 exc_class=type(persist_exc).__name__,
                                 frames=_safe_frame_strings(persist_exc),
                             )

@@ -154,6 +154,24 @@ def _chat_turn_audit_rows(client: TestClient, session_id: str) -> list:
     return [m for m in messages if m.role == "audit" and '"_kind": "chat_turn_audit"' in m.content]
 
 
+def _llm_call_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
+    service = client.app.state.session_service
+    messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+    rows: list[dict] = []
+    for message in messages:
+        if message.role != "audit":
+            continue
+        try:
+            content = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        if content.get("_kind") == "llm_call_audit":
+            rows.append(content)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -317,6 +335,35 @@ class TestStepChatSuccess:
         assert isinstance(body["latency_ms"], int)
         assert body["latency_ms"] >= 0
 
+    def test_successful_step_chat_persists_llm_call_audit_row(self, composer_test_client: TestClient) -> None:
+        """The guided chat LLM call must persist a ComposerLLMCall sidecar.
+
+        ``ComposerChatTurn`` proves a user-facing chat turn happened; it is not
+        a substitute for the lower-level ``ComposerLLMCall`` row that records
+        the outbound model request.  Chain solving already emits that row; the
+        per-step chat path must do the same.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("acked")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="ping",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(audits) == 1, audits
+        audit = audits[0]
+        assert audit["status"] == "success"
+        assert audit["model_requested"]
+
     def test_synthetic_unavailable_persists_audit_message(self, composer_test_client: TestClient) -> None:
         """Slice 5.1: synthetic-unavailable chat round-trips also persist audit.
 
@@ -346,6 +393,9 @@ class TestStepChatSuccess:
         assert body["status"] == "synthetic_unavailable"
         assert body["error_class"] == "TimeoutError"
         assert body["chat_turn_seq"] == 0
+        llm_audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(llm_audits) == 1, llm_audits
+        assert llm_audits[0]["status"] == "timeout"
 
     def test_two_chat_turns_advance_seq_monotonically(self, composer_test_client: TestClient) -> None:
         """Slice 5: chat_turn_seq is monotonic across multiple chat turns in the same step."""
@@ -448,6 +498,9 @@ class TestStep1SourceResolution:
         source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"
         assert source_options["path"].endswith("_teal_colours.csv")
+        audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(audits) == 1, audits
+        assert audits[0]["status"] == "success"
 
 
 class TestStepChatRejections:

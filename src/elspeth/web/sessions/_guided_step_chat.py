@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import structlog
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import solve_step_chat
 from elspeth.web.composer.guided.protocol import GuidedStep
 
@@ -99,6 +100,7 @@ async def solve_step_chat_with_auto_drop(
     user_message: str,
     temperature: float | None,
     seed: int | None,
+    recorder: BufferingRecorder | None = None,
 ) -> StepChatResult:
     """Wrap ``solve_step_chat`` with the synthetic-message-on-transient contract.
 
@@ -173,6 +175,7 @@ async def solve_step_chat_with_auto_drop(
             user_message=user_message,
             temperature=temperature,
             seed=seed,
+            recorder=recorder,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return StepChatResult(

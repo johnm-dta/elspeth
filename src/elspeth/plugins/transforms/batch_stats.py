@@ -22,7 +22,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
-from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
+from elspeth.plugins.transforms._scalar_buckets import ScalarBucketKey, scalar_bucket_key
 
 type BatchStatsAggregateRow = dict[str, object]
 
@@ -292,16 +292,16 @@ class BatchStats(BaseTransform):
         if self._group_by is None:
             return [(None, list(enumerate(rows)))]
 
-        groups: list[tuple[Any, list[tuple[int, PipelineRow]]]] = []
+        groups: dict[ScalarBucketKey, tuple[Any, list[tuple[int, PipelineRow]]]] = {}
         for row_index, row in enumerate(rows):
             group_value = row[self._group_by]
-            for existing_value, grouped_rows in groups:
-                if same_scalar_bucket_value(group_value, existing_value):
-                    grouped_rows.append((row_index, row))
-                    break
+            group_key = scalar_bucket_key(group_value)
+            grouped = groups.get(group_key)
+            if grouped is None:
+                groups[group_key] = (group_value, [(row_index, row)])
             else:
-                groups.append((group_value, [(row_index, row)]))
-        return groups
+                grouped[1].append((row_index, row))
+        return list(groups.values())
 
     def _aggregate_group(
         self,

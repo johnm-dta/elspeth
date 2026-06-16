@@ -477,6 +477,45 @@ class TestBatchStatsGroupByRollups:
         assert rollups["returns"]["mean"] == 20.0
         assert rollups["returns"]["batch_size"] == 1
 
+    def test_distinct_group_keys_do_not_scan_every_prior_group(self, ctx: PluginContext) -> None:
+        """Distinct group_by values are partitioned without quadratic prior-group scans."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        class CountingGroupKey:
+            comparisons = 0
+
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+            def __eq__(self, other: object) -> bool:
+                CountingGroupKey.comparisons += 1
+                return isinstance(other, CountingGroupKey) and self.value == other.value
+
+            def __hash__(self) -> int:
+                return hash(self.value)
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+        row_count = 64
+        group_values = [CountingGroupKey(row_index) for row_index in range(row_count)]
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("id", int, original_name="id", required=False, source="inferred"),
+                make_field("amount", float, original_name="amount", required=False, source="inferred"),
+                make_field("category", object, original_name="category", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+        rows = [
+            make_row({"id": row_index, "amount": 1.0, "category": group_values[row_index]}, contract=contract)
+            for row_index in range(row_count)
+        ]
+
+        grouped = transform._group_rows(rows)
+
+        assert [group_value for group_value, _ in grouped] == group_values
+        assert CountingGroupKey.comparisons <= row_count
+
     def test_two_group_batch_emits_two_rollups(self, ctx: PluginContext) -> None:
         """Mixed group_by values emit one aggregate row per group."""
         from elspeth.plugins.transforms.batch_stats import BatchStats

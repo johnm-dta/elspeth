@@ -6159,6 +6159,80 @@ class TestComposeLoopForcedRepair:
             },
         ]
 
+    def _from_json_fallback_pipeline_tool_calls(self, blob_id: str) -> list[dict[str, Any]]:
+        """Tool call for the p4_t2_edge fallback after unsupported from_json."""
+        return [
+            {
+                "id": "call_set_pipeline",
+                "name": "set_pipeline",
+                "arguments": {
+                    "source": {
+                        "plugin": "csv",
+                        "blob_id": blob_id,
+                        "on_success": "rows",
+                        "on_validation_failure": "discard",
+                        "options": {"schema": {"mode": "observed"}},
+                    },
+                    "nodes": [
+                        {
+                            "id": "gate_signup",
+                            "node_type": "gate",
+                            "input": "rows",
+                            "condition": "row['event_type'] == 'signup'",
+                            "routes": {"true": "signups", "false": "non_signup"},
+                        },
+                        {
+                            "id": "gate_upgrade",
+                            "node_type": "gate",
+                            "input": "non_signup",
+                            "condition": "row['event_type'] == 'upgrade'",
+                            "routes": {"true": "upgrades", "false": "other"},
+                        },
+                    ],
+                    "edges": [],
+                    "outputs": [
+                        {
+                            "sink_name": "signups",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/signups.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                        {
+                            "sink_name": "upgrades",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/upgrades.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                        {
+                            "sink_name": "other",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/other.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                    ],
+                    "metadata": {"name": "events-routing-fallback"},
+                },
+            }
+        ]
+
     @pytest.mark.asyncio
     async def test_empty_state_uploaded_blob_stall_forces_repair_turn(self) -> None:
         """A no-tool prose reply must not end the turn when ready uploaded blobs exist.
@@ -6215,6 +6289,97 @@ class TestComposeLoopForcedRepair:
         assert "inspect_source" in repair_text
         assert "source.blob_id" in repair_text
         assert "Do not infer that a CSV is header-only" in repair_text
+
+    @pytest.mark.asyncio
+    async def test_unsupported_from_json_recovery_forces_supported_fallback_build(self, tmp_path: Path) -> None:
+        """Unsupported requested syntax must not strand the session in empty state.
+
+        Regression for elspeth-164d7078cb / hard-mode p4_t2_edge: the model
+        correctly rejected ``from_json(payload)`` for ``value_transform`` but
+        then kept returning prose instead of committing the supported fallback
+        the user accepted: keep ``payload`` as a string, gate on
+        ``event_type``, and emit the three JSONL sinks.
+        """
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        event_blob_id = str(uuid4())
+        body = (
+            b"event_id,user_id,event_type,timestamp,payload\n"
+            b'EV-1,U-101,signup,2026-09-01T10:00:00Z,{"plan":"free"}\n'
+            b"EV-2,U-102,login,2026-09-01T10:05:00Z,{}\n"
+            b'EV-3,U-101,upgrade,2026-09-02T11:00:00Z,{"to_plan":"pro"}\n'
+        )
+        storage_path = tmp_path / "blobs" / self.session_id / f"{event_blob_id}_events.csv"
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        storage_path.write_bytes(body)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=event_blob_id,
+                    session_id=self.session_id,
+                    filename="events.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turn1_refusal = _make_llm_response(
+            content=(
+                "The value_transform expression from_json(payload) is unsupported here. "
+                "I can keep payload as a string and route on event_type."
+            ),
+            tool_calls=None,
+        )
+        turn2_build = _make_llm_response(content=None, tool_calls=self._from_json_fallback_pipeline_tool_calls(event_blob_id))
+        turn3_done = _make_llm_response(content="Built the supported fallback.", tool_calls=None)
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_refusal, turn2_build, turn3_done]
+            result = await self.service.compose(
+                (
+                    "Build a CSV pipeline on the uploaded events.csv, parse payload with "
+                    "from_json(payload), gate on event_type, and write signups/upgrades/other."
+                ),
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 3
+        assert result.repair_turns_used == 1
+        assert result.state.sources["source"].options["blob_ref"] == event_blob_id
+        assert {node.id for node in result.state.nodes} == {"gate_signup", "gate_upgrade"}
+        assert {output.name for output in result.state.outputs} == {"signups", "upgrades", "other"}
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
+
+        turn2_messages = mock_llm.call_args_list[1].args[0]
+        repair_msgs = [
+            m
+            for m in turn2_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and event_blob_id in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1
+        repair_text = str(repair_msgs[0]["content"])
+        assert "unsupported requested primitive" in repair_text
+        assert "from_json" in repair_text
+        assert "supported fallback" in repair_text
+        assert "Do not reply with another conceptual plan" in repair_text
 
     def _futile_repair_tool_call(self, call_id: str, name_value: str) -> list[dict[str, Any]]:
         """Tool call that mutates state but does NOT clear the proof blocker.

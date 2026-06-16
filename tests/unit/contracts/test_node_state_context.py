@@ -78,6 +78,120 @@ class TestPoolExecutionContext:
         json2 = canonical_json(ctx.to_dict())
         assert json1 == json2
 
+    @pytest.mark.parametrize(
+        ("field", "value", "error"),
+        [
+            ("max_capacity_retry_seconds", -0.1, ValueError),
+            ("max_capacity_retry_seconds", float("nan"), ValueError),
+            ("max_capacity_retry_seconds", "30", TypeError),
+            ("dispatch_delay_at_completion_ms", -0.1, ValueError),
+            ("dispatch_delay_at_completion_ms", float("inf"), ValueError),
+            ("dispatch_delay_at_completion_ms", None, TypeError),
+        ],
+    )
+    def test_pool_config_snapshot_rejects_invalid_timing(self, field: str, value: object, error: type[Exception]) -> None:
+        kwargs: dict[str, Any] = {
+            "pool_size": 4,
+            "max_capacity_retry_seconds": 30.0,
+            "dispatch_delay_at_completion_ms": 10.0,
+        }
+        kwargs[field] = value
+        with pytest.raises(error, match=field):
+            PoolConfigSnapshot(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "error"),
+        [
+            ("peak_delay_ms", -0.1, ValueError),
+            ("peak_delay_ms", float("nan"), ValueError),
+            ("peak_delay_ms", "20", TypeError),
+            ("current_delay_ms", -0.1, ValueError),
+            ("current_delay_ms", float("inf"), ValueError),
+            ("current_delay_ms", None, TypeError),
+            ("total_throttle_time_ms", -0.1, ValueError),
+            ("total_throttle_time_ms", float("-inf"), ValueError),
+            ("total_throttle_time_ms", object(), TypeError),
+        ],
+    )
+    def test_pool_stats_snapshot_rejects_invalid_timing(self, field: str, value: object, error: type[Exception]) -> None:
+        kwargs: dict[str, Any] = {
+            "capacity_retries": 1,
+            "successes": 3,
+            "peak_delay_ms": 20.0,
+            "current_delay_ms": 10.0,
+            "total_throttle_time_ms": 5.0,
+            "max_concurrent_reached": 3,
+        }
+        kwargs[field] = value
+        with pytest.raises(error, match=field):
+            PoolStatsSnapshot(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("value", "error"),
+        [
+            (-0.1, ValueError),
+            (float("nan"), ValueError),
+            (float("inf"), ValueError),
+            ("0", TypeError),
+        ],
+    )
+    def test_query_order_entry_rejects_invalid_buffer_wait_ms(self, value: object, error: type[Exception]) -> None:
+        with pytest.raises(error, match="buffer_wait_ms"):
+            QueryOrderEntry(submit_index=0, complete_index=1, buffer_wait_ms=value)  # type: ignore[arg-type]
+
+    def test_rejects_non_pool_config_snapshot(self) -> None:
+        with pytest.raises(TypeError, match="pool_config must be PoolConfigSnapshot"):
+            PoolExecutionContext(
+                pool_config=object(),  # type: ignore[arg-type]
+                pool_stats=PoolStatsSnapshot(
+                    capacity_retries=0,
+                    successes=0,
+                    peak_delay_ms=0.0,
+                    current_delay_ms=0.0,
+                    total_throttle_time_ms=0.0,
+                    max_concurrent_reached=0,
+                ),
+                query_ordering=(),
+            )
+
+    def test_rejects_non_pool_stats_snapshot(self) -> None:
+        with pytest.raises(TypeError, match="pool_stats must be PoolStatsSnapshot"):
+            PoolExecutionContext(
+                pool_config=PoolConfigSnapshot(pool_size=1, max_capacity_retry_seconds=1.0, dispatch_delay_at_completion_ms=0.0),
+                pool_stats=object(),  # type: ignore[arg-type]
+                query_ordering=(),
+            )
+
+    def test_rejects_non_tuple_query_ordering(self) -> None:
+        with pytest.raises(TypeError, match="query_ordering must be tuple"):
+            PoolExecutionContext(
+                pool_config=PoolConfigSnapshot(pool_size=1, max_capacity_retry_seconds=1.0, dispatch_delay_at_completion_ms=0.0),
+                pool_stats=PoolStatsSnapshot(
+                    capacity_retries=0,
+                    successes=0,
+                    peak_delay_ms=0.0,
+                    current_delay_ms=0.0,
+                    total_throttle_time_ms=0.0,
+                    max_concurrent_reached=0,
+                ),
+                query_ordering=[],  # type: ignore[arg-type]
+            )
+
+    def test_rejects_non_query_order_entry(self) -> None:
+        with pytest.raises(TypeError, match=r"query_ordering\[0\] must be QueryOrderEntry"):
+            PoolExecutionContext(
+                pool_config=PoolConfigSnapshot(pool_size=1, max_capacity_retry_seconds=1.0, dispatch_delay_at_completion_ms=0.0),
+                pool_stats=PoolStatsSnapshot(
+                    capacity_retries=0,
+                    successes=0,
+                    peak_delay_ms=0.0,
+                    current_delay_ms=0.0,
+                    total_throttle_time_ms=0.0,
+                    max_concurrent_reached=0,
+                ),
+                query_ordering=(object(),),  # type: ignore[arg-type]
+            )
+
 
 class TestGateEvaluationContext:
     def test_canonical_json_produces_valid_json(self) -> None:
@@ -91,6 +205,23 @@ class TestGateEvaluationContext:
         json1 = canonical_json(ctx.to_dict())
         json2 = canonical_json(ctx.to_dict())
         assert json1 == json2
+
+    @pytest.mark.parametrize(
+        ("field", "value", "error"),
+        [
+            ("condition", "", ValueError),
+            ("condition", None, TypeError),
+            ("result", "", ValueError),
+            ("result", False, TypeError),
+            ("route_label", "", ValueError),
+            ("route_label", 1, TypeError),
+        ],
+    )
+    def test_rejects_invalid_audit_fields(self, field: str, value: object, error: type[Exception]) -> None:
+        kwargs: dict[str, Any] = {"condition": "x > 0", "result": "True", "route_label": "true"}
+        kwargs[field] = value
+        with pytest.raises(error, match=field):
+            GateEvaluationContext(**kwargs)
 
 
 class TestAggregationFlushContext:
@@ -123,6 +254,30 @@ class TestAggregationFlushContext:
         json1 = canonical_json(ctx.to_dict())
         json2 = canonical_json(ctx.to_dict())
         assert json1 == json2
+
+    @pytest.mark.parametrize(
+        ("field", "value", "error"),
+        [
+            ("trigger_type", "", ValueError),
+            ("trigger_type", None, TypeError),
+            ("batch_id", "", ValueError),
+            ("batch_id", 123, TypeError),
+        ],
+    )
+    def test_rejects_invalid_audit_fields(self, field: str, value: object, error: type[Exception]) -> None:
+        kwargs: dict[str, Any] = {
+            "trigger_type": "COUNT",
+            "buffer_size": 10,
+            "batch_id": "batch-xyz",
+            "flush_index": 2,
+            "rows_seen_total": 20,
+            "row_start": 11,
+            "row_end": 20,
+            "is_end_of_source": False,
+        }
+        kwargs[field] = value
+        with pytest.raises(error, match=field):
+            AggregationFlushContext(**kwargs)
 
 
 class TestRequireIntValidation:

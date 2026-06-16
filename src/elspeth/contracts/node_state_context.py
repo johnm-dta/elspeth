@@ -14,6 +14,7 @@ Trust-tier notes
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -39,6 +40,20 @@ class QueryOrderEntryInput(Protocol):
     buffer_wait_ms: float
 
 
+def _require_non_negative_finite_number(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{field_name} must be non-negative and finite, got {value!r}")
+
+
+def _require_non_empty_str(value: object, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+
+
 @dataclass(frozen=True, slots=True)
 class PoolConfigSnapshot:
     """Pool configuration at completion time."""
@@ -49,6 +64,8 @@ class PoolConfigSnapshot:
 
     def __post_init__(self) -> None:
         require_int(self.pool_size, "pool_size", min_value=0)
+        _require_non_negative_finite_number(self.max_capacity_retry_seconds, "max_capacity_retry_seconds")
+        _require_non_negative_finite_number(self.dispatch_delay_at_completion_ms, "dispatch_delay_at_completion_ms")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +89,9 @@ class PoolStatsSnapshot:
     def __post_init__(self) -> None:
         require_int(self.capacity_retries, "capacity_retries", min_value=0)
         require_int(self.successes, "successes", min_value=0)
+        _require_non_negative_finite_number(self.peak_delay_ms, "peak_delay_ms")
+        _require_non_negative_finite_number(self.current_delay_ms, "current_delay_ms")
+        _require_non_negative_finite_number(self.total_throttle_time_ms, "total_throttle_time_ms")
         require_int(self.max_concurrent_reached, "max_concurrent_reached", min_value=0)
 
     def to_dict(self) -> dict[str, Any]:
@@ -96,6 +116,7 @@ class QueryOrderEntry:
     def __post_init__(self) -> None:
         require_int(self.submit_index, "submit_index", min_value=0)
         require_int(self.complete_index, "complete_index", min_value=0)
+        _require_non_negative_finite_number(self.buffer_wait_ms, "buffer_wait_ms")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +137,17 @@ class PoolExecutionContext:
     pool_config: PoolConfigSnapshot
     pool_stats: PoolStatsSnapshot
     query_ordering: tuple[QueryOrderEntry, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pool_config, PoolConfigSnapshot):
+            raise TypeError(f"pool_config must be PoolConfigSnapshot, got {type(self.pool_config).__name__}: {self.pool_config!r}")
+        if not isinstance(self.pool_stats, PoolStatsSnapshot):
+            raise TypeError(f"pool_stats must be PoolStatsSnapshot, got {type(self.pool_stats).__name__}: {self.pool_stats!r}")
+        if not isinstance(self.query_ordering, tuple):
+            raise TypeError(f"query_ordering must be tuple, got {type(self.query_ordering).__name__}: {self.query_ordering!r}")
+        for idx, entry in enumerate(self.query_ordering):
+            if not isinstance(entry, QueryOrderEntry):
+                raise TypeError(f"query_ordering[{idx}] must be QueryOrderEntry, got {type(entry).__name__}: {entry!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +223,11 @@ class GateEvaluationContext:
     result: str
     route_label: str
 
+    def __post_init__(self) -> None:
+        _require_non_empty_str(self.condition, "condition")
+        _require_non_empty_str(self.result, "result")
+        _require_non_empty_str(self.route_label, "route_label")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "condition": self.condition,
@@ -223,6 +260,8 @@ class AggregationFlushContext:
     is_end_of_source: bool
 
     def __post_init__(self) -> None:
+        _require_non_empty_str(self.trigger_type, "trigger_type")
+        _require_non_empty_str(self.batch_id, "batch_id")
         require_int(self.buffer_size, "buffer_size", min_value=0)
         require_int(self.flush_index, "flush_index", min_value=1)
         require_int(self.rows_seen_total, "rows_seen_total", min_value=1)

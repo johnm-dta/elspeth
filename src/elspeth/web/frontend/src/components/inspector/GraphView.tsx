@@ -53,6 +53,28 @@ const EDGE_LABEL_MAP: Record<string, string> = {
 };
 
 type MiniMapNodeKind = keyof typeof BADGE_COLORS;
+type ValidationStatus = "valid" | "warning" | "error";
+
+const VALIDATION_STATUS_MARKERS: Record<
+  ValidationStatus,
+  { ariaLabel: string; glyph: string; fallbackTitle: string }
+> = {
+  error: {
+    ariaLabel: "Validation: error",
+    glyph: "x",
+    fallbackTitle: "Has validation errors",
+  },
+  warning: {
+    ariaLabel: "Validation: warning",
+    glyph: "!",
+    fallbackTitle: "Has warnings",
+  },
+  valid: {
+    ariaLabel: "Validation: passing",
+    glyph: "✓",
+    fallbackTitle: "Valid",
+  },
+};
 
 interface SelectedComponentConfig {
   id: string;
@@ -398,7 +420,7 @@ export function GraphView() {
 
   // Build a map of component_id → validation severity for border coloring
   const nodeValidationMap = useMemo(() => {
-    const map: Record<string, "valid" | "warning" | "error"> = {};
+    const map: Record<string, ValidationStatus> = {};
     if (!validationResult) return map;
 
     // All nodes with errors
@@ -470,10 +492,13 @@ export function GraphView() {
       subtitle: string | null,
       badgeBg: string,
       badgeColor: string,
-      validationStatus?: "valid" | "warning" | "error",
+      validationStatus?: ValidationStatus,
       validationTooltip?: string,
       isSelected?: boolean,
     ): Node {
+      const validationMarker = validationStatus
+        ? VALIDATION_STATUS_MARKERS[validationStatus]
+        : null;
       // Selection ring takes priority over validation border
       const borderStyle = isSelected
         ? "2px solid var(--color-selected-ring)"
@@ -506,6 +531,8 @@ export function GraphView() {
                 {validationStatus && (
                   <span
                     className="graph-validation-dot"
+                    role="img"
+                    aria-label={validationMarker?.ariaLabel}
                     style={{
                       backgroundColor:
                         validationStatus === "error"
@@ -517,13 +544,11 @@ export function GraphView() {
                     title={
                       validationTooltip
                         ? validationTooltip
-                        : validationStatus === "error"
-                          ? "Has validation errors"
-                          : validationStatus === "warning"
-                            ? "Has warnings"
-                            : "Valid"
+                        : validationMarker?.fallbackTitle
                     }
-                  />
+                  >
+                    {validationMarker?.glyph}
+                  </span>
                 )}
               </div>
               {subtitle && (

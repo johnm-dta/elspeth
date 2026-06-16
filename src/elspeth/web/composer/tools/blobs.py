@@ -336,11 +336,22 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
     keys = rest.split(".")
 
     if prefix == "source":
-        source = state.sources["source"] if "source" in state.sources else None
+        source_name = "source"
+    elif prefix.startswith("source:"):
+        source_name = prefix.removeprefix("source:")
+        if not source_name:
+            raise ValueError("source:<name> field_path must include a source name")
+    else:
+        source_name = None
+
+    if source_name is not None:
+        source = state.sources[source_name] if source_name in state.sources else None
         if source is None:
-            raise ValueError("Cannot wire source ref: no source has been set")
+            if source_name == "source":
+                raise ValueError("Cannot wire source ref: no source has been set")
+            raise ValueError(f"Source {source_name!r} not found in composition state")
         patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)
-        return state.with_named_source("source", replace(source, options=patched_options))
+        return state.with_named_source(source_name, replace(source, options=patched_options))
 
     if prefix.startswith("node:"):
         node_id = prefix.removeprefix("node:")
@@ -372,13 +383,15 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
             raise ValueError(f"Output {output_name!r} not found in composition state")
         return replace(state, outputs=tuple(new_outputs), version=state.version + 1)
 
-    raise ValueError("field_path must start with source.options, node:<id>.options, or output:<name>.options")
+    raise ValueError("field_path must start with source.options, source:<name>.options, node:<id>.options, or output:<name>.options")
 
 
 def _affected_component_for_inline_field_path(field_path: str) -> tuple[str, ...]:
     prefix, _, _rest = field_path.partition(".options.")
     if prefix == "source":
         return ("source",)
+    if prefix.startswith("source:"):
+        return (prefix.removeprefix("source:"),)
     if prefix.startswith("node:"):
         return (prefix.removeprefix("node:"),)
     if prefix.startswith("output:"):
@@ -470,7 +483,10 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
         "properties": {
             "field_path": {
                 "type": "string",
-                "description": "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>.",
+                "description": (
+                    "Canonical path: source.options.<field>, source:<name>.options.<field>, "
+                    "node:<node_id>.options.<field>, or output:<name>.options.<field>."
+                ),
             },
             "blob_id": {"type": "string", "format": "uuid", "description": "Ready blob ID to wire as inline content."},
             "encoding": {

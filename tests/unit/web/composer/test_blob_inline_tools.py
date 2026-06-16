@@ -77,6 +77,30 @@ def _inline_ref_state() -> CompositionState:
     )
 
 
+def _named_sources_state() -> CompositionState:
+    return CompositionState(
+        sources={
+            "orders": SourceSpec(
+                plugin="csv",
+                on_success="orders_rows",
+                options={"path": "/tmp/orders.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "refunds": SourceSpec(
+                plugin="json",
+                on_success="refund_rows",
+                options={"path": "/tmp/refunds.jsonl", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 class _Catalog:
     def list_sources(self) -> list[PluginSummary]:
         return [
@@ -280,6 +304,31 @@ class TestWireBlobInlineRef:
         source_marker = source_result.updated_state.sources["source"].options["schema"]["description"]
         assert source_marker["encoding"] == "latin-1"
         assert output_result.updated_state.outputs[0].options["header"]["mode"] == "inline_content"
+
+    def test_writes_named_source_paths_for_plural_source_yaml(self, blob_env: dict[str, Any]) -> None:
+        blob = _create_blob(blob_env, content="orders prompt")
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": "source:orders.options.schema.description",
+                "blob_id": blob.data["blob_id"],
+            },
+            _named_sources_state(),
+            _catalog(),
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is True
+        marker = result.updated_state.sources["orders"].options["schema"]["description"]
+        assert marker == {
+            "blob_ref": blob.data["blob_id"],
+            "mode": "inline_content",
+            "sha256": blob.data["content_hash"],
+        }
+        pipeline_dict = generate_pipeline_dict(result.updated_state)
+        assert pipeline_dict["sources"]["orders"]["options"]["schema"]["description"] == marker
 
     def test_rejects_pending_blob(self, blob_env: dict[str, Any]) -> None:
         blob = _create_blob(blob_env, content="pending")

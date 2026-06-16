@@ -858,7 +858,8 @@ class TestStep3BlobDiscoveryTierMigration:
                     "field_path": {
                         "type": "string",
                         "description": (
-                            "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>."
+                            "Canonical path: source.options.<field>, source:<name>.options.<field>, "
+                            "node:<node_id>.options.<field>, or output:<name>.options.<field>."
                         ),
                     },
                     "blob_id": {

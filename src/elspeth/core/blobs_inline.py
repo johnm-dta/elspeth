@@ -45,13 +45,15 @@ def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:
     """Return inline-content refs from a YAML-shaped config dict.
 
     The returned field paths use the canonical audit form:
-    ``source.options.<field>``, ``node:<name>.options.<field>``, or
-    ``output:<sink>.options.<field>``.
+    ``source.options.<field>`` for legacy singular-source dicts,
+    ``source:<name>.options.<field>`` for plural sources,
+    ``node:<name>.options.<field>``, or ``output:<sink>.options.<field>``.
     """
     refs: list[BlobInlineRef] = []
     malformed: list[tuple[str, str]] = []
 
     _walk_source(config, refs, malformed)
+    _walk_sources(config, refs, malformed)
     _walk_nodes(config, refs, malformed)
     _walk_outputs(config, refs, malformed)
 
@@ -389,7 +391,9 @@ def _substitute_at_path(config: dict[str, Any], field_path: str, value: str) -> 
     prefix, rest = field_path.split(".options.", 1)
     keys = rest.split(".")
     if prefix == "source":
-        container = _source_options(config)
+        container = _source_options(config, None)
+    elif prefix.startswith("source:"):
+        container = _source_options(config, prefix[len("source:") :])
     elif prefix.startswith("node:"):
         container = _node_options(config, prefix[len("node:") :])
     elif prefix.startswith("output:"):
@@ -399,14 +403,22 @@ def _substitute_at_path(config: dict[str, Any], field_path: str, value: str) -> 
     _assign_nested_option(container, keys, value)
 
 
-def _source_options(config: dict[str, Any]) -> dict[str, Any]:
-    source = config["source"]
+def _source_options(config: dict[str, Any], source_name: str | None) -> dict[str, Any]:
+    if source_name is None:
+        source = config["source"]
+        error_prefix = "source"
+    else:
+        sources = config["sources"]
+        if type(sources) is not dict:
+            raise TypeError("sources must be a mapping")
+        source = cast(dict[object, object], sources)[source_name]
+        error_prefix = f"source:{source_name}"
     if type(source) is not dict:
-        raise TypeError("source must be a mapping")
+        raise TypeError(f"{error_prefix} must be a mapping")
     source_dict = cast(dict[str, object], source)
     options = source_dict["options"]
     if type(options) is not dict:
-        raise TypeError("source.options must be a mapping")
+        raise TypeError(f"{error_prefix}.options must be a mapping")
     return cast(dict[str, Any], options)
 
 
@@ -484,6 +496,28 @@ def _walk_source(
     _walk_options(cast(dict[str, object], options), "source.options", refs, malformed)
 
 
+def _walk_sources(
+    config: dict[str, Any],
+    refs: list[BlobInlineRef],
+    malformed: list[tuple[str, str]],
+) -> None:
+    if "sources" not in config:
+        return
+    sources = config["sources"]
+    if type(sources) is not dict:
+        return
+    for source_name, source in cast(dict[object, object], sources).items():
+        if type(source_name) is not str or type(source) is not dict:
+            continue
+        source_dict = cast(dict[str, object], source)
+        if "options" not in source_dict:
+            continue
+        options = source_dict["options"]
+        if type(options) is not dict:
+            continue
+        _walk_options(cast(dict[str, object], options), f"source:{source_name}.options", refs, malformed)
+
+
 def _walk_nodes(
     config: dict[str, Any],
     refs: list[BlobInlineRef],
@@ -539,7 +573,7 @@ def _walk_options(
 ) -> None:
     if type(value) is dict:
         mapping = cast(dict[object, object], value)
-        if field_path == "source.options" and _is_source_options_bind_source(mapping):
+        if _is_source_options_path(field_path) and _is_source_options_bind_source(mapping):
             for key, child in mapping.items():
                 if type(key) is str:
                     _walk_options(child, f"{field_path}.{key}", refs, malformed)
@@ -557,6 +591,10 @@ def _walk_options(
             if type(child) is dict and "blob_ref" in cast(dict[object, object], child):
                 malformed.append((field_path, "inline blob refs inside lists are not supported"))
                 return
+
+
+def _is_source_options_path(field_path: str) -> bool:
+    return field_path == "source.options" or (field_path.startswith("source:") and field_path.endswith(".options"))
 
 
 def _collect_or_reject_marker(

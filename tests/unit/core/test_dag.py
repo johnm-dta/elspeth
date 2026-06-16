@@ -273,6 +273,27 @@ def test_mixed_multi_source_graph_records_direct_source_sink_edge() -> None:
     )
 
 
+def test_source_route_to_unconsumed_declared_queue_is_rejected() -> None:
+    """A declared queue is only a valid source target when some downstream node consumes it."""
+    from elspeth.core.config import QueueSettings, SourceSettings
+    from elspeth.core.dag import GraphValidationError
+    from tests.fixtures.plugins import CollectSink, ListSource
+
+    with pytest.raises(GraphValidationError, match=r"Dangling output connections.*orphan_q"):
+        ExecutionGraph.from_plugin_instances(
+            sources={
+                "queued": ListSource([{"id": 1}], name="queued_source", on_success="orphan_q"),
+                "direct": ListSource([{"id": 2}], name="direct_source", on_success="out"),
+            },
+            source_settings_map={
+                "queued": SourceSettings(plugin="queued_source", on_success="orphan_q", options={}),
+                "direct": SourceSettings(plugin="direct_source", on_success="out", options={}),
+            },
+            sinks={"out": CollectSink("out")},
+            queues={"orphan_q": QueueSettings(description="unused")},
+        )
+
+
 def instantiate_plugins_from_config_raw(settings: Any) -> PluginBundle:
     """Instantiate plugins without any test-time routing injection."""
     from elspeth.cli_helpers import instantiate_plugins_from_config as _real_instantiate

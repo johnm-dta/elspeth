@@ -234,6 +234,40 @@ class TestNodeChainInOrder:
         )
         assert result["verdict"] == "GREEN", result["amber_reasons"]
 
+    def test_chain_matches_source_transforms_and_sink(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[
+                {"id": "n0", "node_type": "transform", "plugin": "t1"},
+                {"id": "n1", "node_type": "transform", "plugin": "t2"},
+            ],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_chain_fails_when_transform_missing_between_source_and_sink(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[{"id": "n0", "node_type": "transform", "plugin": "t1"}],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "AMBER"
+        assert any("'t2'" in r for r in result["amber_reasons"])
+
 
 # --------------------------------------------------------------------------
 # must_include_observed_columns

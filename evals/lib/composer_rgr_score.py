@@ -62,10 +62,11 @@ Convergence-bar GREEN criteria (added 2026-05-08 for the
 simple-pipeline-convergence program):
 
   must_have_node_chain_in_order
-      List of substrings that must appear in `state.nodes[*].plugin`
-      (or node_type) in the given relative order. Stronger than
+      List of substrings that must appear in the flattened workflow sequence:
+      source plugin(s), then `state.nodes[*].plugin` (or node_type), then
+      `state.outputs[*].plugin`, in the given relative order. Stronger than
       must_have_node_kinds_substring_any_of for chains like
-      [text, web_scrape, line_explode] where order matters.
+      [csv, web_scrape, line_explode, json] where order matters.
 
   must_include_observed_columns
       For CSV/text/JSON sources where the operator gave specific
@@ -116,13 +117,44 @@ def _node_plugins(state: Any) -> list[str]:
     return plugins
 
 
+def _workflow_plugins_for_chain(state: Any) -> list[str]:
+    """Extract source, node, and output plugin/type identifiers for chain checks."""
+    if not isinstance(state, dict):
+        return []
+
+    plugins: list[str] = []
+    source = state.get("source")
+    if isinstance(source, dict):
+        plugin = source.get("plugin")
+        if isinstance(plugin, str) and plugin:
+            plugins.append(plugin.lower())
+
+    sources = state.get("sources")
+    if isinstance(sources, dict):
+        for source_spec in sources.values():
+            if isinstance(source_spec, dict):
+                plugin = source_spec.get("plugin")
+                if isinstance(plugin, str) and plugin:
+                    plugins.append(plugin.lower())
+
+    plugins.extend(_node_plugins(state))
+
+    for output in state.get("outputs") or []:
+        if isinstance(output, dict):
+            plugin = output.get("plugin")
+            if isinstance(plugin, str) and plugin:
+                plugins.append(plugin.lower())
+    return plugins
+
+
 def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
-    """Return an AMBER reason if `chain` substrings don't appear in order in node plugins.
+    """Return an AMBER reason if `chain` substrings don't appear in workflow order.
 
     Each element in `chain` must be a (case-insensitive) substring of some
-    node plugin/type, and the matches must be strictly non-decreasing in index.
+    source plugin, node plugin/type, or output plugin, and the matches must be
+    strictly non-decreasing in index.
     """
-    plugins = _node_plugins(state)
+    plugins = _workflow_plugins_for_chain(state)
     cursor = 0
     for needle in chain:
         needle_l = needle.lower()
@@ -132,9 +164,7 @@ def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
                 match_idx = i
                 break
         if match_idx is None:
-            return (
-                f"required node chain {chain} not satisfied in order; missing '{needle}' after position {cursor}; node plugins: {plugins}"
-            )
+            return f"required node chain {chain} not satisfied in order; missing '{needle}' after position {cursor}; workflow plugins: {plugins}"
         cursor = match_idx + 1
     return None
 

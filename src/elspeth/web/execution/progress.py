@@ -33,11 +33,14 @@ import asyncio
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 
 from elspeth.web.execution.schemas import RunEvent
+
+if TYPE_CHECKING:
+    from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 slog = structlog.get_logger()
 
@@ -98,8 +101,9 @@ class ProgressBroadcaster:
 
     _TERMINAL_EVENT_TYPES = _TERMINAL_EVENT_TYPES
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, *, telemetry: _SessionsTelemetry | None = None) -> None:
         self._loop = loop
+        self._telemetry = telemetry
         self._lock = threading.Lock()
         self._subscribers: dict[str, dict[asyncio.Queue[RunEvent], _SubState]] = {}
         self._terminalized: set[str] = set()
@@ -236,13 +240,19 @@ class ProgressBroadcaster:
             batch = list(state.pending)
             state.pending.clear()
         for event in batch:
-            self._safe_put(state.queue, event, run_id)
+            self._safe_put(state.queue, event, run_id, telemetry=self._telemetry)
         # Re-enter via call_soon so other loop work (WS writes, timers)
         # can interleave between batches. drain_scheduled stays True.
         self._loop.call_soon(self._drain_pending, run_id, state)
 
     @staticmethod
-    def _safe_put(queue: asyncio.Queue[RunEvent], event: RunEvent, run_id: str) -> None:
+    def _safe_put(
+        queue: asyncio.Queue[RunEvent],
+        event: RunEvent,
+        run_id: str,
+        *,
+        telemetry: _SessionsTelemetry | None = None,
+    ) -> None:
         """Put an event on the async queue, dropping oldest on backpressure.
 
         Runs on the event loop thread (invoked from _drain_pending, which
@@ -274,7 +284,7 @@ class ProgressBroadcaster:
                 queue.get_nowait()
                 drained += 1
             if drained > 0:
-                slog.info("subscriber_queue_drained_for_terminal", run_id=run_id, drained=drained)
+                ProgressBroadcaster._record_queue_pressure(telemetry=telemetry, run_id=run_id, reason="terminal_drain", count=drained)
             queue.put_nowait(event)  # Queue is now empty — this cannot fail
             return
 
@@ -285,8 +295,23 @@ class ProgressBroadcaster:
         # backpressure policy for a slow client — record it as a best-effort
         # drop so the loss is observable rather than silent.
         queue.get_nowait()
-        slog.warning("subscriber_queue_drop_oldest", run_id=run_id)
+        ProgressBroadcaster._record_queue_pressure(telemetry=telemetry, run_id=run_id, reason="queue_full", count=1)
         queue.put_nowait(event)
+
+    @staticmethod
+    def _record_queue_pressure(
+        *,
+        telemetry: _SessionsTelemetry | None,
+        run_id: str,
+        reason: str,
+        count: int,
+    ) -> None:
+        if telemetry is None:
+            return
+        telemetry.progress_broadcast_dropped_total.add(
+            count,
+            attributes={"reason": reason, "run_id": run_id},
+        )
 
     def cleanup_run(self, run_id: str) -> None:
         """Remove subscriber mapping for a completed/failed/cancelled run.

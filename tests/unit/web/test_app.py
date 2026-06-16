@@ -30,6 +30,7 @@ from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
+from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -944,7 +945,8 @@ class TestPeriodicOrphanCleanup:
         mock_exec = MagicMock()
         mock_exec.get_live_run_ids.return_value = frozenset()
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=900))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
         try:
             await asyncio.wait_for(called.wait(), timeout=5.0)
         finally:
@@ -957,6 +959,36 @@ class TestPeriodicOrphanCleanup:
             exclude_run_ids=frozenset(),
             reason="Orphaned by periodic cleanup — no active executor thread",
         )
+        assert observed_value(telemetry.orphaned_runs_cancelled_total) == 0
+
+    @pytest.mark.asyncio
+    async def test_periodic_cleanup_emits_cancelled_count_to_telemetry(self) -> None:
+        cleanup_called = asyncio.Event()
+
+        async def signal_called(**_: object) -> int:
+            cleanup_called.set()
+            return 3
+
+        mock_service = AsyncMock()
+        mock_service.cancel_all_orphaned_runs.side_effect = signal_called
+        mock_exec = MagicMock()
+        mock_exec.get_live_run_ids.return_value = frozenset({"run-live"})
+        telemetry = build_sessions_telemetry()
+
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
+        try:
+            await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assert observed_value(telemetry.orphaned_runs_cancelled_total) == 3
+        counter = telemetry.orphaned_runs_cancelled_total
+        assert isinstance(counter, _FakeCounter)
+        amount, attrs, _context = counter.calls[0]
+        assert amount == 3
+        assert attrs == {"source": "periodic", "excluded_live_runs": 1}
 
     @pytest.mark.asyncio
     async def test_continues_after_exception(self) -> None:
@@ -1000,7 +1032,10 @@ class TestPeriodicOrphanCleanup:
         mock_exec.get_live_run_ids.return_value = frozenset()
 
         with capture_logs() as cap_logs:
-            task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+            telemetry = build_sessions_telemetry()
+            task = asyncio.create_task(
+                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+            )
             try:
                 await asyncio.wait_for(recovered.wait(), timeout=5.0)
             finally:
@@ -1031,7 +1066,8 @@ class TestPeriodicOrphanCleanup:
         mock_exec = MagicMock()
         mock_exec.get_live_run_ids.return_value = frozenset()
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=10, max_age_seconds=3600))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=10, max_age_seconds=3600))
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1063,7 +1099,10 @@ class TestPeriodicOrphanCleanup:
         mock_exec.get_live_run_ids.side_effect = AttributeError("ExecutionServiceImpl has no attribute '_shutdown_events'")
 
         with capture_logs() as cap_logs:
-            task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+            telemetry = build_sessions_telemetry()
+            task = asyncio.create_task(
+                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+            )
             # Task must terminate on its own with the AttributeError.
             # ``asyncio.wait_for`` provides the deterministic wait: if the
             # narrow-catch regresses to ``except Exception``, the task
@@ -1102,7 +1141,8 @@ class TestPeriodicOrphanCleanup:
         live_ids = frozenset({"run-1", "run-2"})
         mock_exec.get_live_run_ids.return_value = live_ids
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600))
         await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

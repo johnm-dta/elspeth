@@ -79,7 +79,7 @@ from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyAc
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
-from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.sessions.telemetry import _SessionsTelemetry, build_sessions_telemetry
 from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
 from elspeth.web.shareable_reviews.service import ShareableReviewService
 from elspeth.web.shareable_reviews.signer import ShareTokenSigner
@@ -159,6 +159,7 @@ def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
 async def _periodic_orphan_cleanup(
     session_service: SessionServiceImpl,
     execution_service: ExecutionServiceImpl,
+    telemetry: _SessionsTelemetry,
     *,
     interval_seconds: int,
     max_age_seconds: int,
@@ -188,7 +189,10 @@ async def _periodic_orphan_cleanup(
                 reason="Orphaned by periodic cleanup — no active executor thread",
             )
             if cancelled:
-                slog.info("periodic_orphan_cleanup", cancelled=cancelled, excluded=len(live_run_ids))
+                telemetry.orphaned_runs_cancelled_total.add(
+                    cancelled,
+                    attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+                )
         except (SQLAlchemyError, OSError) as cleanup_exc:
             # Narrow catch — only recoverable audit/IO failures are
             # absorbed so the loop retries on the next interval.
@@ -246,7 +250,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reason="Orphaned by server restart — no active process",
     )
     if cancelled:
-        slog.info("cancelled_orphaned_runs", count=cancelled)
+        app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
+            cancelled,
+            attributes={"source": "startup", "excluded_live_runs": 0},
+        )
 
     # Resolve OIDC authorization_endpoint from discovery or explicit config
     if settings.auth_provider in ("oidc", "entra"):
@@ -281,7 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Sub-5: Construct ProgressBroadcaster and ExecutionServiceImpl
     # These require a running event loop, which is only available here.
     loop = asyncio.get_running_loop()
-    broadcaster = ProgressBroadcaster(loop)
+    broadcaster = ProgressBroadcaster(loop, telemetry=app.state.sessions_telemetry)
     app.state.broadcaster = broadcaster
 
     execution_service = ExecutionServiceImpl(
@@ -462,6 +469,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _periodic_orphan_cleanup(
             session_service,
             execution_service,
+            app.state.sessions_telemetry,
             interval_seconds=settings.orphan_run_check_interval_seconds,
             max_age_seconds=settings.orphan_run_max_age_seconds,
         )

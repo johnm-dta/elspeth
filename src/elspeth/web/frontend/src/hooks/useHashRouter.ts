@@ -108,6 +108,8 @@ export function useHashRouter(
 
       if (sessionId && sessionId !== store.activeSessionId) {
         store.selectSession(sessionId);
+      } else if (!sessionId && store.activeSessionId) {
+        useSessionStore.setState({ activeSessionId: null });
       }
 
       // Fix A: use hasOwnProperty to avoid prototype-chain walk.

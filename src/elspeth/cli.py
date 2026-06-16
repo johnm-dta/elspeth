@@ -896,6 +896,25 @@ def _close_orchestrator_resources(
         raise teardown_error
 
 
+def _close_landscape_db(db: _Closeable, *, pending_exc: BaseException | None) -> None:
+    """Close LandscapeDB without masking an in-flight pipeline exception."""
+    import structlog
+
+    try:
+        db.close()
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as close_exc:
+        # db.close() failure must not mask the original pipeline exception.
+        if pending_exc is not None:
+            structlog.get_logger(__name__).warning(
+                "db.close() failed during exception cleanup — suppressed",
+                close_error=f"{type(close_exc).__name__}: {close_exc}",
+            )
+        else:
+            raise
+
+
 @contextmanager
 def _orchestrator_context(
     config: ElspethSettings,
@@ -1124,7 +1143,9 @@ def _execute_pipeline_with_instances(
                 "rows_processed": result.rows_processed,
             }
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def bootstrap_and_run(settings_path: Path) -> RunResult:
@@ -1217,22 +1238,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     finally:
         import sys
 
-        import structlog
-
-        pending_exc = sys.exc_info()[1]
-        try:
-            db.close()
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as close_exc:
-            # db.close() failure must not mask the original pipeline exception.
-            if pending_exc is not None:
-                structlog.get_logger(__name__).warning(
-                    "db.close() failed during exception cleanup — suppressed",
-                    close_error=f"{type(close_exc).__name__}: {close_exc}",
-                )
-            else:
-                raise
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def _format_validation_error(

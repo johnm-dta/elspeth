@@ -62,7 +62,7 @@ Convergence-bar GREEN criteria (added 2026-05-08 for the
 simple-pipeline-convergence program):
 
   must_have_node_chain_in_order
-      List of substrings that must appear in the flattened workflow sequence:
+      List of plugin/type identifiers that must appear in the flattened workflow sequence:
       source plugin(s), then `state.nodes[*].plugin` (or node_type), then
       `state.outputs[*].plugin`, in the given relative order. Stronger than
       must_have_node_kinds_substring_any_of for chains like
@@ -117,6 +117,10 @@ def _node_plugins(state: Any) -> list[str]:
     return plugins
 
 
+def _normalise_plugin_token(value: Any) -> str:
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
 def _workflow_plugins_for_chain(state: Any) -> list[str]:
     """Extract source, node, and output plugin/type identifiers for chain checks."""
     if not isinstance(state, dict):
@@ -148,19 +152,19 @@ def _workflow_plugins_for_chain(state: Any) -> list[str]:
 
 
 def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
-    """Return an AMBER reason if `chain` substrings don't appear in workflow order.
+    """Return an AMBER reason if `chain` identifiers don't appear in workflow order.
 
-    Each element in `chain` must be a (case-insensitive) substring of some
-    source plugin, node plugin/type, or output plugin, and the matches must be
-    strictly non-decreasing in index.
+    Each element in `chain` must be a case-insensitive exact match for some
+    source plugin, node plugin/type, or output plugin identifier, and the
+    matches must be strictly non-decreasing in index.
     """
     plugins = _workflow_plugins_for_chain(state)
     cursor = 0
     for needle in chain:
-        needle_l = needle.lower()
+        needle_l = _normalise_plugin_token(needle)
         match_idx: int | None = None
         for i in range(cursor, len(plugins)):
-            if needle_l in plugins[i]:
+            if needle_l == plugins[i]:
                 match_idx = i
                 break
         if match_idx is None:
@@ -689,13 +693,15 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
 
     if isinstance(state, dict):
         node_plugins = _node_plugins(state)
-        node_blob = " ".join(node_plugins)
 
         kind_groups = green.get("must_have_node_kinds_substring_any_of") or []
         if kind_groups:
             ok = False
+            node_plugin_set = set(node_plugins)
             for group in kind_groups:
-                if all(needle.lower() in node_blob for needle in group):
+                required_tokens = [_normalise_plugin_token(needle) for needle in group]
+                required_tokens = [token for token in required_tokens if token]
+                if required_tokens and all(token in node_plugin_set for token in required_tokens):
                     ok = True
                     break
             if not ok:

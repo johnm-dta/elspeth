@@ -250,9 +250,10 @@ def _handle_upsert_node(
     # Offensive programming: _execute_upsert_node succeeded above, so the
     # node it just upserted MUST be on the post-mutation state. Absence
     # here would be a bug in state.with_node, not a runtime condition.
-    assert node is not None, (
-        f"_execute_upsert_node succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
-    )
+    if node is None:
+        raise AssertionError(
+            f"_execute_upsert_node succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+        )
     return _attach_post_call_hints(
         result,
         context.catalog,
@@ -763,9 +764,10 @@ def _handle_patch_node_options(
     # Offensive programming: _execute_patch_node_options succeeded above, so
     # the node it just upserted MUST be on the post-mutation state. Absence
     # here would be a bug in state.with_node, not a runtime condition.
-    assert node is not None, (
-        f"_execute_patch_node_options succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
-    )
+    if node is None:
+        raise AssertionError(
+            f"_execute_patch_node_options succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+        )
     return _attach_post_call_hints(
         result,
         context.catalog,

@@ -266,10 +266,11 @@ def _handle_patch_output_options(
     # the output it just upserted MUST be on the post-mutation state. Absence
     # here would be a bug in _execute_patch_output_options' state-update path
     # (or in CompositionState.with_output), not a recoverable runtime branch.
-    assert output is not None, (
-        f"_execute_patch_output_options succeeded for output '{sink_name}' but "
-        "the post-mutation state does not contain it — invariant violation."
-    )
+    if output is None:
+        raise AssertionError(
+            f"_execute_patch_output_options succeeded for output '{sink_name}' but "
+            "the post-mutation state does not contain it — invariant violation."
+        )
     return _attach_post_call_hints(
         result,
         context.catalog,

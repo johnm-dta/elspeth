@@ -20,7 +20,6 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
-from itertools import chain
 from typing import TYPE_CHECKING
 
 from elspeth.contracts import PendingOutcome, SourceRow
@@ -350,8 +349,12 @@ class SourceIterationDriver:
         )
 
     def _requires_idle_aggregation_polling(self, config: PipelineConfig) -> bool:
-        """Return True when a pipeline has time-sensitive aggregation triggers."""
-        return any(settings.trigger.has_timeout or settings.trigger.has_condition for settings in config.aggregation_settings.values())
+        """Return True when the pipeline has time-sensitive buffered work."""
+        has_aggregation_timeout = any(
+            settings.trigger.has_timeout or settings.trigger.has_condition for settings in config.aggregation_settings.values()
+        )
+        has_coalesce_timeout = any(settings.timeout_seconds is not None for settings in config.coalesce_settings)
+        return has_aggregation_timeout or has_coalesce_timeout
 
     def _idle_timeout_context(self, source_ctx: PluginContext) -> PluginContext:
         """Create an isolated context for idle timeout work.
@@ -636,35 +639,40 @@ class SourceIterationDriver:
     ) -> Iterator[SourceRow]:
         """Execute SOURCE phase: emit lifecycle events, load source, handle errors.
 
-        SOURCE phase is complete when this method returns. Errors during load()
-        (file not found, auth failure) are emitted as PhaseError before re-raising.
+        Source iteration is lazy so the caller can wrap the first ``next()``
+        in idle-timeout polling. Errors during load() (file not found, auth
+        failure) are emitted as PhaseError before re-raising.
         """
 
-        phase_start = time.perf_counter()
-        self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
-        self._ceremony.emit_telemetry(
-            PhaseChanged(
-                timestamp=datetime.now(UTC),
-                run_id=run_id,
-                phase=PipelinePhase.SOURCE,
-                action=PhaseAction.INITIALIZING,
+        def _source_iter() -> Iterator[SourceRow]:
+            phase_start = time.perf_counter()
+            self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
+            self._ceremony.emit_telemetry(
+                PhaseChanged(
+                    timestamp=datetime.now(UTC),
+                    run_id=run_id,
+                    phase=PipelinePhase.SOURCE,
+                    action=PhaseAction.INITIALIZING,
+                )
             )
-        )
 
-        try:
-            with self._span_factory.source_span(active_source.name):
-                source_iterator = iter(active_source.load(ctx))
-                try:
-                    first_row = next(source_iterator)
-                except StopIteration:
-                    self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
-                    return iter(())
-        except Exception as e:
-            self._ceremony.emit_phase_error(PipelinePhase.SOURCE, e, target=active_source.name)
-            raise
+            try:
+                with self._span_factory.source_span(active_source.name):
+                    source_iterator = iter(active_source.load(ctx))
+                    try:
+                        first_row = next(source_iterator)
+                    except StopIteration:
+                        self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
+                        return
+            except Exception as e:
+                self._ceremony.emit_phase_error(PipelinePhase.SOURCE, e, target=active_source.name)
+                raise
 
-        self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
-        return chain((first_row,), source_iterator)
+            self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
+            yield first_row
+            yield from source_iterator
+
+        return _source_iter()
 
     def run_main_processing_loop(
         self,
@@ -745,6 +753,23 @@ class SourceIterationDriver:
             )
 
             source_iterator = self.load_source_with_events(run_id, ctx, active_source=active_source)
+            use_idle_polling = self._requires_idle_aggregation_polling(config)
+            source_exhausted = False
+            pending_source_item: SourceRow | None = None
+            try:
+                if use_idle_polling:
+                    pending_source_item = self._next_source_item_with_idle_timeout_flushes(
+                        source_iterator,
+                        loop_ctx,
+                        agg_transform_lookup=agg_transform_lookup,
+                        coalesce_node_map=coalesce_node_map,
+                        source_id=source_id,
+                        source_operation_id=source_operation_id,
+                    )
+                else:
+                    pending_source_item = next(source_iterator)
+            except StopIteration:
+                source_exhausted = True
 
             # Deferred recording flags — field resolution after first iteration,
             # schema contract after first VALID row. Always start false so
@@ -766,26 +791,28 @@ class SourceIterationDriver:
             )
 
             interrupted_by_shutdown = False
-            source_exhausted = False
             try:
                 source_row_index = 0
-                use_idle_polling = self._requires_idle_aggregation_polling(config)
                 while True:
-                    try:
-                        if use_idle_polling:
-                            source_item = self._next_source_item_with_idle_timeout_flushes(
-                                source_iterator,
-                                loop_ctx,
-                                agg_transform_lookup=agg_transform_lookup,
-                                coalesce_node_map=coalesce_node_map,
-                                source_id=source_id,
-                                source_operation_id=source_operation_id,
-                            )
-                        else:
-                            source_item = next(source_iterator)
-                    except StopIteration:
-                        source_exhausted = True
-                        break
+                    if pending_source_item is not None:
+                        source_item = pending_source_item
+                        pending_source_item = None
+                    else:
+                        try:
+                            if use_idle_polling:
+                                source_item = self._next_source_item_with_idle_timeout_flushes(
+                                    source_iterator,
+                                    loop_ctx,
+                                    agg_transform_lookup=agg_transform_lookup,
+                                    coalesce_node_map=coalesce_node_map,
+                                    source_id=source_id,
+                                    source_operation_id=source_operation_id,
+                                )
+                            else:
+                                source_item = next(source_iterator)
+                        except StopIteration:
+                            source_exhausted = True
+                            break
 
                     current_source_row_index = source_row_index
                     source_row_index += 1

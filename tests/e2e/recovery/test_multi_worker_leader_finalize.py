@@ -9,9 +9,8 @@ multi-worker image at finalize time.
 
 To keep the bounded wait fast and deterministic, the loop's ``time.monotonic``
 and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.core``: sleep is
-a no-op and monotonic returns a scripted, advancing clock so the 240s
-(3x liveness) deadline is reached in a handful of iterations without any real
-wall-clock wait.
+a no-op and monotonic returns a scripted, advancing clock so the lease-aware
+deadline is reached in a handful of iterations without any real wall-clock wait.
 
 Contracts pinned (each FAILS under the pre-fix code):
 
@@ -45,7 +44,7 @@ import pytest
 from sqlalchemy import select, update
 
 from elspeth.contracts import Determinism, PipelineRow, PluginSchema, RunStatus
-from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
+from elspeth.contracts.coordination import DEFAULT_ITEM_STALL_BUDGET_SECONDS, DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 from elspeth.contracts.errors import OrchestrationInvariantError, RunWorkerEvictedError
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.scheduler import TokenWorkStatus
@@ -352,9 +351,10 @@ def test_wedged_alive_peer_bounded_wait_times_out_then_raises(tmp_path: Path) ->
     """An unexpired, never-resolving peer lease must NOT hang the leader.
 
     The bounded 4b-pre wait times out (the fast monotonic crosses the
-    3x liveness deadline) and falls through to has_unresolved_scheduler_work(),
-    which raises naming the still-leased peer. Pre-fix this loop is unbounded
-    and the test would hang (guarded by the 60s timeout).
+    item-lease plus stall-budget deadline) and falls through to
+    has_unresolved_scheduler_work(), which raises naming the still-leased peer.
+    Pre-fix this loop is unbounded and the test would hang (guarded by the
+    60s timeout).
     """
     orch, db, payload_store = _make_orch(tmp_path)
 
@@ -380,7 +380,7 @@ def test_wedged_alive_peer_bounded_wait_times_out_then_raises(tmp_path: Path) ->
     timeout_logs = [e for e in captured if str(e.get("event", "")).startswith("Bounded peer-lease wait timed out")]
     assert timeout_logs, "the bounded peer-lease wait must time out and log (not hang)"
     assert PEER_OWNER in timeout_logs[0]["still_leased_peers"]
-    assert timeout_logs[0]["waited_seconds"] == pytest.approx(3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS)
+    assert timeout_logs[0]["waited_seconds"] == pytest.approx(300.0 + DEFAULT_ITEM_STALL_BUDGET_SECONDS)
     # And it fell through to the SPECIFIC unresolved-work invariant raise in
     # core.py (the LEASED row is unresolved) — not some other OrchestrationInvariantError.
     assert "non-terminal scheduler work" in str(exc_info.value).lower()

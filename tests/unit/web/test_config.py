@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import types
 import typing
@@ -12,6 +13,15 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.web.config import WebSettings
+
+
+def test_playwright_local_backend_secret_key_satisfies_non_pytest_guard() -> None:
+    """The Playwright-managed backend runs outside pytest and needs a 32-byte key."""
+    config_path = Path(__file__).parents[3] / "src/elspeth/web/frontend/playwright.config.ts"
+    match = re.search(r'ELSPETH_WEB__secret_key:\s*"([^"]+)"', config_path.read_text(encoding="utf-8"))
+
+    assert match is not None
+    assert len(match.group(1).encode("utf-8")) >= 32
 
 
 class TestWebSettingsValidation:

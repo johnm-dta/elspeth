@@ -49,6 +49,7 @@ def _make_bootstrap_config() -> SimpleNamespace:
         collection_probes=[],
         gates=[],
         coalesce=[],
+        queues={},
         checkpoint=SimpleNamespace(enabled=True),
         rate_limit=SimpleNamespace(),
         concurrency=SimpleNamespace(),
@@ -200,6 +201,36 @@ class TestBootstrapProgrammaticExecution:
 
         assert mock_orch_ctx.call_args is not None
         assert mock_orch_ctx.call_args.kwargs["output_format"] == "none"
+
+    def test_bootstrap_passes_declared_queues_to_graph_builder(self) -> None:
+        """Dependency/preflight graph construction must honor declared queue fan-in nodes."""
+        mock_config = _make_bootstrap_config()
+        mock_config.queues = {"inbound": object()}
+
+        with (
+            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.core.landscape.LandscapeDB"),
+            patch("elspeth.core.payload_store.FilesystemPayloadStore"),
+            patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
+            patch("elspeth.cli._ensure_output_directories", return_value=[]),
+            patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
+        ):
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
+            mock_ctx = MagicMock()
+            mock_ctx.orchestrator.run.return_value = MagicMock()
+            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+
+            from elspeth.cli import bootstrap_and_run
+
+            bootstrap_and_run(Path("/fake/pipeline.yaml"))
+
+        assert mock_graph_cls.from_plugin_instances.call_args is not None
+        assert mock_graph_cls.from_plugin_instances.call_args.kwargs["queues"] == mock_config.queues
 
     def test_orchestrator_context_none_output_uses_null_event_bus(self) -> None:
         """The silent output mode uses NullEventBus, not console/json formatters."""

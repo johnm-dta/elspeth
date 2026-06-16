@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -22,6 +22,7 @@ from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo,
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars, CoalescePendingScalars
+from elspeth.contracts.coordination import DEFAULT_ITEM_STALL_BUDGET_SECONDS
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
@@ -3283,6 +3284,10 @@ class RowProcessor:
             )
         )
 
+    def peer_lease_wait_budget_seconds(self) -> float:
+        """Return the bounded wait budget for peer-held active item leases."""
+        return float(self._scheduler_lease_seconds) + DEFAULT_ITEM_STALL_BUDGET_SECONDS
+
     def peer_active_lease_owners(self) -> tuple[str, ...]:
         """Return the distinct peer lease_owners holding unexpired LEASED rows.
 
@@ -4169,6 +4174,7 @@ class RowProcessor:
         pending_items: dict[str, WorkItem],
         recover_pending_sinks: bool,
         preclaimed_items: list[TokenWorkItem] | None = None,
+        before_claim: Callable[[], None] | None = None,
     ) -> list[RowResult]:
         """Claim and advance scheduler work until no READY work remains.
 
@@ -4215,6 +4221,8 @@ class RowProcessor:
             iterations += 1
             if iterations > MAX_WORK_QUEUE_ITERATIONS:
                 raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
+            if before_claim is not None:
+                before_claim()
 
             # ADR-030 §E.2 (slice 3): per-iteration journal-first intake —
             # adopt intake-pending BLOCKED barrier rows into executor memory,

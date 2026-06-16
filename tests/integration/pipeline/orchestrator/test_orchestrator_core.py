@@ -272,6 +272,96 @@ def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeyp
     assert (source_ctx.node_id, source_ctx.operation_id) == ("source-orders", "op-source-orders")
 
 
+def test_initial_source_pull_uses_idle_timeout_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first source next() must use the same idle-timeout poller as later rows."""
+    orchestrator = Orchestrator(make_landscape_db())
+    monkeypatch.setattr(orchestrator._source_driver, "_SOURCE_IDLE_POLL_INTERVAL_SECONDS", 0.01)
+
+    source_ctx = PluginContext(
+        run_id="run-idle-first-row",
+        config={},
+        landscape=None,
+        node_id="source-orders",
+        operation_id="op-source-orders",
+    )
+    idle_flush_seen = threading.Event()
+
+    class BlockingFirstRowSource:
+        name = "blocking_first_row"
+
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+
+        def load(self, ctx: PluginContext) -> Any:
+            del ctx
+            if not idle_flush_seen.wait(0.5):
+                raise AssertionError("initial source pull was not wrapped in idle-timeout polling")
+            yield make_source_row({"value": 1})
+
+    def fake_check_aggregation_timeouts(**_kwargs: Any) -> AggregationFlushResult:
+        idle_flush_seen.set()
+        return AggregationFlushResult()
+
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.source_iteration.check_aggregation_timeouts",
+        fake_check_aggregation_timeouts,
+    )
+
+    loop_ctx = LoopContext(
+        counters=ExecutionCounters(),
+        pending_tokens={"default": []},
+        processor=MagicMock(),
+        ctx=source_ctx,
+        config=PipelineConfig(
+            sources={"primary": MagicMock()},
+            transforms=(),
+            sinks={"default": MagicMock()},
+        ),
+        agg_transform_lookup={},
+        coalesce_executor=None,
+        coalesce_node_map={},
+    )
+
+    source_iterator = orchestrator._source_driver.load_source_with_events(
+        "run-idle-first-row",
+        source_ctx,
+        active_source=BlockingFirstRowSource(),
+    )
+
+    row = orchestrator._source_driver._next_source_item_with_idle_timeout_flushes(
+        source_iterator,
+        loop_ctx,
+        agg_transform_lookup={},
+        coalesce_node_map={},
+        source_id=NodeID("source-orders"),
+        source_operation_id="op-source-orders",
+    )
+
+    assert row.row == {"value": 1}
+
+
+def test_coalesce_timeouts_enable_idle_polling_without_aggregation_triggers() -> None:
+    """A coalesce timeout alone is time-sensitive and must enable source idle polling."""
+    from elspeth.core.config import CoalesceSettings
+
+    orchestrator = Orchestrator(make_landscape_db())
+    config = PipelineConfig(
+        sources={"primary": MagicMock()},
+        transforms=(),
+        sinks={"default": MagicMock()},
+        coalesce_settings=[
+            CoalesceSettings(
+                name="merge_branches",
+                branches={"fast": "fast", "slow": "slow"},
+                policy="best_effort",
+                timeout_seconds=1.0,
+            )
+        ],
+    )
+
+    assert orchestrator._source_driver._requires_idle_aggregation_polling(config) is True
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

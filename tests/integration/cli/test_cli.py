@@ -610,6 +610,115 @@ class TestJoinCommand:
         # Should mention the run was joined and departed cleanly.
         assert run_id in combined
 
+    def test_join_startup_failure_departs_admitted_worker_and_cleans_plugins(self, tmp_path: Path) -> None:
+        """A follower plugin on_start failure after admission must still depart and tear down."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from sqlalchemy import select
+
+        from elspeth.cli import app
+        from elspeth.core.canonical import stable_hash
+        from elspeth.core.config import load_settings, resolve_config
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
+
+        run_id = "run-startup-failure-departs-005"
+        settings_path = _make_minimal_settings(tmp_path)
+        settings_config = load_settings(settings_path)
+        real_hash = stable_hash(resolve_config(settings_config))
+
+        real_now = datetime.now(UTC)
+        db_path = tmp_path / "landscape.db"
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=True)
+        try:
+            with db.engine.begin() as conn:
+                conn.execute(
+                    insert(runs_table).values(
+                        run_id=run_id,
+                        started_at=real_now.replace(tzinfo=None),
+                        config_hash=real_hash,
+                        settings_json="{}",
+                        canonical_version="v1",
+                        status="running",
+                        openrouter_catalog_sha256="0" * 64,
+                        openrouter_catalog_source="bundled",
+                    )
+                )
+                leader_wid = f"worker:{run_id}:leaderabc123"
+                expires = (real_now + timedelta(hours=1)).replace(tzinfo=None)
+                conn.execute(
+                    insert(run_coordination_table).values(
+                        run_id=run_id,
+                        leader_worker_id=leader_wid,
+                        leader_epoch=1,
+                        leader_heartbeat_expires_at=expires,
+                        updated_at=real_now.replace(tzinfo=None),
+                    )
+                )
+                conn.execute(
+                    insert(run_workers_table).values(
+                        worker_id=leader_wid,
+                        run_id=run_id,
+                        role="leader",
+                        status="active",
+                        registered_at=real_now.replace(tzinfo=None),
+                        heartbeat_expires_at=expires,
+                    )
+                )
+        finally:
+            db.close()
+
+        failing_sink = SimpleNamespace(
+            name="failing_sink",
+            on_start=MagicMock(side_effect=RuntimeError("sink startup failed")),
+            on_complete=MagicMock(),
+            close=MagicMock(),
+        )
+        plugins = SimpleNamespace(
+            sources={"primary": object()},
+            source_settings_map={"primary": object()},
+            transforms=[],
+            aggregations={},
+            sinks={"default": failing_sink},
+        )
+        execution_graph = MagicMock()
+        execution_graph.get_aggregation_id_map.return_value = {}
+
+        with (
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=plugins),
+            patch("elspeth.cli._build_resume_graphs", return_value=(MagicMock(), execution_graph)),
+            patch("elspeth.engine.orchestrator.follower.build_follower_processor") as mock_build_follower,
+        ):
+            result = runner.invoke(
+                app,
+                ["join", run_id, "--settings", str(settings_path)],
+            )
+
+        assert result.exit_code == 4
+        mock_build_follower.assert_called_once()
+        failing_sink.on_start.assert_called_once()
+        failing_sink.on_complete.assert_called_once()
+        failing_sink.close.assert_called_once()
+
+        verify_db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        try:
+            with verify_db.engine.connect() as conn:
+                follower_rows = (
+                    conn.execute(
+                        select(run_workers_table.c.worker_id, run_workers_table.c.status)
+                        .where(run_workers_table.c.run_id == run_id)
+                        .where(run_workers_table.c.role == "follower")
+                    )
+                    .mappings()
+                    .all()
+                )
+        finally:
+            verify_db.close()
+
+        assert len(follower_rows) == 1
+        assert follower_rows[0]["status"] == "departed"
+
     def test_join_json_format_suppresses_db_banner(self, tmp_path: Path) -> None:
         """join --format json must NOT print the settings-derived DB banner to stdout.
 

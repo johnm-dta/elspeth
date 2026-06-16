@@ -1306,6 +1306,36 @@ class TestJSONSourceArrayModeUnicodeDecodeError:
         assert results[0].quarantine_error is not None
 
 
+class TestJSONSourceJSONLDecodeIdentity:
+    """Decode failures after emitted JSONL rows preserve source row identity."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_source_context(plugin_name="json")
+
+    def test_truncated_utf16_jsonl_decode_error_uses_next_source_row_index(self, tmp_path: Path, ctx: PluginContext) -> None:
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_bytes('{"id": 1}\n{"id": 2}\n'.encode("utf-16") + b"\x00")
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "encoding": "utf-16",
+                "on_validation_failure": "quarantine",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert [row.source_row_index for row in rows] == [0, 1, 2]
+        assert rows[2].is_quarantined is True
+        assert rows[2].row["__line_number__"] == 3
+
+
 class TestJSONSourceRowShapeBoundaryErrors:
     """Regression tests for malformed JSON row shapes at the source boundary."""
 

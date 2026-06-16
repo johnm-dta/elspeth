@@ -460,6 +460,34 @@ class CSVSource(BaseSource):
                 # next_nonblank_record() returns None at EOF (iteration-protocol
                 # signal, not a Tier-3 data error); csv.Error still propagates.
                 values = next_nonblank_record()
+            except UnicodeDecodeError as e:
+                # Decode failure while reading the next data row. At this point
+                # row_num counts data rows already emitted/quarantined, so it is
+                # also the correct zero-based SourceRow identity for this failed
+                # next row.
+                source_row_index = row_num
+                physical_line = reader.line_num + 1 if reader.line_num > 0 else self._skip_rows + 1
+                raw_row = {
+                    "file_path": str(self._path),
+                    "__encoding__": self._encoding,
+                    "__line_number__": physical_line,
+                    "__row_number__": source_row_index + 1,
+                }
+                error_msg = f"CSV decode error (encoding '{self._encoding}') at line {physical_line}: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                        source_row_index=source_row_index,
+                    )
+                return
             except csv.Error as e:
                 # CSV parsing error (bad quoting, unmatched quotes, etc.)
                 # CRITICAL: csv.Error can leave the parser in a corrupted state where

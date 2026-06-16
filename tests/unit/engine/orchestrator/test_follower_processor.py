@@ -191,12 +191,14 @@ class _CountingDrainProcessor:
         pending_items: dict[str, Any],
         recover_pending_sinks: bool,
         preclaimed_items: list[Any] | None = None,
+        before_claim: Any = None,
     ) -> list[Any]:
         self.drain_calls.append(
             {
                 "ctx": ctx,
                 "pending_items": pending_items,
                 "recover_pending_sinks": recover_pending_sinks,
+                "before_claim": before_claim,
             }
         )
         if self.drain_results:
@@ -417,6 +419,62 @@ class TestFollowerSeatDead:
 
         # No drain calls — seat was dead before any claim attempt
         assert processor.drain_calls == []
+
+    def test_seat_dead_between_claims_stops_follower_drain(self) -> None:
+        """Follower rechecks leader liveness at each scheduler claim boundary."""
+
+        class _CallbackDrainProcessor(_CountingDrainProcessor):
+            claim_checks = 0
+
+            def _drain_scheduler_claims(self, **kwargs: Any) -> list[Any]:
+                before_claim = kwargs.get("before_claim")
+                if before_claim is None:
+                    raise AssertionError("follower drain must pass a before_claim liveness callback")
+                before_claim()
+                self.claim_checks += 1
+                before_claim()
+                self.claim_checks += 1
+                return [MagicMock()]
+
+        processor = _CallbackDrainProcessor()
+        coord_repo = _StubRunCoordRepo()
+        coord_repo.live_leader_results = [
+            LeaderInfo(
+                run_id=RUN_ID,
+                leader_worker_id=f"worker:{RUN_ID}:leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
+                seat_live=True,
+            ),
+            LeaderInfo(
+                run_id=RUN_ID,
+                leader_worker_id=f"worker:{RUN_ID}:leader",
+                leader_epoch=1,
+                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
+                seat_live=True,
+            ),
+            None,
+        ]
+        factory = _StubFactory(running=True)
+        heartbeat = _StubHeartbeat()
+        token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
+        follower = FollowerProcessor(
+            processor=processor,  # type: ignore[arg-type]
+            token=token,
+            run_coordination=coord_repo,  # type: ignore[arg-type]
+            factory=factory,  # type: ignore[arg-type]
+            now_fn=lambda: NOW,
+            wait_fn=lambda _: None,
+        )
+
+        with (
+            patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat),
+            pytest.raises(FollowerSeatDeadError),
+        ):
+            follower.run(ctx=_ctx())
+
+        assert processor.claim_checks == 1
+        assert len(coord_repo.depart_calls) == 1
 
 
 # ---------------------------------------------------------------------------

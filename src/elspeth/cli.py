@@ -1153,6 +1153,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
         sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=list(config.gates),
+        queues=config.queues,
         coalesce_settings=list(config.coalesce) if config.coalesce else None,
     )
     graph.validate()
@@ -2620,12 +2621,14 @@ def join(
         # _build_run_context lifecycle.  Without this, plugins raise
         # PluginContractViolation("Transform 'X' was called before on_start()")
         # on the first process() call.
-        for _follower_transform in follower_transforms:
-            _follower_transform.on_start(ctx)
-        for _follower_sink in plugins.sinks.values():
-            _follower_sink.on_start(ctx)
-
+        follower_run_entered = False
         try:
+            for _follower_transform in follower_transforms:
+                _follower_transform.on_start(ctx)
+            for _follower_sink in plugins.sinks.values():
+                _follower_sink.on_start(ctx)
+
+            follower_run_entered = True
             follower_proc.run(ctx)
         except RunWorkerEvictedError as e:
             if output_format == "json":
@@ -2685,6 +2688,14 @@ def join(
                 typer.echo(f"\nFollower {worker_id} interrupted (SIGINT). Departed from run {run_id}.")
             raise typer.Exit(3)  # noqa: B904 — interrupted
         finally:
+            if not follower_run_entered:
+                from datetime import UTC, datetime
+
+                from elspeth.engine._best_effort import best_effort
+
+                with best_effort("Follower depart after startup failure", run_id=run_id, worker_id=worker_id):
+                    factory.run_coordination.depart_worker(worker_id=worker_id, now=datetime.now(UTC))
+
             # Mirror the leader's teardown via the canonical cleanup_plugins:
             # on_complete then close, each hook individually guarded so one
             # plugin's failure does not block the others — BUT TIER_1_ERRORS

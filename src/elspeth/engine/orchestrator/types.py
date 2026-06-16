@@ -117,6 +117,10 @@ class RowProcessorHandle(Protocol):
         """Return whether any peer worker holds an unexpired LEASED item (ADR-030)."""
         ...
 
+    def peer_lease_wait_budget_seconds(self) -> float:
+        """Return bounded wait budget for peer-held active item leases."""
+        ...
+
     def peer_active_lease_owners(self) -> tuple[str, ...]:
         """Return the distinct peer lease_owners holding unexpired LEASED rows (ADR-030)."""
         ...

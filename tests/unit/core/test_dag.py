@@ -218,6 +218,61 @@ def _apply_explicit_success_routing(settings: Any) -> Any:
     return routed_settings
 
 
+def test_mixed_multi_source_graph_records_direct_source_sink_edge() -> None:
+    """A direct source->sink route must be visible even when other sources use transforms."""
+    from elspeth.contracts import NodeType, RoutingMode
+    from elspeth.core.config import SourceSettings, TransformSettings
+    from elspeth.core.dag.models import WiredTransform
+    from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
+
+    direct_source = ListSource([{"id": 1}], name="direct_source", on_success="direct_out")
+    routed_source = ListSource([{"id": 2}], name="routed_source", on_success="work_in")
+    transform = PassTransform(name="normalize", input_connection="work_in", on_success="processed_out")
+
+    graph = ExecutionGraph.from_plugin_instances(
+        sources={
+            "direct": direct_source,
+            "routed": routed_source,
+        },
+        source_settings_map={
+            "direct": SourceSettings(plugin="direct_source", on_success="direct_out", options={}),
+            "routed": SourceSettings(plugin="routed_source", on_success="work_in", options={}),
+        },
+        transforms=[
+            WiredTransform(
+                plugin=transform,
+                settings=TransformSettings(
+                    name="normalize",
+                    plugin="normalize",
+                    input="work_in",
+                    on_success="processed_out",
+                    on_error="discard",
+                    options={},
+                ),
+            )
+        ],
+        sinks={
+            "direct_out": CollectSink("direct_out"),
+            "processed_out": CollectSink("processed_out"),
+        },
+    )
+
+    direct_source_node = next(
+        node.node_id for node in graph.get_nodes() if node.node_type is NodeType.SOURCE and node.plugin_name == "direct_source"
+    )
+    direct_sink_node = next(
+        node.node_id for node in graph.get_nodes() if node.node_type is NodeType.SINK and node.plugin_name == "direct_out"
+    )
+
+    assert any(
+        edge.from_node == direct_source_node
+        and edge.to_node == direct_sink_node
+        and edge.label == "on_success"
+        and edge.mode is RoutingMode.MOVE
+        for edge in graph.get_edges()
+    )
+
+
 def instantiate_plugins_from_config_raw(settings: Any) -> PluginBundle:
     """Instantiate plugins without any test-time routing injection."""
     from elspeth.cli_helpers import instantiate_plugins_from_config as _real_instantiate

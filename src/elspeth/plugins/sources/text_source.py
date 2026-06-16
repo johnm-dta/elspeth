@@ -181,6 +181,7 @@ class TextSource(BaseSource):
                 ctx=ctx,
                 row={"file_path": str(self._path), "__line_number__": error_line},
                 error_msg=f"Text parse error at line {error_line}: invalid {self._encoding} encoding ({exc})",
+                source_row_index=error_line - 1,
             )
             if quarantined is not None:
                 yield quarantined
@@ -274,7 +275,7 @@ class TextSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
-        source_row_index: int = 0,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a parse error and quarantine unless discard mode."""
         row_payload = dict(row)

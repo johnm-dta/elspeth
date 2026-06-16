@@ -300,6 +300,7 @@ class JSONSource(BaseSource):
                 ctx=ctx,
                 row=raw_row,
                 error_msg=error_msg,
+                source_row_index=error_line - 1,
             )
             if quarantined is not None:
                 yield quarantined
@@ -327,6 +328,7 @@ class JSONSource(BaseSource):
                         ctx=ctx,
                         row={"file_path": str(self._path), "error": error_msg},
                         error_msg=error_msg,
+                        source_row_index=0,
                     )
                     if quarantined is not None:
                         yield quarantined
@@ -339,6 +341,7 @@ class JSONSource(BaseSource):
                 ctx=ctx,
                 row={"file_path": str(self._path)},
                 error_msg=error_msg,
+                source_row_index=0,
             )
             if quarantined is not None:
                 yield quarantined
@@ -604,7 +607,7 @@ class JSONSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
-        source_row_index: int = 0,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a parse error and return quarantined row unless discard mode."""
         row_payload = dict(row)

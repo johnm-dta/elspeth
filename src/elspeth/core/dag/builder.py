@@ -863,14 +863,12 @@ def build_execution_graph(
         source_on_success = source_settings_entry.on_success
         source_display_name = sources[source_name].name if len(sources) == 1 and source_name == "source" else source_name
         if SinkName(source_on_success) in sink_ids:
-            # For source-only pipelines, create direct source -> sink edge.
-            if not transforms and not gates and not aggregations:
-                graph.add_edge(
-                    source_ids[source_name],
-                    sink_ids[SinkName(source_on_success)],
-                    label="on_success",
-                    mode=RoutingMode.MOVE,
-                )
+            graph.add_edge(
+                source_ids[source_name],
+                sink_ids[SinkName(source_on_success)],
+                label="on_success",
+                mode=RoutingMode.MOVE,
+            )
         elif source_on_success not in consumers and source_on_success not in queue_ids:
             suggestions = _suggest_similar(source_on_success, sorted(str(s) for s in sink_ids))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""

@@ -1165,9 +1165,10 @@ class Orchestrator:
             # has_peer_active_leases() returns False immediately and the loop is
             # skipped.
             #
-            # The wait is BOUNDED (a small multiple of the liveness window, NOT the
-            # multi-minute item-lease TTL): a wedged-but-alive peer that keeps its
-            # lease refreshed must not hang a deposed/interrupted leader forever.
+            # The wait is BOUNDED by the active item lease plus the stall budget:
+            # a live peer gets the full lease window to finish legitimate work,
+            # while a wedged-but-alive peer that keeps its lease refreshed must
+            # not hang a deposed/interrupted leader forever.
             # Each iteration also (a) honours the in-scope shutdown_event (SIGINT)
             # and check_coordination_latch (epoch deposition) so the leader can break
             # out, and (b) drives lease maintenance so a peer that DIED mid-lease is
@@ -1194,7 +1195,8 @@ class Orchestrator:
                 )
 
             if not loop_result.interrupted:
-                peer_wait_deadline = time.monotonic() + (3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS)
+                peer_wait_seconds = loop_ctx.processor.peer_lease_wait_budget_seconds()
+                peer_wait_deadline = time.monotonic() + peer_wait_seconds
                 while loop_ctx.processor.has_peer_active_leases():
                     # SIGINT during the wait: surface the graceful-shutdown path
                     # rather than spinning.
@@ -1216,7 +1218,7 @@ class Orchestrator:
                             "Bounded peer-lease wait timed out; falling through to the unresolved-work invariant",
                             run_id=run_id,
                             still_leased_peers=list(still_leased),
-                            waited_seconds=3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+                            waited_seconds=peer_wait_seconds,
                         )
                         break
                     time.sleep(0.5)

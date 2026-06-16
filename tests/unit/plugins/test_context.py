@@ -27,6 +27,44 @@ class TestPluginContext:
         assert ctx.rate_limit_registry is None
         assert ctx.concurrency_config is None
 
+    def test_config_cannot_be_rebound_after_construction(self) -> None:
+        import pytest
+
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={"source": {"path": "input.csv"}})
+
+        with pytest.raises(AttributeError):
+            ctx.config = {"source": {"path": "other.csv"}}  # type: ignore[misc]
+
+        assert ctx.config["source"]["path"] == "input.csv"
+
+    def test_dataclasses_replace_preserves_read_only_config(self) -> None:
+        import dataclasses
+
+        from elspeth.contracts.node_state_context import AggregationBatchContext
+        from elspeth.contracts.plugin_context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={"source": {"path": "input.csv"}})
+
+        replaced = dataclasses.replace(
+            ctx,
+            aggregation_batch=AggregationBatchContext(
+                trigger_type="count",
+                batch_id="agg",
+                batch_size=1,
+                flush_index=1,
+                row_start=1,
+                row_end=1,
+                rows_seen_total=1,
+                is_end_of_source=False,
+            ),
+        )
+
+        assert replaced.config == ctx.config
+        assert replaced.config["source"]["path"] == "input.csv"
+        assert replaced.aggregation_batch is not None
+
 
 class TestValidationErrorRecording:
     """Tests for recording validation errors from sources."""

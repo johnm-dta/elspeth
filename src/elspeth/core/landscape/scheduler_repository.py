@@ -28,7 +28,10 @@ from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError, RunWorkerEvictedError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
+    BatchMembershipSpec,
     BlockedPendingSinkHandoff,
+    BranchLossSpec,
+    BufferedOutcomeSpec,
     SchedulerEventType,
     TokenWorkItem,
     TokenWorkStatus,
@@ -92,32 +95,6 @@ def token_from_journal_item(
 
 
 @dataclass(frozen=True)
-class BatchMembershipSpec:
-    """Aggregation-arm adoption payload: the ``batch_members`` row to write.
-
-    Coalesce adoptions pass ``None`` (their held-arrival durable bookkeeping
-    is a node_states row written by ``begin_node_state``; the adoption's
-    durable payload is the CAS marker alone).
-    """
-
-    batch_id: str
-    ordinal: int
-
-
-@dataclass(frozen=True)
-class BufferedOutcomeSpec:
-    """Aggregation-arm adoption payload: the BUFFERED ``token_outcomes`` row.
-
-    ``batch_id`` is the same batch as the membership spec — kept explicit
-    because the outcome row carries its own ``batch_id`` column (ADR-019
-    BUFFERED rule: ``batch_id`` REQUIRED for ``path='buffered'``).
-    """
-
-    batch_id: str
-    context: Mapping[str, object] | None = None
-
-
-@dataclass(frozen=True)
 class BarrierAdoptionResult:
     """Outcome of :meth:`TokenSchedulerRepository.adopt_blocked_barrier_item`.
 
@@ -131,24 +108,6 @@ class BarrierAdoptionResult:
     adopted: bool
     barrier_adopted_epoch: int
     outcome_id: str | None
-
-
-@dataclass(frozen=True)
-class BranchLossSpec:
-    """Durable branch-loss record riding a lossy disposition (§E.5).
-
-    Passed to ``mark_failed`` / ``mark_pending_sink`` when the disposed item
-    is a fork-lineage branch feeding a coalesce: the loss row commits in the
-    SAME lease-fenced transaction as the disposition (record-then-notify
-    uniformity rule, design §E.5).
-    """
-
-    coalesce_name: str
-    row_id: str
-    branch_name: str
-    token_id: str
-    reason: str
-    recorded_by: str
 
 
 @dataclass(frozen=True)

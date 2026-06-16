@@ -239,6 +239,7 @@ allowed_dict_patterns:
   - "src/elspeth/core/blobs_inline.py:_output_options:return"
   - "src/elspeth/core/blobs_inline.py:_assign_nested_option:container"
   - "src/elspeth/core/blobs_inline.py:_walk_source:config"
+  - "src/elspeth/core/blobs_inline.py:_walk_sources:config"
   - "src/elspeth/core/blobs_inline.py:_walk_nodes:config"
   - "src/elspeth/core/blobs_inline.py:_walk_outputs:config"
 

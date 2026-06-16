@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -34,6 +35,50 @@ class SchedulerEventType(StrEnum):
     MARK_PENDING_SINK = "mark_pending_sink"
     MARK_PENDING_SINK_TERMINAL = "mark_pending_sink_terminal"
     MARK_BLOCKED_BARRIER_TERMINAL = "mark_blocked_barrier_terminal"
+
+
+@dataclass(frozen=True)
+class BatchMembershipSpec:
+    """Aggregation-arm adoption payload: the ``batch_members`` row to write.
+
+    Coalesce adoptions pass ``None`` (their held-arrival durable bookkeeping
+    is a node_states row written by ``begin_node_state``; the adoption's
+    durable payload is the CAS marker alone).
+    """
+
+    batch_id: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class BufferedOutcomeSpec:
+    """Aggregation-arm adoption payload: the BUFFERED ``token_outcomes`` row.
+
+    ``batch_id`` is the same batch as the membership spec — kept explicit
+    because the outcome row carries its own ``batch_id`` column (ADR-019
+    BUFFERED rule: ``batch_id`` REQUIRED for ``path='buffered'``).
+    """
+
+    batch_id: str
+    context: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class BranchLossSpec:
+    """Durable branch-loss record riding a lossy disposition (§E.5).
+
+    Passed to ``mark_failed`` / ``mark_pending_sink`` when the disposed item
+    is a fork-lineage branch feeding a coalesce: the loss row commits in the
+    SAME lease-fenced transaction as the disposition (record-then-notify
+    uniformity rule, design §E.5).
+    """
+
+    coalesce_name: str
+    row_id: str
+    branch_name: str
+    token_id: str
+    reason: str
+    recorded_by: str
 
 
 def _validate_scheduler_enum(value: object, enum_type: type, field_name: str) -> None:

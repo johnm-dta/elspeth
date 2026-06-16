@@ -79,7 +79,14 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
-from elspeth.contracts.scheduler import BarrierEmission, TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import (
+    BarrierEmission,
+    BatchMembershipSpec,
+    BranchLossSpec,
+    BufferedOutcomeSpec,
+    TokenWorkItem,
+    TokenWorkStatus,
+)
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape._helpers import generate_id
@@ -88,9 +95,6 @@ from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.scheduler_repository import (
-    BatchMembershipSpec,
-    BranchLossSpec,
-    BufferedOutcomeSpec,
     TokenSchedulerRepository,
     token_from_journal_item,
 )
@@ -2565,7 +2569,7 @@ class RowProcessor:
         row_index: int,
         source_row_index: int,
         ingest_sequence: int,
-        data: dict[str, Any],
+        data: Mapping[str, object],
     ) -> TokenWorkItem:
         """Drive the fenced leader INGEST verb for one source row (§C.4 row 9).
 

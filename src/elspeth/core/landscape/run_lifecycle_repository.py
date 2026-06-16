@@ -509,7 +509,7 @@ class RunLifecycleRepository:
         *,
         run_id: str,
         status: RunStatus,
-        values: dict[str, Any],
+        values: Mapping[str, object],
         is_success_status: bool,
         residual_work_exists: Any,
         terminal_values: list[str],

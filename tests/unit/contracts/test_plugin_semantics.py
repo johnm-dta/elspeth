@@ -182,6 +182,121 @@ class TestFieldSemanticFactsCoercion:
         assert "extra" not in facts.configured_by
 
 
+class TestSemanticContractConstructionInvariants:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {
+                "field_name": "",
+                "content_kind": ContentKind.PLAIN_TEXT,
+                "fact_code": "t.x",
+            },
+            {
+                "field_name": "x",
+                "content_kind": "plain_text",
+                "fact_code": "t.x",
+            },
+            {
+                "field_name": "x",
+                "content_kind": ContentKind.PLAIN_TEXT,
+                "text_framing": "compact",
+                "fact_code": "t.x",
+            },
+            {
+                "field_name": "x",
+                "content_kind": ContentKind.PLAIN_TEXT,
+                "value_type": "str",
+                "fact_code": "t.x",
+            },
+            {
+                "field_name": "x",
+                "content_kind": ContentKind.PLAIN_TEXT,
+                "fact_code": "",
+            },
+            {
+                "field_name": "x",
+                "content_kind": ContentKind.PLAIN_TEXT,
+                "fact_code": "t.x",
+                "configured_by": ("format", 1),
+            },
+        ],
+    )
+    def test_field_semantic_facts_rejects_malformed_values(self, kwargs):
+        with pytest.raises((TypeError, ValueError)):
+            FieldSemanticFacts(**kwargs)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"field_name": ""},
+            {"accepted_content_kinds": frozenset({"plain_text"})},
+            {"accepted_text_framings": frozenset({"compact"})},
+            {"accepted_value_types": frozenset({"list"})},
+            {"requirement_code": ""},
+            {"severity": ""},
+            {"unknown_policy": "fail"},
+            {"configured_by": ("source_field", object())},
+        ],
+    )
+    def test_field_semantic_requirement_rejects_malformed_values(self, overrides):
+        kwargs = {
+            "field_name": "x",
+            "accepted_content_kinds": frozenset({ContentKind.PLAIN_TEXT}),
+            "accepted_text_framings": frozenset({TextFraming.NEWLINE_FRAMED}),
+            "requirement_code": "t.x.req",
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            FieldSemanticRequirement(**kwargs)
+
+    def test_output_declaration_rejects_non_fact_fields(self):
+        with pytest.raises(TypeError):
+            OutputSemanticDeclaration(fields=(object(),))
+
+    def test_input_requirements_rejects_non_requirement_fields(self):
+        with pytest.raises(TypeError):
+            InputSemanticRequirements(fields=(object(),))
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"from_id": ""},
+            {"to_id": ""},
+            {"consumer_plugin": ""},
+            {"producer_plugin": 7},
+            {"producer_field": ""},
+            {"consumer_field": ""},
+            {"producer_facts": object()},
+            {"requirement": object()},
+            {"outcome": "satisfied"},
+        ],
+    )
+    def test_semantic_edge_contract_rejects_malformed_values(self, overrides):
+        facts = FieldSemanticFacts("x", ContentKind.PLAIN_TEXT, fact_code="t.x")
+        requirement = FieldSemanticRequirement(
+            field_name="x",
+            accepted_content_kinds=frozenset({ContentKind.PLAIN_TEXT}),
+            accepted_text_framings=frozenset({TextFraming.NEWLINE_FRAMED}),
+            requirement_code="c.x.req",
+        )
+        kwargs = {
+            "from_id": "a",
+            "to_id": "b",
+            "consumer_plugin": "line_explode",
+            "producer_plugin": "web_scrape",
+            "producer_field": "x",
+            "consumer_field": "x",
+            "producer_facts": facts,
+            "requirement": requirement,
+            "outcome": SemanticOutcome.SATISFIED,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            SemanticEdgeContract(**kwargs)
+
+
 class TestOutputSemanticDeclaration:
     def test_default_is_empty(self):
         decl = OutputSemanticDeclaration()

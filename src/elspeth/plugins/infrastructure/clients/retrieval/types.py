@@ -1,9 +1,11 @@
 """Retrieval type dataclasses.
 
 These types represent the output of a retrieval provider search operation.
-RetrievalChunk enforces two invariants at construction time:
-1. Score is normalized to [0.0, 1.0]
-2. Metadata is JSON-serializable
+RetrievalChunk enforces four invariants at construction time:
+1. Content is non-empty
+2. Source ID is non-empty for audit traceability
+3. Score is normalized to [0.0, 1.0]
+4. Metadata is JSON-serializable
 """
 
 from __future__ import annotations
@@ -34,6 +36,16 @@ class RetrievalChunk:
     metadata: dict[str, Any]
 
     def __post_init__(self) -> None:
+        if self.content == "":
+            raise ValueError(
+                "content must not be empty. "
+                "Provider returned an empty retrieval document; skip it or repair the provider parser before constructing RetrievalChunk."
+            )
+        if self.source_id == "":
+            raise ValueError(
+                "source_id must not be empty. "
+                "Provider must supply a stable document/chunk identifier for audit traceability before constructing RetrievalChunk."
+            )
         if not (0.0 <= self.score <= 1.0):
             raise ValueError(
                 f"Score must be normalized to [0.0, 1.0], got {self.score!r}. "

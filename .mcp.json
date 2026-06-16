@@ -30,17 +30,13 @@
       "type": "stdio"
     },
     "wardline": {
+      "type": "stdio",
+      "command": "/home/john/.local/bin/wardline",
       "args": [
         "mcp",
         "--root",
-        ".",
-        "--loomweave-url",
-        "http://127.0.0.1:10251",
-        "--filigree-url",
-        "http://127.0.0.1:9229/api/weft/scan-results"
-      ],
-      "command": "/home/john/.local/bin/wardline",
-      "type": "stdio"
+        "."
+      ]
     }
   }
 }

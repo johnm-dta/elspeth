@@ -29,6 +29,61 @@ from elspeth.web.sessions.protocol import (
 RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
 
+ValidationCheckName = Literal[
+    "path_allowlist",
+    "web_scrape_network_policy",
+    "secret_refs",
+    "semantic_contracts",
+    "batch_transform_options",
+    "interpretation_review",
+    "blob_inline_refs",
+    "settings_load",
+    "plugin_instantiation",
+    "value_source_compliance",
+    "graph_structure",
+    "route_target_resolution",
+    "schema_compatibility",
+    "identity_node_advisory",
+]
+VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
+
+CHECK_PATH_ALLOWLIST: Final[ValidationCheckName] = "path_allowlist"
+CHECK_WEB_SCRAPE_NETWORK_POLICY: Final[ValidationCheckName] = "web_scrape_network_policy"
+CHECK_SECRET_REFS: Final[ValidationCheckName] = "secret_refs"
+CHECK_SEMANTIC_CONTRACTS: Final[ValidationCheckName] = "semantic_contracts"
+CHECK_BATCH_TRANSFORM_OPTIONS: Final[ValidationCheckName] = "batch_transform_options"
+CHECK_INTERPRETATION_REVIEW: Final[ValidationCheckName] = "interpretation_review"
+CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
+CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
+RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
+CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
+RUNTIME_CHECK_GRAPH_STRUCTURE: Final[ValidationCheckName] = "graph_structure"
+CHECK_ROUTE_TARGETS: Final[ValidationCheckName] = "route_target_resolution"
+RUNTIME_CHECK_SCHEMA_COMPATIBILITY: Final[ValidationCheckName] = "schema_compatibility"
+CHECK_IDENTITY_NODE_ADVISORY: Final[ValidationCheckName] = "identity_node_advisory"
+
+VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    CHECK_PATH_ALLOWLIST,
+    CHECK_WEB_SCRAPE_NETWORK_POLICY,
+    CHECK_SECRET_REFS,
+    CHECK_SEMANTIC_CONTRACTS,
+    CHECK_BATCH_TRANSFORM_OPTIONS,
+    CHECK_INTERPRETATION_REVIEW,
+    CHECK_BLOB_INLINE_REFS,
+    CHECK_SETTINGS,
+    RUNTIME_CHECK_PLUGIN_INSTANTIATION,
+    CHECK_VALUE_SOURCE_COMPLIANCE,
+    RUNTIME_CHECK_GRAPH_STRUCTURE,
+    CHECK_ROUTE_TARGETS,
+    RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
+)
+VALIDATION_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    *VALIDATION_BLOCKING_CHECK_NAMES,
+    CHECK_IDENTITY_NODE_ADVISORY,
+)
+if frozenset(VALIDATION_CHECK_NAMES) != VALIDATION_CHECK_NAME_VALUES:
+    raise AssertionError("VALIDATION_CHECK_NAMES must match ValidationCheckName Literal values")
+
 ValidationCheckOutcomeCode = Literal[
     "secret_refs.no_refs",
     "secret_refs.resolved",
@@ -65,7 +120,7 @@ class _StrictResponse(BaseModel):
 class ValidationCheck(_StrictResponse):
     """Individual check result from dry-run validation."""
 
-    _SECRET_REFS_CHECK_NAME: ClassVar[str] = "secret_refs"
+    _SECRET_REFS_CHECK_NAME: ClassVar[ValidationCheckName] = CHECK_SECRET_REFS
     _SECRET_REFS_OUTCOME_CODES: ClassVar[frozenset[str]] = frozenset(
         {
             CHECK_OUTCOME_SECRET_REFS_NO_REFS,
@@ -76,7 +131,7 @@ class ValidationCheck(_StrictResponse):
         }
     )
 
-    name: str
+    name: ValidationCheckName
     passed: bool
     detail: str
     # Structured field: node ids affected by this check (e.g. identity-node

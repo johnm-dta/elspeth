@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, get_args
 
 import pydantic
 import pytest
@@ -12,6 +12,7 @@ from elspeth.web.execution.schemas import (
     RUN_STATUS_ALL_VALUES,
     RUN_STATUS_NON_TERMINAL_VALUES,
     RUN_STATUS_TERMINAL_VALUES,
+    VALIDATION_CHECK_NAME_VALUES,
     CancelledData,
     CompletedData,
     DiscardSummary,
@@ -27,6 +28,7 @@ from elspeth.web.execution.schemas import (
     RunResultsResponse,
     RunStatusResponse,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
@@ -211,6 +213,19 @@ class TestValidationResult:
         )
 
         assert check.outcome_code is None
+
+    def test_unknown_validation_check_name_is_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationCheck(
+                name="made_up_check",  # type: ignore[arg-type]
+                passed=True,
+                detail="OK",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+
+    def test_validation_check_name_literal_matches_exported_values(self) -> None:
+        assert frozenset(get_args(ValidationCheckName)) == VALIDATION_CHECK_NAME_VALUES
 
     def test_unknown_check_outcome_code_is_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):

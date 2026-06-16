@@ -77,11 +77,23 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_BATCH_TRANSFORM_OPTIONS,
+    CHECK_BLOB_INLINE_REFS,
+    CHECK_IDENTITY_NODE_ADVISORY,
+    CHECK_INTERPRETATION_REVIEW,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
     CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+    CHECK_PATH_ALLOWLIST,
+    CHECK_ROUTE_TARGETS,
+    CHECK_SECRET_REFS,
+    CHECK_SEMANTIC_CONTRACTS,
+    CHECK_SETTINGS,
+    CHECK_VALUE_SOURCE_COMPLIANCE,
+    CHECK_WEB_SCRAPE_NETWORK_POLICY,
+    VALIDATION_BLOCKING_CHECK_NAMES,
     ValidationCheck,
     ValidationError,
     ValidationReadiness,
@@ -98,18 +110,18 @@ from elspeth.web.interpretation_state import (
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
-_CHECK_PATH_ALLOWLIST = "path_allowlist"
-_CHECK_WEB_SCRAPE_NETWORK_POLICY = "web_scrape_network_policy"
-_CHECK_SECRET_REFS = "secret_refs"
-_CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
-_CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
-_CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
-_CHECK_INTERPRETATION_REVIEW = "interpretation_review"
-_CHECK_SETTINGS = "settings_load"
+_CHECK_PATH_ALLOWLIST = CHECK_PATH_ALLOWLIST
+_CHECK_WEB_SCRAPE_NETWORK_POLICY = CHECK_WEB_SCRAPE_NETWORK_POLICY
+_CHECK_SECRET_REFS = CHECK_SECRET_REFS
+_CHECK_BLOB_INLINE_REFS = CHECK_BLOB_INLINE_REFS
+_CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
+_CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
+_CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
+_CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
-_CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
+_CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
 _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
-_CHECK_ROUTE_TARGETS = "route_target_resolution"
+_CHECK_ROUTE_TARGETS = CHECK_ROUTE_TARGETS
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
@@ -153,27 +165,13 @@ def _blocked_readiness(
 # earlier pass/fail check fails.  This advisory uses ``passed=True`` for
 # every entry and is emitted only on the happy-path return, so structural
 # errors are never drowned in cosmetic noise.
-_CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+_CHECK_IDENTITY_NODE_ADVISORY = CHECK_IDENTITY_NODE_ADVISORY
 
 # _CHECK_VALUE_SOURCE_COMPLIANCE slots between _CHECK_PLUGINS (typed configs
 # now exist) and _CHECK_GRAPH (so a hallucinated model fails before any DAG
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
 # to prevent silent reordering.
-_ALL_CHECKS = [
-    _CHECK_PATH_ALLOWLIST,
-    _CHECK_WEB_SCRAPE_NETWORK_POLICY,
-    _CHECK_SECRET_REFS,
-    _CHECK_SEMANTIC_CONTRACTS,
-    _CHECK_BATCH_TRANSFORM_OPTIONS,
-    _CHECK_INTERPRETATION_REVIEW,
-    _CHECK_BLOB_INLINE_REFS,
-    _CHECK_SETTINGS,
-    _CHECK_PLUGINS,
-    _CHECK_VALUE_SOURCE_COMPLIANCE,
-    _CHECK_GRAPH,
-    _CHECK_ROUTE_TARGETS,
-    _CHECK_SCHEMA,
-]
+_ALL_CHECKS = list(VALIDATION_BLOCKING_CHECK_NAMES)
 
 
 @dataclass(frozen=True, slots=True)

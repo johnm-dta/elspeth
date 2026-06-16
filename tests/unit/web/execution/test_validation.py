@@ -2674,12 +2674,15 @@ class TestValidatePipelineRuntimeCheckBoundaries:
             RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
             RUNTIME_GRAPH_VALIDATION_CHECKS,
         )
+        from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
+        from elspeth.web.execution.validation import _ALL_CHECKS
 
         assert RUNTIME_GRAPH_VALIDATION_CHECKS == (
             RUNTIME_CHECK_PLUGIN_INSTANTIATION,
             RUNTIME_CHECK_GRAPH_STRUCTURE,
             RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
         )
+        assert tuple(_ALL_CHECKS) == VALIDATION_BLOCKING_CHECK_NAMES
 
     def test_validate_pipeline_success_surfaces_declared_runtime_graph_checks(self) -> None:
         from elspeth.web.execution.preflight import RUNTIME_GRAPH_VALIDATION_CHECKS

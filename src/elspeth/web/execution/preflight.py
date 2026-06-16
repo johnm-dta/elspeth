@@ -13,6 +13,7 @@ import yaml
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
+from elspeth.web.execution import schemas as execution_schemas
 from elspeth.web.execution.protocol import ValidationSettings
 from elspeth.web.paths import (
     NESTED_LOCAL_PATH_OPTION_KEYS,
@@ -21,9 +22,9 @@ from elspeth.web.paths import (
     resolve_data_path,
 )
 
-RUNTIME_CHECK_PLUGIN_INSTANTIATION = "plugin_instantiation"
-RUNTIME_CHECK_GRAPH_STRUCTURE = "graph_structure"
-RUNTIME_CHECK_SCHEMA_COMPATIBILITY = "schema_compatibility"
+RUNTIME_CHECK_PLUGIN_INSTANTIATION = execution_schemas.RUNTIME_CHECK_PLUGIN_INSTANTIATION
+RUNTIME_CHECK_GRAPH_STRUCTURE = execution_schemas.RUNTIME_CHECK_GRAPH_STRUCTURE
+RUNTIME_CHECK_SCHEMA_COMPATIBILITY = execution_schemas.RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 
 RUNTIME_GRAPH_VALIDATION_CHECKS: tuple[str, str, str] = (
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,

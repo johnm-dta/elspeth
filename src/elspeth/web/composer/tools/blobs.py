@@ -155,6 +155,22 @@ def _sync_get_blob(engine: Engine, blob_id: str, session_id: str | None = None) 
         return _blob_row_to_tool_dict(row)
 
 
+def _blob_id_uuid_validation_error(blob_id: Any) -> str | None:
+    """Return a repairable boundary error when ``blob_id`` is not canonical."""
+    if not isinstance(blob_id, str):
+        return f"blob_id must be a UUID string, got {type(blob_id).__name__}."
+    try:
+        UUID(blob_id)
+    except ValueError:
+        return (
+            f"blob_id {blob_id!r} is not a valid UUID. Use list_blobs or "
+            "list_composer_blobs to select an uploaded blob, ask the user to "
+            "upload the source file, or use create_blob for inline content "
+            "before calling this tool."
+        )
+    return None
+
+
 def _sync_get_blob_by_storage_path(
     engine: Engine,
     storage_path: str,
@@ -411,10 +427,10 @@ def _execute_wire_blob_inline_ref(
         return _failure_result(state, "Blob tools require session context.")
 
     field_path = arguments["field_path"]
-    try:
-        blob_id = UUID(arguments["blob_id"])
-    except ValueError:
-        return _failure_result(state, f"blob_id {arguments['blob_id']!r} is not a valid UUID")
+    blob_id_error = _blob_id_uuid_validation_error(arguments["blob_id"])
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
+    blob_id = UUID(arguments["blob_id"])
 
     # Tier-3 LLM tool argument. Absent ``encoding`` means utf-8 by the
     # published tool-schema contract (json_schema declares default "utf-8").
@@ -1151,6 +1167,9 @@ def _execute_update_blob(
         ) from exc
 
     blob_id = validated.blob_id
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     content = validated.content
     if blob_id in _state_source_blob_refs(state):
         return _failure_result(
@@ -1446,6 +1465,9 @@ def _execute_delete_blob(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
 
     blob = _sync_get_blob(session_engine, blob_id, session_id)
     if blob is None:
@@ -1625,6 +1647,9 @@ def _execute_get_blob_content(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(session_engine, blob_id, session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")

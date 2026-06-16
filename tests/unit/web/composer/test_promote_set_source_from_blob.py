@@ -193,6 +193,28 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
+    def test_placeholder_blob_id_returns_boundary_failure(self) -> None:
+        """Invalid placeholder ids are rejected before blob lookup."""
+        engine, session_id = _session_engine_with_session()
+        result = _execute_set_source_from_blob(
+            {
+                "blob_id": "__missing__",
+                "on_success": "out",
+            },
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                session_engine=engine,
+                session_id=session_id,
+            ),
+        )
+
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert "upload" in result.data["error"]
+        assert "list_blobs" in result.data["error"]
+        assert "not found" not in result.data["error"].lower()
+
     def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
         """Functional smoke: a valid call wires the blob as the source.
 

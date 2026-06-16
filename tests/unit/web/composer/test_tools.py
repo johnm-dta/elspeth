@@ -10470,59 +10470,22 @@ class TestInspectSourceTool:
                 session_id=self.session_id,
             )
 
-    def test_non_uuid_blob_id_surfaces_warning_fact(self, tmp_path: Path) -> None:
-        """A blob row whose id is not a parseable UUID must surface a
-        ``blob_id_not_uuid:`` warning to the audit trail, never silently
-        dropping the identifier."""
-        from datetime import UTC, datetime
-
-        from elspeth.web.blobs.service import content_hash as _content_hash
-        from elspeth.web.sessions.models import blobs_table
-
-        non_uuid_id = "not-a-uuid-but-a-real-row"
-        body = b"a,b,c\n1,2,3\n"
-        storage_dir = tmp_path / "blobs" / self.session_id
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        non_uuid_path = storage_dir / f"{non_uuid_id}_x.csv"
-        non_uuid_path.write_bytes(body)
-        now = datetime.now(UTC)
-
-        with self.engine.begin() as conn:
-            conn.execute(
-                blobs_table.insert().values(
-                    id=non_uuid_id,
-                    session_id=self.session_id,
-                    filename="x.csv",
-                    mime_type="text/csv",
-                    size_bytes=len(body),
-                    content_hash=_content_hash(body),
-                    storage_path=str(non_uuid_path),
-                    created_at=now,
-                    created_by="user",
-                    source_description=None,
-                    status="ready",
-                )
-            )
-
-        state = _empty_state()
-        catalog = _mock_catalog()
+    def test_non_uuid_blob_id_rejected_before_lookup(self) -> None:
+        """LLM placeholder identifiers must fail at the blob-id boundary."""
         result = execute_tool(
             "inspect_source",
-            {"blob_id": non_uuid_id},
-            state,
-            catalog,
+            {"blob_id": "__missing__"},
+            _empty_state(),
+            _mock_catalog(),
             session_engine=self.engine,
             session_id=self.session_id,
         )
 
-        assert result.success is True
-        warnings = tuple(result.data["warnings"])
-        matched = [w for w in warnings if w.startswith("blob_id_not_uuid:")]
-        assert len(matched) == 1, f"expected exactly one blob_id_not_uuid warning, got {warnings!r}"
-        assert non_uuid_id in matched[0]
-        identity = result.data["redacted_identity"]
-        assert "blob_id" not in identity
-        assert "content_hash_prefix" in identity
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert "upload" in result.data["error"]
+        assert "list_blobs" in result.data["error"]
+        assert "not found" not in result.data["error"].lower()
 
 
 # ---------------------------------------------------------------------------

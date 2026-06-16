@@ -53,6 +53,7 @@ from elspeth.web.composer.tools._common import (
 )
 from elspeth.web.composer.tools.blobs import (
     BlobToolRecord,
+    _blob_id_uuid_validation_error,
     _blob_row_to_tool_dict,
     _PreparedBlobCreate,
     _sync_get_blob,
@@ -306,6 +307,9 @@ def _resolve_source_blob(
     """Resolve an existing ready blob into authoritative source options."""
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     manual_authoring_error = _reject_manual_source_authoring(caller_options, tool_name=tool_name)
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
@@ -676,6 +680,9 @@ def _execute_inspect_source(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(context.session_engine, blob_id, context.session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")
@@ -695,27 +702,13 @@ def _execute_inspect_source(
 
     _verify_blob_content_integrity(blob, data)
 
-    blob_id_warning: str | None = None
-    try:
-        blob_uuid = UUID(blob_id)
-    except ValueError:
-        blob_uuid = None
-        truncated = blob_id if len(blob_id) <= 64 else blob_id[:64] + "..."
-        blob_id_warning = (
-            f"blob_id_not_uuid: matched blob_id {truncated!r} is not a parseable "
-            "UUID — redacted_identity will omit blob_id and surface "
-            "content_hash_prefix only"
-        )
-
     facts = inspect_blob_content(
         content=data,
         filename=blob["filename"],
         mime_type=blob["mime_type"],
-        blob_id=blob_uuid,
+        blob_id=UUID(blob_id),
         content_hash=blob["content_hash"],
     )
-    if blob_id_warning is not None:
-        facts = replace(facts, warnings=(blob_id_warning, *facts.warnings))
     return _discovery_result(state, facts_to_dict(facts))
 
 

@@ -17,6 +17,15 @@ const appCss = [
   }),
 ].join("\n");
 
+const BADGE_TOKEN_KINDS = [
+  "source",
+  "transform",
+  "gate",
+  "sink",
+  "aggregation",
+  "coalesce",
+] as const;
+
 it("loads inspected CSS through the runtime stylesheet barrel", () => {
   expect(stylesheetBarrel).toContain('@import "./tokens.css";');
   expect(stylesheetBarrel).toContain('@import "./shared.css";');
@@ -367,6 +376,21 @@ describe("role-family surface contrast", () => {
     expect(extractLightThemeToken("--color-badge-coalesce")).not.toBe(
       extractLightThemeToken("--color-success"),
     );
+  });
+
+  it("uses opaque badge background tokens with non-text contrast in both themes", () => {
+    for (const kind of BADGE_TOKEN_KINDS) {
+      const foregroundToken = `--color-badge-${kind}`;
+      const backgroundToken = `--color-badge-${kind}-bg`;
+
+      const darkForeground = extractRootToken(foregroundToken);
+      const darkBackground = extractRootToken(backgroundToken);
+      const lightForeground = extractLightThemeToken(foregroundToken);
+      const lightBackground = extractLightThemeToken(backgroundToken);
+
+      expect(contrastRatio(darkForeground, darkBackground)).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(lightForeground, lightBackground)).toBeGreaterThanOrEqual(3);
+    }
   });
 });
 

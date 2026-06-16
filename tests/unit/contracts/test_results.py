@@ -575,7 +575,7 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="database",
             path_or_uri="db://table@url",
-            content_hash="xyz",
+            content_hash="def456",
             size_bytes=500,
         )
 
@@ -591,17 +591,17 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="file",
             path_or_uri="file:///test",
-            content_hash="required_hash",
+            content_hash="abc123",
             size_bytes=100,
         )
-        assert descriptor.content_hash == "required_hash"
+        assert descriptor.content_hash == "abc123"
 
     def test_size_bytes_is_required(self) -> None:
         """size_bytes is required (not optional) - verification."""
         descriptor = ArtifactDescriptor(
             artifact_type="file",
             path_or_uri="file:///test",
-            content_hash="hash",
+            content_hash="abc123",
             size_bytes=256,
         )
         assert descriptor.size_bytes == 256
@@ -611,7 +611,7 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="file",
             path_or_uri="file:///test",
-            content_hash="hash",
+            content_hash="abc123",
             size_bytes=100,
         )
         assert descriptor.metadata is None
@@ -621,7 +621,7 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="database",
             path_or_uri="db://table@url",
-            content_hash="hash",
+            content_hash="abc123",
             size_bytes=100,
             metadata=MappingProxyType({"table": "results", "row_count": 50}),
         )
@@ -632,7 +632,7 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="file",
             path_or_uri="file:///test",
-            content_hash="hash",
+            content_hash="abc123",
             size_bytes=100,
         )
 
@@ -650,7 +650,7 @@ class TestArtifactDescriptor:
         descriptor = ArtifactDescriptor(
             artifact_type="database",
             path_or_uri="db://table@url",
-            content_hash="hash",
+            content_hash="abc123",
             size_bytes=100,
             metadata=MappingProxyType(original),
         )
@@ -676,7 +676,57 @@ class TestArtifactDescriptor:
             ArtifactDescriptor(  # type: ignore[call-arg]
                 artifact_type="file",
                 path_or_uri="file:///test",
-                content_hash="hash",
+                content_hash="abc123",
+            )
+
+
+class TestArtifactDescriptorAuditInvariants:
+    """Direct construction must enforce the same audit invariants as factories."""
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"artifact_type": "s3"},
+            {"artifact_type": ""},
+            {"path_or_uri": ""},
+            {"content_hash": ""},
+            {"content_hash": "not-hex"},
+            {"content_hash": object()},
+            {"size_bytes": -1},
+            {"size_bytes": 1.5},
+            {"size_bytes": True},
+            {"metadata": [("table", "results")]},
+            {"metadata": {1: "not-string"}},
+        ],
+    )
+    def test_rejects_malformed_audit_fields(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {
+            "artifact_type": "file",
+            "path_or_uri": "file:///tmp/output.csv",
+            "content_hash": "abc123",
+            "size_bytes": 100,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            ArtifactDescriptor(**kwargs)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "path_or_uri",
+        [
+            "webhook://https://user:" + "redacted" + "@example.com/hook",
+            "webhook://https://api.example.com/hook?token=redacted",
+            "db://results@postgresql://user:" + "redacted" + "@db/app",
+            "file:///tmp/output.csv?api_key=redacted",
+        ],
+    )
+    def test_rejects_credential_bearing_path_or_uri(self, path_or_uri: str) -> None:
+        with pytest.raises(ValueError):
+            ArtifactDescriptor(
+                artifact_type="file",
+                path_or_uri=path_or_uri,
+                content_hash="abc123",
+                size_bytes=100,
             )
 
 
@@ -724,14 +774,14 @@ class TestArtifactDescriptorFactories:
         sanitized_url = SanitizedWebhookUrl.from_raw_url("https://api.example.com/webhook", fail_if_no_key=False)
         descriptor = ArtifactDescriptor.for_webhook(
             url=sanitized_url,
-            content_hash="ghi789",
+            content_hash="abc789",
             request_size=512,
             response_code=200,
         )
 
         assert descriptor.artifact_type == "webhook"
         assert descriptor.path_or_uri == "webhook://https://api.example.com/webhook"
-        assert descriptor.content_hash == "ghi789"
+        assert descriptor.content_hash == "abc789"
         assert descriptor.size_bytes == 512
         assert descriptor.metadata == {"response_code": 200}
 
@@ -740,7 +790,7 @@ class TestArtifactDescriptorFactories:
         sanitized_url = SanitizedWebhookUrl.from_raw_url("https://api.example.com/webhook", fail_if_no_key=False)
         descriptor = ArtifactDescriptor.for_webhook(
             url=sanitized_url,
-            content_hash="xyz",
+            content_hash="abc",
             request_size=256,
             response_code=500,
         )
@@ -841,7 +891,7 @@ class TestArtifactDescriptorTypes:
         """File artifact type."""
         descriptor = ArtifactDescriptor.for_file(
             path="/test.csv",
-            content_hash="h",
+            content_hash="a",
             size_bytes=1,
         )
         assert descriptor.artifact_type == "file"
@@ -852,7 +902,7 @@ class TestArtifactDescriptorTypes:
         descriptor = ArtifactDescriptor.for_database(
             url=sanitized_url,
             table="t",
-            content_hash="h",
+            content_hash="a",
             payload_size=1,
             row_count=1,
         )
@@ -863,7 +913,7 @@ class TestArtifactDescriptorTypes:
         sanitized_url = SanitizedWebhookUrl.from_raw_url("http://localhost", fail_if_no_key=False)
         descriptor = ArtifactDescriptor.for_webhook(
             url=sanitized_url,
-            content_hash="h",
+            content_hash="a",
             request_size=1,
             response_code=200,
         )

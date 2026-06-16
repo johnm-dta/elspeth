@@ -11,10 +11,12 @@ IMPORTANT:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import parse_qs, urlparse
 
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
@@ -46,6 +48,96 @@ def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
             "Build transform output with PipelineRow(data, contract) before returning it."
         )
     return value
+
+
+_ARTIFACT_TYPES = frozenset({"file", "database", "webhook"})
+_ARTIFACT_HASH_RE = re.compile(r"[0-9a-fA-F]+")
+_SENSITIVE_ARTIFACT_URI_PARAMS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "api_secret",
+        "apikey",
+        "auth",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "credential",
+        "credentials",
+        "key",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+        "x-api-key",
+    }
+)
+
+
+def _require_non_empty_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+    return value
+
+
+def _base_artifact_param_name(key: str) -> str:
+    bracket = key.find("[")
+    if bracket != -1:
+        key = key[:bracket]
+    dot = key.find(".")
+    if dot != -1:
+        key = key[:dot]
+    return key
+
+
+def _artifact_uri_candidates(path_or_uri: str) -> tuple[str, ...]:
+    candidates = [path_or_uri]
+    if path_or_uri.startswith("webhook://"):
+        candidates.append(path_or_uri.removeprefix("webhook://"))
+    if path_or_uri.startswith("db://"):
+        _, separator, nested_uri = path_or_uri.removeprefix("db://").partition("@")
+        if separator:
+            candidates.append(nested_uri)
+    return tuple(candidates)
+
+
+def _require_no_artifact_uri_credentials(path_or_uri: str) -> None:
+    for candidate in _artifact_uri_candidates(path_or_uri):
+        parsed = urlparse(candidate)
+        if parsed.password is not None:
+            raise ValueError("path_or_uri must not contain raw URL credentials")
+        if parsed.scheme in {"http", "https"} and parsed.username is not None:
+            raise ValueError("path_or_uri must not contain raw URL credentials")
+
+        for section_name, encoded_params in (("query", parsed.query), ("fragment", parsed.fragment)):
+            sensitive_keys = [
+                key
+                for key in parse_qs(encoded_params, keep_blank_values=True)
+                if _base_artifact_param_name(key.lower()) in _SENSITIVE_ARTIFACT_URI_PARAMS
+            ]
+            if sensitive_keys:
+                raise ValueError(f"path_or_uri must not contain sensitive {section_name} parameters: {sensitive_keys}")
+
+
+def _require_artifact_hash(content_hash: object) -> None:
+    value = _require_non_empty_str(content_hash, "content_hash")
+    if _ARTIFACT_HASH_RE.fullmatch(value) is None:
+        raise ValueError("content_hash must be a non-empty hex string")
+
+
+def _require_artifact_metadata(value: object, field_name: str = "metadata") -> None:
+    if value is None:
+        return
+    if not isinstance(value, MappingProxyType):
+        raise TypeError(f"{field_name} must be a frozen mapping, got {type(value).__name__}: {value!r}")
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{field_name} key must be str, got {type(key).__name__}: {key!r}")
+        if isinstance(item, MappingProxyType):
+            _require_artifact_metadata(item, f"{field_name}[{key!r}]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +570,14 @@ class ArtifactDescriptor:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "metadata")
+        artifact_type = _require_non_empty_str(self.artifact_type, "artifact_type")
+        if artifact_type not in _ARTIFACT_TYPES:
+            raise ValueError(f"artifact_type must be one of {sorted(_ARTIFACT_TYPES)}, got {artifact_type!r}")
+        path_or_uri = _require_non_empty_str(self.path_or_uri, "path_or_uri")
+        _require_no_artifact_uri_credentials(path_or_uri)
+        _require_artifact_hash(self.content_hash)
+        require_int(self.size_bytes, "size_bytes", min_value=0)
+        _require_artifact_metadata(self.metadata)
 
     @classmethod
     def for_file(

@@ -79,7 +79,7 @@ class TestPluginSystemIntegration:
 
             def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
                 MemorySink.collected.extend(rows)
-                return SinkWriteResult(artifact=ArtifactDescriptor.for_file(path="memory://collected", content_hash="test", size_bytes=0))
+                return SinkWriteResult(artifact=ArtifactDescriptor.for_file(path="memory://collected", content_hash="a" * 64, size_bytes=0))
 
             def flush(self) -> None:
                 pass

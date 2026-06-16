@@ -214,7 +214,7 @@ class _CollectSink(_TestSinkBase):
             artifact=ArtifactDescriptor.for_file(
                 path=f"memory://{self.name}",
                 size_bytes=len(str(rows)),
-                content_hash="test_hash",
+                content_hash="a" * 64,
             )
         )
 

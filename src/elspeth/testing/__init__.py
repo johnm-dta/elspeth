@@ -381,7 +381,7 @@ def make_artifact(
     path: str = "memory://test",
     *,
     size_bytes: int = 0,
-    content_hash: str = "test_hash",
+    content_hash: str = "a" * 64,
 ) -> ArtifactDescriptor:
     """Build an ArtifactDescriptor for tests."""
     return ArtifactDescriptor.for_file(

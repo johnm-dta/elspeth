@@ -573,7 +573,7 @@ class TestSinkProtocol:
                 return SinkWriteResult(
                     artifact=ArtifactDescriptor.for_file(
                         path="/tmp/memory",
-                        content_hash="test",
+                        content_hash="a" * 64,
                         size_bytes=len(str(rows)),
                     )
                 )

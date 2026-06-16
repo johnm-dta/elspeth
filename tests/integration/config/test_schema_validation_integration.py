@@ -200,7 +200,7 @@ def test_static_schema_validation(plugin_manager: PluginManager) -> None:
 
         def write(self, rows: list[dict[str, Any]], ctx: Any) -> SinkWriteResult:
             self.written.extend(rows)
-            return SinkWriteResult(artifact=ArtifactDescriptor.for_file(path="memory://test", size_bytes=0, content_hash="test"))
+            return SinkWriteResult(artifact=ArtifactDescriptor.for_file(path="memory://test", size_bytes=0, content_hash="a" * 64))
 
     # Build graph with static schema plugins
     source = StaticSchemaSource()

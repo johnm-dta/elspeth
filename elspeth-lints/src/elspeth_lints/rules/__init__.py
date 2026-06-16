@@ -9,7 +9,7 @@ from elspeth_lints.rules.audit_evidence import (
     TIER_1_DECORATION_RULE,
 )
 from elspeth_lints.rules.composer import CATCH_ORDER_RULE, EXCEPTION_CHANNEL_RULE
-from elspeth_lints.rules.contract_invariants import VALIDATION_THEATRE_RULE
+from elspeth_lints.rules.contract_invariants import SESSION_ENGINE_FACTORY_RULE, VALIDATION_THEATRE_RULE
 from elspeth_lints.rules.immutability import FREEZE_GUARDS_RULE, FROZEN_ANNOTATIONS_RULE
 from elspeth_lints.rules.manifest import CONTRACT_MANIFEST_RULE, SYMBOL_INVENTORY_RULE, TEST_TO_SOURCE_MAPPING_RULE
 from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer import RULE as META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE
@@ -29,6 +29,7 @@ BUILTIN_RULES = (
     PLUGIN_HASHES_RULE,
     CATCH_ORDER_RULE,
     EXCEPTION_CHANNEL_RULE,
+    SESSION_ENGINE_FACTORY_RULE,
     VALIDATION_THEATRE_RULE,
     FREEZE_GUARDS_RULE,
     FROZEN_ANNOTATIONS_RULE,
@@ -58,6 +59,7 @@ __all__ = [
     "META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE",
     "OPTIONS_METADATA_RULE",
     "PLUGIN_HASHES_RULE",
+    "SESSION_ENGINE_FACTORY_RULE",
     "SYMBOL_INVENTORY_RULE",
     "TEST_TO_SOURCE_MAPPING_RULE",
     "TIER_1_DECORATION_RULE",

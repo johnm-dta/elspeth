@@ -44,6 +44,7 @@ ALL_RULE_ROOTS: tuple[tuple[str, str], ...] = (
     ("audit_evidence.tier_1_decoration", "src/elspeth"),
     ("composer.catch_order", "src/elspeth"),
     ("composer.exception_channel", "src/elspeth"),
+    ("contract_invariants.session_engine_factory", "."),
     ("contract_invariants.validation_theatre", "src/elspeth"),
     ("immutability.freeze_guards", "src/elspeth"),
     ("immutability.frozen_annotations", "src/elspeth"),

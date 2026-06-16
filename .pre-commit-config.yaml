@@ -132,12 +132,26 @@ repos:
         files: ^elspeth-lints/src/elspeth_lints/rules/contract_invariants/
         pass_filenames: false
 
+      - id: elspeth-lints-session-engine-factory-policy
+        name: elspeth-lints session engine factory
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules contract_invariants.session_engine_factory --root .
+        language: system
+        files: ^(config/cicd/enforce_session_engine_factory/|elspeth-lints/src/elspeth_lints/rules/contract_invariants/session_engine_factory/)
+        pass_filenames: false
+
       - id: elspeth-lints-contract-invariants-incremental
         name: elspeth-lints contract invariants (changed files)
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'contract_invariants/*' --root src/elspeth --files
         language: system
         types: [python]
         files: ^src/elspeth/.*\.py$
+
+      - id: elspeth-lints-session-engine-factory-incremental
+        name: elspeth-lints session engine factory (changed files)
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules contract_invariants.session_engine_factory --root . --files
+        language: system
+        types: [python]
+        files: ^(src/elspeth/web/.*\.py|tests/(unit|integration|property|e2e)/web/.*\.py)$
 
       - id: elspeth-lints-contract-manifest
         name: elspeth-lints contract manifest

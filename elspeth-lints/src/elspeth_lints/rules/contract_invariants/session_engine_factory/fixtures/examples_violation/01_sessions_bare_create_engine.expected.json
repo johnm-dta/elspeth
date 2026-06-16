@@ -1,0 +1,12 @@
+[
+  {
+    "column": 11,
+    "file_path": "src/elspeth/web/sessions/repository.py",
+    "fingerprint": "0033b48a34e84b3e",
+    "line": 5,
+    "message": "Bare sqlalchemy.create_engine call in src/elspeth/web/sessions/repository.py:5 bypasses create_session_engine for session-owned path.",
+    "rule_id": "contract_invariants.session_engine_factory",
+    "severity": "error",
+    "suggestion": "Use elspeth.web.sessions.engine.create_session_engine() for session database engines so SQLite foreign-key, WAL, busy-timeout, and startup probes cannot be bypassed."
+  }
+]

@@ -21,6 +21,7 @@ import threading
 from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,6 +58,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
     CompositionStateRecord,
@@ -70,6 +72,7 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_va
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 _TEST_PIPELINE_YAML = "source:\n  plugin: csv\n  options: {}\n"
+_RESOLVED_TEST_PIPELINE_YAML = "source:\n  options: {}\n  plugin: csv\n"
 
 
 @pytest.fixture
@@ -347,12 +350,18 @@ class TestExecutionFlow:
     async def test_execute_creates_run_via_session_service(self, service: ExecutionServiceImpl, mock_session_service: MagicMock) -> None:
         """AC #17: Run creation delegates to session_service.create_run()
         with R6 expanded params (session_id, state_id, pipeline_yaml)."""
+        session_id = uuid4()
+        state_record = mock_session_service.get_current_state.return_value
         with patch.object(service, "_run_pipeline"):
-            await service.execute(session_id=uuid4())
-        mock_session_service.create_run.assert_called_once()
-        create_call = mock_session_service.create_run.call_args
-        assert "session_id" in create_call[1] or len(create_call[0]) >= 1
-        assert "pipeline_yaml" in create_call[1] or len(create_call[0]) >= 2
+            await service.execute(session_id=session_id)
+        mock_session_service.create_run.assert_awaited_once()
+        create_call = mock_session_service.create_run.await_args
+        assert create_call.args == ()
+        assert create_call.kwargs == {
+            "session_id": session_id,
+            "state_id": state_record.id,
+            "pipeline_yaml": _RESOLVED_TEST_PIPELINE_YAML,
+        }
 
     @pytest.mark.asyncio
     async def test_execute_rejects_invalid_pipeline_before_run_creation(
@@ -425,6 +434,100 @@ class TestExecutionFlow:
             run_id = await service.execute(session_id=uuid4())
         assert isinstance(run_id, UUID)
         mock_session_service.create_run.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_validate_returns_structured_failure_when_no_current_state(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """validate() must return a typed no-state blocker instead of raising."""
+        session_id = uuid4()
+        mock_session_service.get_current_state.return_value = None
+
+        result = await service.validate(session_id, user_id="alice")
+
+        assert result.is_valid is False
+        assert result.checks[0].name == "state_exists"
+        assert result.checks[0].passed is False
+        assert result.errors[0].message == "No composition state exists for this session"
+        assert result.readiness.authoring_valid is False
+        assert result.readiness.blockers[0].code == "state_exists"
+        mock_session_service.get_current_state.assert_awaited_once_with(session_id)
+
+    @pytest.mark.asyncio
+    async def test_validate_delegates_current_state_to_worker_backed_validate_state(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """validate() materializes the current state and delegates scoped validation."""
+        session_id = uuid4()
+        expected = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=True,
+                completion_ready=True,
+                blockers=[],
+            ),
+        )
+        validate_state = AsyncMock(return_value=expected)
+        service.validate_state = validate_state  # type: ignore[method-assign]
+
+        result = await service.validate(session_id, user_id="alice")
+
+        assert result is expected
+        validate_state.assert_awaited_once()
+        delegated_state = validate_state.await_args.args[0]
+        assert delegated_state.version == mock_session_service.get_current_state.return_value.version
+        assert validate_state.await_args.kwargs == {
+            "user_id": "alice",
+            "session_id": session_id,
+        }
+
+    @pytest.mark.asyncio
+    async def test_validate_state_runs_validation_in_worker_with_secret_context(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """validate_state() keeps sync validation off the event loop."""
+        from elspeth.web.execution.validation import validate_pipeline
+
+        state = state_from_record(mock_session_service.get_current_state.return_value)
+        expected = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=True,
+                completion_ready=True,
+                blockers=[],
+            ),
+        )
+
+        with patch("elspeth.web.execution.service.run_sync_in_worker", new_callable=AsyncMock) as run_worker:
+            run_worker.return_value = expected
+            result = await service.validate_state(state, user_id="alice", session_id=uuid4())
+
+        assert result is expected
+        run_worker.assert_awaited_once()
+        worker_call = run_worker.await_args.args[0]
+        assert isinstance(worker_call, partial)
+        assert worker_call.func is validate_pipeline
+        assert worker_call.args == (
+            state,
+            service._settings,
+            service._yaml_generator,
+        )
+        assert worker_call.keywords is not None
+        assert worker_call.keywords["secret_service"] is service._secret_service
+        assert worker_call.keywords["user_id"] == "alice"
+        assert callable(worker_call.keywords["blob_get_metadata"])
 
     @pytest.mark.asyncio
     async def test_get_status_returns_run_status(self, service: ExecutionServiceImpl, mock_session_service: MagicMock) -> None:

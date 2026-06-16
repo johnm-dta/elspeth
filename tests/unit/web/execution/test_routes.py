@@ -1669,6 +1669,32 @@ class TestResultsEndpoint:
         assert svc.get_status.call_args.kwargs["accounting"] == accounting
 
     @pytest.mark.asyncio
+    async def test_results_returns_200_for_cancelled_run(self) -> None:
+        """cancelled is terminal, so /results returns the final status."""
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="cancelled",
+                started_at=datetime.now(tz=UTC),
+                finished_at=datetime.now(tz=UTC),
+                accounting=None,
+                error=None,
+                landscape_run_id=None,
+            )
+        )
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(f"/api/runs/{run_id}/results")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "cancelled"
+        assert body["accounting"] is None
+        assert body["error"] is None
+
+    @pytest.mark.asyncio
     async def test_results_includes_virtual_discard_summary(self) -> None:
         run_id = uuid4()
         svc = MagicMock()

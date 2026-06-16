@@ -45,7 +45,7 @@ class WebSettings(BaseModel):
     settings are constructed once and shared via app.state.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     host: str = "127.0.0.1"
     port: int = Field(default=8451, ge=1, le=65535)

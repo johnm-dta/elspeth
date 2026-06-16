@@ -550,8 +550,9 @@ def _settings_from_env() -> WebSettings:
     Collection-typed fields are JSON-decoded via ``_JSON_COLLECTION_FIELDS``.
     The JSON literal ``null`` is decoded to ``None`` for all fields — this is
     the env-var convention for "clear this optional setting."  Pydantic rejects
-    ``None`` for non-nullable fields, so there is no silent mistyping risk.
-    All other scalar values pass as raw strings; Pydantic coerces
+    ``None`` for non-nullable fields. Unknown setting names are rejected before
+    model construction so deployment typos fail startup with the original
+    environment variable name. All other scalar values pass as raw strings; Pydantic coerces
     str→int, str→float, str→Path automatically.
     """
     kwargs: dict[str, object] = {}
@@ -559,6 +560,8 @@ def _settings_from_env() -> WebSettings:
     for key, value in os.environ.items():
         if key.startswith(prefix):
             field_name = key[len(prefix) :].lower()
+            if field_name not in WebSettings.model_fields:
+                raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
             if field_name in _JSON_COLLECTION_FIELDS:
                 # These fields are tuple-typed on WebSettings; the env-var
                 # convention is a JSON-encoded array. A non-JSON value cannot

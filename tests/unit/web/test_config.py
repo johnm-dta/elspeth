@@ -27,6 +27,17 @@ def test_playwright_local_backend_secret_key_satisfies_non_pytest_guard() -> Non
 class TestWebSettingsValidation:
     """Tests for field validation."""
 
+    def test_unknown_setting_field_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="extra"):
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                composer_expose_provder_errors=True,  # type: ignore[call-arg]
+            )
+
     def test_invalid_auth_provider_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(

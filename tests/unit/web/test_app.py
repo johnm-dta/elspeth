@@ -945,6 +945,12 @@ class TestSettingsFromEnv:
         assert settings.port == 9090
         assert isinstance(settings.port, int)
 
+    def test_unknown_env_setting_rejected_with_original_name(self, monkeypatch) -> None:
+        monkeypatch.setenv("ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS", "true")
+
+        with pytest.raises(RuntimeError, match="ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS"):
+            _settings_from_env()
+
 
 class TestJsonCollectionFieldsSync:
     """Structural test: _JSON_COLLECTION_FIELDS must stay in sync with WebSettings."""

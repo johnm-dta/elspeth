@@ -660,6 +660,26 @@ describe("executionStore WebSocket lifecycle", () => {
     handlers.onProgress(progressEvent, progressEvent.data);
     expect(useExecutionStore.getState().wsDisconnected).toBe(false);
   });
+
+  it("surfaces run-unavailable websocket closes without leaving reconnect state active", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      wsDisconnected: true,
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    handlers.onRunUnavailable();
+
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+    expect(useExecutionStore.getState().error).toBe(
+      "Run is unavailable or you do not have access.",
+    );
+  });
 });
 
 describe("executionStore.loadRuns", () => {

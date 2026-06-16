@@ -525,6 +525,13 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         // Close code 4001 -- do not reconnect, trigger logout
         useAuthStore.getState().logout();
       },
+      onRunUnavailable() {
+        // Close code 4004 -- run not found or not owned.
+        set({
+          wsDisconnected: false,
+          error: "Run is unavailable or you do not have access.",
+        });
+      },
     });
   },
 

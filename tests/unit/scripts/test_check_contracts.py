@@ -9,6 +9,7 @@ from scripts.check_contracts import (
     FieldMappingVisitor,
     HardcodeLiteralVisitor,
     HardcodeViolation,
+    ImportIndex,
     SettingsAccessVisitor,
     SettingsViolation,
     check_field_name_mappings,
@@ -231,6 +232,52 @@ def test_handles_unicode_errors(tmp_path: Path) -> None:
 
     definitions = find_type_definitions(test_file)
     assert definitions == []
+
+
+def test_import_index_does_not_match_substring_module_names(tmp_path: Path) -> None:
+    defining_file = tmp_path / "core" / "foo.py"
+    defining_file.parent.mkdir(parents=True)
+    defining_file.write_text("""
+from dataclasses import dataclass
+
+@dataclass
+class Foo:
+    value: str
+""")
+    using_file = tmp_path / "plugins" / "use.py"
+    using_file.parent.mkdir(parents=True)
+    using_file.write_text("""
+from elspeth.core.foobar import Foo
+
+value: Foo
+""")
+
+    index = ImportIndex.build(tmp_path)
+
+    assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == []
+
+
+def test_import_index_finds_qualified_import_alias_usage(tmp_path: Path) -> None:
+    defining_file = tmp_path / "core" / "foo.py"
+    defining_file.parent.mkdir(parents=True)
+    defining_file.write_text("""
+from dataclasses import dataclass
+
+@dataclass
+class Foo:
+    value: str
+""")
+    using_file = tmp_path / "plugins" / "use.py"
+    using_file.parent.mkdir(parents=True)
+    using_file.write_text("""
+import elspeth.core.foo as foo
+
+value: foo.Foo
+""")
+
+    index = ImportIndex.build(tmp_path)
+
+    assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == [using_file]
 
 
 # =============================================================================

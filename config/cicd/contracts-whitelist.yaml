@@ -5,6 +5,9 @@ allowed_external_types:
   - "tui/types:TokenDisplayInfo"
   # DAG wiring helper type shared between CLI instantiation and graph construction
   - "core/dag/models:WiredTransform"
+  # DAG validation warnings stay with graph construction; web validation only projects them
+  # into API-facing ValidationWarning rows and does not own their construction semantics.
+  - "core/dag/models:GraphValidationWarning"
   # Plugin bundle type shared between runtime construction, CLI, and web preflight
   - "plugins/infrastructure/runtime_factory:PluginBundle"
   # SSRF safety type - security infrastructure, tightly coupled to validation logic
@@ -795,6 +798,10 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_preflight_repair:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._maybe_run_early_checkpoint:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_checkpoint_arguments:return"
+  # Guided chat audit records hash the exact LiteLLM/OpenAI chat-completion
+  # message list sent to the provider. The payload shape is the provider API
+  # boundary ({role, content, optional tool fields}) and is intentionally open.
+  - "src/elspeth/web/composer/guided/chat_solver.py:_record_llm_call:messages (list)"
   # Phase 5b Task 5 follow-on: session-aware async tool dispatch. The
   # ``arguments`` dict is Tier-3 LLM-supplied JSON; the per-handler
   # Pydantic boundary inside the tool surface validates the shape. The

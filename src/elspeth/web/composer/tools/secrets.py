@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.secrets import SecretInventoryItem
+from elspeth.contracts.secrets import SecretInventoryItem, SecretScope, SecretUnavailabilityReason
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -85,7 +85,15 @@ class _WireSecretRefArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _inventory_item_payload(item: SecretInventoryItem) -> dict[str, Any]:
+class _SecretInventoryItemPayload(TypedDict):
+    name: str
+    scope: SecretScope
+    available: bool
+    source_kind: str
+    reason: SecretUnavailabilityReason | None
+
+
+def _inventory_item_payload(item: SecretInventoryItem) -> _SecretInventoryItemPayload:
     return {
         "name": item.name,
         "scope": item.scope,

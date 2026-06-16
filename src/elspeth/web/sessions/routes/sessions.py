@@ -279,26 +279,29 @@ def register_session_routes(router: APIRouter) -> None:
         """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
+        execution_service = request.app.state.execution_service
+        session_key = str(session.id)
+        execution_lock = execution_service.get_session_lock(session_key)
 
-        active_run = await service.get_active_run(session.id)
-        if active_run is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
-            )
+        async with execution_lock:
+            active_run = await service.get_active_run(session.id)
+            if active_run is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
+                )
 
-        try:
-            await service.archive_session(session.id)
-        finally:
-            # Clean up ephemeral per-session state regardless of archive outcome.
-            # If archive fails, the session still exists and a retry will re-enter
-            # this path. The lock cleanup is idempotent.
-            execution_service = request.app.state.execution_service
-            execution_service.cleanup_session_lock(str(session.id))
-            compose_lock_registry = _get_session_compose_lock_registry(request)
-            await compose_lock_registry.cleanup_session_lock(str(session.id))
-            progress_registry = _get_composer_progress_registry(request)
-            await progress_registry.clear(str(session.id))
+            try:
+                await service.archive_session(session.id)
+            finally:
+                # Clean up ephemeral per-session state regardless of archive outcome.
+                # If archive fails, the session still exists and a retry will re-enter
+                # this path. The lock cleanup is idempotent.
+                execution_service.cleanup_session_lock(session_key)
+                compose_lock_registry = _get_session_compose_lock_registry(request)
+                await compose_lock_registry.cleanup_session_lock(session_key)
+                progress_registry = _get_composer_progress_registry(request)
+                await progress_registry.clear(session_key)
 
     @router.post(
         "/{session_id}/fork",

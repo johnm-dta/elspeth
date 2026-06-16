@@ -494,9 +494,18 @@ def _make_app(
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
 
-    # Minimal mock for execution service — delete_session calls
-    # cleanup_session_lock() after archiving.
-    app.state.execution_service = MagicMock()
+    # Minimal mock for execution service — delete_session coordinates with
+    # the per-session execution lock and then cleans it up after archiving.
+    execution_service = MagicMock()
+    execution_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_execution_lock(session_id: str) -> asyncio.Lock:
+        if session_id not in execution_locks:
+            execution_locks[session_id] = asyncio.Lock()
+        return execution_locks[session_id]
+
+    execution_service.get_session_lock.side_effect = _get_execution_lock
+    app.state.execution_service = execution_service
 
     router = create_session_router()
     app.include_router(router)
@@ -1288,6 +1297,55 @@ class TestSessionCRUDRoutes:
         del_resp = client.delete(f"/api/sessions/{session_id}")
         assert del_resp.status_code == 409
         assert "active" in del_resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_delete_session_serializes_active_run_check_with_execution_lock(self, tmp_path) -> None:
+        """Delete must share execute()'s per-session lock across check+archive.
+
+        Holding the execution lock simulates a concurrent execute() already in
+        the active-run check/create-run critical section. The delete route must
+        wait before it even calls get_active_run(); otherwise a run can be
+        created between delete's check and archive.
+        """
+        app, service = _make_app(tmp_path)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            create_resp = await client.post("/api/sessions", json={"title": "Delete Race"})
+            assert create_resp.status_code == 201
+            session_id = create_resp.json()["id"]
+
+            execution_lock = app.state.execution_service.get_session_lock(session_id)
+            await execution_lock.acquire()
+
+            ownership_checked = asyncio.Event()
+            original_get_session = service.get_session
+            active_run_checked = asyncio.Event()
+            original_get_active_run = service.get_active_run
+
+            async def _get_session_spy(session_id_arg: uuid.UUID) -> Any:
+                result = await original_get_session(session_id_arg)
+                ownership_checked.set()
+                return result
+
+            async def _get_active_run_spy(session_id_arg: uuid.UUID) -> Any:
+                active_run_checked.set()
+                return await original_get_active_run(session_id_arg)
+
+            service.get_session = _get_session_spy  # type: ignore[method-assign]
+            service.get_active_run = _get_active_run_spy  # type: ignore[method-assign]
+
+            delete_task = asyncio.create_task(client.delete(f"/api/sessions/{session_id}"))
+            await asyncio.wait_for(ownership_checked.wait(), timeout=2.0)
+            await asyncio.sleep(0)
+
+            assert not active_run_checked.is_set()
+            assert not delete_task.done()
+
+            execution_lock.release()
+            del_resp = await delete_task
+
+        assert del_resp.status_code == 204
+        assert active_run_checked.is_set()
 
     @pytest.mark.asyncio
     async def test_delete_session_allowed_after_run_completes(self, tmp_path) -> None:

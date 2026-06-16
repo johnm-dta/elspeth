@@ -378,6 +378,10 @@ class ExecutionServiceImpl:
         """
         self._session_locks.pop(session_id, None)
 
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session lock shared by execute() and deletion."""
+        return self._session_locks.setdefault(session_id, asyncio.Lock())
+
     async def shutdown(self) -> None:
         """Shut down the thread pool without blocking the event loop.
 
@@ -424,7 +428,7 @@ class ExecutionServiceImpl:
         # get_active_run → create_run window so two concurrent execute()
         # calls cannot both pass the check before either creates a run.
         session_key = str(session_id)
-        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        lock = self.get_session_lock(session_key)
         async with lock:
             return await self._execute_locked(
                 session_id,

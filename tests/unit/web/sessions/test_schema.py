@@ -160,6 +160,39 @@ def test_current_schema_enforces_ready_blob_hash_check(engine) -> None:
             )
 
 
+def test_initialize_session_schema_rejects_same_named_check_with_weakened_sql(tmp_path) -> None:
+    """A current-epoch DB with a same-named weaker CHECK is stale.
+
+    Regression for elspeth-28bb7fcacb: the validator compared only CHECK names,
+    so a manually rebuilt/stale ``ck_blobs_ready_hash`` accepted startup even
+    when its SQL no longer enforced the ready-blob 64-char lowercase-hex hash
+    invariant.
+    """
+    db_path = tmp_path / "sessions.db"
+    eng = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(eng)
+    eng.dispose()
+
+    strong = "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash NOT GLOB '*[^a-f0-9]*')"
+    weak = "status != 'ready' OR content_hash IS NOT NULL"
+    eng = create_session_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        original_sql = conn.execute(text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'blobs'")).scalar_one()
+        assert "CONSTRAINT ck_blobs_ready_hash" in original_sql
+        assert strong in original_sql
+        conn.execute(text("PRAGMA writable_schema = ON"))
+        conn.execute(
+            text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = 'blobs'"),
+            {"sql": original_sql.replace(strong, weak)},
+        )
+        conn.execute(text("PRAGMA writable_schema = OFF"))
+    eng.dispose()
+
+    reopened = create_session_engine(f"sqlite:///{db_path}")
+    with pytest.raises(SessionSchemaError, match="CHECK constraint SQL mismatch"):
+        initialize_session_schema(reopened)
+
+
 # ---------------------------------------------------------------------------
 # elspeth-obs-2ef48619d5: partial-index dialect-symmetry static guard.
 # elspeth-obs-3ac0c829c5: Index(unique=True) included in unique-constraint

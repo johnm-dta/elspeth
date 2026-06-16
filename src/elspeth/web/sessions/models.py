@@ -1310,12 +1310,10 @@ blobs_table = Table(
     # side.
     #
     # The shared name ``ck_blobs_ready_hash`` lets the schema validator
-    # (sessions/schema.py:_validate_named_checks) treat the two
-    # CheckConstraints as one named constraint via set dedup; only the
-    # dialect-active one is created by ``metadata.create_all`` because of
-    # the ``ddl_if(dialect=...)`` filter, so the inspector reports
-    # exactly one CHECK named ``ck_blobs_ready_hash`` per dialect and
-    # set comparison passes on both.
+    # (sessions/schema.py:_validate_named_checks) pair the live constraint
+    # with the dialect-active metadata constraint. The SQL text is still
+    # compared after the ``ddl_if(dialect=...)`` filter, so a same-named
+    # stale CHECK with weaker semantics is rejected at startup.
     #
     # If a third dialect is introduced, add its V0 check expression here
     # with a matching ``ddl_if(dialect=...)`` instead of adding a

@@ -8,6 +8,7 @@ schema; stale local/runtime files should be deleted and recreated.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
@@ -197,7 +198,7 @@ def _validate_current_schema(engine: Engine) -> None:
     for table_name, table in metadata.tables.items():
         _validate_columns(inspector, table_name, table)
         _validate_foreign_keys(inspector, table_name, table)
-        _validate_named_checks(inspector, table_name, table)
+        _validate_named_checks(inspector, table_name, table, dialect=engine.dialect)
         _validate_named_unique_constraints(inspector, table_name, table)
         _validate_named_indexes(inspector, table_name, table)
 
@@ -299,17 +300,64 @@ def _actual_foreign_key_shape(fk: Mapping[str, Any]) -> tuple[tuple[str, ...], s
     )
 
 
-def _validate_named_checks(inspector: Inspector, table_name: str, table: Table) -> None:
-    expected = {
-        str(constraint.name) for constraint in table.constraints if type(constraint) is CheckConstraint and constraint.name is not None
-    }
-    actual = {str(constraint["name"]) for constraint in inspector.get_check_constraints(table_name) if constraint["name"] is not None}
+def _validate_named_checks(inspector: Inspector, table_name: str, table: Table, *, dialect: Any) -> None:
+    expected_sql: dict[str, set[str]] = {}
+    for constraint in table.constraints:
+        if (
+            type(constraint) is CheckConstraint
+            and constraint.name is not None
+            and _ddl_constraint_applies_to_dialect(constraint, dialect.name)
+        ):
+            expected_sql.setdefault(str(constraint.name), set()).add(
+                _normalize_check_sql(
+                    str(
+                        constraint.sqltext.compile(
+                            dialect=dialect,
+                            compile_kwargs={"literal_binds": True},
+                        )
+                    )
+                )
+            )
+
+    actual_sql: dict[str, set[str]] = {}
+    for reflected_check in inspector.get_check_constraints(table_name):
+        if reflected_check["name"] is not None:
+            actual_sql.setdefault(str(reflected_check["name"]), set()).add(_normalize_check_sql(str(reflected_check["sqltext"])))
+
+    expected = set(expected_sql)
+    actual = set(actual_sql)
     if actual != expected:
         _schema_error(
             f"{table_name} CHECK constraint mismatch",
             expected=sorted(expected),
             actual=sorted(actual),
         )
+
+    for name in sorted(expected & actual):
+        if expected_sql[name] != actual_sql[name]:
+            _schema_error(
+                f"{table_name}.{name} CHECK constraint SQL mismatch",
+                expected=sorted(expected_sql[name]),
+                actual=sorted(actual_sql[name]),
+            )
+
+
+def _ddl_constraint_applies_to_dialect(constraint: CheckConstraint, dialect_name: str) -> bool:
+    """Return whether a dialect-filtered constraint is active for this engine."""
+
+    ddl_if = getattr(constraint, "_ddl_if", None)
+    if ddl_if is None:
+        return True
+    target = getattr(ddl_if, "dialect", None)
+    if target is None:
+        return True
+    if isinstance(target, str):
+        return target == dialect_name
+    return dialect_name in target
+
+
+def _normalize_check_sql(sqltext: str) -> str:
+    return re.sub(r"\s+", " ", sqltext.strip())
 
 
 def _validate_named_unique_constraints(inspector: Inspector, table_name: str, table: Table) -> None:

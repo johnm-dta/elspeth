@@ -91,6 +91,11 @@ function resolveVariants(s: DiscriminatedSchema): Array<{ label: string; def: Js
   return out;
 }
 
+function variantKindLabel(s: DiscriminatedSchema): string {
+  const name = s.discriminator?.propertyName?.trim() || "variant";
+  return name.endsWith("s") ? name : `${name}s`;
+}
+
 function renderFields(properties: Record<string, JsonSchemaField>, required: string[] | undefined): JSX.Element[] {
   const req = new Set(required ?? []);
   return Object.entries(properties).map(([name, field]) => (
@@ -213,6 +218,9 @@ export function PluginCard({
             </div>
           ) : isDiscriminated(configSchema) ? (
             <div className="plugin-card-variants">
+              <div className="plugin-card-variants-hint">
+                This plugin supports multiple {variantKindLabel(configSchema)}. Configure exactly one:
+              </div>
               {resolveVariants(configSchema).map((v) => (
                 <div key={v.label} className="plugin-card-variant">
                   <div className="plugin-card-variant-label">{v.label}</div>

@@ -149,6 +149,9 @@ describe("PluginCard — discriminated union", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: /schema for llm/i }));
+    expect(
+      screen.getByText("This plugin supports multiple providers. Configure exactly one:"),
+    ).toBeInTheDocument();
     // Labels come from the discriminator mapping (provider: azure / openrouter),
     // NOT the raw $defs class names (AzureOpenAIConfig / OpenRouterConfig).
     expect(screen.getByText("provider: azure")).toBeInTheDocument();

@@ -233,10 +233,10 @@ def resolve_queries(
             )
 
     # Validate: check output field suffix collisions across queries
-    from elspeth.plugins.transforms.llm import LLM_AUDIT_SUFFIXES, MULTI_QUERY_GUARANTEED_SUFFIXES
+    from elspeth.plugins.transforms.llm import MULTI_QUERY_GUARANTEED_SUFFIXES
 
     reserved_suffixes = set()
-    for suffix in MULTI_QUERY_GUARANTEED_SUFFIXES + LLM_AUDIT_SUFFIXES:
+    for suffix in MULTI_QUERY_GUARANTEED_SUFFIXES:
         if suffix:
             reserved_suffixes.add(suffix.lstrip("_"))
     # System-reserved suffixes used by multi-query error handling

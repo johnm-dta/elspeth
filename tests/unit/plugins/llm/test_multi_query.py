@@ -331,6 +331,26 @@ class TestResolveQueriesReservedSuffixes:
                 }
             )
 
+    def test_audit_only_suffixes_are_accepted(self) -> None:
+        """Audit-only suffixes do not collide with multi-query output rows."""
+        from elspeth.plugins.transforms.llm import LLM_AUDIT_SUFFIXES
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        for suffix in (s.lstrip("_") for s in LLM_AUDIT_SUFFIXES):
+            specs = resolve_queries(
+                {
+                    f"query_{suffix}": {
+                        "input_fields": {"text": "col_a"},
+                        "output_fields": [
+                            {"suffix": suffix, "type": "string"},
+                        ],
+                    },
+                }
+            )
+
+            assert specs[0].output_fields is not None
+            assert specs[0].output_fields[0].suffix == suffix
+
     def test_non_reserved_suffix_accepted(self) -> None:
         """Non-reserved suffixes must be accepted without error."""
         from elspeth.plugins.transforms.llm.multi_query import resolve_queries

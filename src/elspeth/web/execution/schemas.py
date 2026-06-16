@@ -9,10 +9,11 @@ values or dropping unknown fields.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, ClassVar, Final, Literal, Self, get_args
+from typing import Annotated, Any, ClassVar, Final, Literal, Self, TypeAliasType, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from elspeth.contracts import NodeStateStatus, Operation, TerminalOutcome
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SessionRunStatus,
@@ -641,6 +642,44 @@ class DiscardSummary(_StrictResponse):
         return self
 
 
+type RunDiagnosticNodeStateStatus = Literal["open", "pending", "completed", "failed"]
+type RunDiagnosticTerminalOutcome = Literal["success", "failure", "transient"]
+type RunDiagnosticOperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+type RunDiagnosticOperationStatus = Literal["open", "completed", "failed", "pending"]
+type RunDiagnosticDurationMs = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+type RunDiagnosticCount = Annotated[int, Field(ge=0)]
+
+
+def _type_alias_literal_values(alias: TypeAliasType) -> frozenset[str]:
+    return frozenset(get_args(alias.__value__))
+
+
+RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticNodeStateStatus)
+RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticTerminalOutcome)
+RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationType)
+RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationStatus)
+
+if frozenset(status.value for status in NodeStateStatus) != RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES:
+    raise AssertionError(
+        f"RunDiagnosticNodeState.status Literal values must mirror NodeStateStatus values; got {RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES}"
+    )
+if frozenset(outcome.value for outcome in TerminalOutcome) != RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES:
+    raise AssertionError(
+        "RunDiagnosticToken.terminal_outcome Literal values must mirror "
+        f"TerminalOutcome values; got {RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES}"
+    )
+if RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES != Operation._ALLOWED_OPERATION_TYPES:
+    raise AssertionError(
+        "RunDiagnosticOperation.operation_type Literal values must mirror "
+        f"Operation._ALLOWED_OPERATION_TYPES; got {RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES}"
+    )
+if RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES != Operation._ALLOWED_STATUSES:
+    raise AssertionError(
+        "RunDiagnosticOperation.status Literal values must mirror "
+        f"Operation._ALLOWED_STATUSES; got {RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES}"
+    )
+
+
 class RunDiagnosticNodeState(_StrictResponse):
     """Bounded node-state projection for run diagnostics.
 
@@ -653,8 +692,8 @@ class RunDiagnosticNodeState(_StrictResponse):
     node_id: str
     step_index: int = Field(ge=0)
     attempt: int = Field(ge=0)
-    status: str
-    duration_ms: float | None
+    status: RunDiagnosticNodeStateStatus
+    duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
     completed_at: datetime | None
     error: Any | None = None
@@ -666,14 +705,14 @@ class RunDiagnosticToken(_StrictResponse):
 
     token_id: str
     row_id: str
-    row_index: int | None
+    row_index: int | None = Field(ge=0)
     branch_name: str | None
     fork_group_id: str | None
     join_group_id: str | None
     expand_group_id: str | None
-    step_in_pipeline: int | None
+    step_in_pipeline: int | None = Field(ge=0)
     created_at: datetime
-    terminal_outcome: str | None
+    terminal_outcome: RunDiagnosticTerminalOutcome | None
     states: list[RunDiagnosticNodeState]
 
 
@@ -682,9 +721,9 @@ class RunDiagnosticOperation(_StrictResponse):
 
     operation_id: str
     node_id: str
-    operation_type: str
-    status: str
-    duration_ms: float | None
+    operation_type: RunDiagnosticOperationType
+    status: RunDiagnosticOperationStatus
+    duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
     completed_at: datetime | None
     error_message: str | None
@@ -774,8 +813,8 @@ class RunDiagnosticSummary(_StrictResponse):
     token_count: int = Field(ge=0)
     preview_limit: int = Field(ge=1, le=100)
     preview_truncated: bool
-    state_counts: dict[str, int]
-    operation_counts: dict[str, int]
+    state_counts: dict[RunDiagnosticNodeStateStatus, RunDiagnosticCount]
+    operation_counts: dict[RunDiagnosticOperationType, RunDiagnosticCount]
     latest_activity_at: datetime | None
 
 
@@ -795,7 +834,7 @@ class RunDiagnosticFailureDetail(_StrictResponse):
 
     operation_id: str
     node_id: str
-    operation_type: str
+    operation_type: RunDiagnosticOperationType
     error_message: str = Field(min_length=1)
     failed_at: datetime
 

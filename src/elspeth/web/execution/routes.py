@@ -15,6 +15,7 @@ run's parent session.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -292,7 +293,7 @@ def _counted(label: str, count: int) -> str:
     return f"{count} {label}s"
 
 
-def _summarize_counts(prefix: str, counts: dict[str, int]) -> str | None:
+def _summarize_counts(prefix: str, counts: Mapping[Any, int]) -> str | None:
     """Render snapshot counts without implying hidden progress."""
     if not counts:
         return None

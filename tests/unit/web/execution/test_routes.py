@@ -764,7 +764,7 @@ class TestRunDiagnosticsEndpoint:
                 token_count=3,
                 preview_limit=50,
                 preview_truncated=False,
-                state_counts={"completed": 2, "running": 1},
+                state_counts={"completed": 2, "open": 1},
                 operation_counts={},
                 latest_activity_at=datetime.now(UTC),
             ),

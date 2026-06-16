@@ -328,6 +328,7 @@ TransformErrorCategory = Literal[
     "type_mismatch",
     "validation_failed",
     "invalid_input",
+    "too_many_lines",  # Line-expanding transform input exceeds configured max_lines
     # Template errors
     "template_rendering_failed",
     "template_context_failed",  # Multi-query template context build failed (missing field)
@@ -550,6 +551,8 @@ class TransformErrorReason(TypedDict):
     actual: NotRequired[str]
     actual_type: NotRequired[str]
     value: NotRequired[str]
+    line_count: NotRequired[int]  # Observed lines before rejecting line-expanding input
+    max_lines: NotRequired[int]  # Configured line-expansion limit
 
     # Contract violation context
     violation_type: NotRequired[str]

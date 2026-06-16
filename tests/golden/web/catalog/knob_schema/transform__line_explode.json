@@ -53,6 +53,15 @@
         "name": "index_field",
         "nullable": false,
         "required": false
+      },
+      {
+        "default": 10000,
+        "description": "Maximum number of output lines this transform may emit for one input row",
+        "kind": "number-int",
+        "label": "Max Lines",
+        "name": "max_lines",
+        "nullable": false,
+        "required": false
       }
     ]
   },

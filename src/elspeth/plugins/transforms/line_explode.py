@@ -35,6 +35,11 @@ if TYPE_CHECKING:
     from elspeth.contracts.plugin_semantics import InputSemanticRequirements
 
 
+DEFAULT_MAX_LINES = 10_000
+HARD_MAX_LINES = 100_000
+_LINE_BOUNDARY_CHARS = frozenset(("\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))
+
+
 class LineExplodeConfig(TransformDataConfig):
     """Configuration for line-oriented string deaggregation."""
 
@@ -42,6 +47,12 @@ class LineExplodeConfig(TransformDataConfig):
     output_field: str = Field(default="line", description="Name for each emitted line")
     include_index: bool = Field(default=True, description="Whether to include a line index field")
     index_field: str = Field(default="line_index", description="Name for the emitted line index")
+    max_lines: int = Field(
+        default=DEFAULT_MAX_LINES,
+        gt=0,
+        le=HARD_MAX_LINES,
+        description="Maximum number of output lines this transform may emit for one input row",
+    )
 
     @field_validator("source_field", "output_field", "index_field")
     @classmethod
@@ -158,6 +169,39 @@ def _build_line_explode_input_requirements(
     )
 
 
+def _splitlines_bounded(source_value: str, *, max_lines: int) -> tuple[list[str] | None, int]:
+    """Split like str.splitlines(), stopping once the configured cap is exceeded."""
+    lines: list[str] = []
+    line_start = 0
+    index = 0
+    length = len(source_value)
+
+    while index < length:
+        char = source_value[index]
+        separator_length = 0
+        if char == "\r":
+            separator_length = 2 if index + 1 < length and source_value[index + 1] == "\n" else 1
+        elif char in _LINE_BOUNDARY_CHARS:
+            separator_length = 1
+
+        if separator_length == 0:
+            index += 1
+            continue
+
+        lines.append(source_value[line_start:index])
+        if len(lines) > max_lines:
+            return None, len(lines)
+        index += separator_length
+        line_start = index
+
+    if line_start < length:
+        lines.append(source_value[line_start:])
+        if len(lines) > max_lines:
+            return None, len(lines)
+
+    return lines, len(lines)
+
+
 class LineExplode(BaseTransform):
     """Explode a string field into one output row per line."""
 
@@ -185,6 +229,7 @@ class LineExplode(BaseTransform):
         self._output_field = cfg.output_field
         self._include_index = cfg.include_index
         self._index_field = cfg.index_field
+        self._max_lines = cfg.max_lines
 
         fields = [cfg.output_field]
         if cfg.include_index:
@@ -260,7 +305,17 @@ class LineExplode(BaseTransform):
                 "This indicates an upstream validation bug - check source schema or prior transforms."
             )
 
-        lines = source_value.splitlines()
+        lines, line_count = _splitlines_bounded(source_value, max_lines=self._max_lines)
+        if lines is None:
+            return TransformResult.error(
+                {
+                    "reason": "too_many_lines",
+                    "field": self._source_field,
+                    "line_count": line_count,
+                    "max_lines": self._max_lines,
+                },
+                retryable=False,
+            )
         if len(lines) == 0:
             return TransformResult.error(
                 {"reason": "invalid_input", "field": self._source_field, "error": "empty string"},

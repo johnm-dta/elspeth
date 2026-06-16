@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -84,6 +85,16 @@ class _WireSecretRefArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _inventory_item_payload(item: SecretInventoryItem) -> dict[str, Any]:
+    return {
+        "name": item.name,
+        "scope": item.scope,
+        "available": item.available,
+        "source_kind": item.source_kind,
+        "reason": item.reason,
+    }
+
+
 def _handle_list_secret_refs(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -93,7 +104,7 @@ def _handle_list_secret_refs(
         return _failure_result(state, "Secret tools require secret service context.")
     items = context.secret_service.list_refs(context.user_id)
     # Return inventory dicts — NEVER include values
-    data = [{"name": item.name, "scope": item.scope, "available": item.available} for item in items]
+    data = [_inventory_item_payload(item) for item in items]
     return _discovery_result(state, data)
 
 
@@ -122,6 +133,10 @@ def _handle_validate_secret_ref(
             actual_type=type(exc).__name__,
         ) from exc
     name = validated.name
+    for item in context.secret_service.list_refs(context.user_id):
+        if item.name == name:
+            return _discovery_result(state, _inventory_item_payload(item))
+
     available = context.secret_service.has_ref(context.user_id, name)
     return _discovery_result(state, {"name": name, "available": available})
 

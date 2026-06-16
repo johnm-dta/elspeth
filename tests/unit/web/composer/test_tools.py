@@ -4897,6 +4897,43 @@ class TestSecretTools:
         for item in result.data:
             assert "value" not in item
 
+    def test_list_secret_refs_returns_unavailability_reason(self) -> None:
+        """Unavailable secret refs expose structural reasons, never values."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason="fingerprint_resolver_not_configured",
+            )
+        ]
+
+        result = execute_tool(
+            "list_secret_refs",
+            {},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        assert len(result.data) == 1
+        assert dict(result.data[0]) == {
+            "name": "OPENROUTER_API_KEY",
+            "scope": "server",
+            "available": False,
+            "source_kind": "env",
+            "reason": "fingerprint_resolver_not_configured",
+        }
+        assert "value" not in repr(result.to_dict())
+
     def test_validate_secret_ref_returns_availability(self) -> None:
         """validate_secret_ref returns name and availability status."""
         state = _empty_state()
@@ -4913,6 +4950,42 @@ class TestSecretTools:
         assert result.success is True
         assert result.data["name"] == "OPENROUTER_API_KEY"
         assert result.data["available"] is True
+
+    def test_validate_secret_ref_returns_unavailability_reason(self) -> None:
+        """Known but unavailable secret refs carry the inventory reason."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.has_ref.return_value = False
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason="fingerprint_resolver_not_configured",
+            )
+        ]
+
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY"},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        assert dict(result.data) == {
+            "name": "OPENROUTER_API_KEY",
+            "available": False,
+            "scope": "server",
+            "source_kind": "env",
+            "reason": "fingerprint_resolver_not_configured",
+        }
 
     def test_validate_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()

@@ -117,7 +117,11 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightKey,
 )
 from elspeth.web.execution.schemas import (
+    CHECK_ADVISOR_SIGNOFF,
+    CHECK_INTERPRETATION_REVIEW,
+    CHECK_STATE_EXISTS,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
@@ -756,7 +760,7 @@ _INTERPRETATION_REVIEW_ORPHANED_CODE: Final[str] = "interpretation_review_orphan
 # Mirrors ``validation._CHECK_INTERPRETATION_REVIEW`` so the synthetic
 # fail-closed result names the same check as the runtime preflight; kept as a
 # local literal rather than importing a private validation symbol.
-_INTERPRETATION_REVIEW_CHECK_NAME: Final[str] = "interpretation_review"
+_INTERPRETATION_REVIEW_CHECK_NAME: Final[ValidationCheckName] = CHECK_INTERPRETATION_REVIEW
 
 
 def _orphaned_interpretation_review_validation(
@@ -855,7 +859,7 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     )
     return ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail, affected_nodes=(), outcome_code=None)],
+        checks=[ValidationCheck(name=CHECK_STATE_EXISTS, passed=False, detail=detail, affected_nodes=(), outcome_code=None)],
         errors=[
             ValidationError(
                 component_id=None,
@@ -1034,10 +1038,28 @@ def _compose_preflight_repair_message(runtime_result: ValidationResult, *, next_
         "fixing — that will not resolve the violation."
     )
 
+    credential_note = ""
+    if any(
+        error.error_code in {"fabricated_secret", "missing_secret_ref"}
+        or "Credential field(s)" in error.message
+        or "secret reference" in error.message
+        for error in runtime_result.errors
+    ):
+        credential_note = (
+            "\n\nCredential-secret diagnostic requirement:\n"
+            "- Before answering or finalising, call list_secret_refs and validate_secret_ref for the intended secret name "
+            "(for example OPENROUTER_API_KEY when the user asked for OpenRouter).\n"
+            "- If a secret is unavailable, report the returned reason "
+            "(fingerprint_resolver_not_configured, env_var_not_set, or value_decryption_failed) and the layer it identifies. "
+            "Do not answer by repeating the runtime preflight complaint.\n"
+            "- Do not inline a literal credential, use ${VAR} interpolation, or keep placeholders. "
+            "Only wire {secret_ref: NAME} after validate_secret_ref reports available=true."
+        )
+
     return (
         "[composer-system] Pre-finalisation runtime preflight found contract "
         "violation(s) — the pipeline cannot run as currently configured. "
-        "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+        "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note + credential_note
     )
 
 
@@ -4909,7 +4931,7 @@ def _render_interpolated_row_fields(node: NodeSpec) -> str:
 _ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
 # Mirrors the orphan gate's check-name convention so the synthetic fail-closed
 # result names a stable check the UI/audit can key on.
-_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[str] = "advisor_signoff"
+_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[ValidationCheckName] = CHECK_ADVISOR_SIGNOFF
 
 
 def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:

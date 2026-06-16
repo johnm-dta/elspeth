@@ -34,6 +34,7 @@ from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
     ComposerAvailability,
     ComposerServiceImpl,
+    _compose_preflight_repair_message,
 )
 from elspeth.web.composer.state import (
     CompositionState,
@@ -4495,6 +4496,34 @@ class TestComposerRuntimePreflightCacheAndTimeout:
 
 
 class TestComposerRuntimePreflightFinalGate:
+    def test_literal_credential_preflight_repair_requires_secret_inventory_diagnosis(self) -> None:
+        """elspeth-697b7377a7: literal credential failures must drive
+        secret inventory diagnosis, not another copy of the validate complaint.
+        """
+        invalid_preflight = ValidationResultModel(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="summarize",
+                    component_type="transform",
+                    message="Credential field(s) api_key contain a literal value; expected a wired secret reference.",
+                    suggestion="Wire each credential field through the Secrets panel.",
+                    error_code="fabricated_secret",
+                )
+            ],
+            readiness=_not_authoring_ready("fabricated_secret"),
+        )
+
+        repair = _compose_preflight_repair_message(invalid_preflight, next_turn=1)
+
+        assert "list_secret_refs" in repair
+        assert "validate_secret_ref" in repair
+        assert "reason" in repair
+        assert "fingerprint_resolver_not_configured" in repair
+        assert "Do not answer by repeating the runtime preflight complaint" in repair
+        assert "Do not inline a literal credential" in repair
+
     @pytest.mark.asyncio
     async def test_changed_state_completion_is_replaced_when_runtime_preflight_fails(self) -> None:
         catalog = _mock_catalog()

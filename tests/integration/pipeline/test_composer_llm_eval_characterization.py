@@ -1007,7 +1007,13 @@ def test_known_secret_env_marker_cannot_bypass_unavailable_web_secret_contract(
     )
 
     assert result.success is True
-    assert result.to_dict()["data"] == {"name": secret_name, "available": False}
+    assert result.to_dict()["data"] == {
+        "name": secret_name,
+        "scope": "server",
+        "available": False,
+        "source_kind": "env",
+        "reason": "fingerprint_resolver_not_configured",
+    }
 
     with pytest.raises(SecretResolutionError) as exc_info:
         resolve_secret_refs(

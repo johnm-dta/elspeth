@@ -46,6 +46,7 @@ _QUALITY_OUTPUT_FIELDS = frozenset(
         "valid_rate",
     }
 )
+_MAX_INSPECT_FIELDS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,8 @@ class BatchDataQualityReportConfig(TransformDataConfig):
     def _reject_empty_inspect_fields(cls, v: list[str]) -> list[str]:
         if not v:
             raise ValueError("inspect_fields must contain at least one field")
+        if len(v) > _MAX_INSPECT_FIELDS:
+            raise ValueError(f"inspect_fields must contain at most {_MAX_INSPECT_FIELDS} fields")
         for index, field_name in enumerate(v):
             if not field_name.strip():
                 raise ValueError(f"inspect_fields[{index}] must not be empty")
@@ -93,9 +96,14 @@ class BatchDataQualityReportConfig(TransformDataConfig):
 
     @model_validator(mode="after")
     def _reject_duplicate_inspect_fields(self) -> BatchDataQualityReportConfig:
-        duplicates = sorted({field_name for field_name in self.inspect_fields if self.inspect_fields.count(field_name) > 1})
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for field_name in self.inspect_fields:
+            if field_name in seen:
+                duplicates.add(field_name)
+            seen.add(field_name)
         if duplicates:
-            raise ValueError(f"Duplicate inspect_fields values: {', '.join(duplicates)}")
+            raise ValueError(f"Duplicate inspect_fields values: {', '.join(sorted(duplicates))}")
         return self
 
 

@@ -125,6 +125,14 @@ class TestBatchDataQualityReportConfig:
         with pytest.raises(PluginConfigError):
             BatchDataQualityReport({"schema": DYNAMIC_SCHEMA, "inspect_fields": inspect_fields})
 
+    def test_excessive_inspect_fields_rejected_at_config_boundary(self) -> None:
+        from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
+
+        inspect_fields = [f"field_{index}" for index in range(129)]
+
+        with pytest.raises(PluginConfigError, match="inspect_fields must contain at most 128 fields"):
+            BatchDataQualityReport({"schema": DYNAMIC_SCHEMA, "inspect_fields": inspect_fields})
+
     def test_output_schema_config_guarantees_report_fields(self) -> None:
         from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
 

@@ -35,6 +35,7 @@ _THRESHOLD_OUTPUT_FIELDS = frozenset(
         "value_field",
     }
 )
+_MAX_THRESHOLDS = 128
 
 
 class ThresholdSpec(BaseModel):
@@ -79,14 +80,20 @@ class BatchThresholdSummaryConfig(TransformDataConfig):
     def _reject_empty_thresholds(cls, v: list[ThresholdSpec]) -> list[ThresholdSpec]:
         if not v:
             raise ValueError("thresholds must contain at least one threshold")
+        if len(v) > _MAX_THRESHOLDS:
+            raise ValueError(f"thresholds must contain at most {_MAX_THRESHOLDS} entries")
         return v
 
     @model_validator(mode="after")
     def _reject_duplicate_threshold_names(self) -> BatchThresholdSummaryConfig:
-        names = [threshold.name for threshold in self.thresholds]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for threshold in self.thresholds:
+            if threshold.name in seen:
+                duplicates.add(threshold.name)
+            seen.add(threshold.name)
         if duplicates:
-            raise ValueError(f"Duplicate threshold names: {', '.join(duplicates)}")
+            raise ValueError(f"Duplicate threshold names: {', '.join(sorted(duplicates))}")
         return self
 
 

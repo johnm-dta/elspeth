@@ -1163,6 +1163,19 @@ class SessionServiceProtocol(Protocol):
         """
         ...
 
+    async def cancel_all_orphaned_run_records(
+        self,
+        max_age_seconds: int | None = None,
+        exclude_run_ids: frozenset[str] = frozenset(),
+        reason: str | None = None,
+    ) -> list[RunRecord]:
+        """Force-cancel orphaned runs and return the cancelled records.
+
+        Used by app-level startup reconciliation to terminalize matching
+        Landscape audit rows via each record's ``landscape_run_id``.
+        """
+        ...
+
     async def persist_compose_turn_async(
         self,
         *,

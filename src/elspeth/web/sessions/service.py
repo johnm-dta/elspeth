@@ -4666,9 +4666,29 @@ class SessionServiceImpl:
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
         """
+        cancelled = await self.cancel_all_orphaned_run_records(
+            max_age_seconds=max_age_seconds,
+            exclude_run_ids=exclude_run_ids,
+            reason=reason,
+        )
+        return len(cancelled)
+
+    async def cancel_all_orphaned_run_records(
+        self,
+        max_age_seconds: int | None = None,
+        exclude_run_ids: frozenset[str] = frozenset(),
+        reason: str | None = None,
+    ) -> list[RunRecord]:
+        """Force-cancel orphaned runs and return the cancelled records.
+
+        Startup reconciliation needs the cancelled run ids and their
+        ``landscape_run_id`` anchors so it can terminalize the matching
+        Landscape audit rows. ``cancel_all_orphaned_runs`` keeps the older
+        integer API by delegating here.
+        """
         now = self._now()
 
-        def _sync() -> int:
+        def _sync() -> list[RunRecord]:
             with self._engine.begin() as conn:
                 conditions: list[ColumnElement[bool]] = [runs_table.c.status.in_(["pending", "running"])]
                 if max_age_seconds is not None:
@@ -4683,11 +4703,14 @@ class SessionServiceImpl:
                 if reason is not None:
                     values["error"] = reason
 
+                cancelled: list[RunRecord] = []
                 for row in stale_rows:
                     conn.execute(update(runs_table).where(runs_table.c.id == row.id).values(**values))
-                return len(stale_rows)
+                    updated = conn.execute(select(runs_table).where(runs_table.c.id == row.id)).one()
+                    cancelled.append(self._row_to_run_record(updated))
+                return cancelled
 
-        return cast(int, await self._run_sync(_sync))
+        return cast(list[RunRecord], await self._run_sync(_sync))
 
     async def prune_state_versions(
         self,

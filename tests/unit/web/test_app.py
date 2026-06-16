@@ -7,8 +7,10 @@ import contextlib
 import gc
 import sys
 import weakref
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -18,6 +20,10 @@ from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
 from structlog.testing import capture_logs
 
+import elspeth.web.app as app_module
+from elspeth.contracts import RunStatus
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
     _BodySizeLimitMiddleware,
@@ -30,6 +36,7 @@ from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
+from elspeth.web.sessions.protocol import CompositionStateData, RunRecord
 from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -659,6 +666,46 @@ class TestLifespanShutdown:
         assert called is False
 
     @pytest.mark.asyncio
+    async def test_lifespan_startup_orphan_cleanup_terminalizes_landscape_run(self, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_boot_probe_enabled=False,
+                orphan_run_check_interval_seconds=3600,
+            )
+        )
+        session_service = app.state.session_service
+        session = await session_service.create_session("alice", "Pipeline", "local")
+        state = await session_service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        web_run = await session_service.create_run(session.id, state.id)
+        landscape_run_id = "lscp-startup-orphan"
+        await session_service.update_run_status(web_run.id, "running", landscape_run_id=landscape_run_id)
+
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            RecorderFactory(db).run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id=landscape_run_id,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+
+        updated_web_run = await session_service.get_run(web_run.id)
+        assert updated_web_run.status == "cancelled"
+        assert updated_web_run.finished_at is not None
+
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            landscape_run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
+
+        assert landscape_run is not None
+        assert landscape_run.status == RunStatus.INTERRUPTED
+        assert landscape_run.completed_at is not None
+
+    @pytest.mark.asyncio
     async def test_lifespan_emits_composer_boot_config_attributes(self, monkeypatch, tmp_path) -> None:
         app = create_app(
             _settings(
@@ -1154,6 +1201,52 @@ class TestPeriodicOrphanCleanup:
             exclude_run_ids=live_ids,
             reason="Orphaned by periodic cleanup — no active executor thread",
         )
+
+
+class TestOrphanLandscapeReconciliation:
+    """Cross-DB orphan cleanup reconciliation."""
+
+    def test_terminalizes_landscape_run_rows_for_cancelled_session_runs(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "runs").mkdir(exist_ok=True)
+        landscape_url = settings.get_landscape_url()
+        landscape_run_id = "lscp-orphan-1"
+        with LandscapeDB.from_url(landscape_url) as db:
+            RecorderFactory(db).run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id=landscape_run_id,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+
+        cancelled_run = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="cancelled",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error="Orphaned by server restart - no active process",
+            landscape_run_id=landscape_run_id,
+            pipeline_yaml=None,
+        )
+
+        app_module._finalize_orphaned_landscape_runs(landscape_url, [cancelled_run])
+
+        with LandscapeDB.from_url(landscape_url) as db:
+            run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
+
+        assert run is not None
+        assert run.status == RunStatus.INTERRUPTED
+        assert run.completed_at is not None
 
 
 class TestDataDirCreation:

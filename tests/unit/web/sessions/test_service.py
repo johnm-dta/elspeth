@@ -1148,6 +1148,26 @@ class TestCancelAllOrphanedRuns:
         assert updated.status == "cancelled"
 
     @pytest.mark.asyncio
+    async def test_record_returning_cleanup_preserves_landscape_run_id(self, service) -> None:
+        """Startup reconciliation needs cancelled run records to update Landscape."""
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running", landscape_run_id="lscp-orphan-1")
+
+        cancelled = await service.cancel_all_orphaned_run_records(
+            reason="Orphaned by server restart - no active process",
+        )
+
+        assert len(cancelled) == 1
+        cancelled_run = cancelled[0]
+        assert cancelled_run.id == run.id
+        assert cancelled_run.status == "cancelled"
+        assert cancelled_run.finished_at is not None
+        assert cancelled_run.error == "Orphaned by server restart - no active process"
+        assert cancelled_run.landscape_run_id == "lscp-orphan-1"
+
+    @pytest.mark.asyncio
     async def test_cancels_pending_runs_without_age_filter(self, service) -> None:
         """Pending runs (never transitioned to running) are also cancelled."""
         session = await service.create_session("alice", "Pipeline", "local")

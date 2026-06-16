@@ -32,11 +32,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
+from elspeth.contracts import RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.transforms.llm.model_catalog import (
     prime_openrouter_catalog_from_live,
@@ -75,7 +78,7 @@ from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, RunRecord, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -156,6 +159,35 @@ def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
         ) from exc
 
 
+def _finalize_orphaned_landscape_runs(landscape_url: str, cancelled_runs: list[RunRecord]) -> int:
+    """Mark Landscape rows interrupted for session runs cancelled as orphans."""
+    landscape_run_ids: list[str] = []
+    seen: set[str] = set()
+    for run in cancelled_runs:
+        if run.landscape_run_id is None or run.landscape_run_id in seen:
+            continue
+        seen.add(run.landscape_run_id)
+        landscape_run_ids.append(run.landscape_run_id)
+
+    if not landscape_run_ids:
+        return 0
+
+    finalized = 0
+    with LandscapeDB.from_url(landscape_url) as landscape_db:
+        lifecycle = RecorderFactory(landscape_db).run_lifecycle
+        for landscape_run_id in landscape_run_ids:
+            landscape_run = lifecycle.get_run(landscape_run_id)
+            if landscape_run is None:
+                raise AuditIntegrityError(
+                    f"Orphan cleanup cancelled a session run with landscape_run_id={landscape_run_id!r}, "
+                    "but no matching Landscape run row exists."
+                )
+            if landscape_run.status == RunStatus.RUNNING:
+                lifecycle.complete_run(landscape_run_id, RunStatus.INTERRUPTED)
+                finalized += 1
+    return finalized
+
+
 async def _periodic_orphan_cleanup(
     session_service: SessionServiceImpl,
     execution_service: ExecutionServiceImpl,
@@ -163,6 +195,7 @@ async def _periodic_orphan_cleanup(
     *,
     interval_seconds: int,
     max_age_seconds: int,
+    landscape_url: str | None = None,
 ) -> None:
     """Background task that periodically cancels orphaned runs.
 
@@ -183,11 +216,20 @@ async def _periodic_orphan_cleanup(
         await asyncio.sleep(interval_seconds)
         try:
             live_run_ids = execution_service.get_live_run_ids()
-            cancelled = await session_service.cancel_all_orphaned_runs(
-                max_age_seconds=max_age_seconds,
-                exclude_run_ids=live_run_ids,
-                reason="Orphaned by periodic cleanup — no active executor thread",
-            )
+            if landscape_url is None:
+                cancelled = await session_service.cancel_all_orphaned_runs(
+                    max_age_seconds=max_age_seconds,
+                    exclude_run_ids=live_run_ids,
+                    reason="Orphaned by periodic cleanup — no active executor thread",
+                )
+            else:
+                cancelled_runs = await session_service.cancel_all_orphaned_run_records(
+                    max_age_seconds=max_age_seconds,
+                    exclude_run_ids=live_run_ids,
+                    reason="Orphaned by periodic cleanup — no active executor thread",
+                )
+                _finalize_orphaned_landscape_runs(landscape_url, cancelled_runs)
+                cancelled = len(cancelled_runs)
             if cancelled:
                 telemetry.orphaned_runs_cancelled_total.add(
                     cancelled,
@@ -246,9 +288,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # No age filter — cancel ALL pending/running runs immediately.
     settings: WebSettings = app.state.settings
     session_service = app.state.session_service
-    cancelled = await session_service.cancel_all_orphaned_runs(
+    cancelled_runs = await session_service.cancel_all_orphaned_run_records(
         reason="Orphaned by server restart — no active process",
     )
+    _finalize_orphaned_landscape_runs(settings.get_landscape_url(), cancelled_runs)
+    cancelled = len(cancelled_runs)
     if cancelled:
         app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
             cancelled,
@@ -472,6 +516,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.sessions_telemetry,
             interval_seconds=settings.orphan_run_check_interval_seconds,
             max_age_seconds=settings.orphan_run_max_age_seconds,
+            landscape_url=settings.get_landscape_url(),
         )
     )
 

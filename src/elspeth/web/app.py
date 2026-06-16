@@ -927,7 +927,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     def _request_id(request: Request) -> str:
         """Read the correlation id set by RequestIdMiddleware.
 
-        ``RequestIdMiddleware.dispatch`` sets ``request.state.request_id``
+        ``RequestIdMiddleware`` sets ``request.state.request_id``
         before delegating to ``call_next``, so every request that reaches
         a route handler, dependency, or app-level exception handler has the
         id assigned. The exception handlers that call this helper

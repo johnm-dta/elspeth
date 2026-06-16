@@ -4,7 +4,7 @@
 Deterministic failure injection against REAL multi-source pipelines — real
 Orchestrator.run, real SQLite LandscapeDB, real durable token scheduler —
 asserting only through durable, observable surfaces (token_work_items,
-scheduler_events, node_states, token_outcomes, rows, run_sources, runs,
+scheduler_events, node_states, terminal-outcome journal, rows, run_sources, runs,
 terminal RunStatus). Nothing here reads checkpoint-blob internals, so these
 tests survive the F1 durability unification that deletes the checkpoint-blob
 layer.

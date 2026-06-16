@@ -854,8 +854,8 @@ class JoinRefusedError(Exception):
 # The follower departed cleanly but the run is NOT complete — the operator
 # must use `elspeth resume` to continue.  Distinct from RunWorkerEvictedError
 # (our row left 'active') and JoinRefusedError (admission-time refusal).
-# TIER-2: Operator-actionable mid-drain signal — the seat died while we were
-# draining; the run is intact but leaderless; the operator must resume.
+# Seat death during drain is operator-actionable; the run is intact but leaderless.
+# TIER-2: Mid-drain follower abandon signal; the operator must resume the run.
 class FollowerSeatDeadError(Exception):
     """Raised when the leader seat expires while the follower is draining.
 

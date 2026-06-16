@@ -30,7 +30,7 @@ coverage for the three gaps that ticket names:
 
 Durability-unification (F1) survival contract: every ASSERTION below reads
 PUBLIC, durable surfaces only — the ``token_work_items`` journal columns
-(status/attempt/lease_owner), ``scheduler_events``, ``token_outcomes``,
+(status/attempt/lease_owner), ``scheduler_events``, terminal-outcome journal,
 ``node_states``, ``runs``, ``run_coordination``/``run_workers``/
 ``run_coordination_events``, terminal RunStatus, and the public
 ``Orchestrator.resume()`` API. Nothing asserts on checkpoint internals

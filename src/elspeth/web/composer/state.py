@@ -1673,18 +1673,26 @@ def _check_schema_contracts(
             continue
         assert producer_guaranteed is not None  # No error => guarantees resolved.
 
-        if consumer_required:
-            missing_fields = consumer_required - producer_guaranteed
+        producer_is_typed_source = _producer_is_typed_source(actual_producer)
+        contract_required = consumer_required
+        if producer_is_typed_source:
+            contract_required = consumer_required | consumer_effective_required
+
+        if contract_required:
+            contract_missing_fields = contract_required - producer_guaranteed
             edge_contracts.append(
                 EdgeContract(
                     from_id=actual_producer.producer_id,
                     to_id=node.id,
                     producer_guarantees=tuple(sorted(producer_guaranteed)),
-                    consumer_requires=tuple(sorted(consumer_required)),
-                    missing_fields=tuple(sorted(missing_fields)),
-                    satisfied=not missing_fields,
+                    consumer_requires=tuple(sorted(contract_required)),
+                    missing_fields=tuple(sorted(contract_missing_fields)),
+                    satisfied=not contract_missing_fields,
                 )
             )
+
+        if consumer_required:
+            missing_fields = consumer_required - producer_guaranteed
             if missing_fields:
                 error_component = (
                     _producer_owner(actual_producer) if is_source_producer_id(actual_producer.producer_id) else f"node:{node.id}"
@@ -1709,7 +1717,7 @@ def _check_schema_contracts(
         # producers runtime does NOT bypass (graph.py:1392-1403). Report only
         # the increment beyond the explicit set already handled above, so a
         # field is never double-reported.
-        if _producer_is_typed_source(actual_producer):
+        if producer_is_typed_source:
             implicit_missing = consumer_effective_required - consumer_required - producer_guaranteed
             if implicit_missing:
                 errors.append(

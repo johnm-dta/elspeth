@@ -7151,6 +7151,89 @@ class TestSetPipeline:
         assert result.validation.is_valid is False
         assert len(result.validation.errors) > 0
 
+    def test_set_pipeline_surfaces_fixed_schema_edge_contract_mismatch(self) -> None:
+        """LLM fixed-schema requirements must reject source rows before runtime."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="llm",
+                description="LLM transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "rate_in",
+                "options": {
+                    "path": "/data/colors.txt",
+                    "column": "color",
+                    "schema": {"mode": "fixed", "fields": ["color: str"]},
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "transform_rate_teal_pairing",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "rate_in",
+                    "on_success": "results",
+                    "on_error": "discard",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "prompt_template": "Rate {{ row.color }} for teal pairing.",
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["color: str", "teal_pairing_rating: str"],
+                        },
+                    },
+                }
+            ],
+            "edges": [
+                {
+                    "id": "e1",
+                    "from_node": "source",
+                    "to_node": "transform_rate_teal_pairing",
+                    "edge_type": "on_success",
+                    "label": None,
+                },
+                {
+                    "id": "e2",
+                    "from_node": "transform_rate_teal_pairing",
+                    "to_node": "results",
+                    "edge_type": "on_success",
+                    "label": None,
+                },
+            ],
+            "outputs": [
+                {
+                    "sink_name": "results",
+                    "plugin": "csv",
+                    "options": {"path": "/data/results.csv", "schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.validation is not None
+        assert result.validation.is_valid is False
+        assert any("teal_pairing_rating" in error.message for error in result.validation.errors)
+        contract = next(ec for ec in result.validation.edge_contracts if ec.to_id == "transform_rate_teal_pairing")
+        assert contract.from_id == "source"
+        assert contract.consumer_requires == ("color", "teal_pairing_rating")
+        assert contract.producer_guarantees == ("color",)
+        assert contract.missing_fields == ("teal_pairing_rating",)
+        assert contract.satisfied is False
+
     def test_set_pipeline_unknown_node_type_invalidates_state(self) -> None:
         """set_pipeline keeps enum parsing recoverable but Stage 1 must reject unknown node types."""
         state = _empty_state()

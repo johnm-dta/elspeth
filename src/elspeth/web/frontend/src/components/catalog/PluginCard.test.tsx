@@ -98,6 +98,27 @@ describe("PluginCard — collapsed header", () => {
 });
 
 describe("PluginCard — flat single-model schema", () => {
+  it("links the schema disclosure to the expanded schema panel", async () => {
+    const user = userEvent.setup();
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "csv loader", plugin_type: "source" })}
+        schema={FLAT_SCHEMA}
+        onExpand={vi.fn()}
+      />,
+    );
+
+    const disclosure = screen.getByRole("button", { name: /schema for csv loader/i });
+    expect(disclosure).toHaveAttribute(
+      "aria-controls",
+      "plugin-card-schema-panel-source-csv-loader",
+    );
+
+    await user.click(disclosure);
+    const panel = screen.getByText("path").closest(".plugin-card-expanded");
+    expect(panel).toHaveAttribute("id", "plugin-card-schema-panel-source-csv-loader");
+  });
+
   it("renders each property and marks the required ones", async () => {
     const user = userEvent.setup();
     render(
@@ -370,6 +391,25 @@ describe("PluginCard — Phase 7B reshape", () => {
     await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
     expect(screen.getByText(/use when/i)).toBeInTheDocument();
     expect(screen.getByText(/when you have a csv file/i)).toBeInTheDocument();
+  });
+
+  it("links the details disclosure to the details panel", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "csv loader", usage_when_to_use: "When you have a CSV file already." })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    const detailsButton = screen.getByRole("button", { name: /reference details for csv loader/i });
+    expect(detailsButton).toHaveAttribute(
+      "aria-controls",
+      "plugin-card-details-panel-transform-csv-loader",
+    );
+
+    await userEvent.click(detailsButton);
+    const panel = screen.getByText(/when you have a csv file/i).closest(".plugin-card-details");
+    expect(panel).toHaveAttribute("id", "plugin-card-details-panel-transform-csv-loader");
   });
 
   it("renders the 'Avoid when' prose in the details disclosure", async () => {

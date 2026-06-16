@@ -301,6 +301,20 @@ class TestBuildSystemPrompt:
         result = build_system_prompt("")
         assert result == SYSTEM_PROMPT
 
+    def test_core_skill_batches_complex_new_pipeline_builds(self) -> None:
+        """Complex new builds must steer the model away from granular mutation loops."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Complex New Pipeline Batching" in result
+        assert "three or more components" in flattened
+        assert "two or more workflow patterns" in flattened
+        assert "submit one `set_pipeline`" in flattened
+        assert "Do not build complex new pipelines tool-by-tool" in flattened
+        assert "`classify -> enrich -> route`" in flattened
+        assert "`classify -> aggregate -> cross-tab`" in flattened
+        assert "`split/expand -> gate-route per branch`" in flattened
+
     def test_core_skill_recommends_prompt_shield_for_internet_content_to_llm(self) -> None:
         """The general skill treats internet-controlled text entering an LLM as a cyber risk."""
         result = build_system_prompt(None)

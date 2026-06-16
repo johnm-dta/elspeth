@@ -76,6 +76,32 @@ For ordinary build/edit turns, the action path is:
    `request_interpretation_review(kind="llm_prompt_template")` is rejected.**
 7. End only in one of the valid terminal states below.
 
+### Complex New Pipeline Batching
+
+For a new pipeline build, treat the first topology mutation as a batching
+decision. If the requested build needs three or more components, or combines two
+or more workflow patterns, finish live inventory and schema loading first, then
+submit one `set_pipeline` carrying the source, nodes, edges, outputs, metadata,
+and required interpretation requirements together.
+
+Do not build complex new pipelines tool-by-tool with `set_source`,
+`upsert_node`, `upsert_edge`, `set_output`, or `patch_*` calls. Use those
+smaller mutation tools only for narrow edits to an existing draft, or after a
+tool diagnostic identifies a focused repair to an already-submitted full
+topology. A malformed or rejected full build is repaired by resubmitting the
+same complete requested topology with corrected arguments, not by switching into
+a one-component-at-a-time construction loop.
+
+Canonical multi-step bundles to build in one `set_pipeline` after schemas are
+known:
+
+- `classify -> enrich -> route`: source, LLM classification/enrichment node(s),
+  gate or branch nodes, and all sinks/outputs.
+- `classify -> aggregate -> cross-tab`: source, classification node, aggregation
+  or grouping node, cross-tab/table output, and sink.
+- `split/expand -> gate-route per branch`: source, splitter/expander, branch
+  gates, one route per requested branch, and every requested sink/output.
+
 ## Requested Workflow Integrity
 
 Validation repair must preserve the user's requested workflow shape. Do not

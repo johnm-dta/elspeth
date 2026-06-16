@@ -5,6 +5,7 @@
   "audit_evidence.tier_1_decoration": [],
   "composer.catch_order": [],
   "composer.exception_channel": [],
+  "contract_invariants.validation_theatre": [],
   "immutability.freeze_guards": [],
   "immutability.frozen_annotations": [],
   "manifest.contract_manifest": [],

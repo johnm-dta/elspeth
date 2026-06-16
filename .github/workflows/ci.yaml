@@ -136,6 +136,13 @@ jobs:
             --rules 'composer/*' \
             --root src/elspeth
 
+      - name: Run contract-invariants elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules 'contract_invariants/*' \
+            --root src/elspeth
+
       - name: Run contract-manifest elspeth-lints rule
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
@@ -259,6 +266,20 @@ jobs:
             exit "$status"
           fi
 
+      - name: Emit elspeth-lints contract-invariants SARIF artifact
+        if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules 'contract_invariants/*' \
+            --root src/elspeth \
+            --format sarif > elspeth-lints-contract-invariants.sarif
+          status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+
       - name: Emit elspeth-lints contract-manifest SARIF artifact
         if: always()
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -316,6 +337,7 @@ jobs:
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-plugin-contract.sarif
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-audit-evidence.sarif
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-composer.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-contract-invariants.sarif
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-contract-manifest.sarif
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-manifest-inventory.sarif
             ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-trust-tier.sarif

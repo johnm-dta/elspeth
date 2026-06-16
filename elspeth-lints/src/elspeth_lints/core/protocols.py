@@ -28,6 +28,7 @@ class Category(StrEnum):
     IMMUTABILITY = "immutability"
     AUDIT_EVIDENCE = "audit_evidence"
     PLUGIN_CONTRACT = "plugin_contract"
+    CONTRACT_INVARIANTS = "contract_invariants"
     COMPOSER = "composer"
     MANIFEST = "manifest"
 

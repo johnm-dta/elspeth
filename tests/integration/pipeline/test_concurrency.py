@@ -86,7 +86,7 @@ class TestConcurrencyConfigInTransformExecutor:
         factory = make_factory(landscape_db)
         span_factory = SpanFactory()
 
-        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1, max_workers=8)
+        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1, data_flow=factory.data_flow, max_workers=8)
         assert executor._max_workers == 8
 
     def test_executor_without_max_workers(self, landscape_db: LandscapeDB) -> None:
@@ -94,7 +94,7 @@ class TestConcurrencyConfigInTransformExecutor:
         factory = make_factory(landscape_db)
         span_factory = SpanFactory()
 
-        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1)
+        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1, data_flow=factory.data_flow)
         assert executor._max_workers is None
 
 

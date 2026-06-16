@@ -144,7 +144,7 @@ class CoalesceExecutor:
     - Records audit trail via ExecutionRepository
 
     Example:
-        executor = CoalesceExecutor(execution, span_factory, token_manager, run_id, step_resolver)
+        executor = CoalesceExecutor(execution, span_factory, token_manager, run_id, step_resolver, data_flow=data_flow)
 
         # Configure coalesce point
         executor.register_coalesce(settings, node_id)
@@ -164,9 +164,9 @@ class CoalesceExecutor:
         token_manager: "TokenManager",
         run_id: str,
         step_resolver: StepResolver,
+        data_flow: DataFlowRepository,
         clock: "Clock | None" = None,
         max_completed_keys: int = 10000,
-        data_flow: DataFlowRepository | None = None,
     ) -> None:
         """Initialize executor.
 
@@ -178,11 +178,10 @@ class CoalesceExecutor:
             step_resolver: Resolves NodeID to 1-indexed audit step position.
                            Injected at construction to eliminate step_in_pipeline
                            threading through public method signatures.
+            data_flow: Data flow repository for token outcome recording.
             clock: Optional clock for time access. Defaults to system clock.
                    Inject MockClock for deterministic testing.
             max_completed_keys: Maximum late-arrival completion keys retained in memory.
-            data_flow: Data flow repository for token outcome recording.
-                       Optional for backwards compatibility with tests.
         """
         if max_completed_keys <= 0:
             raise OrchestrationInvariantError(f"max_completed_keys must be > 0, got {max_completed_keys}")

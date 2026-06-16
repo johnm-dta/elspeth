@@ -52,6 +52,15 @@ function extractLightThemeToken(tokenName: string): string {
   return extractTokenFromBlock(tokenName, blockMatch[1], "light theme");
 }
 
+function extractLightThemeRawToken(tokenName: string): string {
+  const blockMatch = /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/.exec(appCss);
+  if (!blockMatch) {
+    throw new Error("Could not find light theme token block in styles/tokens.css");
+  }
+
+  return extractRawTokenFromBlock(tokenName, blockMatch[1], "light theme");
+}
+
 function extractTokenFromBlock(tokenName: string, block: string, blockName: string): string {
   const tokenMatch = new RegExp(`${tokenName}:\\s*(#[0-9a-fA-F]{6})\\s*;`).exec(block);
   if (!tokenMatch) {
@@ -59,6 +68,29 @@ function extractTokenFromBlock(tokenName: string, block: string, blockName: stri
   }
 
   return tokenMatch[1];
+}
+
+function extractRawTokenFromBlock(tokenName: string, block: string, blockName: string): string {
+  const tokenMatch = new RegExp(`${tokenName}:\\s*([^;]+);`).exec(block);
+  if (!tokenMatch) {
+    throw new Error(`Could not find ${tokenName} in ${blockName} token block`);
+  }
+
+  return tokenMatch[1].trim();
+}
+
+function parseRgba(value: string): { red: number; green: number; blue: number; alpha: number } {
+  const match = /^rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\)$/.exec(value);
+  if (!match) {
+    throw new Error(`Expected rgba() colour, got ${value}`);
+  }
+
+  return {
+    red: Number.parseInt(match[1], 10),
+    green: Number.parseInt(match[2], 10),
+    blue: Number.parseInt(match[3], 10),
+    alpha: Number.parseFloat(match[4]),
+  };
 }
 
 function extractCssRule(selector: string): string {
@@ -258,6 +290,14 @@ describe("base interaction tokens", () => {
     expect(dangerRule).toContain("background-color: var(--color-btn-danger-bg);");
     expect(dangerRule).toContain("color: var(--color-text-inverse);");
     expect(dangerRule).not.toContain("rgba(");
+  });
+
+  it("keeps light theme hover surfaces visibly darker than resting surfaces", () => {
+    const hover = parseRgba(extractLightThemeRawToken("--color-surface-hover"));
+
+    expect(hover).toMatchObject({ red: 15, green: 45, blue: 53 });
+    expect(hover.alpha).toBeGreaterThanOrEqual(0.06);
+    expect(hover.alpha).toBeLessThanOrEqual(0.07);
   });
 });
 

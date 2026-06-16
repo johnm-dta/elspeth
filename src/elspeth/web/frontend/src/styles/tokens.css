@@ -224,7 +224,7 @@
   --color-bg:                #f4f8f9;
   --color-surface:           #ffffff;
   --color-surface-elevated:  #ffffff;
-  --color-surface-hover:     rgba(0, 45, 53, 0.04);
+  --color-surface-hover:     rgba(15, 45, 53, 0.06);
 
   /* Navigation family — pale navy chrome */
   --color-surface-nav:        #e8edf3;

@@ -58,6 +58,23 @@ class TestAzureSearchProviderConfig:
                 index="test",
             )
 
+    def test_managed_identity_rejects_non_azure_search_hostname(self) -> None:
+        with pytest.raises(ValueError, match=r"managed identity.*search\.windows\.net"):
+            AzureSearchProviderConfig(
+                endpoint="https://attacker.example.com",
+                index="test",
+                use_managed_identity=True,
+            )
+
+    def test_api_key_auth_preserves_existing_public_hostname_support(self) -> None:
+        config = AzureSearchProviderConfig(
+            endpoint="https://search-proxy.example.com",
+            index="test",
+            api_key="key",
+        )
+
+        assert config.endpoint == "https://search-proxy.example.com"
+
     def test_semantic_requires_config(self):
         with pytest.raises(ValueError, match="semantic_config"):
             AzureSearchProviderConfig(

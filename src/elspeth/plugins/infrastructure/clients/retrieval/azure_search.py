@@ -29,6 +29,14 @@ if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 
+_AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX = ".search.windows.net"
+
+
+def _is_azure_search_managed_identity_hostname(hostname: str) -> bool:
+    """Return True for Azure AI Search hostnames eligible for managed identity."""
+    return hostname.lower().endswith(_AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX)
+
+
 class AzureSearchProviderConfig(BaseModel):
     """Configuration for Azure AI Search provider."""
 
@@ -97,6 +105,14 @@ class AzureSearchProviderConfig(BaseModel):
             raise ValueError("Specify either api_key or use_managed_identity=true")
         if self.api_key and self.use_managed_identity:
             raise ValueError("Specify only one of api_key or use_managed_identity")
+        if self.use_managed_identity:
+            hostname = urllib.parse.urlparse(self.endpoint).hostname
+            if hostname is None or not _is_azure_search_managed_identity_hostname(hostname):
+                raise ValueError(
+                    "managed identity Azure Search endpoints must use a hostname ending in "
+                    f"{_AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX!r}; use api_key auth or add an operator-controlled "
+                    "endpoint allowlist before enabling managed identity for other hosts"
+                )
         return self
 
     @model_validator(mode="after")

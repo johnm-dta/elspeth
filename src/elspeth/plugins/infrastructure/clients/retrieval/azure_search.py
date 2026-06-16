@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 
 _AZURE_SEARCH_MANAGED_IDENTITY_SUFFIX = ".search.windows.net"
+_AZURE_SEARCH_TOKEN_SCOPE = "https://search.azure.com/.default"
 
 
 def _is_azure_search_managed_identity_hostname(hostname: str) -> bool:
@@ -180,6 +181,17 @@ class AzureSearchProvider:
             headers=headers,
         )
 
+    def _auth_headers(self) -> dict[str, str]:
+        if self._config.api_key:
+            return {"api-key": self._config.api_key}
+        if self._config.use_managed_identity:
+            from azure.identity import DefaultAzureCredential
+
+            credential = DefaultAzureCredential()
+            token = credential.get_token(_AZURE_SEARCH_TOKEN_SCOPE)
+            return {"Authorization": f"Bearer {token.token}"}
+        return {}
+
     def search(
         self,
         query: str,
@@ -228,6 +240,7 @@ class AzureSearchProvider:
             response, _final_hostname_url, _call = self._http_client.request_ssrf_safe(
                 "POST",
                 safe_request,
+                headers=self._auth_headers(),
                 json=body,
             )
 
@@ -445,15 +458,7 @@ class AzureSearchProvider:
                     message=f"Index '{index_name}' endpoint blocked by SSRF validation: {exc}",
                 )
 
-            headers: dict[str, str] = {}
-            if self._config.api_key:
-                headers["api-key"] = self._config.api_key
-            elif self._config.use_managed_identity:
-                from azure.identity import DefaultAzureCredential
-
-                credential = DefaultAzureCredential()
-                token = credential.get_token("https://search.azure.com/.default")
-                headers["Authorization"] = f"Bearer {token.token}"
+            headers = self._auth_headers()
 
             response = self._readiness_get(safe_request, headers=headers, timeout=10.0)
 

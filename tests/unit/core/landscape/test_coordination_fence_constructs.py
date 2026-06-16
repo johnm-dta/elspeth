@@ -229,9 +229,7 @@ class TestActiveWorkerFenceClause:
 
         # The READY row is untouched (zero mutation on fence failure).
         with db.engine.connect() as conn:
-            status = conn.execute(
-                select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == RUN_1)
-            ).scalar_one()
+            status = conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == RUN_1)).scalar_one()
         assert status == TokenWorkStatus.READY.value
 
         # enqueue_ready: evicted worker is refused (worker_id kwarg carries the fence).

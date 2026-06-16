@@ -507,10 +507,10 @@ def test_live_registered_owner_expired_lease_is_revived_not_reaped() -> None:
 @pytest.mark.parametrize(
     ("owner_status", "heartbeat_fresh"),
     [
-        ("absent", True),      # arm (a): no run_workers row at all
-        ("evicted", True),     # arm (b): status='evicted'
-        ("departed", True),    # arm (b): status='departed'
-        ("active", False),     # arm (c): status='active' + stale heartbeat
+        ("absent", True),  # arm (a): no run_workers row at all
+        ("evicted", True),  # arm (b): status='evicted'
+        ("departed", True),  # arm (b): status='departed'
+        ("active", False),  # arm (c): status='active' + stale heartbeat
     ],
     ids=["absent-row", "evicted", "departed", "active-stale-heartbeat"],
 )

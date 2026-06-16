@@ -51,16 +51,18 @@ const emptySession = {
 const compositionState = {
   id: "state-1",
   version: 1,
-  source: {
-    plugin: "inline_blob",
-    options: {
-      rows: [
-        { url: "dta.gov.au" },
-        { url: "data.gov.au" },
-        { url: "ato.gov.au" },
-        { url: "finance.gov.au" },
-        { url: "australia.gov.au" },
-      ],
+  sources: {
+    source: {
+      plugin: "inline_blob",
+      options: {
+        rows: [
+          { url: "dta.gov.au" },
+          { url: "data.gov.au" },
+          { url: "ato.gov.au" },
+          { url: "finance.gov.au" },
+          { url: "australia.gov.au" },
+        ],
+      },
     },
   },
   nodes: [

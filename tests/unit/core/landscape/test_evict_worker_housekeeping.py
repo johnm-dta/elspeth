@@ -145,20 +145,22 @@ def _seed_follower(
 
 def _worker_status(engine: Tier1Engine, worker_id: str) -> str | None:
     with engine.connect() as conn:
-        row = conn.execute(
-            select(run_workers_table.c.status).where(run_workers_table.c.worker_id == worker_id)
-        ).one_or_none()
+        row = conn.execute(select(run_workers_table.c.status).where(run_workers_table.c.worker_id == worker_id)).one_or_none()
     return None if row is None else str(row[0])
 
 
 def _coordination_events(engine: Tier1Engine, event_type: str) -> list[dict[str, object]]:
     with engine.connect() as conn:
-        rows = conn.execute(
-            select(run_coordination_events_table)
-            .where(run_coordination_events_table.c.run_id == RUN_ID)
-            .where(run_coordination_events_table.c.event_type == event_type)
-            .order_by(run_coordination_events_table.c.seq)
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                select(run_coordination_events_table)
+                .where(run_coordination_events_table.c.run_id == RUN_ID)
+                .where(run_coordination_events_table.c.event_type == event_type)
+                .order_by(run_coordination_events_table.c.seq)
+            )
+            .mappings()
+            .all()
+        )
     return [dict(r) for r in rows]
 
 
@@ -175,22 +177,26 @@ def _seed_leased_item(
 
     row_id = f"row-{token_id}"
     with engine.begin() as conn:
-        conn.execute(insert(rows_table).values(
-            row_id=row_id,
-            run_id=RUN_ID,
-            source_node_id="source-a",
-            row_index=0,
-            source_row_index=0,
-            ingest_sequence=0,
-            source_data_hash=f"hash-{token_id}",
-            created_at=now,
-        ))
-        conn.execute(insert(tokens_table).values(
-            token_id=token_id,
-            row_id=row_id,
-            run_id=RUN_ID,
-            created_at=now,
-        ))
+        conn.execute(
+            insert(rows_table).values(
+                row_id=row_id,
+                run_id=RUN_ID,
+                source_node_id="source-a",
+                row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
+                source_data_hash=f"hash-{token_id}",
+                created_at=now,
+            )
+        )
+        conn.execute(
+            insert(tokens_table).values(
+                token_id=token_id,
+                row_id=row_id,
+                run_id=RUN_ID,
+                created_at=now,
+            )
+        )
     repo = TokenSchedulerRepository(engine)
     payload = TokenSchedulerRepository.serialize_row_payload(
         PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
@@ -242,12 +248,18 @@ class TestEvictWorkerHousekeepingIndividualNotBulk:
 
         # Evict each individually.
         evicted_a = coord.evict_worker(
-            token=token, target_worker_id=follower_a, now=sweep_at,
-            grace_seconds=GRACE, window_seconds=WINDOW,
+            token=token,
+            target_worker_id=follower_a,
+            now=sweep_at,
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
         )
         evicted_b = coord.evict_worker(
-            token=token, target_worker_id=follower_b, now=sweep_at,
-            grace_seconds=GRACE, window_seconds=WINDOW,
+            token=token,
+            target_worker_id=follower_b,
+            now=sweep_at,
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
         )
         assert evicted_a is True
         assert evicted_b is True
@@ -275,10 +287,8 @@ class TestEvictWorkerHousekeepingIndividualNotBulk:
         # One live follower, one dead follower.
         live_follower = "follower-live"
         dead_follower = "follower-dead"
-        _seed_follower(engine, worker_id=live_follower, now=NOW,
-                       heartbeat_expires_at=NOW + timedelta(hours=1))
-        _seed_follower(engine, worker_id=dead_follower, now=NOW,
-                       heartbeat_expires_at=NOW - timedelta(seconds=GRACE + 10))
+        _seed_follower(engine, worker_id=live_follower, now=NOW, heartbeat_expires_at=NOW + timedelta(hours=1))
+        _seed_follower(engine, worker_id=dead_follower, now=NOW, heartbeat_expires_at=NOW - timedelta(seconds=GRACE + 10))
 
         sweep_at = NOW + timedelta(seconds=200)
         dead = coord.dead_non_leader_workers(
@@ -302,13 +312,15 @@ class TestEvictWorkerHousekeepingIndividualNotBulk:
 
         # Follower has a FRESH heartbeat — the grace CAS will miss.
         fresh_follower = "follower-fresh"
-        _seed_follower(engine, worker_id=fresh_follower, now=NOW,
-                       heartbeat_expires_at=NOW + timedelta(hours=1))
+        _seed_follower(engine, worker_id=fresh_follower, now=NOW, heartbeat_expires_at=NOW + timedelta(hours=1))
 
         sweep_at = NOW + timedelta(seconds=200)
         result = coord.evict_worker(
-            token=token, target_worker_id=fresh_follower, now=sweep_at,
-            grace_seconds=GRACE, window_seconds=WINDOW,
+            token=token,
+            target_worker_id=fresh_follower,
+            now=sweep_at,
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
         )
         assert result is False
         assert _worker_status(engine, fresh_follower) == "active"
@@ -333,8 +345,11 @@ class TestEvictWorkerHousekeepingIndividualNotBulk:
 
         sweep_at = NOW + timedelta(seconds=200)
         result = coord.evict_worker(
-            token=token, target_worker_id=target, now=sweep_at,
-            grace_seconds=GRACE, window_seconds=WINDOW,
+            token=token,
+            target_worker_id=target,
+            now=sweep_at,
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
         )
         assert result is False, "evict_worker must refuse when target holds an unexpired lease"
         assert _worker_status(engine, target) == "active"
@@ -381,8 +396,11 @@ class TestEvictionBeforeReapOrdering:
 
         # Step 1: evict before reap.
         evicted = coord.evict_worker(
-            token=token, target_worker_id=dead_member, now=sweep_at,
-            grace_seconds=GRACE, window_seconds=WINDOW,
+            token=token,
+            target_worker_id=dead_member,
+            now=sweep_at,
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
         )
         assert evicted is True
         assert _worker_status(engine, dead_member) == "evicted"

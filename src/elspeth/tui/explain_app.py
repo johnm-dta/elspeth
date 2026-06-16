@@ -55,11 +55,18 @@ class ExplainApp(App[None]):
         self,
         db: LandscapeDB | None = None,
         run_id: str | None = None,
+        *,
+        token_id: str | None = None,
+        row_id: str | None = None,
+        sink: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._db = db
         self._run_id = run_id
+        self._token_id = token_id
+        self._row_id = row_id
+        self._sink = sink
         self._screen: ExplainScreen | None = None
 
     def compose(self) -> ComposeResult:
@@ -68,7 +75,13 @@ class ExplainApp(App[None]):
 
         # Create ExplainScreen with database connection if available
         if self._db is not None and self._run_id is not None:
-            self._screen = ExplainScreen(db=self._db, run_id=self._run_id)
+            self._screen = ExplainScreen(
+                db=self._db,
+                run_id=self._run_id,
+                token_id=self._token_id,
+                row_id=self._row_id,
+                sink=self._sink,
+            )
 
             # Handle state explicitly - no defensive fallback
             screen_state = self._screen.state
@@ -111,7 +124,13 @@ class ExplainApp(App[None]):
             # Clear and reload
             self._screen.clear()
             if self._db and self._run_id:
-                self._screen.load(self._db, self._run_id)
+                self._screen.load(
+                    self._db,
+                    self._run_id,
+                    token_id=self._token_id,
+                    row_id=self._row_id,
+                    sink=self._sink,
+                )
         self.notify("Refreshed")
 
     def action_help(self) -> None:

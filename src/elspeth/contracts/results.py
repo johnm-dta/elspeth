@@ -149,6 +149,8 @@ class TransformResult:
 
     def __post_init__(self) -> None:
         """Validate invariants - success and error results MUST satisfy their contracts."""
+        if self.status not in ("success", "error"):
+            raise ValueError("TransformResult status must be 'success' or 'error'.")
         if self.status == "success" and self.success_reason is None:
             raise ValueError(
                 "TransformResult with status='success' MUST provide success_reason. "

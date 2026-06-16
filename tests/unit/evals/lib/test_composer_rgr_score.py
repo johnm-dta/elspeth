@@ -151,7 +151,7 @@ class TestBaselineAmberSignals:
             state=_state_valid(),
         )
         assert result["verdict"] == "AMBER"
-        assert any("expected node combo" in r for r in result["amber_reasons"])
+        assert any("expected workflow combo" in r for r in result["amber_reasons"])
 
     def test_node_kind_group_does_not_match_substring_inside_plugin(self) -> None:
         scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [["gate"]]})
@@ -162,7 +162,17 @@ class TestBaselineAmberSignals:
         )
 
         assert result["verdict"] == "AMBER"
-        assert any("expected node combo" in r for r in result["amber_reasons"])
+        assert any("expected workflow combo" in r for r in result["amber_reasons"])
+
+    def test_node_kind_group_matches_source_plugin(self) -> None:
+        scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [["csv"]]})
+        result = score(
+            scenario=scenario,
+            messages=[_msg("assistant", "ok")],
+            state=_state_valid(nodes=[]),
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
 
     def test_amber_on_outputs_min(self) -> None:
         result = score(

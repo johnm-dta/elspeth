@@ -692,20 +692,22 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
             amber_reasons.append(inefficient_reason)
 
     if isinstance(state, dict):
-        node_plugins = _node_plugins(state)
+        workflow_plugins = _workflow_plugins_for_chain(state)
 
         kind_groups = green.get("must_have_node_kinds_substring_any_of") or []
         if kind_groups:
             ok = False
-            node_plugin_set = set(node_plugins)
+            workflow_plugin_set = set(workflow_plugins)
             for group in kind_groups:
                 required_tokens = [_normalise_plugin_token(needle) for needle in group]
                 required_tokens = [token for token in required_tokens if token]
-                if required_tokens and all(token in node_plugin_set for token in required_tokens):
+                if required_tokens and all(token in workflow_plugin_set for token in required_tokens):
                     ok = True
                     break
             if not ok:
-                amber_reasons.append(f"no expected node combo present (need one of {kind_groups}); found node plugins {node_plugins}")
+                amber_reasons.append(
+                    f"no expected workflow combo present (need one of {kind_groups}); found workflow plugins {workflow_plugins}"
+                )
 
         chain = green.get("must_have_node_chain_in_order")
         if isinstance(chain, list) and chain:

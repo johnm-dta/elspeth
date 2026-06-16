@@ -151,11 +151,19 @@ class NodeStateRecord(TypedDict, total=False):
     success_reason: dict[str, Any] | None
 
 
+class CollisionValueFingerprint(TypedDict):
+    """Non-reversible summary of a branch value involved in a coalesce collision."""
+
+    value_hash: str
+    value_type: str
+
+
 class CollisionFieldRecord(TypedDict):
     """Details of a single field collision during coalesce.
 
     When the coalesce node status is FAILED (e.g., union_collision_policy='fail'),
-    ``winner_branch`` and ``winner_value`` are None because no winner was selected.
+    ``winner_branch`` and ``winner_value_fingerprint`` are None because no winner
+    was selected.
     """
 
     field: str
@@ -164,11 +172,11 @@ class CollisionFieldRecord(TypedDict):
     winner_branch: str | None
     """Branch whose value was kept (last_wins or first_wins), or None if merge failed."""
 
-    winner_value: Any
-    """The value that won, or None if merge failed."""
+    winner_value_fingerprint: CollisionValueFingerprint | None
+    """Fingerprint of the value that won, or None if merge failed."""
 
-    competing_values: list[tuple[str, Any]]
-    """List of (branch_name, value) entries in merge order."""
+    competing_value_fingerprints: list[tuple[str, CollisionValueFingerprint]]
+    """List of (branch_name, value fingerprint) entries in merge order."""
 
 
 class CollisionRecord(TypedDict):

@@ -922,14 +922,14 @@ class CoalesceCollisionError(Exception):
 
     This is NOT an engine bug or audit-integrity failure — it's a config-elected
     enforcement. The pipeline author chose to fail-fast on union merge collisions
-    rather than allow last_wins/first_wins resolution. The full CoalesceMetadata
-    is captured BEFORE raising so the orchestrator's failure path can persist
-    the complete collision record (field_origins + collision_values) to the
-    audit trail.
+    rather than allow last_wins/first_wins resolution. The CoalesceMetadata is
+    captured BEFORE raising so the orchestrator's failure path can persist
+    collision provenance and value fingerprints to the audit trail without
+    storing the raw colliding branch values.
 
     Attributes:
         metadata: CoalesceMetadata with union_field_origins and
-                  union_field_collision_values populated.
+                  audit-safe union_field_collision_values populated.
     """
 
     def __init__(self, message: str, *, metadata: "CoalesceMetadata") -> None:

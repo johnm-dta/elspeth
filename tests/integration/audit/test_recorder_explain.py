@@ -30,6 +30,15 @@ from tests.integration.pipeline.orchestrator.test_branch_transforms import _buil
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
+def _assert_collision_value_fingerprint(entry: list[Any], branch: str, value_type: str) -> None:
+    assert entry[0] == branch
+    fingerprint = entry[1]
+    assert set(fingerprint) == {"value_hash", "value_type"}
+    assert fingerprint["value_type"] == value_type
+    assert isinstance(fingerprint["value_hash"], str)
+    assert len(fingerprint["value_hash"]) == 64
+
+
 class TestExplainGracefulDegradation:
     """Tests for explain_row() when payloads are unavailable."""
 
@@ -547,7 +556,7 @@ class TestUnionMergeFieldProvenance:
 
           * The underlying ``node_states.context_after_json`` column captures
             ``union_field_origins`` (every merged field -> its branch) and
-            ``union_field_collision_values`` (both (branch, value) entries for
+            ``union_field_collision_values`` (both branch/value fingerprints for
             the colliding 'score' field in declared order).
           * Calling ``explain(run_id, token_id=merged_token_id)`` and then
             drilling into each consumed parent token's ``LineageResult`` exposes
@@ -622,15 +631,16 @@ class TestUnionMergeFieldProvenance:
         # last_wins: 'score' collision resolves to path_b
         assert origins["score"] == "path_b"
 
-        # collision_values records every contributing branch in declared order
+        # collision_values records every contributing branch fingerprint in declared order
         assert "union_field_collision_values" in ctx
         collision_values = ctx["union_field_collision_values"]
         assert "score" in collision_values
-        # Each entry is a [branch, value] pair; declared order is path_a, path_b
+        # Each entry is a [branch, value fingerprint] pair; declared order is path_a, path_b
         score_entries = collision_values["score"]
         assert len(score_entries) == 2
-        assert score_entries[0][0] == "path_a" and score_entries[0][1] == 10
-        assert score_entries[1][0] == "path_b" and score_entries[1][1] == 99
+        _assert_collision_value_fingerprint(score_entries[0], "path_a", "int")
+        _assert_collision_value_fingerprint(score_entries[1], "path_b", "int")
+        assert score_entries[0][1]["value_hash"] != score_entries[1][1]["value_hash"]
 
         # Base merge metadata is still present
         assert ctx["policy"] == "require_all"
@@ -690,8 +700,8 @@ class TestUnionMergeFieldProvenance:
             "auditors cannot reach field provenance through the explain() API."
         )
 
-        # The explain()-surfaced provenance must match the raw audit trail
-        # (same serialization, same values). Spot-check the critical fields.
+        # The explain()-surfaced provenance must match the audit trail
+        # (same serialization, same value fingerprints). Spot-check the critical fields.
         assert provenance_via_explain["union_field_origins"]["field_a"] == "path_a"
         assert provenance_via_explain["union_field_origins"]["field_b"] == "path_b"
         assert provenance_via_explain["union_field_origins"]["score"] == "path_b"
@@ -864,14 +874,15 @@ class TestUnionMergeFieldProvenance:
         assert origins["field_a"] == "path_a"
         assert origins["field_b"] == "path_b"
 
-        # collision_values still records BOTH branches in declared order
+        # collision_values still records BOTH branch fingerprints in declared order
         assert "union_field_collision_values" in ctx
         collision_values = ctx["union_field_collision_values"]
         assert "score" in collision_values
         score_entries = collision_values["score"]
         assert len(score_entries) == 2
-        assert score_entries[0][0] == "path_a" and score_entries[0][1] == 10
-        assert score_entries[1][0] == "path_b" and score_entries[1][1] == 99
+        _assert_collision_value_fingerprint(score_entries[0], "path_a", "int")
+        _assert_collision_value_fingerprint(score_entries[1], "path_b", "int")
+        assert score_entries[0][1]["value_hash"] != score_entries[1][1]["value_hash"]
 
         # Base merge metadata
         assert ctx["policy"] == "require_all"

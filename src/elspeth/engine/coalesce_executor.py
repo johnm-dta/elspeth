@@ -970,7 +970,7 @@ class CoalesceExecutor:
 
         completed_state_ids: set[str] = set()
         # Captured so the failure cleanup handler can persist collision provenance
-        # (union_field_origins, union_field_collision_values) to the audit trail
+        # (union_field_origins, redacted union_field_collision_values) to the audit trail
         # when CoalesceCollisionError is raised under union_collision_policy=fail,
         # or when any other exception happens after metadata was built. Stays None
         # for early failures (e.g., contract merge) where no metadata exists yet.
@@ -1087,7 +1087,7 @@ class CoalesceExecutor:
                 raise RuntimeError(f"Unknown merge strategy: {settings.merge}")
 
             # Build audit metadata BEFORE token creation so union_collision_policy
-            # enforcement can attach the full collision record to failures, and so
+            # enforcement can attach collision provenance to failures, and so
             # first_wins resolution rewrites the merged data before the token is minted.
             # (Bug l4h fix retained: metadata is still finalized before node-state completion.)
             coalesce_metadata = CoalesceMetadata.for_merge(
@@ -1109,7 +1109,8 @@ class CoalesceExecutor:
 
             # Layer union-merge provenance onto metadata. field_origins is always
             # recorded; collisions/collision_values populate only when the union
-            # merge produced overlapping fields.
+            # merge produced overlapping fields. CoalesceMetadata redacts raw
+            # collision_values into value fingerprints before audit serialization.
             if settings.merge == "union":
                 coalesce_metadata = CoalesceMetadata.with_union_result(
                     coalesce_metadata,
@@ -1118,15 +1119,15 @@ class CoalesceExecutor:
                     collision_values=collision_values if collision_values else None,
                 )
                 # Capture enriched metadata for the failure handler so a subsequent
-                # CoalesceCollisionError (fail policy) can persist the full collision
-                # record to complete_node_state(context_after=...).
+                # CoalesceCollisionError (fail policy) can persist the redacted
+                # collision record to complete_node_state(context_after=...).
                 metadata_for_audit = coalesce_metadata
 
                 # Apply union_collision_policy — only meaningful when collisions occurred.
                 if union_collisions:
                     if settings.union_collision_policy == "fail":
                         # Metadata is captured; raise with it attached so the orchestrator's
-                        # failure path can persist the full collision record to the audit trail.
+                        # failure path can persist collision provenance to the audit trail.
                         raise CoalesceCollisionError(
                             f"union merge collisions in coalesce '{coalesce_name}': {sorted(union_collisions)}",
                             metadata=coalesce_metadata,
@@ -1139,8 +1140,9 @@ class CoalesceExecutor:
                         # before _resolve_first_wins computed the correct origins.)
                         if use_precomputed:
                             merged_contract = self._merge_with_original_names(precomputed, branch_contracts, first_wins_origins)
-                        # Rebuild metadata with the updated origins; collision_values
-                        # unchanged (still records every contributing branch in order).
+                        # Rebuild metadata with the updated origins; collision
+                        # fingerprints unchanged (still records every contributing
+                        # branch in order).
                         coalesce_metadata = replace(
                             coalesce_metadata,
                             union_field_origins=first_wins_origins,
@@ -1235,9 +1237,9 @@ class CoalesceExecutor:
                 # (Happy path already recorded COALESCED outcome for these.)
                 if entry.state_id in completed_state_ids:
                     continue
-                # Pass metadata_for_audit so union_collision_policy=fail's full
-                # collision record (field_origins + collision_values) reaches the
-                # Landscape audit trail via context_after. None is acceptable for
+                # Pass metadata_for_audit so union_collision_policy=fail's
+                # collision provenance (field_origins + value fingerprints) reaches
+                # the Landscape audit trail via context_after. None is acceptable for
                 # early failures (e.g., contract merge) where no metadata exists.
                 self._execution.complete_node_state(
                     state_id=entry.state_id,

@@ -10,6 +10,7 @@ and audit trail recording.
 from __future__ import annotations
 
 import itertools
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -231,6 +232,19 @@ def _settings(
         select_branch=select_branch,
         union_collision_policy=union_collision_policy,
     )
+
+
+def _assert_collision_fingerprints(
+    entries: list[tuple[str, Any]],
+    branches: list[str],
+    *,
+    value_type: str = "str",
+) -> None:
+    assert [branch for branch, _fingerprint in entries] == branches
+    fingerprints = [dict(fingerprint) for _branch, fingerprint in entries]
+    assert [fingerprint["value_type"] for fingerprint in fingerprints] == [value_type] * len(branches)
+    assert all(set(fingerprint) == {"value_hash", "value_type"} for fingerprint in fingerprints)
+    assert all(isinstance(fingerprint["value_hash"], str) and len(fingerprint["value_hash"]) == 64 for fingerprint in fingerprints)
 
 
 # Reference instant for journal-restore tests (tz-aware, like barrier_blocked_at).
@@ -834,8 +848,8 @@ class TestUnionMerge:
         # No collisions -> collision_values should be absent (None).
         assert o.coalesce_metadata.union_field_collision_values is None
 
-    def test_union_merge_collision_preserves_overwritten_value(self):
-        """When two branches collide, both (branch, value) entries must be recorded."""
+    def test_union_merge_collision_records_ordered_value_fingerprints(self):
+        """When branches collide, ordered branch/value fingerprints are recorded."""
         executor, _, _, _, _ = _make_executor()
         executor.register_coalesce(_settings(branches=["a", "b"], merge="union"), "node_1")
         t1 = _make_token(branch_name="a", token_id="t1", data={"shared": "from_a"})
@@ -844,12 +858,33 @@ class TestUnionMerge:
         o = executor.accept(t2, "merge")
         collision_values = o.coalesce_metadata.union_field_collision_values
         assert collision_values is not None
-        assert list(collision_values["shared"]) == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(list(collision_values["shared"]), ["a", "b"])
         # Default last_wins: winner in merged data is the last branch.
         assert o.coalesce_metadata.union_field_origins["shared"] == "b"
 
-    def test_union_merge_three_way_collision_preserves_all_values(self):
-        """Three-way collisions preserve every (branch, value) entry in declaration order."""
+    def test_union_merge_collision_metadata_serializes_value_hashes_not_raw_values(self):
+        """Collision audit metadata must preserve provenance without leaking branch payload values."""
+        executor, _, _, _, _ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"], merge="union"), "node_1")
+        t1 = _make_token(branch_name="a", token_id="t1", data={"shared": "secret-from-a"})
+        t2 = _make_token(branch_name="b", token_id="t2", data={"shared": "secret-from-b"})
+
+        executor.accept(t1, "merge")
+        outcome = executor.accept(t2, "merge")
+
+        serialized = outcome.coalesce_metadata.to_dict()
+        serialized_json = json.dumps(serialized, sort_keys=True)
+        assert "secret-from-a" not in serialized_json
+        assert "secret-from-b" not in serialized_json
+
+        collision_entries = serialized["union_field_collision_values"]["shared"]
+        assert [entry[0] for entry in collision_entries] == ["a", "b"]
+        assert [entry[1]["value_type"] for entry in collision_entries] == ["str", "str"]
+        assert [set(entry[1]) for entry in collision_entries] == [{"value_hash", "value_type"}, {"value_hash", "value_type"}]
+        assert collision_entries[0][1]["value_hash"] != collision_entries[1][1]["value_hash"]
+
+    def test_union_merge_three_way_collision_preserves_all_branch_fingerprints(self):
+        """Three-way collisions preserve every branch fingerprint in declaration order."""
         executor, _, _, _, _ = _make_executor()
         s = _settings(branches=["a", "b", "c"], merge="union", policy="require_all")
         executor.register_coalesce(s, "node_1")
@@ -860,7 +895,7 @@ class TestUnionMerge:
         executor.accept(t2, "merge")
         o = executor.accept(t3, "merge")
         entries = list(o.coalesce_metadata.union_field_collision_values["f"])
-        assert entries == [("a", "va"), ("b", "vb"), ("c", "vc")]
+        _assert_collision_fingerprints(entries, ["a", "b", "c"])
 
     def test_union_merge_field_origins_flow_to_metadata(self):
         """field_origins returned from _merge_data must be reflected in CoalesceMetadata."""
@@ -920,9 +955,9 @@ class TestUnionMerge:
         assert merged["shared"] == "from_a"
         # Origins reflect the winner.
         assert o.coalesce_metadata.union_field_origins["shared"] == "a"
-        # Collision values still record every contributing branch in order.
+        # Collision fingerprints still record every contributing branch in order.
         entries = list(o.coalesce_metadata.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
     def test_union_collision_policy_first_wins_three_way(self):
         """first_wins: first branch in settings.branches order wins for 3-way collisions."""
@@ -949,7 +984,7 @@ class TestUnionMerge:
     # ------------------------------------------------------------------
 
     def test_union_collision_policy_fail_raises_on_collision(self):
-        """fail: CoalesceCollisionError raised with full metadata attached."""
+        """fail: CoalesceCollisionError raised with redacted metadata attached."""
         executor, _, _, _, _ = _make_executor()
         s = _settings(
             branches=["a", "b"],
@@ -963,12 +998,12 @@ class TestUnionMerge:
         with pytest.raises(CoalesceCollisionError) as exc_info:
             executor.accept(t2, "merge")
         # Metadata must be attached so the orchestrator's failure path
-        # can persist the full collision record to the audit trail.
+        # can persist redacted collision provenance to the audit trail.
         md = exc_info.value.metadata
         assert md.union_field_origins is not None
         assert md.union_field_collision_values is not None
         entries = list(md.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
     def test_union_collision_policy_fail_no_collisions_is_noop(self):
         """fail: non-overlapping branches merge successfully without raising."""
@@ -995,8 +1030,8 @@ class TestUnionMerge:
 
         Without this propagation, the audit trail loses the field-level provenance
         that union_collision_policy=fail exists to capture. The stringified exception
-        message preserves only the field name — every (branch, value) pair would be
-        lost, defeating the whole point of opting into hard-fail enforcement.
+        message preserves only the field name — every branch/value fingerprint would
+        be lost, defeating the whole point of opting into hard-fail enforcement.
         """
         executor, execution, _, _, _ = _make_executor()
         s = _settings(
@@ -1023,14 +1058,14 @@ class TestUnionMerge:
         ]
         assert metadata_calls, (
             "expected fail-path audit record to carry union_field_collision_values; "
-            "without this, the Landscape audit trail loses the (branch, value) pairs "
+            "without this, the Landscape audit trail loses the branch/value fingerprints "
             "that union_collision_policy=fail is specifically designed to preserve"
         )
 
         md = metadata_calls[0].kwargs["context_after"]
-        # Every branch's contributing value must survive into the audit record.
+        # Every branch's contributing value fingerprint must survive into the audit record.
         entries = list(md.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
         # field_origins must also be present (last_wins default before the raise).
         assert md.union_field_origins is not None
         assert md.union_field_origins["shared"] == "b"
@@ -1237,12 +1272,12 @@ class TestUnionMerge:
         assert origins["only_a"] == "a"
         assert origins["only_b"] == "b"
 
-        # collision_values: records both contributing branches for "shared".
+        # collision_values: records both contributing branch fingerprints for "shared".
         collision_values = outcome.coalesce_metadata.union_field_collision_values
         assert collision_values is not None
         entries = list(collision_values["shared"])
         # Order in collision_values is branch order, not arrival order.
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
 
 # ===========================================================================

@@ -16,10 +16,36 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypedDict
 
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.hashing import repr_hash, stable_hash
+
+
+class CollisionValueFingerprint(TypedDict):
+    """Audit-safe fingerprint for a colliding branch value."""
+
+    value_hash: str
+    value_type: str
+
+
+def collision_value_fingerprint(value: Any) -> CollisionValueFingerprint:
+    """Return a stable, non-reversible summary for a collided branch value."""
+    try:
+        value_hash = stable_hash(value)
+    except (TypeError, ValueError):
+        value_hash = repr_hash(value)
+    return {"value_hash": value_hash, "value_type": type(value).__name__}
+
+
+def _fingerprint_collision_values(
+    collision_values: Mapping[str, Sequence[tuple[str, Any]]],
+) -> dict[str, tuple[tuple[str, CollisionValueFingerprint], ...]]:
+    return {
+        field: tuple((branch, collision_value_fingerprint(value)) for branch, value in entries)
+        for field, entries in collision_values.items()
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +81,10 @@ class CoalesceMetadata:
         timeout_seconds: Configured timeout (for timeout-triggered failures).
         union_field_collisions: Field name to contributing branches (union merge).
         union_field_origins: Field name to originating branch (every union merge).
-        union_field_collision_values: Field name to tuple of ``(branch, value)``
-            entries in merge order (populated only when collisions occurred).
+        union_field_collision_values: Field name to tuple of
+            ``(branch, {value_hash, value_type})`` entries in merge order
+            (populated only when collisions occurred). Raw branch values are
+            never serialized into audit metadata.
     """
 
     policy: CoalescePolicy
@@ -109,10 +137,12 @@ class CoalesceMetadata:
     # Union merge provenance (populated for every union merge)
     union_field_origins: Mapping[str, str] | None = None
 
-    # Union merge collision values (populated only when collisions occurred).
-    # Outer key: field name. Inner tuple entries: (branch_name, value) in merge order.
-    # The last entry is the winner under last_wins; first under first_wins.
-    union_field_collision_values: Mapping[str, tuple[tuple[str, Any], ...]] | None = None
+    # Union merge collision value fingerprints (populated only when collisions occurred).
+    # Outer key: field name. Inner tuple entries: (branch_name, fingerprint) in
+    # merge order. The last entry is the winner under last_wins; first under
+    # first_wins. Fingerprints preserve branch/value equality debugging without
+    # persisting raw colliding values into the audit trail.
+    union_field_collision_values: Mapping[str, tuple[tuple[str, CollisionValueFingerprint], ...]] | None = None
 
     # Lost branch expected fields (populated when branches_lost is non-empty).
     # Outer key: branch name. Value: tuple of field names that branch would have
@@ -157,7 +187,8 @@ class CoalesceMetadata:
             result["union_field_origins"] = dict(self.union_field_origins)
         if self.union_field_collision_values is not None:
             result["union_field_collision_values"] = {
-                field: [list(entry) for entry in entries] for field, entries in self.union_field_collision_values.items()
+                field: [[branch, dict(fingerprint)] for branch, fingerprint in entries]
+                for field, entries in self.union_field_collision_values.items()
             }
         if self.lost_branch_expected_fields is not None:
             result["lost_branch_expected_fields"] = {k: list(v) for k, v in self.lost_branch_expected_fields.items()}
@@ -250,13 +281,13 @@ class CoalesceMetadata:
 
         ``field_origins`` is always populated for union merges. ``collisions``
         and ``collision_values`` are populated only when at least one field
-        was produced by more than one branch.
+        was produced by more than one branch. ``collision_values`` may contain
+        raw branch values at this internal boundary; they are converted to
+        non-reversible fingerprints before being stored on the metadata object.
         """
         return replace(
             base,
             union_field_origins=dict(field_origins),
             union_field_collisions=({k: tuple(v) for k, v in collisions.items()} if collisions is not None else None),
-            union_field_collision_values=(
-                {k: tuple(tuple(entry) for entry in v) for k, v in collision_values.items()} if collision_values is not None else None
-            ),
+            union_field_collision_values=(_fingerprint_collision_values(collision_values) if collision_values is not None else None),
         )

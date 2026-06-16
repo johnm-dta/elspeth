@@ -62,6 +62,13 @@ from tests.fixtures.landscape import (
 # ---------------------------------------------------------------------------
 
 
+def _assert_value_fingerprint(fingerprint: dict[str, Any], *, value_type: str) -> None:
+    assert set(fingerprint) == {"value_hash", "value_type"}
+    assert fingerprint["value_type"] == value_type
+    assert isinstance(fingerprint["value_hash"], str)
+    assert len(fingerprint["value_hash"]) == 64
+
+
 def _build_linear_pipeline(
     *,
     run_id: str = "run-1",
@@ -1421,6 +1428,9 @@ class TestListCollisions:
         # Should find the collision even with plain 'coalesce' plugin_name
         assert len(results) == 1, f"Expected 1 collision record for plain 'coalesce' plugin_name, got {len(results)}"
         assert results[0]["token_id"] == token.token_id
+        result_json = json.dumps(results, sort_keys=True)
+        assert "active" not in result_json
+        assert "inactive" not in result_json
 
     def test_filters_out_overlap_only_fields(self) -> None:
         """list_collisions filters fields where all branches have identical values.
@@ -1547,15 +1557,21 @@ class TestListCollisions:
         assert score_field["winner_branch"] == "branch1", (
             f"Expected winner_branch='branch1' (from union_field_origins), got '{score_field['winner_branch']}'"
         )
-        assert score_field["winner_value"] == 10, f"Expected winner_value=10 (branch1's value), got {score_field['winner_value']}"
+        winner_fingerprint = score_field["winner_value_fingerprint"]
+        assert winner_fingerprint is not None
+        _assert_value_fingerprint(winner_fingerprint, value_type="int")
+        competing = score_field["competing_value_fingerprints"]
+        assert [branch for branch, _fingerprint in competing] == ["branch1", "branch2"]
+        assert competing[0][1]["value_hash"] != competing[1][1]["value_hash"]
 
     def test_failed_merge_reports_no_winner(self) -> None:
         """list_collisions reports no winner when merge failed (union_collision_policy='fail').
 
         Regression: When status is 'failed' (NodeStateStatus.FAILED.value), the code
         compared against uppercase "FAILED" which never matched. This caused failed
-        merges to incorrectly populate winner_branch/winner_value from the pre-failure
-        union_field_origins, making it appear a winner was selected when no merge happened.
+        merges to incorrectly populate winner_branch/winner_value_fingerprint from
+        the pre-failure union_field_origins, making it appear a winner was selected
+        when no merge happened.
         """
         from sqlalchemy import text
 
@@ -1624,7 +1640,9 @@ class TestListCollisions:
 
         # Winner should be None for failed merges — no winner was selected
         assert score_field["winner_branch"] is None, f"Expected winner_branch=None for failed merge, got '{score_field['winner_branch']}'"
-        assert score_field["winner_value"] is None, f"Expected winner_value=None for failed merge, got '{score_field['winner_value']}'"
+        assert score_field["winner_value_fingerprint"] is None, (
+            f"Expected winner_value_fingerprint=None for failed merge, got '{score_field['winner_value_fingerprint']}'"
+        )
 
     def test_returns_separate_records_for_each_node_state(self) -> None:
         """list_collisions returns one record per node_states row with real collisions.

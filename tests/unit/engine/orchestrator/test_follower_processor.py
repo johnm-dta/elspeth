@@ -420,8 +420,54 @@ class TestFollowerSeatDead:
         # No drain calls — seat was dead before any claim attempt
         assert processor.drain_calls == []
 
+    def test_before_claim_liveness_check_is_throttled_within_interval(self) -> None:
+        """Follower does not re-read leader liveness for every claim in a hot drain."""
+
+        class _ManyClaimDrainProcessor(_CountingDrainProcessor):
+            claim_checks = 0
+
+            def _drain_scheduler_claims(self, **kwargs: Any) -> list[Any]:
+                before_claim = kwargs.get("before_claim")
+                if before_claim is None:
+                    raise AssertionError("follower drain must pass a before_claim liveness callback")
+                for _ in range(3):
+                    before_claim()
+                    self.claim_checks += 1
+                return [MagicMock()]
+
+        from elspeth.contracts.enums import RunStatus
+
+        processor = _ManyClaimDrainProcessor()
+        coord_repo = _StubRunCoordRepo()
+        factory = _StubFactory(running=True)
+        run_result_running = MagicMock()
+        run_result_running.status = RunStatus.RUNNING
+        run_result_completed = MagicMock()
+        run_result_completed.status = RunStatus.COMPLETED
+        factory.run_lifecycle.get_run_results = [run_result_running, run_result_completed]
+        heartbeat = _StubHeartbeat()
+        token = CoordinationToken(run_id=RUN_ID, worker_id=WORKER_ID, leader_epoch=0)
+        follower = FollowerProcessor(
+            processor=processor,  # type: ignore[arg-type]
+            token=token,
+            run_coordination=coord_repo,  # type: ignore[arg-type]
+            factory=factory,  # type: ignore[arg-type]
+            now_fn=lambda: NOW,
+            wait_fn=lambda _: None,
+        )
+
+        with (
+            patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat),
+            patch("elspeth.engine.orchestrator.follower.time.monotonic", side_effect=[10.0, 10.0, 11.0, 19.9]),
+        ):
+            follower.run(ctx=_ctx())
+
+        assert processor.claim_checks == 3
+        assert len(coord_repo.live_leader_calls) == 1
+        assert len(coord_repo.depart_calls) == 1
+
     def test_seat_dead_between_claims_stops_follower_drain(self) -> None:
-        """Follower rechecks leader liveness at each scheduler claim boundary."""
+        """Follower rechecks leader liveness once the throttle interval elapses."""
 
         class _CallbackDrainProcessor(_CountingDrainProcessor):
             claim_checks = 0
@@ -446,13 +492,6 @@ class TestFollowerSeatDead:
                 leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
                 seat_live=True,
             ),
-            LeaderInfo(
-                run_id=RUN_ID,
-                leader_worker_id=f"worker:{RUN_ID}:leader",
-                leader_epoch=1,
-                leader_heartbeat_expires_at=NOW + timedelta(seconds=LIVENESS_WINDOW),
-                seat_live=True,
-            ),
             None,
         ]
         factory = _StubFactory(running=True)
@@ -469,11 +508,13 @@ class TestFollowerSeatDead:
 
         with (
             patch("elspeth.engine.orchestrator.follower.RunHeartbeatThread", return_value=heartbeat),
+            patch("elspeth.engine.orchestrator.follower.time.monotonic", side_effect=[0.0, 0.0, 21.0]),
             pytest.raises(FollowerSeatDeadError),
         ):
             follower.run(ctx=_ctx())
 
         assert processor.claim_checks == 1
+        assert len(coord_repo.live_leader_calls) == 2
         assert len(coord_repo.depart_calls) == 1
 
 

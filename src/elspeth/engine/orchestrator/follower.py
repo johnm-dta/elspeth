@@ -292,7 +292,19 @@ class FollowerProcessor:
         run_id = self._token.run_id
         worker_id = self._token.worker_id
 
-        def ensure_leader_live() -> None:
+        leader_recheck_interval = max(self._window_seconds / 4.0, 1.0)
+        last_leader_check_monotonic: float | None = None
+
+        def ensure_leader_live(*, force: bool = False) -> None:
+            nonlocal last_leader_check_monotonic
+            monotonic_now = time.monotonic()
+            if (
+                not force
+                and last_leader_check_monotonic is not None
+                and monotonic_now - last_leader_check_monotonic < leader_recheck_interval
+            ):
+                return
+            last_leader_check_monotonic = monotonic_now
             now = self._now_fn()
             seat = self._run_coordination.live_leader(run_id=run_id, now=now)
             if seat is None or not seat.seat_live:
@@ -336,7 +348,7 @@ class FollowerProcessor:
                 return
 
             # ── check leader liveness ─────────────────────────────────
-            ensure_leader_live()
+            ensure_leader_live(force=True)
 
             # ── attempt one claim-and-drain pass ──────────────────────
             # _drain_scheduler_claims is the existing production drain; it

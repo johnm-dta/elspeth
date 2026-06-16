@@ -536,6 +536,27 @@ def test_guard_symmetry_accepts_loader_with_audit_integrity_error(tmp_path: Path
     assert _root_findings(GUARD_SYMMETRY_RULE, tmp_path) == []
 
 
+def test_guard_symmetry_ignores_nested_audit_integrity_error_raises(tmp_path: Path) -> None:
+    """Nested helper raises do not guard the load() read path."""
+    _write_validated_widget(tmp_path)
+    _write(
+        tmp_path / "core" / "model_loaders.py",
+        """
+        class WidgetLoader:
+            def load(self, row):
+                def unused_guard():
+                    raise AuditIntegrityError("bad size")
+
+                return Widget(size=row.size)
+        """,
+    )
+
+    findings = _root_findings(GUARD_SYMMETRY_RULE, tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["GS1"]
+    assert "WidgetLoader.load() has no AuditIntegrityError guards" in findings[0].message
+
+
 def test_guard_symmetry_ignores_freeze_only_post_init(tmp_path: Path) -> None:
     _write(
         tmp_path / "contracts" / "audit.py",

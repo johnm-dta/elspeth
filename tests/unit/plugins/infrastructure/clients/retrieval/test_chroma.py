@@ -905,6 +905,39 @@ class TestDocTypeValidation:
             assert all(isinstance(c.content, str) for c in chunks)
             assert len(chunks) == 1
             assert chunks[0].content == "real doc"
+            assert provider.last_skipped_count == 1
+            assert provider.last_skipped_reasons == [{"reason": "invalid_content_type", "id": "doc1", "type": "int"}]
+
+    def test_successful_search_clears_previous_skip_reasons(self):
+        """Skip reasons are per-search audit metadata, not sticky provider state."""
+        from unittest.mock import patch
+
+        unique_name = f"tdvc-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        config = ChromaSearchProviderConfig(
+            collection=unique_name,
+            mode="ephemeral",
+        )
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
+        provider._collection.add(documents=["real doc"], ids=["doc1"])
+        provider.last_skipped_count = 1
+        provider.last_skipped_reasons = [{"reason": "invalid_content_type", "id": "old-doc", "type": "int"}]
+
+        with patch.object(
+            provider._collection,
+            "query",
+            return_value={
+                "ids": [["doc1"]],
+                "documents": [["real doc"]],
+                "distances": [[0.1]],
+                "metadatas": [[{}]],
+            },
+        ):
+            chunks = provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        assert len(chunks) == 1
+        assert provider.last_skipped_count == 0
+        assert provider.last_skipped_reasons == []
 
 
 class TestChromaSearchProviderReadiness:

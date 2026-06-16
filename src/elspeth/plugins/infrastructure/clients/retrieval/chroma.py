@@ -224,6 +224,8 @@ class ChromaSearchProvider:
                 response_data=RawCallPayload({"result_count": 0, "skipped_count": 0, "top_score": None, "collection_count": 0}),
                 latency_ms=round(empty_elapsed_ms),
             )
+            self.last_skipped_count = 0
+            self.last_skipped_reasons = []
             return []
         effective_top_k = min(top_k, collection_count)
 
@@ -261,13 +263,14 @@ class ChromaSearchProvider:
         # distance validation crashes, and normalization failures would leave
         # no trace in the Landscape (fix: elspeth-9454d584d2).
         try:
-            chunks, skipped = self._parse_and_build_chunks(results, min_score)
+            chunks, skipped_items = self._parse_and_build_chunks(results, min_score)
         except RetrievalError as exc:
             self._record_error(state_id, start_time, request_payload, exc, retryable=exc.retryable)
             raise
 
         chunks.sort(key=lambda c: c.score, reverse=True)
-        self.last_skipped_count = skipped
+        self.last_skipped_count = len(skipped_items)
+        self.last_skipped_reasons = skipped_items
 
         call_index = self._execution.allocate_call_index(state_id)
         self._execution.record_call(
@@ -277,7 +280,7 @@ class ChromaSearchProvider:
             status=CallStatus.SUCCESS,
             request_data=request_payload,
             response_data=RawCallPayload(
-                {"result_count": len(chunks), "skipped_count": skipped, "top_score": chunks[0].score if chunks else None}
+                {"result_count": len(chunks), "skipped_count": len(skipped_items), "top_score": chunks[0].score if chunks else None}
             ),
             latency_ms=round(elapsed_ms),
         )
@@ -288,14 +291,14 @@ class ChromaSearchProvider:
         self,
         results: Any,
         min_score: float,
-    ) -> tuple[list[RetrievalChunk], int]:
+    ) -> tuple[list[RetrievalChunk], list[dict[str, Any]]]:
         """Parse ChromaDB query results and build RetrievalChunk list.
 
         Tier 3 boundary: the SDK response structure is external data.
         All access is guarded against malformed/unexpected responses.
 
         Returns:
-            Tuple of (chunks, skipped_count)
+            Tuple of (chunks, skipped_items)
 
         Raises:
             RetrievalError: On malformed response structure, corrupt distances,
@@ -335,10 +338,10 @@ class ChromaSearchProvider:
             ) from exc
 
         chunks: list[RetrievalChunk] = []
-        skipped = 0
+        skipped_items: list[dict[str, Any]] = []
         for doc, distance, metadata, doc_id in zip(documents, distances, metadatas, ids, strict=True):
             if not isinstance(doc, str):  # Tier 3: SDK may return non-str from corrupt index
-                skipped += 1
+                skipped_items.append({"reason": "invalid_content_type", "id": doc_id, "type": type(doc).__name__})
                 continue
 
             # ChromaDB is our infrastructure, not an external API — corrupt
@@ -383,7 +386,7 @@ class ChromaSearchProvider:
                     retryable=False,
                 ) from exc
 
-        return chunks, skipped
+        return chunks, skipped_items
 
     def _normalize_distance(self, distance: float) -> float:
         if not math.isfinite(distance):

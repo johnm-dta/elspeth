@@ -48,6 +48,16 @@ Classify the user's latest request before acting.
 | Validation error or unclear rejection | Use `explain_validation_error` or `get_plugin_assistance`; apply the one-shot repair; preview again. |
 | Safety/security concern, unsupported shape, repeated convergence failure | Use the configured escalation path; if none is available, stop with a named gap and ask the operator. |
 
+Opening build turns are action turns. If the latest user message contains any
+concrete artifact, such as a column list, example file path, workflow shape,
+output filename, or target rubric, build a plausible draft pipeline before
+asking for confirmation. Name missing assumptions after the mutation, not
+instead of it. Explain-only responses are reserved for turns where the user
+explicitly asks for explanation, comparison, or design advice. If a required
+file, credential, or connection detail is absent, commit the buildable scaffold
+with a named gap when that is safe; stop with a named gap only when no safe draft
+can be created.
+
 For ordinary build/edit turns, the action path is:
 
 1. Extract supplied facts from the user prompt and current state. Ask only for

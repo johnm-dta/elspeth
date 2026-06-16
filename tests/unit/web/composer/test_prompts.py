@@ -387,6 +387,20 @@ class TestBuildSystemPrompt:
         assert "For row-file routing/splitting requests, default outputs to the source row format" in flattened
         assert "CSV source means CSV sinks unless the user explicitly asks for JSON/JSONL" in flattened
 
+    def test_core_skill_requires_draft_first_on_opening_build_turns(self) -> None:
+        """Under-specified opening build asks should mutate state before waiting."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Opening build turns are action turns" in flattened
+        assert "If the latest user message contains any concrete artifact" in flattened
+        assert "build a plausible draft pipeline before asking for confirmation" in flattened
+        assert "column list, example file path, workflow shape, output filename, or target rubric" in flattened
+        assert "Name missing assumptions after the mutation" in flattened
+        assert "Explain-only responses are reserved for turns where the user explicitly asks for explanation" in flattened
+        assert "If a required file, credential, or connection detail is absent" in flattened
+        assert "commit the buildable scaffold with a named gap" in flattened
+
     def test_core_skill_rejects_plugin_contract_whiplash(self) -> None:
         """Plugin schema facts must remain stable across self-correction turns."""
         result = build_system_prompt(None)

@@ -99,6 +99,7 @@ from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_se
 
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
+_CHECK_WEB_SCRAPE_NETWORK_POLICY = "web_scrape_network_policy"
 _CHECK_SECRET_REFS = "secret_refs"
 _CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
 _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
@@ -160,6 +161,7 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 # to prevent silent reordering.
 _ALL_CHECKS = [
     _CHECK_PATH_ALLOWLIST,
+    _CHECK_WEB_SCRAPE_NETWORK_POLICY,
     _CHECK_SECRET_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
@@ -907,6 +909,74 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
+
+    web_scrape_network_errors: list[ValidationError] = []
+    for node in state.nodes:
+        if node.plugin != "web_scrape":
+            continue
+        http_options = node.options.get("http")
+        if not isinstance(http_options, Mapping):
+            continue
+        if "allowed_hosts" not in http_options:
+            continue
+        allowed_hosts = http_options["allowed_hosts"]
+        if allowed_hosts == "allow_private":
+            message = (
+                "web_scrape.http.allowed_hosts='allow_private' is not permitted in web execution. "
+                "Web-authored pipelines may only use public SSRF policy; private-network fetching requires "
+                "an operator-owned runtime outside the web composer."
+            )
+        elif isinstance(allowed_hosts, Sequence) and not isinstance(allowed_hosts, str):
+            message = (
+                "web_scrape.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
+                "Web-authored pipelines may only use allowed_hosts='public_only'; private-network fetching "
+                "requires an operator-owned runtime outside the web composer."
+            )
+        else:
+            continue
+        web_scrape_network_errors.append(
+            ValidationError(
+                component_id=node.id,
+                component_type="transform",
+                message=message,
+                suggestion="Set web_scrape.http.allowed_hosts to 'public_only' or remove the option.",
+                error_code="web_scrape_private_network_not_allowed",
+            )
+        )
+
+    if web_scrape_network_errors:
+        affected_nodes = tuple(error.component_id for error in web_scrape_network_errors if error.component_id is not None)
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
+                passed=False,
+                detail="web_scrape private-network allowlists are not permitted in web execution",
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        )
+        checks.extend(_skipped_checks(_CHECK_WEB_SCRAPE_NETWORK_POLICY))
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=web_scrape_network_errors,
+            readiness=_blocked_readiness(
+                code="web_scrape_network_policy",
+                detail="web_scrape private-network allowlists are not permitted in web execution.",
+                component_id=web_scrape_network_errors[0].component_id,
+                component_type="transform",
+            ),
+        )
+
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
+            passed=True,
+            detail="No web_scrape private-network allowlists found",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
 
     # Step 1b: Secret ref validation — check that
     #   (a) every wired ``{secret_ref: ...}`` / inventory ``${NAME}`` resolves

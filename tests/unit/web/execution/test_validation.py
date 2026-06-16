@@ -273,6 +273,94 @@ class TestValidatePipelinePathAllowlist:
         assert "skipped" in path_check.detail.lower()
 
 
+class TestValidatePipelineWebScrapeNetworkPolicy:
+    """Web-authored web_scrape configs must not widen SSRF allowlists."""
+
+    @staticmethod
+    def _web_scrape_options(allowed_hosts: object = "public_only") -> dict[str, object]:
+        return {
+            "schema": {"mode": "fixed", "fields": ["url: str"]},
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "fingerprint",
+            "http": {
+                "abuse_contact": "ops@somecompany.gov.au",
+                "scraping_reason": "User-authorised public web fetch",
+                "allowed_hosts": allowed_hosts,
+            },
+        }
+
+    def test_web_scrape_allow_private_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options("allow_private"),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        assert result.errors[0].component_id == "test_node"
+        assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
+        assert "allow_private" in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_web_scrape_explicit_cidr_allowlist_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options(["10.0.0.0/8"]),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
+        assert "CIDR" in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_web_scrape_public_only_allowed_to_reach_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options("public_only"),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "web_scrape_network_policy").passed is True
+        assert all(error.error_code != "web_scrape_private_network_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+
 class TestValidatePipelineBatchTransformOptions:
     """ADR-013 composer/runtime agreement for batch-aware transform options."""
 
@@ -1253,10 +1341,11 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 12
+        assert len(result.checks) == 13
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
+        assert _check(result, "web_scrape_network_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
@@ -2084,7 +2173,7 @@ class TestValidatePipelineFabricatedCredentials:
                         "http": {
                             "abuse_contact": {"secret_ref": "ANY_SECRET"},
                             "scraping_reason": "research",
-                            "allowed_hosts": ["example.com"],
+                            "allowed_hosts": "public_only",
                         },
                     },
                 ),

@@ -1074,6 +1074,33 @@ export async function previewBlobContent(
   return response.text();
 }
 
+export interface BlobContentPreview {
+  text: string;
+  truncated: boolean;
+  limit: number;
+}
+
+/** Fetch bounded blob content as text for inline UI preview. */
+export async function previewBlobContentSnippet(
+  sessionId: string,
+  blobId: string,
+  limit: number,
+): Promise<BlobContentPreview> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/blobs/${blobId}/preview?limit=${limit}`,
+    { headers: authHeaders() },
+  );
+  if (!response.ok) {
+    await parseResponse<never>(response);
+  }
+  const headerLimit = Number(response.headers.get("X-Preview-Limit"));
+  return {
+    text: await response.text(),
+    truncated: response.headers.get("X-Preview-Truncated") === "true",
+    limit: Number.isFinite(headerLimit) && headerLimit > 0 ? headerLimit : limit,
+  };
+}
+
 /** Delete a blob and its backing file. */
 export async function deleteBlob(
   sessionId: string,

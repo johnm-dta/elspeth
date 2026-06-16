@@ -264,6 +264,34 @@ class TestDownloadBlob:
 
 
 # ---------------------------------------------------------------------------
+# Preview
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewBlob:
+    """Blob preview: bounded inline read, not a full download."""
+
+    def test_preview_returns_bounded_prefix_without_full_content_read(self, tmp_path, monkeypatch) -> None:
+        app, _, blob_service = _make_app(tmp_path)
+        client = TestClient(app)
+        session_id = _create_session(client)
+        content = b"a" * 6000
+        blob = _upload_blob(client, session_id, content=content, content_type="text/plain", filename="large.txt")
+
+        async def fail_full_read(blob_id):
+            raise AssertionError(f"preview must not call read_blob_content({blob_id})")
+
+        monkeypatch.setattr(blob_service, "read_blob_content", fail_full_read)
+
+        resp = client.get(f"/api/sessions/{session_id}/blobs/{blob['id']}/preview?limit=5000")
+
+        assert resp.status_code == 200
+        assert resp.content == b"a" * 5000
+        assert resp.headers["x-preview-truncated"] == "true"
+        assert resp.headers["x-preview-limit"] == "5000"
+
+
+# ---------------------------------------------------------------------------
 # IDOR protection — CRITICAL security boundary
 # ---------------------------------------------------------------------------
 

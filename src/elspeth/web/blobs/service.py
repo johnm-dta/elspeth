@@ -773,6 +773,40 @@ class BlobServiceImpl:
 
         return await self._run_sync(_sync)
 
+    async def read_blob_preview(self, blob_id: UUID, *, limit_bytes: int) -> tuple[bytes, bool]:
+        """Read a bounded prefix of a ready blob for inline UI preview.
+
+        This shares the full-content lifecycle/missing-file guards but does
+        not verify the full SHA-256 digest, because doing so would require
+        reading the whole blob and defeat the preview endpoint's resource cap.
+        """
+        if limit_bytes < 1:
+            raise ValueError("limit_bytes must be >= 1")
+
+        blob_id_str = str(blob_id)
+
+        def _sync() -> tuple[bytes, bool]:
+            with self._engine.connect() as conn:
+                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
+                if row is None:
+                    raise BlobNotFoundError(blob_id_str)
+
+                if row.status != "ready":
+                    raise BlobStateError(
+                        blob_id_str,
+                        message=f"Cannot preview blob {blob_id_str} — status is '{row.status}', expected 'ready'",
+                    )
+
+                storage = Path(row.storage_path)
+                if not storage.exists():
+                    raise BlobContentMissingError(blob_id_str, storage_path=row.storage_path)
+
+                with storage.open("rb") as handle:
+                    data = handle.read(limit_bytes + 1)
+                return data[:limit_bytes], len(data) > limit_bytes
+
+        return await self._run_sync(_sync)
+
     async def link_blob_to_run(
         self,
         blob_id: UUID,

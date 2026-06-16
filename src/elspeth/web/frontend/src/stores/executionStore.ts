@@ -469,10 +469,17 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   connectWebSocket(runId: string) {
     // Close any existing WebSocket connection
     wsConnection?.close();
+    set({ wsDisconnected: false });
 
     // Open a WebSocket for live progress, passing JWT as query parameter
     const token = useAuthStore.getState().token ?? "";
     wsConnection = connectToRun(runId, token, {
+      onConnected() {
+        set({ wsDisconnected: false });
+      },
+      onDisconnected() {
+        set({ wsDisconnected: true });
+      },
       onProgress(event: RunEvent, _data: RunEventProgress) {
         set((state) => applyRunEvent(state, event));
       },

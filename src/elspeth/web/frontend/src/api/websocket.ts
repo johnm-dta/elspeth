@@ -33,6 +33,8 @@ import type {
  * - onComplete: Terminal. Pipeline finished successfully.
  * - onCancelled: Terminal. Pipeline was cancelled.
  * - onFailed: Terminal. Pipeline aborted due to unrecoverable error.
+ * - onConnected: Socket opened, including after a reconnect.
+ * - onDisconnected: Abnormal close entered the reconnect loop.
  * - onAuthFailure: Close code 4001. Token invalid/expired.
  *   Caller should trigger authStore.logout(). No reconnect attempt.
  */
@@ -42,6 +44,8 @@ export interface WebSocketCallbacks {
   onComplete: (event: RunEvent, data: RunEventCompleted) => void;
   onCancelled: (event: RunEvent, data: RunEventCancelled) => void;
   onFailed: (event: RunEvent, data: RunEventFailed) => void;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
   onAuthFailure: () => void;
 }
 
@@ -114,6 +118,7 @@ export function connectToRun(
     socket.onopen = (): void => {
       // Reset backoff on successful connection
       reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+      callbacks.onConnected?.();
     };
 
     socket.onmessage = (messageEvent: MessageEvent): void => {
@@ -174,6 +179,7 @@ export function connectToRun(
   function scheduleReconnect(): void {
     if (closed) return;
 
+    callbacks.onDisconnected?.();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();

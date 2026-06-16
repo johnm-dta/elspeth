@@ -608,6 +608,60 @@ describe("executionStore.cancel", () => {
   });
 });
 
+describe("executionStore WebSocket lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+  });
+
+  it("marks the active run disconnected during reconnect and clears it after the socket recovers", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    handlers.onDisconnected();
+    expect(useExecutionStore.getState().wsDisconnected).toBe(true);
+
+    handlers.onConnected();
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+
+    handlers.onDisconnected();
+    const progressEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        source_rows_processed: 3,
+        tokens_succeeded: 2,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 1,
+        tokens_routed_failure: 0,
+      },
+    };
+    handlers.onProgress(progressEvent, progressEvent.data);
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+  });
+});
+
 describe("executionStore progress events advance live accounting", () => {
   // The API run record no longer carries best-known live counters. Progress
   // events update state.progress, while completed events attach closed

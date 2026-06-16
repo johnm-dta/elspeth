@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -62,6 +63,26 @@ def _make_204_response() -> DataversePageResponse:
         next_link=None,
         paging_cookie=None,
         more_records=None,  # No body → no morerecords field
+    )
+
+
+def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
+    """Build a real PluginContext configured for sink operation call recording."""
+    from elspeth.contracts.plugin_context import PluginContext
+
+    landscape = MagicMock()
+    landscape.record_operation_call.return_value = SimpleNamespace(
+        request_hash="req-hash",
+        response_hash="resp-hash",
+    )
+
+    return PluginContext(
+        run_id="test-run-123",
+        config={},
+        landscape=landscape,
+        node_id="sink-node",
+        operation_id="op-001",
+        telemetry_emit=telemetry_emit,
     )
 
 
@@ -594,7 +615,6 @@ class TestWriteLifecycle:
         )
         mock_client_cls.assert_called_once()
         assert sink._client is not None
-        assert sink._run_id == "test-run-123"
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     @patch("elspeth.plugins.sinks.dataverse.DataverseClient")
@@ -657,6 +677,27 @@ class TestWriteLifecycle:
         for call in ctx.record_call.call_args_list:
             assert call.kwargs["status"].value == "success"
             assert call.kwargs["provider"] == "dataverse"
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_write_emits_single_completion_event_via_plugin_context(self, _mock_schema: MagicMock) -> None:
+        """Real PluginContext path emits one completion event per Dataverse write."""
+        sink = inject_write_failure(DataverseSink(_config()))
+
+        mock_client = MagicMock()
+        mock_client.upsert.return_value = _make_204_response()
+        sink._client = mock_client
+
+        events: list[Any] = []
+        ctx = _plugin_context_for_operation_calls(telemetry_emit=events.append)
+
+        sink.write([{"email": "a@b.com", "name": "Alice"}], ctx)
+
+        assert len(events) == 1
+        event = events[0]
+        assert event.operation_id == "op-001"
+        assert event.provider == "dataverse"
+        assert event.request_hash == "req-hash"
+        assert event.response_hash == "resp-hash"
 
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_per_row_attributable_400_diverts_not_raises(self, _mock_schema: MagicMock) -> None:

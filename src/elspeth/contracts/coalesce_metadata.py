@@ -14,12 +14,13 @@ Trust-tier notes
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, TypedDict
 
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.hashing import repr_hash, stable_hash
 
 
@@ -48,12 +49,115 @@ def _fingerprint_collision_values(
     }
 
 
+def _require_optional_str(value: object, field_name: str) -> None:
+    if value is not None and type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+
+
+def _require_non_negative_finite_number(value: object, field_name: str, *, optional: bool = True) -> None:
+    if optional and value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{field_name} must be non-negative and finite, got {value!r}")
+
+
+def _require_string_sequence(value: object, field_name: str, *, optional: bool = True) -> None:
+    if optional and value is None:
+        return
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):
+        raise TypeError(f"{field_name} must be a sequence, got {type(value).__name__}: {value!r}")
+    for idx, item in enumerate(value):
+        if type(item) is not str:
+            raise TypeError(f"{field_name}[{idx}] must be str, got {type(item).__name__}: {item!r}")
+
+
+def _require_string_to_string_mapping(value: object, field_name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}: {value!r}")
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{field_name} key must be str, got {type(key).__name__}: {key!r}")
+        if type(item) is not str:
+            raise TypeError(f"{field_name}[{key!r}] must be str, got {type(item).__name__}: {item!r}")
+
+
+def _require_string_to_string_sequence_mapping(value: object, field_name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}: {value!r}")
+    for key, items in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{field_name} key must be str, got {type(key).__name__}: {key!r}")
+        _require_string_sequence(items, f"{field_name}[{key!r}]", optional=False)
+
+
+def _require_arrival_order(value: object) -> None:
+    if value is None:
+        return
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):
+        raise TypeError(f"arrival_order must be a sequence, got {type(value).__name__}: {value!r}")
+    for idx, entry in enumerate(value):
+        if type(entry) is not ArrivalOrderEntry:
+            raise TypeError(f"arrival_order[{idx}] must be ArrivalOrderEntry, got {type(entry).__name__}: {entry!r}")
+
+
+def _require_union_field_collision_values(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise TypeError(f"union_field_collision_values must be a mapping, got {type(value).__name__}: {value!r}")
+    for field, entries in value.items():
+        if type(field) is not str:
+            raise TypeError(f"union_field_collision_values key must be str, got {type(field).__name__}: {field!r}")
+        if isinstance(entries, str | bytes | bytearray) or not isinstance(entries, Sequence):
+            raise TypeError(f"union_field_collision_values[{field!r}] must be a sequence, got {type(entries).__name__}: {entries!r}")
+        for idx, entry in enumerate(entries):
+            if isinstance(entry, str | bytes | bytearray) or not isinstance(entry, Sequence):
+                raise TypeError(
+                    f"union_field_collision_values[{field!r}][{idx}] must be a 2-item sequence, got {type(entry).__name__}: {entry!r}"
+                )
+            if len(entry) != 2:
+                raise ValueError(f"union_field_collision_values[{field!r}][{idx}] must have exactly 2 items")
+            branch, fingerprint = entry
+            if type(branch) is not str:
+                raise TypeError(
+                    f"union_field_collision_values[{field!r}][{idx}] branch must be str, got {type(branch).__name__}: {branch!r}"
+                )
+            if not isinstance(fingerprint, Mapping):
+                raise TypeError(
+                    f"union_field_collision_values[{field!r}][{idx}] fingerprint must be a mapping, got "
+                    f"{type(fingerprint).__name__}: {fingerprint!r}"
+                )
+            if set(fingerprint.keys()) != {"value_hash", "value_type"}:
+                raise ValueError(f"union_field_collision_values[{field!r}][{idx}] fingerprint must contain value_hash and value_type only")
+            if type(fingerprint["value_hash"]) is not str:
+                raise TypeError(
+                    f"union_field_collision_values[{field!r}][{idx}] fingerprint.value_hash must be str, got "
+                    f"{type(fingerprint['value_hash']).__name__}: {fingerprint['value_hash']!r}"
+                )
+            if type(fingerprint["value_type"]) is not str:
+                raise TypeError(
+                    f"union_field_collision_values[{field!r}][{idx}] fingerprint.value_type must be str, got "
+                    f"{type(fingerprint['value_type']).__name__}: {fingerprint['value_type']!r}"
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class ArrivalOrderEntry:
     """One branch's arrival timing relative to first arrival."""
 
     branch: str
     arrival_offset_ms: float
+
+    def __post_init__(self) -> None:
+        if type(self.branch) is not str:
+            raise TypeError(f"ArrivalOrderEntry.branch must be str, got {type(self.branch).__name__}: {self.branch!r}")
+        _require_non_negative_finite_number(self.arrival_offset_ms, "arrival_offset_ms", optional=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {"branch": self.branch, "arrival_offset_ms": self.arrival_offset_ms}
@@ -90,8 +194,23 @@ class CoalesceMetadata:
     policy: CoalescePolicy
 
     def __post_init__(self) -> None:
-        if not self.policy:
-            raise ValueError("CoalesceMetadata.policy must not be empty")
+        if type(self.policy) is not CoalescePolicy:
+            raise TypeError(f"policy must be CoalescePolicy, got {type(self.policy).__name__}: {self.policy!r}")
+        if self.merge_strategy is not None and type(self.merge_strategy) is not MergeStrategy:
+            raise TypeError(f"merge_strategy must be MergeStrategy, got {type(self.merge_strategy).__name__}: {self.merge_strategy!r}")
+        _require_optional_str(self.reason, "reason")
+        _require_optional_str(self.select_branch, "select_branch")
+        _require_string_sequence(self.expected_branches, "expected_branches")
+        _require_string_sequence(self.branches_arrived, "branches_arrived")
+        _require_string_to_string_mapping(self.branches_lost, "branches_lost")
+        _require_arrival_order(self.arrival_order)
+        _require_non_negative_finite_number(self.wait_duration_ms, "wait_duration_ms")
+        require_int(self.quorum_required, "quorum_required", optional=True, min_value=0)
+        _require_non_negative_finite_number(self.timeout_seconds, "timeout_seconds")
+        _require_string_to_string_sequence_mapping(self.union_field_collisions, "union_field_collisions")
+        _require_string_to_string_mapping(self.union_field_origins, "union_field_origins")
+        _require_union_field_collision_values(self.union_field_collision_values)
+        _require_string_to_string_sequence_mapping(self.lost_branch_expected_fields, "lost_branch_expected_fields")
         # Freeze all container fields — catches direct construction with raw lists/dicts
         fields_to_freeze = []
         if self.expected_branches is not None:

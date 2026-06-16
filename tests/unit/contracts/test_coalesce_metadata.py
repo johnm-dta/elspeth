@@ -6,7 +6,7 @@ from types import MappingProxyType
 import pytest
 
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
-from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
+from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata, collision_value_fingerprint
 
 
 def _base_merge_metadata() -> CoalesceMetadata:
@@ -148,6 +148,52 @@ class TestCoalesceMetadataEnumFields:
         assert isinstance(d["merge_strategy"], str)
 
 
+class TestCoalesceMetadataConstructionInvariants:
+    @pytest.mark.parametrize(
+        ("kwargs", "exc_type", "match"),
+        [
+            ({"policy": "require_all"}, TypeError, "policy must be CoalescePolicy"),
+            ({"merge_strategy": "union"}, TypeError, "merge_strategy must be MergeStrategy"),
+            ({"wait_duration_ms": float("nan")}, ValueError, "wait_duration_ms must be non-negative and finite"),
+            ({"timeout_seconds": True}, TypeError, "timeout_seconds must be int or float"),
+            ({"quorum_required": -1}, ValueError, "quorum_required must be >= 0"),
+            ({"expected_branches": ("a", 1)}, TypeError, "expected_branches\\[1\\] must be str"),
+            ({"branches_lost": {"a": 1}}, TypeError, "branches_lost\\['a'\\] must be str"),
+            ({"union_field_collisions": {"field": "ab"}}, TypeError, "union_field_collisions\\['field'\\] must be a sequence"),
+            ({"union_field_collisions": {"field": ("a", 1)}}, TypeError, "union_field_collisions\\['field'\\]\\[1\\] must be str"),
+            ({"union_field_origins": {1: "a"}}, TypeError, "union_field_origins key must be str"),
+            (
+                {"lost_branch_expected_fields": {"branch": ("field", 2)}},
+                TypeError,
+                "lost_branch_expected_fields\\['branch'\\]\\[1\\] must be str",
+            ),
+            ({"arrival_order": ({"branch": "a", "arrival_offset_ms": 0.0},)}, TypeError, "arrival_order\\[0\\] must be ArrivalOrderEntry"),
+            (
+                {"union_field_collision_values": {"field": (("a", 1),)}},
+                TypeError,
+                "union_field_collision_values\\['field'\\]\\[0\\] fingerprint must be a mapping",
+            ),
+        ],
+    )
+    def test_direct_construction_rejects_invalid_audit_shape(
+        self,
+        kwargs: dict,
+        exc_type: type[Exception],
+        match: str,
+    ) -> None:
+        params = {"policy": CoalescePolicy.REQUIRE_ALL, **kwargs}
+        with pytest.raises(exc_type, match=match):
+            CoalesceMetadata(**params)
+
+    def test_arrival_order_entry_rejects_negative_offset(self) -> None:
+        with pytest.raises(ValueError, match="arrival_offset_ms must be non-negative and finite"):
+            ArrivalOrderEntry(branch="a", arrival_offset_ms=-1.0)
+
+    def test_arrival_order_entry_rejects_non_string_branch(self) -> None:
+        with pytest.raises(TypeError, match=r"ArrivalOrderEntry\.branch must be str"):
+            ArrivalOrderEntry(branch=1, arrival_offset_ms=0.0)  # type: ignore[arg-type]
+
+
 class TestCoalesceMetadataFreezeGuards:
     def test_direct_construction_with_raw_dict_freezes(self) -> None:
         """Even if someone bypasses factories, freeze_fields catches it."""
@@ -257,7 +303,7 @@ class TestWithUnionResult:
         assert meta.union_field_origins is not None
         assert dict(meta.union_field_origins) == {"field_x": "a", "field_y": "b"}
 
-    def test_with_union_result_records_collision_values(self) -> None:
+    def test_with_union_result_records_collision_value_fingerprints(self) -> None:
         base = _base_merge_metadata()
         origins = {"field_x": "b"}
         collisions = {"field_x": ["a", "b"]}
@@ -275,7 +321,7 @@ class TestWithUnionResult:
         assert isinstance(meta.union_field_collisions["field_x"], tuple)
         assert meta.union_field_collision_values is not None
         entries = meta.union_field_collision_values["field_x"]
-        assert entries == (("a", 1), ("b", 2))
+        assert entries == (("a", collision_value_fingerprint(1)), ("b", collision_value_fingerprint(2)))
         # Deeply tuple-ified: outer is a tuple, each entry is a tuple.
         assert isinstance(entries, tuple)
         for entry in entries:
@@ -333,7 +379,7 @@ class TestWithUnionResult:
         assert d["union_field_origins"] == {"field_x": "b", "field_y": "a"}
         assert isinstance(d["union_field_origins"], dict)
         assert d["union_field_collision_values"] == {
-            "field_x": [["a", 1], ["b", 2]],
+            "field_x": [["a", collision_value_fingerprint(1)], ["b", collision_value_fingerprint(2)]],
         }
         # Inner entries must be plain lists, not tuples, for JSON shape.
         entries = d["union_field_collision_values"]["field_x"]
@@ -364,12 +410,12 @@ class TestWithUnionResult:
         assert isinstance(meta.union_field_collision_values, MappingProxyType)
         assert dict(meta.union_field_collision_values) == {}
 
-    def test_union_field_collision_values_freezes_dict_valued_entries(self) -> None:
-        """Dict-valued entries in collision_values must be deeply frozen.
+    def test_union_field_collision_values_store_fingerprints_not_raw_dict_values(self) -> None:
+        """Dict-valued entries in collision_values must be fingerprinted.
 
         The value slot is typed ``Any`` because real union merges carry
-        arbitrary row values — including dicts and lists. This test
-        exercises the ``deep_freeze`` contract for that path.
+        arbitrary row values — including dicts and lists. The audit contract
+        stores only non-reversible fingerprints, never raw colliding values.
         """
         base = _base_merge_metadata()
         meta = CoalesceMetadata.with_union_result(
@@ -386,14 +432,13 @@ class TestWithUnionResult:
         assert meta.union_field_collision_values is not None
         entries = meta.union_field_collision_values["payload"]
 
-        # Inner dict value is deep-frozen to MappingProxyType.
+        # Inner fingerprint is deeply frozen and contains no raw nested value.
         _, value_a = entries[0]
         assert isinstance(value_a, MappingProxyType)
+        assert dict(value_a) == collision_value_fingerprint({"nested": [1, 2]})
+        assert "nested" not in value_a
         with pytest.raises(TypeError):
-            value_a["nested"] = "mutated"  # type: ignore[index]
-
-        # Nested list inside the dict is frozen to a tuple.
-        assert isinstance(value_a["nested"], tuple)
+            value_a["value_type"] = "mutated"  # type: ignore[index]
 
     def test_metadata_to_dict_omits_origins_when_none(self) -> None:
         base = _base_merge_metadata()

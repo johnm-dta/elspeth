@@ -85,7 +85,8 @@ async def solve_chain_with_auto_drop(
 
     On success, returns ``(proposal, session)`` unchanged — the caller proceeds
     with the proposal. On transient LLM failure (LiteLLM API/auth/bad-request,
-    timeouts, malformed-response shape from ``response.choices[0].message``),
+    non-APIError LiteLLM operational/policy failures, the LiteLLM OpenAIError
+    base, timeouts, malformed-response shape from ``response.choices[0].message``),
     marks the session ``solver_exhausted`` via :func:`mark_solver_exhausted`,
     fans the ``guided_dropped_to_freeform`` directive to the audit emitter,
     and returns ``(None, new_terminal_session)`` so the caller can short-circuit
@@ -97,11 +98,13 @@ async def solve_chain_with_auto_drop(
 
     The transient exception set mirrors the project canonical at
     ``composer/service.py:3173-3268`` (the advisor invocation path):
-    ``LiteLLMAPIError``, ``LiteLLMAuthError``, ``LiteLLMBadRequestError``,
-    plus ``TimeoutError`` for asyncio timeouts. ``IndexError``,
-    ``AttributeError``, and ``json.JSONDecodeError`` cover malformed-response
-    shape from ``chain_solver._extract_tool_call`` (empty ``choices``,
-    missing ``message``, invalid tool-call JSON).
+    LiteLLM ``APIError``, ``AuthenticationError``, ``BadRequestError``,
+    ``BudgetExceededError``, ``BlockedPiiEntityError``,
+    ``GuardrailRaisedException``, ``GuardrailInterventionNormalStringError``,
+    and ``OpenAIError`` plus ``TimeoutError`` for asyncio timeouts.
+    ``IndexError``, ``AttributeError``, and ``json.JSONDecodeError`` cover
+    malformed-response shape from ``chain_solver._extract_tool_call`` (empty
+    ``choices``, missing ``message``, invalid tool-call JSON).
     ``ChainSolverResponseShapeError`` covers shape failures one layer deeper:
     wrong tool name, wrong ``turn_type``, missing or malformed
     ``payload.steps`` / ``payload.why``.  All such failures are
@@ -141,9 +144,16 @@ async def solve_chain_with_auto_drop(
             ``guided_dropped_to_freeform`` :class:`ComposerToolInvocation` on
             the transient-failure branch (one per drop).
     """
-    from litellm.exceptions import APIError as LiteLLMAPIError
-    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        APIError,
+        AuthenticationError,
+        BadRequestError,
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+        OpenAIError,
+    )
 
     try:
         proposal = await solve_chain(
@@ -158,9 +168,14 @@ async def solve_chain_with_auto_drop(
         )
         return proposal, session
     except (
-        LiteLLMAPIError,
-        LiteLLMAuthError,
-        LiteLLMBadRequestError,
+        APIError,
+        AuthenticationError,
+        BadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
+        OpenAIError,
         TimeoutError,
         IndexError,
         AttributeError,

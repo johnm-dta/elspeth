@@ -662,6 +662,38 @@ describe("executionStore WebSocket lifecycle", () => {
   });
 });
 
+describe("executionStore.loadRuns", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+  });
+
+  it("drops a run-list response that resolves after the active session changes", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    const pendingRuns = deferred<Run[]>();
+    (fetchRuns as ReturnType<typeof vi.fn>).mockReturnValue(pendingRuns.promise);
+    const currentRun = makeRun({
+      id: "run-session-2",
+      session_id: "session-2",
+    });
+    useExecutionStore.setState({ runs: [currentRun] });
+
+    const loadPromise = useExecutionStore.getState().loadRuns("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingRuns.resolve([
+      makeRun({
+        id: "run-stale-session-1",
+        session_id: "session-1",
+      }),
+    ]);
+    await loadPromise;
+
+    expect(useExecutionStore.getState().runs).toEqual([currentRun]);
+  });
+});
+
 describe("executionStore progress events advance live accounting", () => {
   // The API run record no longer carries best-known live counters. Progress
   // events update state.progress, while completed events attach closed

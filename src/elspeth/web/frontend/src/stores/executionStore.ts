@@ -112,6 +112,10 @@ function shouldApplyExecutionResult(
   );
 }
 
+function shouldApplyRunListResult(sessionId: string): boolean {
+  return useSessionStore.getState().activeSessionId === sessionId;
+}
+
 function assertNever(value: never): never {
   throw new Error(`Unhandled interpretation kind: ${String(value)}`);
 }
@@ -556,6 +560,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   async loadRuns(sessionId: string) {
     try {
       const runs = await api.fetchRuns(sessionId);
+      if (!shouldApplyRunListResult(sessionId)) return;
       set({ runs });
     } catch {
       // Non-critical -- runs list can be stale temporarily

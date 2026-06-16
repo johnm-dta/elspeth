@@ -41,7 +41,7 @@ from elspeth.core.blobs_inline import (
     _validate_blob_content_refs_sync,
 )
 from elspeth.core.config import load_settings_from_yaml_string
-from elspeth.core.dag.models import EdgeContractError, GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
@@ -99,6 +99,7 @@ from elspeth.web.execution.schemas import (
     ValidationReadiness,
     ValidationReadinessBlocker,
     ValidationResult,
+    ValidationWarning,
 )
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REVIEW_PENDING_CODE,
@@ -156,6 +157,17 @@ def _blocked_readiness(
                 detail=detail,
             )
         ],
+    )
+
+
+def _graph_warning_to_validation_warning(warning: GraphValidationWarning) -> ValidationWarning:
+    component_id = warning.node_ids[0] if warning.node_ids else None
+    return ValidationWarning(
+        component_id=component_id,
+        component_type="graph",
+        message=warning.message,
+        suggestion=None,
+        warning_code=warning.code,
     )
 
 
@@ -1615,12 +1627,15 @@ def validate_pipeline(
     try:
         graph = build_runtime_graph(elspeth_settings, bundle)
         graph.validate()
+        graph_warnings = [_graph_warning_to_validation_warning(warning) for warning in graph.validation_warnings]
         checks.append(
             ValidationCheck(
                 name=_CHECK_GRAPH,
                 passed=True,
-                detail="Graph structure is valid",
-                affected_nodes=(),
+                detail="Graph structure is valid"
+                if not graph_warnings
+                else f"Graph structure is valid with {len(graph_warnings)} warning(s)",
+                affected_nodes=tuple(warning.component_id for warning in graph_warnings if warning.component_id is not None),
                 outcome_code=None,
             )
         )
@@ -1824,6 +1839,7 @@ def validate_pipeline(
         is_valid=True,
         checks=checks,
         errors=errors,
+        warnings=graph_warnings,
         readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
     )

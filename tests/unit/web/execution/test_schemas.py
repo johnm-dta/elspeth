@@ -33,6 +33,7 @@ from elspeth.web.execution.schemas import (
     ValidationReadiness,
     ValidationReadinessBlocker,
     ValidationResult,
+    ValidationWarning,
 )
 
 
@@ -148,6 +149,26 @@ class TestValidationResult:
     def test_validation_result_requires_readiness(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+
+    def test_validation_result_accepts_structured_warnings(self) -> None:
+        result = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            warnings=[
+                ValidationWarning(
+                    component_id="transform_a",
+                    component_type="graph",
+                    message="DIVERT branch feeds a coalesce.",
+                    suggestion=None,
+                    warning_code="DIVERT_COALESCE_REQUIRE_ALL",
+                )
+            ],
+            readiness=_ready_readiness(),
+            semantic_contracts=[],
+        )
+
+        assert result.warnings[0].warning_code == "DIVERT_COALESCE_REQUIRE_ALL"
 
     def test_validation_readiness_accepts_pending_interpretation_blocker(self) -> None:
         result = ValidationResult(
@@ -859,7 +880,13 @@ class TestExtraFieldsRejected:
 
     def test_validation_result_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), warnings=[])  # type: ignore[call-arg]
+            ValidationResult(
+                is_valid=True,
+                checks=[],
+                errors=[],
+                readiness=_ready_readiness(),
+                invented_extra_field="nope",  # type: ignore[call-arg]
+            )
 
     def test_run_status_response_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):

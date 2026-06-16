@@ -172,6 +172,16 @@ class ValidationError(_StrictResponse):
     error_code: str | None
 
 
+class ValidationWarning(_StrictResponse):
+    """Non-blocking validation warning with per-component attribution."""
+
+    component_id: str | None
+    component_type: str | None
+    message: str
+    suggestion: str | None
+    warning_code: str
+
+
 class SemanticEdgeContractResponse(_StrictResponse):
     """Per-edge semantic-contract result for HTTP serialization.
 
@@ -217,6 +227,7 @@ class ValidationResult(_StrictResponse):
     is_valid: bool
     checks: list[ValidationCheck]
     errors: list[ValidationError]
+    warnings: list[ValidationWarning] = []
     # Required: every producer must state which contract failed or passed.
     # This prevents callers from reconstructing readiness heuristically from
     # prose errors or parser side effects.

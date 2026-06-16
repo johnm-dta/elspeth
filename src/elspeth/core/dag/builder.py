@@ -1144,7 +1144,7 @@ def build_execution_graph(
 
     # Warn about DIVERT edges feeding require_all coalesces (non-fatal).
     if coalesce_id_to_config:
-        graph.warn_divert_coalesce_interactions(coalesce_id_to_config)
+        graph.set_validation_warnings(graph.warn_divert_coalesce_interactions(coalesce_id_to_config))
 
     # Deep-freeze all NodeInfo configs now that schema resolution is complete.
     # NodeInfo.__post_init__ cannot freeze config because the builder mutates

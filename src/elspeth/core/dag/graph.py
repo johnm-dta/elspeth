@@ -160,6 +160,7 @@ class ExecutionGraph:
         self._route_resolution_map: dict[tuple[NodeID, str], RouteDestination] = {}
         self._pipeline_nodes: list[NodeID] | None = None  # Ordered processing nodes (no source/sinks); None = not yet populated
         self._node_step_map: dict[NodeID, int] = {}  # node_id -> audit step (source=0)
+        self._validation_warnings: tuple[GraphValidationWarning, ...] = ()
 
     @property
     def node_count(self) -> int:
@@ -772,6 +773,10 @@ class ExecutionGraph:
         """Set the node_id -> audit step mapping."""
         self._node_step_map = dict(mapping)
 
+    def set_validation_warnings(self, warnings: Sequence[GraphValidationWarning]) -> None:
+        """Set non-fatal graph construction warnings."""
+        self._validation_warnings = tuple(warnings)
+
     def add_route_resolution_entry(self, gate_id: NodeID, label: str, dest: RouteDestination) -> None:
         """Add a single entry to the route resolution map."""
         self._route_resolution_map[(gate_id, label)] = dest
@@ -790,6 +795,11 @@ class ExecutionGraph:
             No substring matching required - use this for direct lookup.
         """
         return dict(self._sink_id_map)
+
+    @property
+    def validation_warnings(self) -> tuple[GraphValidationWarning, ...]:
+        """Non-fatal graph construction warnings emitted during build."""
+        return self._validation_warnings
 
     def get_transform_id_map(self) -> dict[int, NodeID]:
         """Get explicit sequence -> node_id mapping for transforms.

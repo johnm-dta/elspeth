@@ -19,7 +19,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
-from elspeth.core.dag.models import EdgeContractError, GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer.state import (
@@ -1333,6 +1333,7 @@ class TestValidatePipelineSuccess:
         mock_instantiate.return_value = mock_bundle
 
         mock_graph = MagicMock()
+        mock_graph.validation_warnings = ()
         mock_build_graph.return_value = mock_graph
         mock_assemble.return_value = MagicMock()
 
@@ -1357,6 +1358,7 @@ class TestValidatePipelineSuccess:
         assert result.readiness.execution_ready is True
         assert result.readiness.completion_ready is True
         assert result.errors == []
+        assert result.warnings == []
 
         # Verify real engine functions were called
         mock_load.assert_called_once()
@@ -1366,6 +1368,57 @@ class TestValidatePipelineSuccess:
         mock_assemble.assert_called_once()
         assert mock_assemble.call_args.kwargs["sources"] == mock_bundle.sources
         mock_graph.validate_edge_compatibility.assert_called_once()
+
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+    @patch("elspeth.web.execution.validation.build_runtime_graph")
+    def test_validate_pipeline_surfaces_graph_warnings(
+        self,
+        mock_build_graph: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+        mock_assemble: MagicMock,
+    ) -> None:
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        mock_settings = MagicMock()
+        mock_load.return_value = mock_settings
+
+        mock_bundle = MagicMock()
+        mock_bundle.source = MagicMock()
+        mock_bundle.sources = {"source": mock_bundle.source}
+        mock_bundle.source_settings = MagicMock()
+        mock_bundle.transforms = ()
+        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+
+        mock_graph = MagicMock()
+        mock_graph.validation_warnings = (
+            GraphValidationWarning(
+                code="DIVERT_COALESCE_REQUIRE_ALL",
+                message="Transform 't_a' has on_error routing and feeds require_all coalesce 'join'.",
+                node_ids=("t_a", "join"),
+            ),
+        )
+        mock_build_graph.return_value = mock_graph
+        mock_assemble.return_value = MagicMock()
+
+        state = _make_state()
+        settings = _make_settings()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is True
+        assert len(result.warnings) == 1
+        assert result.warnings[0].component_id == "t_a"
+        assert result.warnings[0].component_type == "graph"
+        assert result.warnings[0].warning_code == "DIVERT_COALESCE_REQUIRE_ALL"
+        assert "require_all coalesce" in result.warnings[0].message
+        graph_check = _check(result, "graph_structure")
+        assert graph_check.passed is True
+        assert graph_check.affected_nodes == ("t_a",)
 
 
 class TestValidatePipelineSettingsFailure:

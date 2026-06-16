@@ -265,6 +265,8 @@ def mock_session_service() -> MagicMock:
     svc.create_run = AsyncMock(return_value=MagicMock(id=uuid4()))
     svc.get_run = AsyncMock(return_value=MagicMock(status="pending"))
     svc.update_run_status = AsyncMock()
+    svc.append_run_event = AsyncMock()
+    svc.list_run_events = AsyncMock(return_value=[])
     return svc
 
 
@@ -4037,6 +4039,32 @@ class TestEventBusBridge:
         assert run_event.data.tokens_routed_failure == 2
         assert run_event.run_id == "run-123"
 
+    def test_progress_event_persisted_even_without_subscriber(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        from elspeth.contracts.cli import ProgressEvent
+
+        service._broadcast_progress_event(
+            "4a8ebbb1-dc97-4875-8b3d-1890ec7ead87",
+            ProgressEvent(
+                rows_processed=100,
+                rows_succeeded=92,
+                rows_failed=5,
+                rows_quarantined=3,
+                rows_routed_success=7,
+                rows_routed_failure=2,
+                elapsed_seconds=10.5,
+            ),
+        )
+
+        mock_session_service.append_run_event.assert_awaited_once()
+        call = mock_session_service.append_run_event.await_args
+        assert call.kwargs["run_id"] == UUID("4a8ebbb1-dc97-4875-8b3d-1890ec7ead87")
+        assert call.kwargs["event_type"] == "progress"
+        assert call.kwargs["data"]["source_rows_processed"] == 100
+
     def test_progress_broadcast_closed_loop_records_drop_telemetry(self, service: ExecutionServiceImpl) -> None:
         """Loop-closed progress drops are operational telemetry, not slog-only."""
         from elspeth.contracts.cli import ProgressEvent
@@ -4044,12 +4072,13 @@ class TestEventBusBridge:
         loop = asyncio.new_event_loop()
         try:
             broadcaster = ProgressBroadcaster(loop)
-            broadcaster.subscribe("run-123")
+            run_id = "4a8ebbb1-dc97-4875-8b3d-1890ec7ead87"
+            broadcaster.subscribe(run_id)
             loop.close()
             service._broadcaster = broadcaster
 
             service._broadcast_progress_event(
-                "run-123",
+                run_id,
                 ProgressEvent(
                     rows_processed=100,
                     rows_succeeded=92,

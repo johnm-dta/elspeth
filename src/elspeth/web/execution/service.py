@@ -81,7 +81,7 @@ from elspeth.web.execution.fanout_guard import (
     evaluate_execution_fanout_guard,
 )
 from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
-from elspeth.web.execution.progress import ProgressBroadcaster
+from elspeth.web.execution.progress import BroadcastResult, ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
 from elspeth.web.execution.schemas import (
     CancelledData,
@@ -964,7 +964,7 @@ class ExecutionServiceImpl:
             if shutdown_event.is_set():
                 self._finalize_output_blobs(run_id, success=False)
                 self._call_async(self._session_service.update_run_status(run_uuid, status="cancelled"))
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -992,7 +992,7 @@ class ExecutionServiceImpl:
                 current = self._call_async(self._session_service.get_run(run_uuid))
                 if current.status == "cancelled":
                     self._finalize_output_blobs(run_id, success=False)
-                    self._broadcaster.broadcast(
+                    self._persist_and_broadcast_run_event(
                         run_id,
                         RunEvent(
                             run_id=run_id,
@@ -1368,7 +1368,7 @@ class ExecutionServiceImpl:
                         rows_failed=result.rows_failed,
                     )
                     self._finalize_output_blobs(run_id, success=False)
-                    self._broadcaster.broadcast(
+                    self._persist_and_broadcast_run_event(
                         run_id,
                         RunEvent(
                             run_id=run_id,
@@ -1415,7 +1415,7 @@ class ExecutionServiceImpl:
                 assert session_error is not None, (
                     "Tier-1 invariant: session_error must be populated when result.status == RunStatus.FAILED (see the FAILED branch above)"
                 )
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1431,7 +1431,7 @@ class ExecutionServiceImpl:
                 if landscape_db is None:
                     raise RuntimeError("Tier-1 invariant: completed run has no open LandscapeDB for accounting projection")
                 accounting = load_run_accounting_from_db(landscape_db, landscape_run_id=result.run_id)
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1478,7 +1478,7 @@ class ExecutionServiceImpl:
                     rows_quarantined=gse.rows_quarantined,
                 )
             )
-            self._broadcaster.broadcast(
+            self._persist_and_broadcast_run_event(
                 run_id,
                 RunEvent(
                     run_id=run_id,
@@ -1676,7 +1676,7 @@ class ExecutionServiceImpl:
             # Re-emitting the *correct* terminal SSE event for consumer
             # continuity is a separate UX improvement.
             if not run_already_terminal:
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1778,13 +1778,32 @@ class ExecutionServiceImpl:
 
     def _broadcast_progress_event(self, run_id: str, progress: ProgressEvent) -> None:
         run_event = self._to_run_event(run_id, progress)
-        broadcast_result = self._broadcaster.broadcast(run_id, run_event)
+        broadcast_result = self._persist_and_broadcast_run_event(run_id, run_event)
         if broadcast_result.dropped_count > 0:
             assert broadcast_result.drop_reason is not None, "BroadcastResult with drops must carry a drop_reason"
             self._telemetry.progress_broadcast_dropped_total.add(
                 broadcast_result.dropped_count,
                 attributes={"reason": broadcast_result.drop_reason},
             )
+
+    def _persist_and_broadcast_run_event(self, run_id: str, run_event: RunEvent) -> BroadcastResult:
+        try:
+            self._call_async(
+                self._session_service.append_run_event(
+                    run_id=UUID(run_id),
+                    timestamp=run_event.timestamp,
+                    event_type=run_event.event_type,
+                    data=run_event.data.model_dump(mode="json"),
+                )
+            )
+        except (OSError, SQLAlchemyError) as exc:
+            slog.error(
+                "run_event_persist_failed",
+                run_id=run_id,
+                event_type=run_event.event_type,
+                exc_class=type(exc).__name__,
+            )
+        return self._broadcaster.broadcast(run_id, run_event)
 
     # Exceptions that can escape finalize_run_output_blobs itself
     # (not per-blob errors, which are captured in the result).

@@ -74,6 +74,7 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
+    RunEventRecord,
     RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
@@ -283,6 +284,17 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
         timestamp=timestamp,
         event_type=event_type,
         data=payload,
+    )
+
+
+def _run_event_from_record(record: RunEventRecord) -> RunEvent:
+    return RunEvent.model_validate(
+        {
+            "run_id": str(record.run_id),
+            "timestamp": record.timestamp,
+            "event_type": record.event_type,
+            "data": record.data,
+        }
     )
 
 
@@ -888,6 +900,12 @@ def create_execution_router() -> APIRouter:
                 await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                 return
             current = current_snapshot.response
+            for persisted in await websocket.app.state.session_service.list_run_events(UUID(run_id)):
+                replay_event = _run_event_from_record(persisted)
+                await websocket.send_json(replay_event.model_dump(mode="json"))
+                if replay_event.event_type in ("completed", "cancelled", "failed"):
+                    await websocket.close(code=1000)
+                    return
             if current.status in RUN_STATUS_TERMINAL_VALUES:
                 event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                 await websocket.send_json(event.model_dump(mode="json"))

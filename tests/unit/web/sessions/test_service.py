@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import structlog
@@ -19,7 +19,13 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
 )
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import composer_completion_events_table
+from elspeth.web.sessions.models import (
+    composer_completion_events_table,
+    composition_states_table,
+    run_events_table,
+    runs_table,
+    sessions_table,
+)
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     CompositionStateData,
@@ -249,6 +255,67 @@ class TestSessionCRUD:
         assert not blob_dir.exists()
         assert quarantine_dir.is_dir()
         assert (quarantine_dir / blob_file.name).read_text() == "col1\nval1"
+
+
+class TestRunEvents:
+    @pytest.mark.asyncio
+    async def test_append_and_list_run_events_preserves_order_and_payload(self, service, engine) -> None:
+        session_id = uuid.uuid4()
+        state_id = uuid.uuid4()
+        run_id = uuid.uuid4()
+        created_at = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=str(session_id),
+                    user_id="alice",
+                    title="Run events",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=str(state_id),
+                    session_id=str(session_id),
+                    version=1,
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=created_at,
+                )
+            )
+            conn.execute(
+                insert(runs_table).values(
+                    id=str(run_id),
+                    session_id=str(session_id),
+                    state_id=str(state_id),
+                    status="running",
+                    started_at=created_at,
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+
+        await service.append_run_event(
+            run_id=run_id,
+            timestamp=created_at,
+            event_type="progress",
+            data={"source_rows_processed": 1},
+        )
+        await service.append_run_event(
+            run_id=run_id,
+            timestamp=created_at + timedelta(milliseconds=1),
+            event_type="error",
+            data={"message": "bad row", "node_id": None, "row_id": None},
+        )
+
+        records = await service.list_run_events(run_id)
+
+        assert [record.event_type for record in records] == ["progress", "error"]
+        assert records[0].data == {"source_rows_processed": 1}
+        assert records[1].data["message"] == "bad row"
+        with engine.connect() as conn:
+            assert conn.execute(select(run_events_table.c.id)).fetchall()
 
 
 class TestMessagePersistence:

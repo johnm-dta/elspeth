@@ -30,6 +30,7 @@ from elspeth.web.execution.schemas import (
     RunEvent,
     RunStatusResponse,
 )
+from elspeth.web.sessions.protocol import RunEventRecord
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ def _create_ws_test_app(
     app.state.broadcaster = broadcaster or MagicMock()
     app.state.session_service = MagicMock()
     app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4(), landscape_run_id=None))
+    app.state.session_service.list_run_events = AsyncMock(return_value=[])
     app.state.settings = MagicMock()
 
     app.include_router(create_execution_router())
@@ -285,6 +287,50 @@ class TestWebSocketTimeoutRecovery:
         assert payload["data"]["tokens_routed_success"] == 3
         assert payload["data"]["tokens_routed_failure"] == 1
         assert "type" not in payload
+
+    @pytest.mark.asyncio
+    async def test_replays_persisted_run_events_before_waiting_for_live_queue(self) -> None:
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=True)
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(tz=UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=None,
+            )
+        )
+        app = self._make_authed_app(svc)
+        app.state.session_service.list_run_events = AsyncMock(
+            return_value=[
+                RunEventRecord(
+                    id=uuid4(),
+                    run_id=run_id,
+                    timestamp=datetime.now(tz=UTC),
+                    event_type="error",
+                    data={"message": "row failed", "node_id": None, "row_id": None},
+                )
+            ]
+        )
+
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=WebSocketDisconnect(code=1000)),
+        ):
+            websocket = await _call_websocket(app, str(run_id), token="valid")
+
+        assert websocket.sent_json == [
+            {
+                "run_id": str(run_id),
+                "timestamp": websocket.sent_json[0]["timestamp"],
+                "event_type": "error",
+                "data": {"message": "row failed", "node_id": None, "row_id": None},
+            }
+        ]
+        app.state.session_service.list_run_events.assert_awaited_once_with(run_id)
 
     @pytest.mark.asyncio
     async def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:

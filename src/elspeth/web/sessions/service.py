@@ -68,6 +68,7 @@ from elspeth.web.sessions.models import (
     composition_states_table,
     interpretation_events_table,
     proposal_events_table,
+    run_events_table,
     runs_table,
     sessions_table,
     skill_markdown_history_table,
@@ -77,6 +78,7 @@ from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
     LEGAL_RUN_TRANSITIONS,
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
+    SESSION_RUN_EVENT_TYPE_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     AuditAccessLogRecord,
     AuditAccessLogWriteError,
@@ -95,9 +97,11 @@ from elspeth.web.sessions.protocol import (
     ProposalEventRecord,
     ProposalLifecycleStatus,
     RunAlreadyActiveError,
+    RunEventRecord,
     RunRecord,
     SessionNotFoundError,
     SessionRecord,
+    SessionRunEventType,
     SessionRunStatus,
     StaleComposeStateError,
     ToolCallIDMismatchError,
@@ -4290,6 +4294,59 @@ class SessionServiceImpl:
         rows = await self._run_sync(_sync)
         return [self._row_to_run_record(row) for row in rows]
 
+    async def append_run_event(
+        self,
+        *,
+        run_id: UUID,
+        timestamp: datetime,
+        event_type: SessionRunEventType,
+        data: Mapping[str, Any],
+    ) -> RunEventRecord:
+        """Append a structured run event for websocket replay and audit inspection."""
+        if event_type not in SESSION_RUN_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: run_events.event_type is {event_type!r}, expected one of {sorted(SESSION_RUN_EVENT_TYPE_VALUES)}"
+            )
+        event_id = uuid.uuid4()
+        rid = str(run_id)
+        payload = deep_thaw(dict(data))
+
+        def _sync() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    insert(run_events_table).values(
+                        id=str(event_id),
+                        run_id=rid,
+                        timestamp=timestamp,
+                        event_type=event_type,
+                        data=payload,
+                    )
+                )
+
+        await self._run_sync(_sync)
+        return RunEventRecord(
+            id=event_id,
+            run_id=run_id,
+            timestamp=timestamp,
+            event_type=event_type,
+            data=cast(Mapping[str, Any], payload),
+        )
+
+    async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
+        """List persisted run events in timestamp order."""
+        rid = str(run_id)
+
+        def _sync() -> Any:
+            with self._engine.connect() as conn:
+                return conn.execute(
+                    select(run_events_table)
+                    .where(run_events_table.c.run_id == rid)
+                    .order_by(run_events_table.c.timestamp, run_events_table.c.id)
+                ).fetchall()
+
+        rows = await self._run_sync(_sync)
+        return [self._row_to_run_event_record(row) for row in rows]
+
     async def update_run_status(
         self,
         run_id: UUID,
@@ -5156,4 +5213,20 @@ class SessionServiceImpl:
             error=row.error,
             landscape_run_id=row.landscape_run_id,
             pipeline_yaml=row.pipeline_yaml,
+        )
+
+    def _row_to_run_event_record(self, row: Any) -> RunEventRecord:
+        """Convert a SQLAlchemy row to a RunEventRecord."""
+        if row.event_type not in SESSION_RUN_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: run_events.event_type is {row.event_type!r}, expected one of {sorted(SESSION_RUN_EVENT_TYPE_VALUES)}"
+            )
+        if not isinstance(row.data, Mapping):
+            raise AuditIntegrityError(f"Tier 1: run_events.data for event {row.id} is not a JSON object")
+        return RunEventRecord(
+            id=UUID(row.id),
+            run_id=UUID(row.run_id),
+            timestamp=self._ensure_utc(row.timestamp),
+            event_type=cast(SessionRunEventType, row.event_type),
+            data=cast(Mapping[str, Any], row.data),
         )

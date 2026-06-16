@@ -54,6 +54,7 @@ ProposalEventType = Literal[
 SessionRunStatus = Literal["pending", "running", "completed", "completed_with_failures", "failed", "empty", "cancelled"]
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
+SessionRunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 
 # Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
 # constraint in ``web/sessions/models.py``. The Python Literal and the SQL
@@ -118,6 +119,7 @@ COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(Composi
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
+SESSION_RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(SessionRunEventType))
 _RUN_COUNTER_FIELDS: tuple[str, ...] = (
     "rows_processed",
     "rows_succeeded",
@@ -170,6 +172,17 @@ if _legal_transitions_terminal != SESSION_TERMINAL_RUN_STATUS_VALUES:
         f"LEGAL_RUN_TRANSITIONS terminal entries {sorted(_legal_transitions_terminal)} "
         f"must match TerminalSessionRunStatus {sorted(SESSION_TERMINAL_RUN_STATUS_VALUES)}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RunEventRecord:
+    """Represents a row from the run_events table."""
+
+    id: UUID
+    run_id: UUID
+    timestamp: datetime
+    event_type: SessionRunEventType
+    data: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1071,6 +1084,21 @@ class SessionServiceProtocol(Protocol):
         raise ValueError if landscape_run_id is provided but the run
         already has one set.
         """
+        ...
+
+    async def append_run_event(
+        self,
+        *,
+        run_id: UUID,
+        timestamp: datetime,
+        event_type: SessionRunEventType,
+        data: Mapping[str, Any],
+    ) -> RunEventRecord:
+        """Append a structured execution event for replay/audit."""
+        ...
+
+    async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
+        """Return persisted execution events for a run in event order."""
         ...
 
     async def record_blob_inline_resolutions(

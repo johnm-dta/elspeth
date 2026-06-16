@@ -47,12 +47,12 @@ def _extract_python_members() -> set[str]:
     # Ensure the src tree is importable from the CWD (repo root)
     sys.path.insert(0, "src")
     try:
-        from elspeth.web.composer.recipes import SlotType  # type: ignore[attr-defined]
+        from elspeth.web.composer.recipes import SlotType
 
         args = get_args(SlotType)
         if not args:
             # SlotType might be imported as a re-export; try get_type_hints fallback
-            import elspeth.web.composer.recipes as _mod  # type: ignore[import-untyped]
+            import elspeth.web.composer.recipes as _mod
 
             hints: dict[str, Any] = get_type_hints(_mod)
             args = get_args(hints.get("SlotType", SlotType))
@@ -66,13 +66,14 @@ def _extract_python_members() -> set[str]:
 # TypeScript side: regex extraction from guided.ts
 # ---------------------------------------------------------------------------
 
-# Pattern targets the slot_type field in RecipeSlotInput:
+# Pattern targets the RecipeSlotInput interface, then the slot_type field inside it:
 #   slot_type: "blob_id" | "str" | "float" | "int" | "str_list";
 #
 # The interface may span multiple lines.  Keep this deliberately linear:
 # capture everything up to the field terminator, then extract string literal
 # members from that slice.  A nested union-token regex here can backtrack
 # exponentially on malformed input before the semicolon.
+_TS_INTERFACE_RE = re.compile(r"(?:^|\n)\s*(?:export\s+)?interface\s+RecipeSlotInput\b[^{]*\{", re.MULTILINE)
 _TS_FIELD_RE = re.compile(r"slot_type\s*:\s*([^;]+);", re.MULTILINE)
 
 _TS_MEMBER_RE = re.compile(r'"([^"]+)"')
@@ -86,18 +87,37 @@ def _extract_ts_members(ts_path: Path) -> set[str]:
     commas in the union.
     """
     content = ts_path.read_text(encoding="utf-8")
-    match = _TS_FIELD_RE.search(content)
+    interface_body = _extract_recipe_slot_input_body(content, ts_path)
+    match = _TS_FIELD_RE.search(interface_body)
     if not match:
         raise ValueError(
-            f"Could not locate `slot_type: ...;` field in {ts_path}. "
-            "Check that the RecipeSlotInput interface is present and "
-            "the field uses a string-literal union type."
+            f"Could not locate `slot_type: ...;` field in RecipeSlotInput interface in {ts_path}. "
+            "Check that the field uses a string-literal union type."
         )
     union_text = match.group(1)
     members = _TS_MEMBER_RE.findall(union_text)
     if not members:
         raise ValueError(f"Regex matched slot_type field in {ts_path} but extracted no string literals from: {union_text!r}")
     return set(members)
+
+
+def _extract_recipe_slot_input_body(content: str, ts_path: Path) -> str:
+    """Return the body of the RecipeSlotInput TypeScript interface."""
+    match = _TS_INTERFACE_RE.search(content)
+    if not match:
+        raise ValueError(f"Could not locate RecipeSlotInput interface in {ts_path}.")
+
+    start = match.end()
+    depth = 1
+    for index, char in enumerate(content[start:], start=start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start:index]
+
+    raise ValueError(f"Could not locate closing brace for RecipeSlotInput interface in {ts_path}.")
 
 
 # ---------------------------------------------------------------------------

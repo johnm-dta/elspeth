@@ -145,6 +145,30 @@ class TestTSHasExtra:
         assert "ts_only" in result.stderr
         assert "In TypeScript only" in result.stderr
 
+    def test_targets_recipe_slot_input_when_earlier_slot_type_field_exists(self, tmp_path: Path) -> None:
+        _write_python(tmp_path, ["str"])
+        ts_path = _write_ts(tmp_path, ["str", "int"])
+        ts_path.write_text(
+            """\
+export interface Earlier {
+  slot_type: "str";
+}
+
+export interface RecipeSlotInput {
+  name: string;
+  slot_type: "str" | "int";
+  description: string;
+}
+""",
+            encoding="utf-8",
+        )
+
+        result = _run_script(tmp_path)
+
+        assert result.returncode == 1
+        assert "int" in result.stderr
+        assert "In TypeScript only" in result.stderr
+
 
 # ---------------------------------------------------------------------------
 # Error case: missing source files

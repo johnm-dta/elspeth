@@ -385,13 +385,15 @@ class DatabaseSink(BaseSink):
 
         DDL is instrumented via ctx.record_call for audit trail completeness.
         """
-        assert self._engine is not None, (
-            "engine is None at DROP TABLE time — invariant violation (_ensure_engine_and_metadata_initialized must run first)"
-        )
+        engine = self._engine
+        if engine is None:
+            raise RuntimeError(
+                "engine is None at DROP TABLE time — invariant violation (_ensure_engine_and_metadata_initialized must run first)"
+            )
 
         from sqlalchemy import MetaData, Table, inspect
 
-        inspector = inspect(self._engine)
+        inspector = inspect(engine)
         if inspector.has_table(self._table_name):
             # Use SQLAlchemy's Table.drop() for dialect-safe drop
             # This generates correct identifier quoting for any database
@@ -400,7 +402,7 @@ class DatabaseSink(BaseSink):
 
             start_time = time.perf_counter()
             try:
-                table.drop(self._engine)
+                table.drop(engine)
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 try:
                     ctx.record_call(
@@ -563,9 +565,8 @@ class DatabaseSink(BaseSink):
 
         # Insert all rows in batch with call recording for audit trail
         # (ctx.operation_id is set by executor)
-        assert self._engine is not None and self._table is not None, (
-            "engine/table is None at INSERT time — invariant violation (_ensure_table must set both before write)"
-        )
+        if self._engine is None or self._table is None:
+            raise RuntimeError("engine/table is None at INSERT time — invariant violation (_ensure_table must set both before write)")
         start_time = time.perf_counter()
         try:
             written_rows = self._insert_with_per_row_diversion(rows, insert_rows)
@@ -689,10 +690,12 @@ class DatabaseSink(BaseSink):
         a silent or partial-write path, so no speculative non-savepoint
         fallback is provided.
         """
-        assert self._engine is not None and self._table is not None, "engine/table is None at INSERT time — invariant violation"
+        engine = self._engine
         table = self._table
+        if engine is None or table is None:
+            raise RuntimeError("engine/table is None at INSERT time — invariant violation")
         written_rows: list[dict[str, Any]] = []
-        with self._engine.begin() as conn:
+        with engine.begin() as conn:
             batch_savepoint = conn.begin_nested()
             try:
                 conn.execute(insert(table), insert_rows)

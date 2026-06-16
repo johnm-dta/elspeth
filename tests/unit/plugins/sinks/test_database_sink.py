@@ -957,9 +957,9 @@ class TestDatabaseSinkFalseSuccess:
         engine.dispose()
 
     def test_none_engine_at_insert_raises_invariant_error(self, tmp_path: Path) -> None:
-        """If _ensure_table fails to set engine/table, assertion catches it.
+        """If _ensure_table fails to set engine/table, explicit invariant raises.
 
-        This tests the defense-in-depth assertion. We mock _ensure_table to
+        This tests the defense-in-depth invariant. We mock _ensure_table to
         be a no-op, simulating a code path where the invariant is broken.
         Previously, the code would silently skip INSERT and record SUCCESS.
         """
@@ -982,9 +982,47 @@ class TestDatabaseSinkFalseSuccess:
             operation_type="sink_write",
         )
 
-        # Mock _ensure_table to be a no-op, leaving _engine and _table as None
-        with patch.object(sink, "_ensure_table"), pytest.raises(AssertionError, match=r"engine.*None.*invariant"):
+        # Mock _ensure_table to be a no-op, leaving _engine and _table as None.
+        with patch.object(sink, "_ensure_table"), pytest.raises(RuntimeError, match=r"engine.*None.*invariant"):
             sink.write([{"id": 1, "name": "should_fail"}], ctx)
+
+    def test_drop_without_engine_raises_explicit_invariant_error(self, tmp_path: Path) -> None:
+        """DROP TABLE invariant failures must survive optimized Python."""
+        db_path = tmp_path / "test.db"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+        ctx = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        with pytest.raises(RuntimeError, match=r"engine.*None.*invariant"):
+            sink._drop_table_if_exists(ctx)
+
+    def test_direct_insert_without_engine_table_raises_explicit_invariant_error(self, tmp_path: Path) -> None:
+        """Per-row diversion helper should not rely on stripped assert statements."""
+        db_path = tmp_path / "test.db"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+
+        with pytest.raises(RuntimeError, match=r"engine/table.*None.*invariant"):
+            sink._insert_with_per_row_diversion([{"id": 1, "name": "alice"}], [{"id": 1, "name": "alice"}])
 
 
 class TestDDLAuditRecording:

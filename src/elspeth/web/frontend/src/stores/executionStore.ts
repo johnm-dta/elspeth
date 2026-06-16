@@ -477,6 +477,26 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
 
     // Open a WebSocket for live progress, passing JWT as query parameter
     const token = useAuthStore.getState().token ?? "";
+    function applyActiveRunEvent(event: RunEvent): boolean {
+      let applied = false;
+      set((state) => {
+        if (event.run_id !== runId || state.activeRunId !== runId) {
+          return {};
+        }
+        applied = true;
+        return applyRunEvent(state, event);
+      });
+      return applied;
+    }
+
+    function refreshTerminalProjections(): void {
+      const sessionId = useSessionStore.getState().activeSessionId;
+      if (sessionId) {
+        void get().loadRuns(sessionId);
+        void useBlobStore.getState().loadBlobs(sessionId);
+      }
+    }
+
     wsConnection = connectToRun(runId, token, {
       onConnected() {
         set({ wsDisconnected: false });
@@ -485,40 +505,34 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         set({ wsDisconnected: true });
       },
       onProgress(event: RunEvent, _data: RunEventProgress) {
-        set((state) => applyRunEvent(state, event));
+        applyActiveRunEvent(event);
       },
       onError(event: RunEvent, _data: RunEventError) {
         // Non-terminal: per-row exception. Accumulate into progress.
-        set((state) => applyRunEvent(state, event));
+        applyActiveRunEvent(event);
       },
       onComplete(event: RunEvent, _data: RunEventCompleted) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows carry finalized output inventory.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onCancelled(event: RunEvent, _data: RunEventCancelled) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows may carry partial outputs after cancellation.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onFailed(event: RunEvent, _data: RunEventFailed) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows may carry partial outputs after failure.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onAuthFailure() {

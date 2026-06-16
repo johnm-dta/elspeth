@@ -847,6 +847,53 @@ describe("executionStore progress events advance live accounting", () => {
     expect(state.runs[0]).toEqual(otherRun);
   });
 
+  it("ignores progress events whose run_id does not match the active run", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 5,
+        tokens_succeeded: 4,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 2,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const staleEvent: RunEvent = {
+      run_id: "run-old",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        source_rows_processed: 99,
+        tokens_succeeded: 72,
+        tokens_failed: 9,
+        tokens_quarantined: 1,
+        tokens_routed_success: 9,
+        tokens_routed_failure: 9,
+      },
+    };
+    handlers.onProgress(staleEvent, staleEvent.data);
+
+    expect(useExecutionStore.getState().progress).toMatchObject({
+      source_rows_processed: 5,
+      tokens_succeeded: 4,
+      tokens_failed: 0,
+      tokens_quarantined: 0,
+      tokens_routed_success: 2,
+      tokens_routed_failure: 0,
+    });
+  });
+
   it("does not zero state.runs[i] counters on error events with null progress", () => {
     // RunEventError carries no accounting. The store must preserve the REST
     // snapshot instead of fabricating zeros during reconnect-before-progress.

@@ -162,11 +162,12 @@ def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
     """Extract plugin class declarations from one source file."""
     source = file_path.read_text(encoding="utf-8-sig")
     tree = ast.parse(source, filename=str(file_path))
+    module_string_constants = _module_string_constants(tree)
     results: list[PluginAttributes] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
-        if not _has_name_class_attribute(node):
+        if not _has_name_class_attribute(node, module_string_constants):
             continue
         version_value, _ = _get_class_attribute_value(node, "plugin_version")
         hash_value, _ = _get_class_attribute_value(node, "source_file_hash")
@@ -180,7 +181,29 @@ def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
     return results
 
 
-def _get_class_attribute_value(node: ast.ClassDef, attr_name: str) -> tuple[object | None, int | None]:
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Return top-level names bound directly to string constants."""
+    constants: dict[str, str] = {}
+    for item in tree.body:
+        if isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str):
+            for target in item.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = item.value.value
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and isinstance(item.value, ast.Constant)
+            and isinstance(item.value.value, str)
+        ):
+            constants[item.target.id] = item.value.value
+    return constants
+
+
+def _get_class_attribute_value(
+    node: ast.ClassDef,
+    attr_name: str,
+    module_string_constants: dict[str, str] | None = None,
+) -> tuple[object | None, int | None]:
     sentinel = object()
     for item in node.body:
         if isinstance(item, ast.Assign):
@@ -188,18 +211,26 @@ def _get_class_attribute_value(node: ast.ClassDef, attr_name: str) -> tuple[obje
                 if isinstance(target, ast.Name) and target.id == attr_name:
                     if isinstance(item.value, ast.Constant):
                         return (item.value.value, item.lineno)
+                    if isinstance(item.value, ast.Name) and module_string_constants is not None:
+                        resolved = module_string_constants.get(item.value.id, sentinel)
+                        if resolved is not sentinel:
+                            return (resolved, item.lineno)
                     return (sentinel, item.lineno)
         if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and item.target.id == attr_name:
             if item.value is not None and isinstance(item.value, ast.Constant):
                 return (item.value.value, item.lineno)
+            if item.value is not None and isinstance(item.value, ast.Name) and module_string_constants is not None:
+                resolved = module_string_constants.get(item.value.id, sentinel)
+                if resolved is not sentinel:
+                    return (resolved, item.lineno)
             if item.value is None:
                 return (None, None)
             return (sentinel, item.lineno)
     return (None, None)
 
 
-def _has_name_class_attribute(node: ast.ClassDef) -> bool:
-    value, _ = _get_class_attribute_value(node, "name")
+def _has_name_class_attribute(node: ast.ClassDef, module_string_constants: dict[str, str]) -> bool:
+    value, _ = _get_class_attribute_value(node, "name", module_string_constants)
     return isinstance(value, str)
 
 

@@ -307,6 +307,25 @@ def test_plugin_hashes_reports_missing_source_file_hash(tmp_path: Path) -> None:
     assert "source_file_hash" in findings[0].message
 
 
+def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "dynamic_name.py",
+        """
+        PLUGIN_NAME = "dynamic"
+
+        class DynamicSource:
+            name = PLUGIN_NAME
+            plugin_version = "1.0.0"
+            source_file_hash = None
+        """,
+    )
+
+    findings = scan_plugin_hashes_root(tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["PH2"]
+    assert "DynamicSource" in findings[0].message
+
+
 def test_plugin_hashes_passes_on_correct_hashes(tmp_path: Path) -> None:
     _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
 

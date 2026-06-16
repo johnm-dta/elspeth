@@ -1404,6 +1404,35 @@ class TestSecretsExceptionHandlers:
         assert body["request_id"]
         assert resp.headers["X-Request-ID"] == body["request_id"]
 
+    def test_validate_secret_rejects_invalid_path_name_before_service_access(self, tmp_path, monkeypatch) -> None:
+        """Invalid path names must fail at the HTTP boundary without probing stores."""
+        client = self._authed_client(tmp_path)
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("secret service must not be called for invalid path names")
+
+        monkeypatch.setattr(client.app.state.secret_service, "check_user_ref_resolvable", fail_if_called)
+
+        resp = client.post("/api/secrets/1bad/validate")
+
+        assert resp.status_code == 422
+        assert "1bad" not in resp.text
+
+    def test_delete_secret_rejects_oversized_path_name_before_service_access(self, tmp_path, monkeypatch) -> None:
+        """Oversized path names must fail closed without echoing the attacker-controlled name."""
+        client = self._authed_client(tmp_path)
+        oversized_name = "A" * 300
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("secret service must not be called for invalid path names")
+
+        monkeypatch.setattr(client.app.state.secret_service, "delete_user_secret", fail_if_called)
+
+        resp = client.delete(f"/api/secrets/{oversized_name}")
+
+        assert resp.status_code == 422
+        assert oversized_name not in resp.text
+
     # -- SecretDecryptionError → 409 ------------------------------------------
 
     def test_decryption_failure_on_validate_returns_409(self, tmp_path, monkeypatch) -> None:

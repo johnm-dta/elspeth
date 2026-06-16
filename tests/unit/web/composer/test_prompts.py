@@ -377,6 +377,16 @@ class TestBuildSystemPrompt:
         assert "the artifact you wrote is authoritative for its header/column names" in flattened
         assert "Do not stop by saying the source contract is incomplete" in flattened
 
+    def test_core_skill_rejects_persona_column_and_format_fabrication(self) -> None:
+        """Panel-persona prose must not override inspected source facts."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert 'Do not turn persona prose such as "approval status indicator" into a column name like `approval_status`' in flattened
+        assert "inspect the source and use the literal observed header such as `approved`" in flattened
+        assert "For row-file routing/splitting requests, default outputs to the source row format" in flattened
+        assert "CSV source means CSV sinks unless the user explicitly asks for JSON/JSONL" in flattened
+
     def test_core_skill_treats_authored_rubrics_as_reviewable(self) -> None:
         """LLM-authored scoring semantics must create vague-term review cards."""
         result = build_system_prompt(None)

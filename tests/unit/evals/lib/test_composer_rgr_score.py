@@ -573,6 +573,39 @@ class TestOutputOptionAsserters:
         assert any("write_mode" in r for r in result["amber_reasons"])
 
 
+class TestOutputPluginAsserters:
+    """must_have_output_plugins — output sink plugin multiset pinning."""
+
+    def test_green_when_required_output_plugins_present(self) -> None:
+        state = _state_valid(
+            outputs=[
+                {"name": "approved", "plugin": "csv", "options": {}},
+                {"name": "rejected", "plugin": "csv", "options": {}},
+            ]
+        )
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["csv", "csv"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_amber_when_json_outputs_replace_required_csv_sinks(self) -> None:
+        state = _state_valid(
+            outputs=[
+                {"name": "approved", "plugin": "json", "options": {"format": "jsonl"}},
+                {"name": "rejected", "plugin": "json", "options": {"format": "jsonl"}},
+            ]
+        )
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["csv", "csv"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("output plugins" in r and "csv" in r and "json" in r for r in result["amber_reasons"])
+
+
 # --------------------------------------------------------------------------
 # Tool-sequence asserters (gov-pages-rate-cool scenario, 2026-05-23)
 # --------------------------------------------------------------------------

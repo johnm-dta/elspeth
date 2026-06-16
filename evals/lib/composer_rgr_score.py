@@ -80,6 +80,11 @@ simple-pipeline-convergence program):
       the field as int/float. Catches the numeric-gate-on-string-field
       hazard.
 
+  must_have_output_plugins
+      List of output sink plugin names required as a multiset. For example
+      ["csv", "csv"] requires at least two CSV sinks and catches JSON sinks
+      chosen for a CSV-in/CSV-out routing target.
+
   max_repair_turns
       Integer. If state has composer_meta.repair_turns_used, that
       value must be <= max_repair_turns. If the field is absent
@@ -91,6 +96,7 @@ simple-pipeline-convergence program):
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 
@@ -173,6 +179,46 @@ def _sole_source(state: Any) -> Any:
     if not isinstance(sources, dict) or len(sources) != 1:
         return None
     return next(iter(sources.values()))
+
+
+def _output_plugins(state: Any) -> list[str]:
+    """Return output sink plugin identifiers from list or mapping state shapes."""
+    if not isinstance(state, dict):
+        return []
+    outputs = state.get("outputs")
+    if isinstance(outputs, dict):
+        iterable = list(outputs.values())
+    elif isinstance(outputs, list):
+        iterable = outputs
+    else:
+        return []
+
+    plugins: list[str] = []
+    for output in iterable:
+        if not isinstance(output, dict):
+            continue
+        plugin = output.get("plugin") or output.get("type")
+        if isinstance(plugin, str) and plugin:
+            plugins.append(plugin.lower())
+    return plugins
+
+
+def _check_output_plugins(state: Any, expected: list[str]) -> str | None:
+    """None when output plugins satisfy the expected lower-case multiset."""
+    expected_plugins = [plugin.lower() for plugin in expected if isinstance(plugin, str) and plugin]
+    if not expected_plugins:
+        return None
+
+    observed = _output_plugins(state)
+    observed_counts = Counter(observed)
+    missing: list[str] = []
+    for plugin, required_count in Counter(expected_plugins).items():
+        observed_count = observed_counts[plugin]
+        if observed_count < required_count:
+            missing.append(f"{plugin} x{required_count} (found {observed_count})")
+    if not missing:
+        return None
+    return f"required output plugins not satisfied: need {missing}; found output plugins {observed}"
 
 
 def _schema_covers_columns(schema: dict[str, Any], columns: list[str]) -> str | None:
@@ -648,6 +694,12 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         min_outputs = green.get("must_have_outputs_min", 0)
         if out_count < min_outputs:
             amber_reasons.append(f"only {out_count} outputs (need >= {min_outputs})")
+
+        output_plugins = green.get("must_have_output_plugins")
+        if isinstance(output_plugins, list) and output_plugins:
+            output_plugin_reason = _check_output_plugins(state, output_plugins)
+            if output_plugin_reason is not None:
+                amber_reasons.append(output_plugin_reason)
 
         # Hint-uptake asserters (Phase 1 of composer-jit-hints).
         # These check that the LLM applied a discovery-time hint

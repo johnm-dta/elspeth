@@ -278,6 +278,16 @@ names come from source inspection or user-provided inline content, not guesses.
 If a CSV blob handed to you by the user is a bare list, either add a real header
 row or set `columns`.
 
+Do not turn persona prose such as "approval status indicator" into a column name
+like `approval_status`. If the source is bound, inspect the source and use the
+literal observed header such as `approved`; if no source facts are available,
+ask a narrow column-identification question instead of fabricating a field.
+
+For row-file routing/splitting requests, default outputs to the source row
+format. CSV source means CSV sinks unless the user explicitly asks for
+JSON/JSONL, the target system requires JSON, or the requested output contains
+nested structure that CSV cannot represent.
+
 `columns` controls how a headerless CSV is parsed; it is not by itself a DAG
 contract. If a downstream transform requires a CSV field, the source schema must
 guarantee that field by name, either through explicit schema fields or

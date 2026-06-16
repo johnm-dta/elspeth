@@ -171,7 +171,7 @@ class ConfigGateReason(TypedDict):
 # RoutingReason union is defined after TransformErrorReason (see RoutingReason below)
 
 
-# Literal type for common transform actions (extensible - str also accepted)
+# Literal type for transform success actions recorded in Tier 1 audit data.
 TransformActionCategory = Literal[
     # Processing actions
     "processed",  # Generic successful processing
@@ -182,14 +182,21 @@ TransformActionCategory = Literal[
     "normalized",  # Data normalization applied
     "filtered",  # Row passed filter criteria
     "classified",  # Classification assigned
+    "coerced",  # Type coercion applied
+    "assembled_report",  # Report assembly completed
     # Skip/passthrough actions
     "passthrough",  # No changes made (intentional)
     "skipped",  # Processing skipped (e.g., data already present)
     "cached",  # Result retrieved from cache
+    # Multi-row/batch actions
+    "split",  # One input row emitted multiple output rows
+    "aggregated",  # Multiple input rows emitted aggregate output
     # Plugin-specific actions
     "query_completed",  # LLM single-query completion
     "multi_query_enriched",  # LLM multi-query execution completed
     "rag_retrieval",  # RAG retrieval pipeline completed
+    # Test/helper action
+    "test",  # Generic test fixture success
 ]
 
 
@@ -207,7 +214,7 @@ class TransformSuccessReason(TypedDict):
 
     Required field:
         action: What the transform did. Use TransformActionCategory values
-                for common actions, or custom strings for plugin-specific actions.
+                for common and plugin-specific actions.
 
     Optional fields:
         fields_modified: List of field names that were changed
@@ -234,7 +241,7 @@ class TransformSuccessReason(TypedDict):
         })
     """
 
-    action: str  # Use TransformActionCategory or custom string
+    action: TransformActionCategory
 
     # Multi-query success context
     queries_completed: NotRequired[int]  # Number of queries completed in multi-query

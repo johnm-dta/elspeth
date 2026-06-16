@@ -82,6 +82,17 @@ _COMPLETABLE_OPERATION_STATUSES = frozenset({"completed", "failed"})
 _TOKEN_ID_CHUNK_SIZE = 500
 
 
+def _validate_transform_success_reason(success_reason: object) -> None:
+    """Validate TransformSuccessReason shape before Tier 1 audit serialization."""
+    if success_reason is None:
+        return
+    if not isinstance(success_reason, Mapping):
+        raise ValueError(f"success_reason must be a mapping, got {type(success_reason).__name__}")
+    action = success_reason.get("action")
+    if not isinstance(action, str):
+        raise ValueError("success_reason['action'] must be a str")
+
+
 class _PreparedCallData(NamedTuple):
     """Intermediate result from _prepare_call_payloads.
 
@@ -242,6 +253,7 @@ class ExecutionRepository:
             input_hash = stable_hash(input_data)
         output_hash = stable_hash(output_data)
         timestamp = now()
+        _validate_transform_success_reason(success_reason)
         success_reason_json = canonical_json(success_reason) if success_reason is not None else None
         context_json = canonical_json(context_after.to_dict()) if context_after is not None else None
 
@@ -450,6 +462,7 @@ class ExecutionRepository:
             error_json = None
         context_json = canonical_json(context_after.to_dict()) if context_after is not None else None
         # Serialize success reason if provided (use canonical_json for audit consistency)
+        _validate_transform_success_reason(success_reason)
         success_reason_json = canonical_json(success_reason) if success_reason is not None else None
 
         # Single transaction: UPDATE + SELECT-back for atomicity.

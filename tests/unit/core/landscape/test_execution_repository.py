@@ -1087,6 +1087,34 @@ class TestCompleteNodeStateSuccessFailure:
         assert completed.success_reason_json is not None
         assert "classified" in completed.success_reason_json
 
+    def test_complete_rejects_success_reason_without_action(self) -> None:
+        """Tier 1 success_reason writes require an action string."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"x": 1})
+
+        with pytest.raises(ValueError, match=r"success_reason.*action"):
+            repo.complete_node_state(
+                state.state_id,
+                NodeStateStatus.COMPLETED,
+                output_data={"x": 1},
+                duration_ms=10.0,
+                success_reason={"fields_added": ["x"]},  # type: ignore[typeddict-item]
+            )
+
+    def test_complete_rejects_success_reason_with_non_string_action(self) -> None:
+        """Tier 1 success_reason action must be a string."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"x": 1})
+
+        with pytest.raises(ValueError, match=r"success_reason.*action.*str"):
+            repo.complete_node_state(
+                state.state_id,
+                NodeStateStatus.COMPLETED,
+                output_data={"x": 1},
+                duration_ms=10.0,
+                success_reason={"action": 123},  # type: ignore[typeddict-item]
+            )
+
     def test_complete_failed_requires_error(self) -> None:
         """FAILED status without error raises ValueError."""
         _db, repo, _fac, tok = _make_repo_with_token()

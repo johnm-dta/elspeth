@@ -103,7 +103,7 @@ class BatchThresholdSummary(BaseTransform):
     name = "batch_threshold_summary"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:baf0488c9134eca6"
+    source_file_hash: str | None = "sha256:93afacbaaa867db3"
     config_model = BatchThresholdSummaryConfig
     is_batch_aware = True
 

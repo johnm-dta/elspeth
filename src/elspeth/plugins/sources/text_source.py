@@ -73,7 +73,7 @@ class TextSource(BaseSource):
     name = "text"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a1fcd2a205bace79"
+    source_file_hash: str | None = "sha256:6943b40c2d2d9cbe"
     config_model = TextSourceConfig
     _on_validation_failure: str
 

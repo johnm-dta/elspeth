@@ -100,6 +100,50 @@ describe("CatalogDrawer", () => {
     });
   });
 
+  it("links tabs to the active tab panel with roving focus metadata", async () => {
+    render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+
+    const sourcesTab = await screen.findByRole("tab", { name: "Sources" });
+    const transformsTab = screen.getByRole("tab", { name: "Transforms" });
+    const panel = screen.getByRole("tabpanel", { name: "Sources" });
+
+    expect(sourcesTab).toHaveAttribute("id", "catalog-tab-sources");
+    expect(sourcesTab).toHaveAttribute("aria-controls", "catalog-panel-sources");
+    expect(sourcesTab).toHaveAttribute("tabIndex", "0");
+    expect(transformsTab).toHaveAttribute("aria-controls", "catalog-panel-transforms");
+    expect(transformsTab).toHaveAttribute("tabIndex", "-1");
+    expect(panel).toHaveAttribute("id", "catalog-panel-sources");
+    expect(panel).toHaveAttribute("aria-labelledby", "catalog-tab-sources");
+  });
+
+  it("supports arrow-key tab navigation with wrapping focus", async () => {
+    render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+
+    const sourcesTab = await screen.findByRole("tab", { name: "Sources" });
+    sourcesTab.focus();
+
+    await user.keyboard("{ArrowRight}");
+    const transformsTab = screen.getByRole("tab", { name: "Transforms" });
+    expect(transformsTab).toHaveFocus();
+    expect(transformsTab).toHaveAttribute("aria-selected", "true");
+    expect(transformsTab).toHaveAttribute("tabIndex", "0");
+    expect(sourcesTab).toHaveAttribute("tabIndex", "-1");
+    expect(screen.getByRole("tabpanel", { name: "Transforms" })).toHaveAttribute(
+      "id",
+      "catalog-panel-transforms",
+    );
+
+    await user.keyboard("{ArrowLeft}");
+    expect(sourcesTab).toHaveFocus();
+    expect(sourcesTab).toHaveAttribute("aria-selected", "true");
+
+    await user.keyboard("{ArrowLeft}");
+    const sinksTab = screen.getByRole("tab", { name: "Sinks" });
+    expect(sinksTab).toHaveFocus();
+    expect(sinksTab).toHaveAttribute("aria-selected", "true");
+  });
+
   it("shows plugin list after fetch", async () => {
     render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
     await waitFor(() => {

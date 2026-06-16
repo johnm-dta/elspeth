@@ -23,7 +23,14 @@
 // lifetime of the drawer instance.
 // ============================================================================
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   listSources,
   listTransforms,
@@ -42,6 +49,19 @@ import {
 } from "@/utils/fuzzyScore";
 
 type CatalogTab = "sources" | "transforms" | "sinks";
+const CATALOG_TABS: readonly CatalogTab[] = ["sources", "transforms", "sinks"];
+
+function catalogTabLabel(tab: CatalogTab): string {
+  return tab === "sources" ? "Sources" : tab === "transforms" ? "Transforms" : "Sinks";
+}
+
+function catalogTabId(tab: CatalogTab): string {
+  return `catalog-tab-${tab}`;
+}
+
+function catalogPanelId(tab: CatalogTab): string {
+  return `catalog-panel-${tab}`;
+}
 
 /**
  * Score a plugin against the search query.
@@ -141,6 +161,31 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
     (next: CatalogFilters) =>
       setFiltersByTab((prev) => ({ ...prev, [activeTab]: next })),
     [activeTab],
+  );
+
+  const handleTabKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+      let nextIndex: number | null = null;
+      if (event.key === "ArrowRight") {
+        nextIndex = (index + 1) % CATALOG_TABS.length;
+      } else if (event.key === "ArrowLeft") {
+        nextIndex = (index - 1 + CATALOG_TABS.length) % CATALOG_TABS.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = CATALOG_TABS.length - 1;
+      }
+
+      if (nextIndex === null) return;
+      event.preventDefault();
+      const nextTab = CATALOG_TABS[nextIndex];
+      setActiveTab(nextTab);
+      event.currentTarget
+        .parentElement
+        ?.querySelector<HTMLButtonElement>(`#${catalogTabId(nextTab)}`)
+        ?.focus();
+    },
+    [],
   );
 
   const loadCatalog = useCallback(() => {
@@ -416,20 +461,20 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           aria-label="Plugin type tabs"
           className="catalog-tab-strip"
         >
-          {(["sources", "transforms", "sinks"] as CatalogTab[]).map((tab) => {
-            const label =
-              tab === "sources"
-                ? "Sources"
-                : tab === "transforms"
-                  ? "Transforms"
-                  : "Sinks";
+          {CATALOG_TABS.map((tab, index) => {
+            const label = catalogTabLabel(tab);
             const count = counts[tab];
             const isActive = activeTab === tab;
             return (
               <button
                 key={tab}
                 role="tab"
+                id={catalogTabId(tab)}
+                aria-controls={catalogPanelId(tab)}
+                aria-label={label}
                 aria-selected={isActive}
+                tabIndex={isActive ? 0 : -1}
+                onKeyDown={(event) => handleTabKeyDown(event, index)}
                 onClick={() => setActiveTab(tab)}
                 className={`tab-strip-tab catalog-tab ${isActive ? "tab-strip-tab-active" : ""}`}
               >
@@ -452,7 +497,12 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
             remains visible even when filters eliminate every real plugin.
             The empty-state message applies to the plugin list, not the
             Sources tab as a whole — the synthetic entry stays usable. */}
-        <div className="catalog-list">
+        <div
+          id={catalogPanelId(activeTab)}
+          role="tabpanel"
+          aria-labelledby={catalogTabId(activeTab)}
+          className="catalog-list"
+        >
           {activeTab === "sources" && (
             <InlineChatSourceEntry onCloseDrawer={onClose} />
           )}

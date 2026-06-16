@@ -404,8 +404,6 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/sinks/dataverse.py:DataverseSink.write:rows (list)"
   - "src/elspeth/plugins/infrastructure/clients/dataverse.py:DataverseClient._execute_request:json_body"
   - "src/elspeth/plugins/infrastructure/clients/dataverse.py:DataverseClient.upsert:body"
-  - "src/elspeth/plugins/sinks/dataverse.py:DataverseSink._emit_telemetry:request_data"
-  - "src/elspeth/plugins/sinks/dataverse.py:DataverseSink._emit_telemetry:response_data"
   - "src/elspeth/plugins/sinks/azure_blob_sink.py:AzureBlobSink.__init__:config"
   - "src/elspeth/plugins/sinks/azure_blob_sink.py:AzureBlobSink._serialize_rows:rows (list)"
   - "src/elspeth/plugins/sinks/azure_blob_sink.py:AzureBlobSink._serialize_csv:rows (list)"

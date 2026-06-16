@@ -24,6 +24,7 @@ ComposerLLMProviderCostSource = Literal["not_available", "response_usage.cost"]
 
 PROVIDER_COST_SOURCE_NOT_AVAILABLE: ComposerLLMProviderCostSource = "not_available"
 PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST: ComposerLLMProviderCostSource = "response_usage.cost"
+_VALID_PROVIDER_COST_SOURCES = {PROVIDER_COST_SOURCE_NOT_AVAILABLE, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST}
 
 
 class ComposerLLMCallStatus(StrEnum):
@@ -36,6 +37,29 @@ class ComposerLLMCallStatus(StrEnum):
     BAD_REQUEST_ERROR = "bad_request_error"
     MALFORMED_RESPONSE = "malformed_response"
     CANCELLED = "cancelled"
+
+
+def _require_non_empty_str(value: object, field_name: str, *, optional: bool = False) -> None:
+    if optional and value is None:
+        return
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+
+
+def _require_datetime(value: object, field_name: str) -> None:
+    if type(value) is not datetime:
+        raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}: {value!r}")
+
+
+def _require_optional_finite_number(value: object, field_name: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,10 +129,42 @@ class ComposerLLMCall:
     provider_cost_source: ComposerLLMProviderCostSource = PROVIDER_COST_SOURCE_NOT_AVAILABLE
 
     def __post_init__(self) -> None:
+        if type(self.status) is not ComposerLLMCallStatus:
+            raise TypeError(f"status must be ComposerLLMCallStatus, got {type(self.status).__name__}: {self.status!r}")
+        _require_non_empty_str(self.model_requested, "model_requested")
+        _require_non_empty_str(self.model_returned, "model_returned", optional=True)
+        _require_non_empty_str(self.provider_request_id, "provider_request_id", optional=True)
+        _require_non_empty_str(self.messages_hash, "messages_hash")
+        _require_non_empty_str(self.tools_spec_hash, "tools_spec_hash", optional=True)
+        _require_datetime(self.started_at, "started_at")
+        _require_datetime(self.finished_at, "finished_at")
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must be >= started_at")
+        require_int(self.prompt_tokens, "prompt_tokens", optional=True, min_value=0)
+        require_int(self.completion_tokens, "completion_tokens", optional=True, min_value=0)
+        require_int(self.total_tokens, "total_tokens", optional=True, min_value=0)
+        require_int(self.latency_ms, "latency_ms", min_value=0)
+        require_int(self.seed, "seed", optional=True)
+        require_int(self.cached_prompt_tokens, "cached_prompt_tokens", optional=True, min_value=0)
+        require_int(self.cache_creation_input_tokens, "cache_creation_input_tokens", optional=True, min_value=0)
+        require_int(self.cache_read_input_tokens, "cache_read_input_tokens", optional=True, min_value=0)
         require_int(self.reasoning_tokens, "reasoning_tokens", optional=True, min_value=0)
+        _require_optional_finite_number(self.temperature, "temperature")
+        if self.temperature is not None:
+            object.__setattr__(self, "temperature", float(self.temperature))
+        _require_non_empty_str(self.error_class, "error_class", optional=True)
+        _require_non_empty_str(self.error_message, "error_message", optional=True)
+        if self.status is ComposerLLMCallStatus.SUCCESS and (self.error_class is not None or self.error_message is not None):
+            raise ValueError("SUCCESS calls must not include error_class or error_message")
+        if self.status is not ComposerLLMCallStatus.SUCCESS and (self.error_class is None or self.error_message is None):
+            raise ValueError("non-success calls must include error_class and error_message")
         if self.reasoning_content is not None and type(self.reasoning_content) is not str:
             raise TypeError(f"reasoning_content must be str or None, got {type(self.reasoning_content).__name__}")
         freeze_fields(self, "reasoning_details", "thinking_blocks")
+        if self.provider_cost_source not in _VALID_PROVIDER_COST_SOURCES:
+            raise ValueError(
+                f"provider_cost_source must be one of {sorted(_VALID_PROVIDER_COST_SOURCES)}, got {self.provider_cost_source!r}"
+            )
         if self.provider_cost is not None:
             if (
                 type(self.provider_cost) is bool

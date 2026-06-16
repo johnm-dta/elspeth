@@ -283,6 +283,15 @@ artifact yourself in the same turn, then retry the complete workflow.
 
 ### Source Facts
 
+If the user says they uploaded, attached, provided, or already have a file in
+the session, discover it before the first source-binding or `set_pipeline`
+mutation. Call `list_blobs` or `list_composer_blobs`, choose the ready blob when
+there is exactly one obvious match, then call `inspect_source` before declaring
+columns, schema fields, or gate conditions. Do not synthesize a header-only
+inline CSV, invent a future file path, or jump straight to `set_pipeline` from
+the prose description of an uploaded file. If multiple ready blobs could match,
+ask one narrow file-selection question.
+
 Use `inspect_source` for existing blobs before declaring fixed fields. Column
 names come from source inspection or user-provided inline content, not guesses.
 If a CSV blob handed to you by the user is a bare list, either add a real header

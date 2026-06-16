@@ -20,7 +20,8 @@
 #
 # Output:
 #   runs/<utc-ts>-<run_label>/
-#     login.json  session.json  send.json  messages.json  scoring.json
+#     login.json  session.json  blob.req.json/blob.json (if scenario CSV is seeded)
+#     send.json  messages.json  scoring.json
 set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +55,30 @@ curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions" \
     -o "$RUN_DIR/session.json"
 SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUN_DIR/session.json")"
 log "session id: $SID"
+
+HAS_CSV_BLOB="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("1" if d.get("csv_filename") else "")' "$SCENARIO_FILE")"
+if [[ -n "$HAS_CSV_BLOB" ]]; then
+    log "upload scenario CSV blob"
+    python3 - "$SCENARIO_FILE" "$RUN_DIR/blob.req.json" <<'PY'
+import json
+import sys
+
+scenario_path, output_path = sys.argv[1:]
+scenario = json.load(open(scenario_path))
+payload = {
+    "filename": scenario["csv_filename"],
+    "mime_type": "text/csv",
+    "content": scenario["csv_content"],
+}
+with open(output_path, "w") as f:
+    json.dump(payload, f)
+PY
+    curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/blobs/inline" \
+        -H "Authorization: Bearer $JWT" \
+        -H "Content-Type: application/json" \
+        --data @"$RUN_DIR/blob.req.json" \
+        -o "$RUN_DIR/blob.json"
+fi
 
 PROMPT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["opening_prompt"])' "$SCENARIO_FILE")"
 PAYLOAD="$(python3 -c "import json,sys; print(json.dumps({'content': sys.argv[1]}))" "$PROMPT")"

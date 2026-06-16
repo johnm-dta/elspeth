@@ -55,6 +55,17 @@ class PurgeResult:
 
 logger = structlog.get_logger()
 
+_PURGE_ELIGIBLE_RUN_STATUSES = (
+    RunStatus.COMPLETED.value,
+    RunStatus.COMPLETED_WITH_FAILURES.value,
+    RunStatus.FAILED.value,
+    RunStatus.EMPTY.value,
+)
+_RETENTION_ACTIVE_RUN_STATUSES = (
+    RunStatus.RUNNING.value,
+    RunStatus.INTERRUPTED.value,
+)
+
 
 class PurgeManager:
     """Manages payload purging based on retention policy.
@@ -185,11 +196,11 @@ class PurgeManager:
 
         cutoff = as_of - timedelta(days=retention_days)
 
-        # Condition for expired runs: finished (not running) AND older than cutoff
-        # Both "completed" and "failed" runs are eligible for purge once they're
-        # past the retention period. Only "running" runs are excluded.
+        # Condition for expired runs: purge-eligible terminal status AND older than cutoff.
+        # Interrupted is terminal in the lifecycle repository, but it remains
+        # a recovery candidate and is protected by the active condition below.
         run_expired_condition = and_(
-            runs_table.c.status.in_(("completed", "failed")),
+            runs_table.c.status.in_(_PURGE_ELIGIBLE_RUN_STATUSES),
             runs_table.c.completed_at.isnot(None),
             runs_table.c.completed_at < cutoff,
         )
@@ -198,12 +209,11 @@ class PurgeManager:
         # A run is "active" if any of:
         # - completed_at >= cutoff (recent, within retention period)
         # - completed_at IS NULL (still running, hasn't finished yet)
-        # - status == "running" (explicitly marked as running)
+        # - status is running or interrupted (explicitly protected)
         run_active_condition = or_(
             runs_table.c.completed_at >= cutoff,
             runs_table.c.completed_at.is_(None),
-            runs_table.c.status == "running",
-            runs_table.c.status == "interrupted",  # Interrupted runs are recovery candidates
+            runs_table.c.status.in_(_RETENTION_ACTIVE_RUN_STATUSES),
         )
 
         # === Build joins (shared between expired and active queries) ===

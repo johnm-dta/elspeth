@@ -276,8 +276,8 @@ describe("GraphView", () => {
     expect(screen.getByText("error")).toBeInTheDocument();
   });
 
-  it("shows minimap for >5 nodes", () => {
-    const nodes = Array.from({ length: 6 }, (_, i) =>
+  it("shows minimap for >8 nodes", () => {
+    const nodes = Array.from({ length: 9 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({
@@ -287,8 +287,8 @@ describe("GraphView", () => {
     expect(screen.getByTestId("minimap")).toBeInTheDocument();
   });
 
-  it("hides minimap for <=5 nodes", () => {
-    const nodes = Array.from({ length: 3 }, (_, i) =>
+  it("hides minimap for 6-node graphs that still fit the main viewport", () => {
+    const nodes = Array.from({ length: 6 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({
@@ -305,7 +305,7 @@ describe("GraphView", () => {
     document.documentElement.style.setProperty("--color-border-strong", "rgba(1, 2, 3, 0.4)");
     document.documentElement.style.setProperty("--color-text-muted", "#7a9a9a");
 
-    const nodes = Array.from({ length: 5 }, (_, i) =>
+    const nodes = Array.from({ length: 6 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({

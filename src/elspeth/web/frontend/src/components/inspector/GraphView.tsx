@@ -40,6 +40,9 @@ const NODE_WIDTH = 260;
 const NODE_HEIGHT = 80;
 const FALLBACK_MINIMAP_NODE_COLOR_VAR = "--color-text-muted";
 const MINIMAP_NODE_STROKE_COLOR_VAR = "--color-border-strong";
+// Interim UX threshold: avoid MiniMap noise on small graphs until we can
+// promote this to a viewport-overflow heuristic or an explicit user toggle.
+const MINIMAP_NODE_COUNT_THRESHOLD = 8;
 
 const EDGE_LABEL_MAP: Record<string, string> = {
   on_success: "success",
@@ -827,7 +830,7 @@ export function GraphView() {
         >
           <Background gap={16} size={1} color="var(--color-canvas-grid)" />
           <Controls showInteractive={false} />
-          {nodes.length > 5 && (
+          {nodes.length > MINIMAP_NODE_COUNT_THRESHOLD && (
             <MiniMap
               bgColor="var(--color-surface)"
               nodeColor={getMiniMapNodeColor}

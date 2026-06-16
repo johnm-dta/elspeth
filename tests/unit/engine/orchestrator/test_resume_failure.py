@@ -787,6 +787,8 @@ class TestResumeFinalizesAsFailed:
         )
         processor = MagicMock(spec=RowProcessor)
         processor.run_id = "run-stuck-scheduler"
+        processor.has_peer_active_leases.return_value = False
+        processor.peer_lease_wait_budget_seconds.return_value = 0.0
         processor.has_unresolved_scheduler_work.return_value = True
         processor.summarize_unresolved_scheduler_work.return_value = ("READY count=1 node=transform-normalize",)
         run_ctx = SimpleNamespace(

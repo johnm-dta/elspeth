@@ -1186,10 +1186,13 @@ def register_composer_routes(router: APIRouter) -> None:
 
         Runs runtime preflight on the exact CompositionState reconstructed
         from the persisted record, then generates deterministic YAML via
-        generate_yaml() against that same snapshot. The two operations see
-        the same Python object — there is no re-fetch between preflight
-        and serialization, so a state that passes the gate is byte-
-        identical to the state that gets serialized.
+        generate_yaml() against that same snapshot. YAML export preflight
+        deliberately does not receive the scoped secret resolver: export
+        serializes secret_ref markers, and a rejected preflight response must
+        not expose resolved secret values through plugin validation prose.
+        The two operations see the same Python object — there is no re-fetch
+        between preflight and serialization, so a state that passes the gate
+        is byte-identical to the state that gets serialized.
         """
         session = await _verify_session_ownership(session_id, user, request)
         service: SessionServiceProtocol = request.app.state.session_service
@@ -1201,8 +1204,8 @@ def register_composer_routes(router: APIRouter) -> None:
             runtime_validation = await _runtime_preflight_for_state(
                 state,
                 settings=request.app.state.settings,
-                secret_service=request.app.state.scoped_secret_resolver,
-                user_id=str(user.user_id),
+                secret_service=None,
+                user_id=None,
             )
         except (
             TimeoutError,
@@ -1251,8 +1254,6 @@ def register_composer_routes(router: APIRouter) -> None:
         )
         if not runtime_validation.is_valid:
             detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
-            if runtime_validation.errors:
-                detail = f"{detail} First error: {runtime_validation.errors[0].message}"
             raise HTTPException(status_code=409, detail=detail)
         yaml_str = generate_yaml(state)
 

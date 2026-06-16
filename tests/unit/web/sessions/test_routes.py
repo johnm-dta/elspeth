@@ -4401,9 +4401,43 @@ class TestYamlEndpoint:
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
-        assert "runtime preflight failed for captured state" in resp.json()["detail"]
+        assert resp.json()["detail"] == "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        assert "runtime preflight failed for captured state" not in resp.text
         assert len(captured_states) == 1
         assert captured_states[0].sources["source"] is not None
+
+    @pytest.mark.asyncio
+    async def test_get_state_yaml_does_not_echo_preflight_error_messages(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "Pipeline", "local")
+        await service.save_composition_state(
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
+        )
+        leaked_value = "REDACTED-preflight-error-canary"
+
+        async def fake_runtime_preflight(state, *, settings, secret_service, user_id):
+            del state, settings, secret_service, user_id
+            return ValidationResult(
+                is_valid=False,
+                checks=[],
+                errors=[
+                    ValidationError(
+                        component_id="scraper",
+                        component_type="transform",
+                        message=f"Invalid CIDR in allowed_hosts: {leaked_value!r}",
+                        suggestion=None,
+                        error_code=None,
+                    )
+                ],
+            )
+
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+            resp = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        assert leaked_value not in resp.text
 
     @pytest.mark.asyncio
     async def test_get_state_yaml_emits_yaml_export_telemetry_on_passed_preflight(self, tmp_path, monkeypatch) -> None:
@@ -4603,10 +4637,9 @@ class TestYamlEndpoint:
         )
 
         async def fake_runtime_preflight(state, *, settings, secret_service, user_id):
-            assert secret_service is app.state.scoped_secret_resolver
-            assert secret_service.resolved_value == resolved_secret
-            # The runtime preflight path may resolve the secret in memory; export
-            # must still serialize the original state snapshot with the secret_ref marker.
+            assert secret_service is None
+            # YAML export preflight must not receive the scoped resolver. It only
+            # serializes the original state snapshot with the secret_ref marker.
             assert state.to_dict()["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
             return ValidationResult(is_valid=True, checks=[], errors=[])
 

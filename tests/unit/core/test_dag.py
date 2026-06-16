@@ -279,7 +279,9 @@ def test_source_route_to_unconsumed_declared_queue_is_rejected() -> None:
     from elspeth.core.dag import GraphValidationError
     from tests.fixtures.plugins import CollectSink, ListSource
 
-    with pytest.raises(GraphValidationError, match=r"Dangling output connections.*orphan_q"):
+    with pytest.raises(
+        GraphValidationError, match=r"Source 'queued' on_success 'orphan_q' references queue 'orphan_q' with no downstream consumer"
+    ):
         ExecutionGraph.from_plugin_instances(
             sources={
                 "queued": ListSource([{"id": 1}], name="queued_source", on_success="orphan_q"),

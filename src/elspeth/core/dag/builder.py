@@ -869,6 +869,14 @@ def build_execution_graph(
                 label="on_success",
                 mode=RoutingMode.MOVE,
             )
+        elif source_on_success in queue_ids:
+            if source_on_success not in consumers:
+                raise GraphValidationError(
+                    f"Source '{source_display_name}' on_success '{source_on_success}' "
+                    f"references queue '{source_on_success}' with no downstream consumer.",
+                    component_id=source_name,
+                    component_type="source",
+                )
         elif source_on_success not in consumers and source_on_success not in queue_ids:
             suggestions = _suggest_similar(source_on_success, sorted(str(s) for s in sink_ids))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""

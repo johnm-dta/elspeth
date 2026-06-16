@@ -44,6 +44,33 @@ def test_exception_channel_reports_bare_value_error(tmp_path: Path) -> None:
     assert "ValueError" in findings[0].message
 
 
+def test_exception_channel_reports_qualified_builtins_value_error(tmp_path: Path) -> None:
+    source = "import builtins\n\ndef f():\n    raise builtins.ValueError('bad')\n"
+
+    findings = _exception_channel_findings(tmp_path, source)
+
+    assert [finding.rule_id for finding in findings] == ["CEC1"]
+    assert "ValueError" in findings[0].message
+
+
+def test_exception_channel_reports_assigned_value_error_alias(tmp_path: Path) -> None:
+    source = "BadValue = ValueError\n\ndef f():\n    raise BadValue('bad')\n"
+
+    findings = _exception_channel_findings(tmp_path, source)
+
+    assert [finding.rule_id for finding in findings] == ["CEC1"]
+    assert "ValueError" in findings[0].message
+
+
+def test_exception_channel_reports_imported_value_error_alias(tmp_path: Path) -> None:
+    source = "from builtins import ValueError as BadValue\n\ndef f():\n    raise BadValue('bad')\n"
+
+    findings = _exception_channel_findings(tmp_path, source)
+
+    assert [finding.rule_id for finding in findings] == ["CEC1"]
+    assert "ValueError" in findings[0].message
+
+
 def test_exception_channel_reports_explicit_raise_inside_try_except(tmp_path: Path) -> None:
     source = (
         "def _failure_result(state, msg): return msg\n"

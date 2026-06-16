@@ -29,20 +29,82 @@ class ComposerExceptionChannelRule:
 def find_exception_channel_findings(tree: ast.AST, file_path: str) -> list[Finding]:
     """Return CEC1 findings for one parsed file."""
     findings: list[Finding] = []
+    aliases = _exception_aliases(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Raise) or node.exc is None:
             continue
-        name = _raise_exception_name(node.exc)
+        name = _raise_exception_name(node.exc, aliases)
         if name in _BANNED:
             findings.append(_finding(file_path=file_path, line=node.lineno, name=name))
     return findings
 
 
-def _raise_exception_name(exc: ast.expr) -> str | None:
-    if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
-        return exc.func.id
-    if isinstance(exc, ast.Name):
-        return exc.id
+def _raise_exception_name(exc: ast.expr, aliases: dict[str, str]) -> str | None:
+    if isinstance(exc, ast.Call):
+        return _exception_reference_name(exc.func, aliases)
+    return _exception_reference_name(exc, aliases)
+
+
+def _exception_aliases(tree: ast.AST) -> dict[str, str]:
+    """Return simple aliases to banned builtins exception classes."""
+    aliases: dict[str, str] = {"builtins": "builtins"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "builtins":
+                    aliases[alias.asname or alias.name] = "builtins"
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "builtins":
+            for alias in node.names:
+                if alias.name in _BANNED:
+                    aliases[alias.asname or alias.name] = alias.name
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if value is None:
+                continue
+            resolved = _exception_reference_name(value, aliases)
+            if resolved not in _BANNED:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = resolved
+    return aliases
+
+
+def _exception_reference_name(expr: ast.expr, aliases: dict[str, str]) -> str | None:
+    if isinstance(expr, ast.Name):
+        return _canonical_exception_name(aliases.get(expr.id, expr.id))
+    if isinstance(expr, ast.Attribute):
+        dotted = _dotted_name(expr)
+        if dotted is None:
+            return None
+        parts = dotted.split(".")
+        if parts[0] in aliases:
+            dotted = ".".join((aliases[parts[0]], *parts[1:]))
+        return _canonical_exception_name(dotted)
+    return None
+
+
+def _dotted_name(expr: ast.expr) -> str | None:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _dotted_name(expr.value)
+        if base is None:
+            return None
+        return f"{base}.{expr.attr}"
+    return None
+
+
+def _canonical_exception_name(name: str) -> str | None:
+    if name in _BANNED:
+        return name
+    if name.startswith("builtins."):
+        candidate = name.rsplit(".", 1)[-1]
+        if candidate in _BANNED:
+            return candidate
     return None
 
 

@@ -52,6 +52,41 @@ describe("SecretsPanel", () => {
     expect(screen.getByText("SERVER_KEY")).toBeInTheDocument();
   });
 
+  it("uses theme token references without hard-coded fallback colours", () => {
+    useSecretsStore.setState({
+      secrets: [
+        {
+          name: "SET_KEY",
+          scope: "user" as const,
+          available: true,
+          source_kind: "user",
+          reason: null,
+        },
+        {
+          name: "MISSING_KEY",
+          scope: "server" as const,
+          available: false,
+          source_kind: "env",
+          reason: "env_var_not_set",
+        },
+      ],
+    });
+
+    render(<SecretsPanel onClose={onClose} />);
+
+    const dialogStyle = screen.getByRole("dialog").getAttribute("style");
+    const availableStyle = screen.getByRole("img", { name: "Available" }).getAttribute("style");
+    const unavailableStyle = screen.getByRole("img", { name: "Unavailable" }).getAttribute("style");
+
+    expect(dialogStyle).toContain("var(--color-surface)");
+    expect(availableStyle).toContain("var(--color-success)");
+    expect(availableStyle).toContain("var(--color-success-bg)");
+    expect(unavailableStyle).toContain("var(--color-text-muted)");
+    expect(`${dialogStyle} ${availableStyle} ${unavailableStyle}`).not.toMatch(
+      /#16a34a|#9ca3af|#fff/i,
+    );
+  });
+
   it("surfaces human-readable reasons for unavailable secrets", () => {
     useSecretsStore.setState({
       secrets: [

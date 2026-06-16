@@ -49,13 +49,13 @@ function AvailabilityDot({ available }: { available: boolean }) {
         borderRadius: "50%",
         boxSizing: "border-box",
         backgroundColor: available
-          ? "var(--color-success, #16a34a)"
+          ? "var(--color-success)"
           : "transparent",
         border: available
-          ? "1px solid var(--color-success, #16a34a)"
-          : "1.5px solid var(--color-text-muted, #9ca3af)",
+          ? "1px solid var(--color-success)"
+          : "1.5px solid var(--color-text-muted)",
         boxShadow: available
-          ? "0 0 0 2px var(--color-success-bg, rgba(20, 176, 174, 0.12))"
+          ? "0 0 0 2px var(--color-success-bg)"
           : "none",
         flexShrink: 0,
       }}
@@ -190,7 +190,7 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
           maxHeight: "calc(100vh - 64px)",
           display: "flex",
           flexDirection: "column",
-          backgroundColor: "var(--color-surface, #fff)",
+          backgroundColor: "var(--color-surface)",
           borderRadius: 8,
           boxShadow: "0 8px 32px rgba(0,0,0,0.25)",
           border: "1px solid var(--color-border)",

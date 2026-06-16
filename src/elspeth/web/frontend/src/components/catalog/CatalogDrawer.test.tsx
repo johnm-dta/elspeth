@@ -152,6 +152,21 @@ describe("CatalogDrawer", () => {
     });
   });
 
+  it("preserves the search query across close and reopen", async () => {
+    const { rerender } = render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    const input = await screen.findByRole("textbox", { name: "Search plugins" });
+
+    await user.type(input, "csv");
+    expect(input).toHaveValue("csv");
+
+    rerender(<CatalogDrawer isOpen={false} onClose={vi.fn()} />);
+    expect(screen.queryByRole("textbox", { name: "Search plugins" })).not.toBeInTheDocument();
+
+    rerender(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+    expect(screen.getByRole("textbox", { name: "Search plugins" })).toHaveValue("csv");
+  });
+
   it("retries catalog loading inline after an initial fetch failure", async () => {
     vi.mocked(listSources)
       .mockRejectedValueOnce(new Error("catalog unavailable"))

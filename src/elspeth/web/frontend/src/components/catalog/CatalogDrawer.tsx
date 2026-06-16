@@ -261,10 +261,11 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Clear search and filters when drawer closes
+  // Clear filters when drawer closes. Search persists across close/reopen so
+  // operators can inspect a plugin, leave the drawer, then continue the same
+  // catalog lookup without retyping.
   useEffect(() => {
     if (!isOpen) {
-      setSearchQuery("");
       setFiltersByTab(emptyFiltersByTab());
     }
   }, [isOpen]);

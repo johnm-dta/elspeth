@@ -9,6 +9,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_PUSH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-push.yaml"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
 def _workflow() -> dict[str, Any]:
@@ -123,3 +124,36 @@ def test_smoke_test_logs_into_the_pushed_registry() -> None:
     assert "ghcr" in ghcr_login["if"]
     assert "acr" in acr_login["if"]
     assert acr_login["with"]["registry"] == "${{ secrets.ACR_REGISTRY }}"
+
+
+def test_release_dockerfile_builds_frontend_dist_before_python_install() -> None:
+    """Release image must build the SPA instead of relying on ignored host dist."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "AS frontend-builder" in dockerfile
+    assert "npm ci" in dockerfile
+    assert "npm run build" in dockerfile
+    assert "COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/" in dockerfile
+    assert dockerfile.index("npm run build") < dockerfile.index("uv sync --frozen --extra all --no-editable --active")
+
+
+def test_release_dockerfile_copies_local_uv_sources_before_dependency_sync() -> None:
+    """Root pyproject local uv sources must exist before Docker runs uv sync."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "COPY elspeth-lints/ ./elspeth-lints/" in dockerfile
+    assert dockerfile.index("COPY elspeth-lints/ ./elspeth-lints/") < dockerfile.index(
+        "uv sync --frozen --extra all --no-install-project --active"
+    )
+
+
+def test_release_dockerfile_copies_frontend_dist_into_installed_package() -> None:
+    """The non-editable Docker install must carry generated SPA assets into site-packages."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/" in dockerfile
+    assert "import elspeth.web" in dockerfile
+    assert 'shutil.copytree("/tmp/frontend-dist", target)' in dockerfile
+    assert dockerfile.index("uv sync --frozen --extra all --no-editable --active") < dockerfile.index(
+        'shutil.copytree("/tmp/frontend-dist", target)'
+    )

@@ -2368,13 +2368,18 @@ class ComposerServiceImpl:
             hint_text = anti_anchor.build_hint()
             anti_anchor.consume_fire()
             llm_messages.append({"role": "user", "content": hint_text})
+            is_drift_hint = "drift without convergence" in hint_text
             await emit_progress(
                 progress,
                 ComposerProgressEvent(
                     phase="using_tools",
-                    headline="ELSPETH detected an anchored retry pattern.",
+                    headline="ELSPETH detected a no-progress retry pattern.",
                     evidence=(
-                        "The last 3 tool calls used identical arguments and produced the same error.",
+                        (
+                            "The last 3 tool calls used different arguments but failed the same repair loop."
+                            if is_drift_hint
+                            else "The last 3 tool calls used identical arguments and produced the same error."
+                        ),
                         "A structural hint was injected to help the model converge.",
                     ),
                     likely_next="The model will see the hint and try a different argument shape.",

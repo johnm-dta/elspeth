@@ -104,7 +104,10 @@ from sqlalchemy.types import JSON
 #   19 → ``composition_states.sources`` added so named multi-source composer
 #        states survive save/load instead of collapsing to the legacy singular
 #        ``source`` compatibility column.
-SESSION_SCHEMA_EPOCH = 19
+#   20 → ``sessions.forked_from_message_id`` gains an ON DELETE SET NULL
+#        foreign key to ``chat_messages.id`` so source-message deletion cannot
+#        leave dangling fork provenance.
+SESSION_SCHEMA_EPOCH = 20
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -217,6 +220,12 @@ sessions_table = Table(
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),
+    ForeignKeyConstraint(
+        ["forked_from_message_id"],
+        ["chat_messages.id"],
+        name="fk_sessions_forked_from_message",
+        ondelete="SET NULL",
+    ),
     # ``interpretation_review_disabled`` — per-session "stop asking" toggle for
     # LLM-surfaced interpretation review. Fast-path read by the compose loop;
     # the authoritative audit record is the ``opted_out``

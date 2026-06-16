@@ -208,6 +208,36 @@ class TestSessionForeignKeys:
         constrained_columns = {column for foreign_key in foreign_keys for column in foreign_key["constrained_columns"]}
         assert "forked_from_session_id" not in constrained_columns
 
+    def test_forked_from_message_id_has_set_null_chat_message_fk(self, engine) -> None:
+        """Fork message provenance is cleared if the source chat message is deleted."""
+        inspector = inspect(engine)
+        foreign_keys = inspector.get_foreign_keys("sessions")
+
+        matching = [foreign_key for foreign_key in foreign_keys if tuple(foreign_key["constrained_columns"]) == ("forked_from_message_id",)]
+
+        assert len(matching) == 1
+        foreign_key = matching[0]
+        assert foreign_key["name"] == "fk_sessions_forked_from_message"
+        assert foreign_key["referred_table"] == "chat_messages"
+        assert tuple(foreign_key["referred_columns"]) == ("id",)
+        assert str(foreign_key["options"]["ondelete"]).lower() == "set null"
+
+    def test_orphan_forked_from_message_id_rejected_with_fk_enforcement(self, engine) -> None:
+        """Child sessions cannot point fork provenance at a nonexistent message."""
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(sessions_table).values(
+                        id=str(uuid.uuid4()),
+                        user_id="alice",
+                        title="Fork with missing message",
+                        forked_from_message_id=str(uuid.uuid4()),
+                        created_at=datetime.now(UTC),
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+
 
 class TestCheckConstraints:
     """Verify CHECK constraints reject invalid values."""

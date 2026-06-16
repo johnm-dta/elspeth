@@ -18,6 +18,19 @@ from elspeth.web.sessions.schema import (
 )
 
 
+def _create_all_on_mock_engine(engine) -> None:
+    try:
+        metadata.create_all(engine)
+    finally:
+        # SQLAlchemy's mock PostgreSQL create_all path marks cycle-breaking
+        # foreign keys with a transient _create_rule. If left on the shared
+        # metadata object, later SQLite create_all calls omit those inline FKs.
+        for table in metadata.tables.values():
+            for constraint in table.constraints:
+                if hasattr(constraint, "_create_rule"):
+                    constraint._create_rule = None
+
+
 @pytest.fixture
 def engine():
     eng = create_session_engine("sqlite:///:memory:")
@@ -62,7 +75,7 @@ def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
     emitted: list[str] = []
     engine = create_mock_engine("postgresql://", lambda sql, *_, **__: emitted.append(str(sql)))
 
-    metadata.create_all(engine)
+    _create_all_on_mock_engine(engine)
 
     assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
     assert not any("CREATE TRIGGER" in statement for statement in emitted)
@@ -77,7 +90,7 @@ def test_postgres_schema_uses_postgres_non_blank_check_syntax() -> None:
         lambda sql, *_, **__: emitted.append(str(sql.compile(dialect=engine.dialect))),
     )
 
-    metadata.create_all(engine)
+    _create_all_on_mock_engine(engine)
 
     ddl = "\n".join(emitted)
     assert "ck_composition_proposals_composer_provenance_all_or_none" in ddl

@@ -72,6 +72,10 @@ class PendingOutcome:
         """Validate pair/error_hash consistency before sink side effects."""
         if type(self.scheduler_pending_sink) is not bool:
             raise ValueError("PendingOutcome.scheduler_pending_sink must be a bool")
+        if self.outcome is not None and not isinstance(self.outcome, TerminalOutcome):
+            raise ValueError("PendingOutcome.outcome must be TerminalOutcome or None")
+        if not isinstance(self.path, TerminalPath):
+            raise ValueError("PendingOutcome.path must be TerminalPath")
         if self.outcome is None:
             if self.path != TerminalPath.BUFFERED:
                 raise ValueError(f"PendingOutcome with outcome=None requires path=BUFFERED, got {self.path.name}")

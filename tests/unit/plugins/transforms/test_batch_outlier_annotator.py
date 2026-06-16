@@ -258,6 +258,52 @@ class TestBatchOutlierAnnotator:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_excessive_batch_size_is_rejected_before_outlier_work(self, ctx: PluginContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import elspeth.plugins.transforms.batch_outlier_annotator as module
+        from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
+
+        monkeypatch.setattr(module, "_MAX_BATCH_ROWS", 3, raising=False)
+        transform = BatchOutlierAnnotator({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+        rows = [_make_row({"id": index, "score": float(index)}) for index in range(4)]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "batch_too_large"
+        assert result.reason["batch_size"] == 4
+        assert result.reason["expected"] == "at most 3 rows"
+        assert not result.retryable
+
+    def test_large_skipped_index_details_are_bounded_per_output_row(
+        self,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import elspeth.plugins.transforms.batch_outlier_annotator as module
+        from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
+
+        monkeypatch.setattr(module, "_MAX_SKIPPED_INDEX_DETAILS", 3, raising=False)
+        transform = BatchOutlierAnnotator({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+        rows = [
+            _make_row({"id": 0, "score": 10.0}),
+            _make_row({"id": 1, "score": 11.0}),
+            *[_make_row({"id": index, "score": None}) for index in range(2, 7)],
+            *[_make_row({"id": index, "score": float("inf")}) for index in range(7, 12)],
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 2
+        for row in result.rows:
+            assert row["outlier_missing_count"] == 5
+            assert row["outlier_non_finite_count"] == 5
+            assert row["outlier_missing_indices"] == (2, 3, 4)
+            assert row["outlier_non_finite_indices"] == (7, 8, 9)
+
 
 class TestBatchOutlierAnnotatorConfig:
     @pytest.mark.parametrize("blank_value_field", ["", "   "])

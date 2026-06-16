@@ -55,6 +55,7 @@ _PAIRED_OUTPUT_FIELDS = frozenset(
         "wins",
     }
 )
+_MAX_BATCH_ROWS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +288,16 @@ class BatchPairedPreference(BaseTransform):
         return TransformResult.error(reason, retryable=False)
 
     @staticmethod
+    def _error_for_batch_too_large(*, batch_size: int) -> TransformResult:
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "batch_too_large",
+            "batch_size": batch_size,
+            "expected": f"at most {_MAX_BATCH_ROWS} rows",
+        }
+        return TransformResult.error(reason, retryable=False)
+
+    @staticmethod
     def _find_variant_entry(entries: list[_ScoreEntry], variant: Any) -> _ScoreEntry | None:
         for entry in entries:
             if same_scalar_bucket_value(entry.variant, variant):
@@ -457,6 +468,8 @@ class BatchPairedPreference(BaseTransform):
         """Compute paired preference summaries over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+        if len(rows) > _MAX_BATCH_ROWS:
+            return self._error_for_batch_too_large(batch_size=len(rows))
 
         non_finite_error = self._non_finite_variant_error(rows)
         if non_finite_error is not None:

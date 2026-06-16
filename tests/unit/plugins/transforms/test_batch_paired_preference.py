@@ -269,6 +269,31 @@ class TestBatchPairedPreference:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_excessive_batch_size_is_rejected_before_pair_work(self, ctx: PluginContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import elspeth.plugins.transforms.batch_paired_preference as module
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        monkeypatch.setattr(module, "_MAX_BATCH_ROWS", 3, raising=False)
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.4}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.7}),
+            _make_row({"case_id": "p2", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p2", "variant": "B", "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "batch_too_large"
+        assert result.reason["batch_size"] == 4
+        assert result.reason["expected"] == "at most 3 rows"
+        assert not result.retryable
+
     def test_all_ties_reports_none_preference_rate(self, ctx: PluginContext) -> None:
         """All-tie batch: wins+losses==0 -> preference_rate must be None (B4.5-b)."""
         from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference

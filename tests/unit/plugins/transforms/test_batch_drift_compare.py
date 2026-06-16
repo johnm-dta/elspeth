@@ -253,6 +253,29 @@ class TestBatchDriftCompare:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_excessive_batch_size_is_rejected_before_drift_work(self, ctx: PluginContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import elspeth.plugins.transforms.batch_drift_compare as module
+        from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+        monkeypatch.setattr(module, "_MAX_BATCH_ROWS", 3, raising=False)
+        transform = BatchDriftCompare({"schema": DYNAMIC_SCHEMA, "cohort_field": "cohort", "value_field": "score"})
+        rows = [
+            _make_row({"cohort": "baseline", "score": 1.0}),
+            _make_row({"cohort": "current", "score": 2.0}),
+            _make_row({"cohort": "baseline", "score": 3.0}),
+            _make_row({"cohort": "current", "score": 4.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "batch_too_large"
+        assert result.reason["batch_size"] == 4
+        assert result.reason["expected"] == "at most 3 rows"
+        assert not result.retryable
+
     @pytest.mark.parametrize("cohort_value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, cohort_value: float) -> None:
         """Non-finite cohort key must error before producing any output (B4.5-d)."""

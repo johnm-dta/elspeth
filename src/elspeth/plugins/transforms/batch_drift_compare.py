@@ -21,7 +21,6 @@ from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms._scalar_buckets import (
     ScalarBucketKey,
-    append_unique_bucket_value,
     same_scalar_bucket_value,
     scalar_bucket_key,
 )
@@ -65,6 +64,7 @@ _CATEGORICAL_OUTPUT_FIELDS = _COMMON_OUTPUT_FIELDS | frozenset(
         "total_variation",
     }
 )
+_MAX_BATCH_ROWS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +314,16 @@ class BatchDriftCompare(BaseTransform):
         return TransformResult.error(reason, retryable=False)
 
     @staticmethod
+    def _error_for_batch_too_large(*, batch_size: int) -> TransformResult:
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "batch_too_large",
+            "batch_size": batch_size,
+            "expected": f"at most {_MAX_BATCH_ROWS} rows",
+        }
+        return TransformResult.error(reason, retryable=False)
+
+    @staticmethod
     def _require_finite(value: float, *, operation: str) -> float:
         if not math.isfinite(value):
             raise OverflowError(operation)
@@ -325,9 +335,17 @@ class BatchDriftCompare(BaseTransform):
         right_values = sorted(float(value) for value in right)
         thresholds = sorted(set(left_values + right_values))
         max_distance = 0.0
+        left_index = 0
+        right_index = 0
+        left_count = len(left_values)
+        right_count = len(right_values)
         for threshold in thresholds:
-            left_cdf = sum(1 for value in left_values if value <= threshold) / len(left_values)
-            right_cdf = sum(1 for value in right_values if value <= threshold) / len(right_values)
+            while left_index < left_count and left_values[left_index] <= threshold:
+                left_index += 1
+            while right_index < right_count and right_values[right_index] <= threshold:
+                right_index += 1
+            left_cdf = left_index / left_count
+            right_cdf = right_index / right_count
             max_distance = max(max_distance, abs(left_cdf - right_cdf))
         return max_distance
 
@@ -335,9 +353,10 @@ class BatchDriftCompare(BaseTransform):
     def _categorical_shifts(baseline: _CohortValues, cohort: _CohortValues) -> tuple[list[dict[str, object]], float, float, list[object]]:
         baseline_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in baseline.values)
         cohort_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in cohort.values)
-        values: list[object] = []
+        values_by_key: dict[ScalarBucketKey, object] = {}
         for value in baseline.values + cohort.values:
-            append_unique_bucket_value(values, value)
+            values_by_key.setdefault(scalar_bucket_key(value), value)
+        values = list(values_by_key.values())
 
         shifts: list[dict[str, object]] = []
         total_variation_sum = 0.0
@@ -470,6 +489,8 @@ class BatchDriftCompare(BaseTransform):
         """Compare baseline and current cohort distributions over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+        if len(rows) > _MAX_BATCH_ROWS:
+            return self._error_for_batch_too_large(batch_size=len(rows))
 
         non_finite_error = self._non_finite_group_key_error(rows)
         if non_finite_error is not None:

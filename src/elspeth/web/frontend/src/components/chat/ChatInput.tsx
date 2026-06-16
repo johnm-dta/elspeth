@@ -25,6 +25,8 @@ interface ChatInputProps {
   value?: string;
   /** Controlled mode: callback when value changes */
   onChange?: (value: string) => void;
+  /** Optional native textarea maxLength, used by guided chat to mirror backend validation. */
+  maxLength?: number;
   /**
    * Optional placeholder override.  Used by the guided-mode chat input
    * (Phase A slice 4) to surface a per-step nudge.  Defaults to the
@@ -64,6 +66,7 @@ export function ChatInput({
   onOpenSecrets,
   value: controlledValue,
   onChange: controlledOnChange,
+  maxLength,
   placeholder,
 }: ChatInputProps) {
   // Stable id for the keyboard-hint element, wired into the textarea's
@@ -245,6 +248,7 @@ export function ChatInput({
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={effectivePlaceholder}
+          maxLength={maxLength}
           aria-label="Message input"
           aria-describedby={hintId}
           rows={2}

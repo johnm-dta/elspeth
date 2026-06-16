@@ -291,6 +291,32 @@ describe("ChatInput composing cancel", () => {
   });
 });
 
+describe("ChatInput max length", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("passes the configured maxLength to the textarea", () => {
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={false}
+        inputRef={inputRef}
+        maxLength={4096}
+      />,
+    );
+
+    expect(screen.getByLabelText(/message input/i)).toHaveAttribute(
+      "maxlength",
+      "4096",
+    );
+  });
+});
+
 // ============================================================================
 // ChatInput — pending-interpretation placeholder cue (Phase 5b Task 8).
 //

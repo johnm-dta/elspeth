@@ -84,16 +84,19 @@ vi.mock("./ChatInput", () => ({
     placeholder,
     onSend,
     disabled,
+    maxLength,
   }: {
     placeholder?: string;
     onSend?: (content: string) => void;
     disabled?: boolean;
+    maxLength?: number;
   }) => (
     <button
       type="button"
       data-testid="chat-input"
       data-placeholder={placeholder ?? ""}
       data-disabled={disabled ? "true" : "false"}
+      data-max-length={maxLength ?? ""}
       onClick={() => onSend?.("test-chat-message")}
     >
       {placeholder ?? ""}
@@ -651,6 +654,20 @@ describe("ChatPanel mode discriminator", () => {
     await waitFor(() => {
       expect(chatGuidedSpy).toHaveBeenCalledWith("test-chat-message");
     });
+  });
+
+  it("passes the backend guided-chat message limit to the guided ChatInput", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.maxLength).toBe("4096");
   });
 
   it("disables the guided ChatInput while guidedChatPending=true", () => {

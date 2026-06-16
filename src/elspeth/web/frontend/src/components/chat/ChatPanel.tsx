@@ -40,7 +40,10 @@ import type {
   CompositionState,
   InlineSourceSummary,
 } from "@/types/api";
-import type { GuidedStep } from "@/types/guided";
+import {
+  GUIDED_CHAT_MESSAGE_MAX_LENGTH,
+  type GuidedStep,
+} from "@/types/guided";
 import type { ExampleUseCase, RecommendedStartingPoint } from "./templates_data";
 
 function assertNever(value: never): never {
@@ -1214,6 +1217,7 @@ export function ChatPanel({
             disabled={guidedChatPending}
             inputRef={inputRef}
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+            maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
           />
         </section>
         <InlineRunResults />

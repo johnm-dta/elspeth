@@ -216,14 +216,26 @@ def run_scenario(
             break
 
         messages.append(msg_dict)
+        malformed_tool_call = False
         for tc in tool_calls:
             fn = tc.get("function", {})
             name = fn.get("name", "")
             raw_args = fn.get("arguments", "{}")
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-            except json.JSONDecodeError:
-                args = {"_raw": raw_args}
+            except json.JSONDecodeError as exc:
+                transcript.append(
+                    {
+                        "role": "tool_argument_error",
+                        "tool_call_id": tc.get("id"),
+                        "name": name,
+                        "raw_args": raw_args,
+                        "error_class": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                malformed_tool_call = True
+                break
             stub = scenario.stubs.get(name) or _default_stub(name)
             result = stub(args)
             result_str = json.dumps(result, default=str)
@@ -244,6 +256,8 @@ def run_scenario(
                     "content": result_str,
                 }
             )
+        if malformed_tool_call:
+            break
 
     out_dir = TRANSCRIPTS_DIR / scenario.name
     out_dir.mkdir(parents=True, exist_ok=True)

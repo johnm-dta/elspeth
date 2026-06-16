@@ -3028,7 +3028,7 @@ schema-change cohort with epoch bump.**
 
 | Table | Column | Allowed values | Paired Python type |
 |-------|--------|----------------|--------------------|
-| `composition_states` | `provenance` | `tool_call`, `convergence_persist`, `plugin_crash_persist`, `preflight_persist`, `session_seed`, `session_fork`, `interpretation_resolve` | `web/sessions/protocol.py::CompositionStateProvenance` |
+| `composition_states` | `provenance` | `tool_call`, `convergence_persist`, `plugin_crash_persist`, `preflight_persist`, `tutorial_normalization`, `post_compose`, `session_seed`, `session_fork`, `interpretation_resolve` | `web/sessions/protocol.py::CompositionStateProvenance` |
 | `composer_completion_events` | `event_type` | `mark_ready_for_review`, `export_yaml` | Inline check, see `web/sessions/models.py` |
 | `runs` | `status` | `pending`, `running`, `completed`, `completed_with_failures`, `failed`, `empty`, `cancelled` | `web/sessions/protocol.py::SessionRunStatus` |
 | `interpretation_events` | `event_type` | (Phase 5b — see `web/sessions/models.py` for current set) | `web/sessions/protocol.py` |

@@ -491,15 +491,10 @@ def register_session_routes(router: APIRouter) -> None:
                     copied_state = await service.save_composition_state(
                         new_session.id,
                         state_data,
-                        # Preserves pre-fix labelling. The fork-time source-
-                        # storage rewrite previously wrote ``session_seed``
-                        # under the hardcoded label and continues to do so.
-                        # Whether this row should carry ``session_fork``
-                        # (the rewrite is part of the fork operation) or a
-                        # new ``fork_storage_rewrite`` discriminator is a
-                        # separate audit-attribution question outside the
-                        # scope of elspeth-obs-f217c634aa.
-                        provenance="session_seed",
+                        # The blob-reference rewrite is part of the fork
+                        # operation: it rewrites copied state so the new
+                        # session is self-contained after blob copy.
+                        provenance="session_fork",
                     )
 
                     # The edited user message (last in list) still references

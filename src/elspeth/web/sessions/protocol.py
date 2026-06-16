@@ -91,6 +91,7 @@ CompositionStateProvenance = Literal[
     # written under the old behavior remain representable; re-activating it is
     # a governance action (see the NO SILENT EXTENSION block in ``models.py``).
     "tutorial_normalization",
+    "post_compose",
     "session_seed",
     "session_fork",
     "interpretation_resolve",
@@ -973,7 +974,7 @@ class SessionServiceProtocol(Protocol):
     ) -> CompositionStateRecord:
         """Save a new immutable composition state snapshot.
 
-        ``provenance`` MUST be one of the six values enumerated by the
+        ``provenance`` MUST be one of the values enumerated by the
         ``ck_composition_states_provenance`` CHECK constraint and the
         :data:`CompositionStateProvenance` Literal. It records WHY this row
         was written and is the load-bearing discriminator for the

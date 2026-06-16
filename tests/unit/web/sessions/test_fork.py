@@ -753,6 +753,17 @@ def _make_fork_app(
     return app, session_service, blob_service
 
 
+def _read_composition_state_provenances(service: SessionServiceImpl, session_id: str) -> list[str]:
+    from sqlalchemy import text
+
+    with service._engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT provenance FROM composition_states WHERE session_id = :sid ORDER BY version"),
+            {"sid": session_id},
+        ).fetchall()
+    return [row.provenance for row in rows]
+
+
 class TestForkEndpoint:
     """Route-level tests for POST /api/sessions/{id}/fork."""
 
@@ -782,6 +793,58 @@ class TestForkEndpoint:
         msgs = body["messages"]
         assert any(m["role"] == "system" for m in msgs)
         assert any(m["content"] == "Hello universe" for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_fork_blob_rewrite_persists_session_fork_provenance(self, tmp_path) -> None:
+        """Fork-time blob remapping is still part of the fork writer path."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Original", "local")
+        blob = await blob_service.create_blob(
+            session.id,
+            "data.csv",
+            b"a,b\n1,2",
+            "text/csv",
+        )
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "my_csv": {
+                        "plugin": "csv",
+                        "options": {
+                            "blob_ref": str(blob.id),
+                            "path": blob.storage_path,
+                        },
+                    }
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
+
+        assert response.status_code == 201
+        fork_session_id = response.json()["session"]["id"]
+        assert _read_composition_state_provenances(service, fork_session_id) == [
+            "session_fork",
+            "session_fork",
+        ]
 
     @pytest.mark.asyncio
     async def test_fork_endpoint_idor_protection(self, tmp_path) -> None:

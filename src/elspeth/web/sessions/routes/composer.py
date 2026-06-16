@@ -964,11 +964,9 @@ def register_composer_routes(router: APIRouter) -> None:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
-                        # Preserves pre-fix labelling — see the parallel
-                        # comment on the post-compose path 1 site above.
-                        # Symmetric mis-attribution; out of scope for the
-                        # f217c634aa handler-site fix.
-                        provenance="session_seed",
+                        # Successful recompose state advance after the LLM
+                        # composer returns a newer state version.
+                        provenance="post_compose",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -995,12 +993,11 @@ def register_composer_routes(router: APIRouter) -> None:
                     _transition_record = await service.save_composition_state(
                         session.id,
                         _transition_state_data,
-                        # Mirrors the paired session_seed-labelled site immediately
-                        # above (post-compose path 1, transition_consumed flip).
-                        # Same known mis-attribution as that paired site — see the
-                        # comment block at the earlier save call for the
-                        # elspeth-obs-f217c634aa relabelling history.
-                        provenance="session_seed",
+                        # Metadata-only post-compose advance: the LLM result
+                        # did not change graph version, but the guided-session
+                        # transition was consumed and must be audited separately
+                        # from session seeding.
+                        provenance="post_compose",
                     )
                     post_compose_state_id = _transition_record.id
                     state_response = _state_response(_transition_record)

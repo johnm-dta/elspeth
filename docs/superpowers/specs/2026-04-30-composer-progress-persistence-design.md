@@ -272,7 +272,8 @@ composition_states_table = Table(
     CheckConstraint(                                                            # NEW (rev 4)
         "provenance IN ('tool_call', 'convergence_persist', "
         "'plugin_crash_persist', 'preflight_persist', "
-        "'session_seed', 'session_fork')",
+        "'tutorial_normalization', 'post_compose', "
+        "'session_seed', 'session_fork', 'interpretation_resolve')",
         name="ck_composition_states_provenance",
     ),
 )
@@ -316,16 +317,19 @@ corresponding amendment of this section):
   rejection class correctly. **ACTIVE writer in Phase 1** (promoted
   from DORMANT by elspeth-obs-f217c634aa under the same shadowing fix
   as above).
+- `tutorial_normalization` — historical value for the Phase 4 hello-world
+  tutorial template normalizer. The live writer is currently dormant, but the
+  value remains in the closed enum so historical audit rows stay
+  representable.
+- `post_compose` — written by the successful send-message and recompose
+  route paths after the LLM composer returns a newer composition state, and by
+  the paired metadata-only `transition_consumed` persistence path. This is
+  deliberately separate from `session_seed`: the row records an LLM-driven
+  post-compose advance in an existing session, not initial session creation or
+  explicit state reselection.
 - `session_seed` — initial state row written when a session is created
-  with seed configuration (`SessionsService.create_session`;
-  branch-from-message reseed in `set_active_state`). Note: two
-  additional `routes.py` call sites continue to write `session_seed`
-  under their pre-fix behaviour (post-compose state advance in
-  `_send_message` and the fork source-storage rewrite in
-  `fork_session_at_message`). Both are pre-existing mis-attributions
-  separate from elspeth-obs-f217c634aa; relabelling them is a
-  follow-up that requires its own observation, spec amendment, and
-  governance ticket. **ACTIVE writer in Phase 1.**
+  with seed configuration (`SessionsService.create_session`) and by
+  branch-from-message reseed in `set_active_state`. **ACTIVE writer in Phase 1.**
 - `session_fork` — written by `SessionsService.fork_session_at_message`
   (`web/sessions/service.py` ~L2260) when a user forks a session from
   an earlier message: the helper copies the source session's state
@@ -333,9 +337,14 @@ corresponding amendment of this section):
   copy-forward is meaningfully distinct from intra-session reseed, and
   the audit DB needs to tell them apart (`session_seed` is a single-
   session originating event; `session_fork` derives from another
-  session's prior state). **ACTIVE writer in Phase 1.** Added in the
+  session's prior state). The fork route's blob-reference rewrite is part of
+  this same writer path: it rewrites the copied state so the child session is
+  self-contained after blob copy. **ACTIVE writer in Phase 1.** Added in the
   Phase 1 plan supersession marker; this revision of §4.1.2 closes the
   drift between that addition and the spec text.
+- `interpretation_resolve` — written when a user resolves an LLM-surfaced
+  interpretation event and the patched prompt template is committed alongside
+  the `interpretation_events` row.
 
 **Why this is the load-bearing addition.** Without `provenance`, the
 backward-direction INV-AUDIT-AHEAD post-condition ("every committed
@@ -379,7 +388,7 @@ CREATE UNIQUE INDEX uq_chat_messages_tool_call_id
 - `(session_id, sequence_no)` is unique — every row in a session has a unique sequence number, monotonically increasing in commit order. **Sequence numbers are ordering keys, not counts.** Gaps are permitted (e.g., when an atomic-pair transaction rolls back after the next free sequence number was reserved). The property test post-condition asserts strict monotonicity within a session, NOT density. Closes architect H-3.
 - `(session_id, tool_call_id)` is unique among `role='tool'` rows. Cross-turn collisions (same `tool_call_id` reused by the LLM provider in a different turn) are rejected as a Tier-3 input-validation failure: the compose loop crashes the request rather than silently mis-correlating.
 - `writer_principal` is one of the four enumerated values; the database refuses any other string at write time.
-- `composition_states.provenance` is one of the six enumerated values (see §4.1.2); backward-direction INV-AUDIT-AHEAD applies only to rows with `provenance='tool_call'`.
+- `composition_states.provenance` is one of the enumerated values (see §4.1.2); backward-direction INV-AUDIT-AHEAD applies only to rows with `provenance='tool_call'`.
 
 `composition_state_id` FK behaviour — see §4.5.
 

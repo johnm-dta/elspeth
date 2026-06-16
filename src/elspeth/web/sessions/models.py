@@ -110,7 +110,11 @@ from sqlalchemy.types import JSON
 #   21 → ``sessions.auth_provider_type`` and
 #        ``user_secrets.auth_provider_type`` gain closed-list CHECK
 #        constraints for the supported auth-provider namespaces.
-SESSION_SCHEMA_EPOCH = 21
+#   22 → ``composition_states.provenance`` closed enum gains the
+#        ``post_compose`` value for successful send-message/recompose state
+#        advances. SQLite cannot ALTER a CHECK constraint in place, so
+#        pre-release policy remains delete-and-recreate for stale session DBs.
+SESSION_SCHEMA_EPOCH = 22
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -424,7 +428,7 @@ composition_states_table = Table(
     # Adding a value here without amending the spec creates an
     # untraceable writer category in the audit DB.
     #
-    # All seven original values were actively written as of
+    # The original persist-path values were actively written as of
     # elspeth-obs-f217c634aa (closed by the same commit that retired the
     # dormant-value friction block here). The previous block warned that
     # three values (``convergence_persist``, ``plugin_crash_persist``,
@@ -455,12 +459,15 @@ composition_states_table = Table(
     #                                    historical audit rows remain representable;
     #                                    re-activation is a governance action per
     #                                    the NO SILENT EXTENSION block below.
+    #   - ``post_compose``            — routes/messages.py send_message and
+    #                                    routes/composer.py recompose successful
+    #                                    LLM-driven state advances, including the
+    #                                    transition_consumed metadata-only row.
     #   - ``session_seed``            — service.py create_session + set_active_state
-    #                                    (also: routes.py post-compose state advance
-    #                                     + fork source-storage rewrite — these two
-    #                                     are pre-existing mis-attributions, see the
-    #                                     comments at those call sites)
-    #   - ``session_fork``            — service.py fork_session_at_message
+    #   - ``session_fork``            — service.py fork_session_at_message and
+    #                                    routes/sessions.py fork blob-reference
+    #                                    rewrite, which is part of the same fork
+    #                                    writer path.
     #   - ``interpretation_resolve``  — routes.py /resolve handler:
     #                                    a composition-state row written when the
     #                                    user resolves an LLM-surfaced interpretation
@@ -468,7 +475,7 @@ composition_states_table = Table(
     #                                    prompt template is committed alongside the
     #                                    ``interpretation_events`` row.
     #
-    # NO SILENT EXTENSION. Adding a ninth value MUST include all three
+    # NO SILENT EXTENSION. Adding another value MUST include all three
     # of: (a) a spec amendment documenting the writer path and the audit
     # semantics that distinguish it from neighbouring values; (b) an
     # integration test that drives the writer and asserts the row was
@@ -480,7 +487,7 @@ composition_states_table = Table(
     # IN PHASE 1A" block below for the same closed-list-of-permitted-
     # writers posture.
     CheckConstraint(
-        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'tutorial_normalization', 'session_seed', 'session_fork', 'interpretation_resolve')",
+        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'tutorial_normalization', 'post_compose', 'session_seed', 'session_fork', 'interpretation_resolve')",
         name="ck_composition_states_provenance",
     ),
 )

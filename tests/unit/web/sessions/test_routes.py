@@ -7785,6 +7785,73 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     assert _read_persisted_provenance(service, session_id) == "preflight_persist"
 
 
+def test_send_message_post_compose_state_advance_persists_post_compose_provenance(tmp_path: Path) -> None:
+    """A successful send-message state advance is not a session seed.
+
+    The row is committed after the composer returns a newer state version, so
+    auditors must be able to distinguish it from initial session creation and
+    explicit state reselection.
+    """
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+
+    assert response.status_code == 200
+    assert _read_persisted_provenance(service, session_id) == "post_compose"
+
+
+def test_recompose_post_compose_state_advance_persists_post_compose_provenance(tmp_path: Path) -> None:
+    """The recompose mirror path uses the same post-compose provenance."""
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            service.add_message(
+                uuid.UUID(session_id),
+                "user",
+                "Build me a pipeline",
+                writer_principal="route_user_message",
+            )
+        )
+    finally:
+        loop.close()
+
+    response = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert response.status_code == 200
+    assert _read_persisted_provenance(service, session_id) == "post_compose"
+
+
 def test_composition_state_provenance_python_and_sql_enums_agree() -> None:
     """The ``ck_composition_states_provenance`` CHECK constraint and the
     :data:`CompositionStateProvenance` Literal are paired contracts:

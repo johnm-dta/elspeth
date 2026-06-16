@@ -3345,3 +3345,31 @@ Same as the precedent above. This enum extension requires the staging session DB
 - **CHECK + Literal paired extension** — `web/sessions/models.py::ck_composition_states_provenance` and `web/sessions/protocol.py::CompositionStateProvenance`. The `test_composition_state_provenance_python_and_sql_enums_agree` test in `tests/unit/web/sessions/test_routes.py` pins them equal.
 - **Integration / unit test** — `tests/unit/web/composer/test_tutorial_service.py::test_normalise_current_tutorial_state_persists_tutorial_normalization_provenance` drives the writer via a stub session-service and asserts the captured `provenance` kwarg. The DB-level CHECK accept path is covered by `tests/unit/web/sessions/test_composition_states.py::test_provenance_check_accepts_known_values`.
 - **Filigree ticket** — filed at PR-open time; cited in the commit body (this is the residual close-out of the post-`ca9bc05bd` PR review's I7 finding).
+
+## Addendum (post-compose route attribution): closed-enum extension to `post_compose`
+
+This addendum records the ninth value added to the `composition_states.provenance` closed enum, following the same governance posture used for `interpretation_resolve` and `tutorial_normalization` (CHECK + Literal paired extension + Filigree ticket + spec amendment + integration test).
+
+### Writer path
+
+`post_compose` is written by the successful send-message and recompose route paths after the composer returns a newer composition state. The same value is used by the paired metadata-only persistence path that flips `guided_session.transition_consumed` after a transition prompt was consumed even when the graph version did not change.
+
+### Audit semantics
+
+`post_compose` is a route-level, LLM-driven state advance inside an existing session. It is distinct from:
+
+- **`session_seed`** — initial session creation or explicit active-state reselection.
+- **`tool_call`** — the atomic compose-loop tool-call writer that carries the backward-direction INV-AUDIT-AHEAD invariant.
+- **`convergence_persist` / `plugin_crash_persist` / `preflight_persist`** — failure-path partial-state captures.
+
+Fork-time blob-reference rewriting remains `session_fork` because it is part of the fork operation: it rewrites the copied state so the child session is self-contained after blob copy.
+
+### Deploy constraint
+
+Same as the precedent above. This enum extension requires a fresh session DB because SQLite cannot ALTER a CHECK constraint in place. `SESSION_SCHEMA_EPOCH` bumps `21 -> 22` and stale pre-release session DBs must be deleted/recreated at startup.
+
+### Governance bundle
+
+- **CHECK + Literal paired extension** — `web/sessions/models.py::ck_composition_states_provenance` and `web/sessions/protocol.py::CompositionStateProvenance`. The `test_composition_state_provenance_python_and_sql_enums_agree` test pins them equal.
+- **Integration / unit tests** — `tests/unit/web/sessions/test_routes.py::test_send_message_post_compose_state_advance_persists_post_compose_provenance`, `tests/unit/web/sessions/test_routes.py::test_recompose_post_compose_state_advance_persists_post_compose_provenance`, and `tests/unit/web/sessions/test_fork.py::TestForkEndpoint::test_fork_blob_rewrite_persists_session_fork_provenance` drive the affected route writers and assert the persisted DB values.
+- **Filigree ticket** — `elspeth-24a7fb8e54`.

@@ -656,17 +656,9 @@ def register_message_routes(router: APIRouter) -> None:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
-                        # Preserves pre-fix labelling. This call site (post-
-                        # compose path 1, send_message) wrote ``session_seed``
-                        # under the previous hardcoded label and continues to
-                        # do so here. The mismatch between this label and the
-                        # actual writer category (post-compose state advance,
-                        # not session create / branch reseed) is a SEPARATE
-                        # mis-attribution from the three handler sites that
-                        # commit elspeth-obs-f217c634aa addresses; widening
-                        # this commit to relabel post-compose paths would
-                        # require its own spec amendment + observation.
-                        provenance="session_seed",
+                        # Successful send-message state advance after the LLM
+                        # composer returns a newer state version.
+                        provenance="post_compose",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -693,12 +685,11 @@ def register_message_routes(router: APIRouter) -> None:
                     _transition_record = await service.save_composition_state(
                         session.id,
                         _transition_state_data,
-                        # Mirrors the paired session_seed-labelled site immediately
-                        # above (post-compose path 1, transition_consumed flip).
-                        # Same known mis-attribution as that paired site — see the
-                        # comment block at the earlier save call for the
-                        # elspeth-obs-f217c634aa relabelling history.
-                        provenance="session_seed",
+                        # Metadata-only post-compose advance: the LLM result
+                        # did not change graph version, but the guided-session
+                        # transition was consumed and must be audited separately
+                        # from session seeding.
+                        provenance="post_compose",
                     )
                     post_compose_state_id = _transition_record.id
                     state_response = _state_response(_transition_record)

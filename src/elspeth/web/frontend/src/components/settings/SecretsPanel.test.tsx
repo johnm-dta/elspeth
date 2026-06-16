@@ -140,6 +140,22 @@ describe("SecretsPanel", () => {
     expect(valueInput).toHaveAttribute("type", "password");
   });
 
+  it("associates name-specific form errors with the name field", () => {
+    useSecretsStore.setState({ error: "Secret name already exists." });
+
+    render(<SecretsPanel onClose={onClose} />);
+
+    const alert = screen.getByRole("alert");
+    const nameInput = screen.getByLabelText("Name");
+    const valueInput = screen.getByLabelText("Value");
+
+    expect(alert).toHaveAttribute("id", "secret-form-error");
+    expect(nameInput).toHaveAttribute("aria-invalid", "true");
+    expect(nameInput).toHaveAttribute("aria-describedby", "secret-form-error");
+    expect(valueInput).not.toHaveAttribute("aria-invalid");
+    expect(valueInput).not.toHaveAttribute("aria-describedby");
+  });
+
   describe("submit failure recovery", () => {
     it("re-enables the form after createSecret throws", async () => {
       const user = userEvent.setup();

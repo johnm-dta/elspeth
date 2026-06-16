@@ -8,6 +8,13 @@ interface SecretsPanelProps {
   onClose: () => void;
 }
 
+const SECRET_FORM_ERROR_ID = "secret-form-error";
+
+interface SecretFormErrorTargets {
+  name: boolean;
+  value: boolean;
+}
+
 function ScopeBadge({ scope }: { scope: SecretInventoryItem["scope"] }) {
   const colors: Record<SecretInventoryItem["scope"], { bg: string; text: string }> = {
     user: { bg: "var(--color-accent-muted)", text: "var(--color-accent)" },
@@ -66,6 +73,28 @@ function reasonLabel(reason: SecretInventoryItem["reason"]): string | null {
   return labels[reason];
 }
 
+function secretFormErrorTargets(error: string | null): SecretFormErrorTargets {
+  if (!error) {
+    return { name: false, value: false };
+  }
+
+  const normalized = error.toLowerCase();
+  if (
+    normalized.includes("secret name") ||
+    normalized.includes("name already exists")
+  ) {
+    return { name: true, value: false };
+  }
+  if (normalized.includes("secret value")) {
+    return { name: false, value: true };
+  }
+  if (normalized.includes("failed to save secret")) {
+    return { name: true, value: true };
+  }
+
+  return { name: false, value: false };
+}
+
 /**
  * Secrets settings panel — modal overlay.
  *
@@ -85,6 +114,8 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
   const [value, setValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
+  const formErrorTargets = secretFormErrorTargets(error);
+  const hasFormErrorTarget = formErrorTargets.name || formErrorTargets.value;
   useFocusTrap(modalRef, true, "#secret-name");
 
   useEffect(() => {
@@ -203,6 +234,10 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
                   <input
                     id="secret-name"
                     type="text"
+                    aria-invalid={formErrorTargets.name ? true : undefined}
+                    aria-describedby={
+                      formErrorTargets.name ? SECRET_FORM_ERROR_ID : undefined
+                    }
                     autoComplete="off"
                     spellCheck={false}
                     placeholder="e.g. OPENAI_API_KEY"
@@ -223,6 +258,10 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
                   <input
                     id="secret-value"
                     type="password"
+                    aria-invalid={formErrorTargets.value ? true : undefined}
+                    aria-describedby={
+                      formErrorTargets.value ? SECRET_FORM_ERROR_ID : undefined
+                    }
                     autoComplete="new-password"
                     placeholder="Paste your secret value here"
                     value={value}
@@ -244,6 +283,7 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
           {/* Error banner */}
           {error && (
             <div
+              id={hasFormErrorTarget ? SECRET_FORM_ERROR_ID : undefined}
               role="alert"
               style={{
                 marginTop: 12,

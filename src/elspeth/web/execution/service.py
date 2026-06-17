@@ -577,7 +577,9 @@ class ExecutionServiceImpl:
             for node in composition_state.nodes:
                 if node.node_type != "transform":
                     continue
-                provider_config = node.options.get("provider_config")
+                if "provider_config" not in node.options:
+                    continue
+                provider_config = node.options["provider_config"]
                 if not isinstance(provider_config, Mapping):
                     continue
                 for key in NESTED_LOCAL_PATH_OPTION_KEYS:

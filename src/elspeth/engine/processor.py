@@ -793,7 +793,11 @@ class RowProcessor:
 
             for node_id in sorted(self._aggregation_settings, key=str):
                 node_items = agg_items_by_node.get(node_id, [])
-                node_batches = batches_by_node.get(str(node_id), [])
+                # Reconciliation join (configured nodes against audit batches): a
+                # configured node with no batches yet (batches are created
+                # lazily on first row arrival) legitimately has zero rows, so
+                # absence is an empty bucket, not Tier-1 corruption.
+                node_batches = batches_by_node[str(node_id)] if str(node_id) in batches_by_node else []
                 # COUNT(DISTINCT token_id), not raw COUNT: retry_batch COPIES
                 # members into the retry batch, and handle_incomplete_batches
                 # runs BEFORE this derivation on resume — a raw count would
@@ -861,7 +865,7 @@ class RowProcessor:
                         _AggregationRestorePlan(
                             node_id=node_id,
                             items=node_items,
-                            member_order=members_by_batch.get(batch_id, []),
+                            member_order=(members_by_batch[batch_id] if batch_id in members_by_batch else []),
                             batch_id=batch_id,
                             accepted_count_total=accepted_count_total,
                             completed_flush_count=completed_flush_count,
@@ -4720,12 +4724,13 @@ class RowProcessor:
         (``_process_batch_aggregation_node`` / ``_maybe_coalesce_token``)
         stashed the barrier_key alongside the live token instead.
         """
-        hold = self._live_barrier_holds.get(token_id)
-        if hold is None:
+        try:
+            hold = self._live_barrier_holds[token_id]
+        except KeyError:
             raise AuditIntegrityError(
                 f"Buffered scheduler result for token {token_id!r} has no live barrier hold stash; "
                 "cannot persist a durable release barrier. Processor bug."
-            )
+            ) from None
         return hold.barrier_key
 
     @staticmethod

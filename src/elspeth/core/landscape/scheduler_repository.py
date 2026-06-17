@@ -2128,7 +2128,7 @@ class TokenSchedulerRepository:
             passthrough_emissions: list[BarrierEmission] = []
             fresh_emissions: list[BarrierEmission] = []
             for emission in emitted_pending_sink:
-                matching_rows = blocked_by_token.get(emission.token_id, [])
+                matching_rows = blocked_by_token[emission.token_id] if emission.token_id in blocked_by_token else []
                 if not matching_rows:
                     # Strict/legacy partition: on the strict arm (the F1 verb)
                     # an unbuffered sink-bound emission is a fresh terminal-lane

@@ -747,14 +747,15 @@ class AggregationExecutor:
                     f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
                     f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
                 )
-            attempt_offset = attempt_offsets.get(item.token_id)
-            if attempt_offset is None:
+            try:
+                attempt_offset = attempt_offsets[item.token_id]
+            except KeyError:
                 raise AuditIntegrityError(
                     f"No entry in attempt_offsets for journal token {item.token_id!r} at "
                     f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
                     f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
                     "cover every BLOCKED journal row."
-                )
+                ) from None
 
             tokens_by_id[item.token_id] = token_from_journal_item(
                 item,

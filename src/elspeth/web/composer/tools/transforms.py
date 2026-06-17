@@ -566,7 +566,7 @@ def _execute_upsert_edge(
                         return _failure_result(state, f"Only gates can use '{edge_type}' edges to sinks.")
                     route_key = "true" if edge_type == "route_true" else "false"
                     routes = dict(node.routes or {})
-                    if routes.get(route_key) != to_node:
+                    if route_key not in routes or routes[route_key] != to_node:
                         routes[route_key] = to_node
                         new_state = new_state.with_node(replace(node, routes=routes))
                 elif edge_type == "fork":

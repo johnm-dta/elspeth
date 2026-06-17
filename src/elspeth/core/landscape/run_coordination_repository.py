@@ -54,7 +54,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from elspeth.contracts.coordination import (
     CoordinationSnapshot,
@@ -190,9 +190,16 @@ def _record_best_effort_event(
                 recorded_at=recorded_at,
                 context=context,
             )
-    except Exception:
+    except OperationalError as exc:
+        # Benign-loss applies ONLY to transient write contention (§A.2): a
+        # "database is locked" OperationalError under a held WAL writer. Any
+        # other failure (canonical_json encoding bug, unique-index violation
+        # on event_id, real DB corruption) is a Tier-1 audit-integrity fault
+        # and must propagate, not be swallowed as "best effort".
+        if not _is_database_locked(exc):
+            raise
         logger.warning(
-            "best-effort coordination event %r for run %r (worker %r) could not be recorded",
+            "best-effort coordination event %r for run %r (worker %r) could not be recorded due to write contention",
             event_type,
             run_id,
             worker_id,
@@ -1011,7 +1018,12 @@ class RunCoordinationRepository:
                     .where(run_workers_table.c.run_id == run_id)
                     .order_by(run_workers_table.c.registered_at)
                 ).all()
-        except Exception:
+        except SQLAlchemyError:
+            # Forensic best-effort read: a DB-layer failure (the registry is
+            # unreadable while the writer we are diagnosing holds the lock)
+            # yields an empty roster and must never mask the WriteLockHeldError
+            # the caller raises. A non-DB (programmer) error is not an expected
+            # outcome here and is allowed to surface.
             logger.warning("could not read run_workers roster for run %r while diagnosing a held write lock", run_id, exc_info=True)
             return ()
         return tuple(

@@ -161,13 +161,13 @@ def _inline_blob_content_for_proposal(
     """Return inline blob content that accept replay would persist, if any."""
     if proposal.tool_name != "set_pipeline":
         return None
-    source = arguments.get("source")
+    source = arguments["source"] if "source" in arguments else None
     if not isinstance(source, Mapping):
         return None
-    inline_blob = source.get("inline_blob")
+    inline_blob = source["inline_blob"] if "inline_blob" in source else None
     if not isinstance(inline_blob, Mapping):
         return None
-    content = inline_blob.get("content")
+    content = inline_blob["content"] if "content" in inline_blob else None
     return content if isinstance(content, str) else None
 
 

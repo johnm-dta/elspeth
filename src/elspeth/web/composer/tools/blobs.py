@@ -441,7 +441,9 @@ def _execute_wire_blob_inline_ref(
     # explicit failure result. The str narrowing also satisfies the
     # ContentEncoding cast below.
     encoding_value = arguments["encoding"] if "encoding" in arguments else "utf-8"
-    if not isinstance(encoding_value, str) or encoding_value not in ALLOWED_CONTENT_ENCODINGS:
+    if type(encoding_value) is not str:
+        return _failure_result(state, f"encoding must be a string, got {type(encoding_value).__name__}")
+    if encoding_value not in ALLOWED_CONTENT_ENCODINGS:
         return _failure_result(state, f"encoding must be one of {sorted(ALLOWED_CONTENT_ENCODINGS)}, got {encoding_value!r}")
     encoding = cast(ContentEncoding, encoding_value)
 

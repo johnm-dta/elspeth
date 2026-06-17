@@ -585,7 +585,7 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         # per skill lines 758-768).  ``options`` values are Tier-3 (LLM- or
         # operator-supplied), so isinstance() dispatches the optional schema
         # block legitimately — a non-Mapping value means "no schema declared".
-        schema_block = node.options.get("schema")
+        schema_block = node.options["schema"] if "schema" in node.options else None
         if isinstance(schema_block, Mapping):
             fields = schema_block.get("fields")
             if isinstance(fields, (list, tuple)) and len(fields) > 0:
@@ -819,7 +819,7 @@ def validate_pipeline(
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
         for key in SINK_LOCAL_PATH_OPTION_KEYS:
-            value = output.options.get(key)
+            value = output.options[key] if key in output.options else None
             if value is not None:
                 path_checked = True
                 resolved = resolve_data_path(value, str(settings.data_dir))
@@ -860,7 +860,7 @@ def validate_pipeline(
     for node in state.nodes:
         if node.node_type != "transform":
             continue
-        provider_config = node.options.get("provider_config")
+        provider_config = node.options["provider_config"] if "provider_config" in node.options else None
         if not isinstance(provider_config, Mapping):
             continue
         for key in NESTED_LOCAL_PATH_OPTION_KEYS:
@@ -924,7 +924,7 @@ def validate_pipeline(
     for node in state.nodes:
         if node.plugin != "web_scrape":
             continue
-        http_options = node.options.get("http")
+        http_options = node.options["http"] if "http" in node.options else None
         if not isinstance(http_options, Mapping):
             continue
         if "allowed_hosts" not in http_options:

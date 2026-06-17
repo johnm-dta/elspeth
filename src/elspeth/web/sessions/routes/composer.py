@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from elspeth.contracts.trust_boundary import trust_boundary
+
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
     _DATA_ERROR_KEY,
@@ -154,6 +156,14 @@ _PROPOSAL_COMPOSER_CONTEXT_FIELDS: tuple[str, ...] = (
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="persisted LLM tool-call arguments of a stored CompositionProposalRecord (Tier-3 on read-back)",
+    source_param="arguments",
+    suppresses=("R5",),
+    invariant="returns None on any absent/wrong-typed branch of arguments.source.inline_blob.content; never raises on arguments",
+    non_raising=True,
+)
 def _inline_blob_content_for_proposal(
     proposal: CompositionProposalRecord,
     arguments: Mapping[str, Any],

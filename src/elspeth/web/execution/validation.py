@@ -34,6 +34,7 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
 from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
     BLOB_INLINE_PER_REF_BYTE_CAP,
@@ -504,6 +505,14 @@ class _IdentityFinding:
     sink_schema_mode: str | None
 
 
+@trust_boundary(
+    tier=3,
+    source="composer-authored CompositionState sink/node options (Tier-3, operator/LLM-supplied)",
+    source_param="state",
+    suppresses=("R1",),
+    invariant="returns advisory findings; every malformed-options branch returns/continues, never raises on state",
+    non_raising=True,
+)
 def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFinding]:
     """Detect identity-shaped passthrough transforms between a real transform and a sink.
 
@@ -671,6 +680,17 @@ def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> V
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="composer-authored CompositionState (pipeline nodes/options) re-read at dry-run validation",
+    source_param="state",
+    suppresses=("R1",),
+    invariant=(
+        "converts expected user/config validation failures into a ValidationResult and returns it; never raises "
+        "on the shape of state (Tier-1 invariant crashes on the analyzer's own generated YAML still propagate)"
+    ),
+    non_raising=True,
+)
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,

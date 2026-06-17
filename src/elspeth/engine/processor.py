@@ -779,7 +779,9 @@ class RowProcessor:
         # offsets for.
         token_ids = [item.token_id for item in items]
         max_attempts = self._execution.get_max_node_state_attempts(self._run_id, token_ids) if token_ids else {}
-        attempt_offsets: dict[str, int] = {token_id: max_attempts.get(token_id, -1) + 1 for token_id in token_ids}
+        attempt_offsets: dict[str, int] = {
+            token_id: (max_attempts[token_id] if token_id in max_attempts else -1) + 1 for token_id in token_ids
+        }
 
         # Per-node batch metadata for every configured aggregation node.
         agg_plans: list[_AggregationRestorePlan] = []
@@ -792,7 +794,7 @@ class RowProcessor:
                 batches_by_node.setdefault(str(batch.aggregation_node_id), []).append(batch)
 
             for node_id in sorted(self._aggregation_settings, key=str):
-                node_items = agg_items_by_node.get(node_id, [])
+                node_items = agg_items_by_node[node_id] if node_id in agg_items_by_node else []
                 # Reconciliation join (configured nodes against audit batches): a
                 # configured node with no batches yet (batches are created
                 # lazily on first row arrival) legitimately has zero rows, so
@@ -803,10 +805,16 @@ class RowProcessor:
                 # runs BEFORE this derivation on resume — a raw count would
                 # double-count every member of a retried batch.
                 accepted_count_total = len(
-                    {member_token for node_batch in node_batches for member_token in members_by_batch.get(node_batch.batch_id, ())}
+                    {
+                        member_token
+                        for node_batch in node_batches
+                        for member_token in (members_by_batch[node_batch.batch_id] if node_batch.batch_id in members_by_batch else ())
+                    }
                 )
                 completed_flush_count = sum(1 for node_batch in node_batches if node_batch.status is BatchStatus.COMPLETED)
-                node_scalars = scalars.aggregation.get(str(node_id), AggregationNodeScalars(None, None))
+                node_scalars = (
+                    scalars.aggregation[str(node_id)] if str(node_id) in scalars.aggregation else AggregationNodeScalars(None, None)
+                )
                 # ---- ADR-030 §E.3a aggregation reconcile (elspeth-55546a6fd6) ---
                 # A FAILED out-of-claim flush records terminal FAILURE/UNROUTED
                 # token_outcomes for every buffered token (_handle_flush_error)
@@ -990,9 +998,9 @@ class RowProcessor:
         if self._coalesce_executor is not None:
             for loss in self._scheduler.list_coalesce_branch_losses(run_id=self._run_id):
                 key = (loss.coalesce_name, loss.row_id)
-                existing = effective_coalesce_scalars.get(key)
+                existing = effective_coalesce_scalars[key] if key in effective_coalesce_scalars else None
                 lost_branches = dict(existing.lost_branches) if existing is not None else {}
-                checkpoint_reason = lost_branches.get(loss.branch_name)
+                checkpoint_reason = lost_branches[loss.branch_name] if loss.branch_name in lost_branches else None
                 if checkpoint_reason is not None and checkpoint_reason != loss.reason:
                     logger.warning(
                         "coalesce restore: checkpoint lost-branch reason %r for %s/%s/%s disagrees with the durable "

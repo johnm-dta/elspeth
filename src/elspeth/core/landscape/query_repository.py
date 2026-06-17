@@ -743,7 +743,29 @@ class QueryRepository:
                     f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
                     f"{run_id!r} has unparseable error_json — Tier-1 audit-database integrity violation: {exc}"
                 ) from exc
-            if isinstance(error_payload, dict) and error_payload.get("failure_reason") == "late_arrival_after_merge":
+            # error_json for a FAILED coalesce node_state is polymorphic across
+            # two legitimate writers: coalesce_executor records a
+            # CoalesceFailureReason (a dict WITH a required failure_reason) for
+            # accept/merge failure outcomes, and the merge-cleanup handler
+            # records an ExecutionError (a dict WITHOUT failure_reason, keys
+            # {exception,type,phase}) for merge-time exceptions. Both are valid
+            # FAILED barrier rows. A non-dict parsed payload is producible by
+            # NEITHER writer (both .to_dict() to objects), so it is Tier-1 audit
+            # corruption — crash with provenance, consistent with the null /
+            # unparseable guards above.
+            if not isinstance(error_payload, dict):
+                raise AuditIntegrityError(
+                    f"FAILED coalesce node_state for node {db_row.node_id!r} / row {db_row.row_id!r} in run "
+                    f"{run_id!r} has a non-object error_json payload (got {type(error_payload).__name__}) — the "
+                    f"write side serializes a CoalesceFailureReason or ExecutionError object, so this is a "
+                    f"Tier-1 audit-database integrity violation."
+                )
+            # Exclude only the benign late-arrival-after-merge case (a
+            # CoalesceFailureReason discriminator). Every other FAILED payload —
+            # including ExecutionError shapes with no failure_reason — is a real
+            # failed barrier. .get() reads the OPTIONAL discriminator across the
+            # two valid payload shapes without crashing on the keyless one.
+            if error_payload.get("failure_reason") == "late_arrival_after_merge":
                 continue
             failed_barriers.add((db_row.node_id, db_row.row_id))
         return len(failed_barriers)

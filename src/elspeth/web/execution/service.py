@@ -71,6 +71,7 @@ from elspeth.web.execution.errors import (
     MalformedBlobRefError,
     PathAllowlistViolationError,
     PipelineValidationError,
+    RunSessionIntegrityError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -104,6 +105,7 @@ from elspeth.web.sessions.protocol import (
     IllegalRunTransitionError,
     RunAlreadyActiveError,
     RunRecord,
+    SessionNotFoundError,
     SessionRunStatus,
     SessionServiceProtocol,
 )  # B1: canonical definition
@@ -905,8 +907,22 @@ class ExecutionServiceImpl:
         user_id and auth_provider_type to prevent cross-provider access
         when user_id namespaces overlap between providers.
         """
+        # Tier-3 boundary: ``UUID(run_id)`` raises ValueError on a malformed
+        # run id, and ``get_run`` raises a bare ValueError when no run row
+        # matches. Both are legitimate external not-found cases — the caller
+        # maps them to an IDOR-safe 4004 close.
         run = await self._session_service.get_run(UUID(run_id))
-        session = await self._session_service.get_session(run.session_id)
+        # Tier-1 invariant: an existing run's ``session_id`` FK MUST resolve to
+        # a sessions row. If it does not, that is referential corruption of our
+        # own sessions DB, not hostile client input. ``get_session`` signals
+        # this as ``SessionNotFoundError`` (a ValueError subclass); we re-raise
+        # it as a non-ValueError integrity error so the ownership-check caller's
+        # broad ``except ValueError`` cannot silently collapse Tier-1 corruption
+        # into a benign "Run not found" response.
+        try:
+            session = await self._session_service.get_session(run.session_id)
+        except SessionNotFoundError as exc:
+            raise RunSessionIntegrityError(run_id=run_id, session_id=str(run.session_id)) from exc
         return session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
 
     async def cancel(self, run_id: UUID) -> None:

@@ -348,7 +348,14 @@ def _ddl_constraint_applies_to_dialect(constraint: CheckConstraint, dialect_name
     ddl_if = getattr(constraint, "_ddl_if", None)
     if ddl_if is None:
         return True
-    target = getattr(ddl_if, "dialect", None)
+    # ``ddl_if`` is non-None here, so it is SQLAlchemy's ``DDLIf`` NamedTuple,
+    # whose ``dialect`` field always exists (``Optional[str]``). Access it
+    # directly: a missing ``dialect`` attribute would mean ``_ddl_if`` drifted
+    # to a non-``DDLIf`` shape (library-contract drift), and this Tier-1 schema
+    # validator must crash loudly on that rather than silently treating the
+    # constraint as applying to every dialect. ``dialect is None`` remains the
+    # legitimate callable-only-filter case and still applies to all dialects.
+    target = ddl_if.dialect
     if target is None:
         return True
     if isinstance(target, str):

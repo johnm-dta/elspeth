@@ -3119,8 +3119,27 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     """
 
     def _redact_one(source: Any) -> tuple[Any, bool]:
-        if source is None or not isinstance(source, Mapping):
+        # An absent/None source is the documented "nothing to redact"
+        # first-party shape (see this function's docstring). A PRESENT,
+        # non-None source that is not a Mapping is NOT a producible
+        # first-party shape: every serializer feeding this surface
+        # (CompositionState.to_dict, _serialize_source,
+        # _serialize_full_pipeline_state) emits source/named-source values
+        # as dicts. A non-Mapping here is a corrupted/regressed Tier-1
+        # serializer output; returning it unchanged would silently pass an
+        # un-redacted storage path through this leak-prevention surface, so
+        # fail closed with provenance instead (matches the offensive posture
+        # of _state_response's direct index and the MCP read-back's
+        # PLUGIN_CRASH reclassification).
+        if source is None:
             return source, False
+        if not isinstance(source, Mapping):
+            raise AuditIntegrityError(
+                "redact_source_storage_path received a non-Mapping source value "
+                f"(type {type(source).__name__!r}); serialized state source entries "
+                "must be mappings. Refusing to pass through a malformed first-party "
+                "shape that may carry an un-redacted internal storage path."
+            )
         if "options" not in source:
             return source, False
         options = source["options"]

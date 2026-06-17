@@ -4379,6 +4379,36 @@ class TestVerifyRunOwnership:
             await svc.verify_run_ownership(user, str(uuid4()))
 
     @pytest.mark.asyncio
+    async def test_dangling_session_fk_raises_integrity_error(self, idor_service) -> None:
+        """Existing run whose session_id FK has no sessions row → Tier-1
+        integrity error, NOT a benign ValueError/not-found.
+
+        Regression: a dangling parent-session reference is referential
+        corruption of our own sessions DB, not hostile client input. It must
+        NOT collapse into the Tier-3 "Run not found" (ValueError → 4004) path.
+        ``get_session`` signals the missing row as ``SessionNotFoundError``
+        (a ValueError subclass); ``verify_run_ownership`` must surface it as a
+        non-ValueError ``RunSessionIntegrityError`` so the ownership-check
+        caller's broad ``except ValueError`` cannot swallow Tier-1 corruption.
+        """
+        from elspeth.web.execution.errors import RunSessionIntegrityError
+        from elspeth.web.sessions.protocol import SessionNotFoundError
+
+        svc, session_svc = idor_service
+        dangling_session_id = uuid4()
+        run = MagicMock(session_id=dangling_session_id)
+        session_svc.get_run = AsyncMock(return_value=run)
+        session_svc.get_session = AsyncMock(side_effect=SessionNotFoundError(dangling_session_id))
+
+        user = MagicMock(user_id="alice")
+        with pytest.raises(RunSessionIntegrityError) as exc_info:
+            await svc.verify_run_ownership(user, str(uuid4()))
+        # It must NOT be catchable as the benign Tier-3 not-found path even
+        # though SessionNotFoundError itself subclasses ValueError.
+        assert not isinstance(exc_info.value, ValueError)
+        assert exc_info.value.session_id == str(dangling_session_id)
+
+    @pytest.mark.asyncio
     async def test_str_vs_non_str_user_id_rejects(self, idor_service) -> None:
         """Regression: if session.user_id were stored as UUID, str comparison must reject."""
         svc, session_svc = idor_service

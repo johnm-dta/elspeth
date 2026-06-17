@@ -2256,7 +2256,7 @@ class TokenSchedulerRepository:
             terminal_event_context.update(release_context)
         consumed_set = frozenset(consumed)
         candidate_rows = sorted(
-            (row for token_id in consumed_set for row in blocked_by_token.get(token_id, ())),
+            (row for token_id in consumed_set for row in blocked_by_token[token_id]),
             key=lambda row: (row["token_id"], row["work_item_id"]),
         )
         terminalized = 0

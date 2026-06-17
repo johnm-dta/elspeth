@@ -28,7 +28,7 @@ from pydantic import ValidationError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
@@ -40,6 +40,7 @@ from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     ExecuteRequestValidationError,
     PipelineValidationError,
+    RunSessionIntegrityError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -854,6 +855,22 @@ def create_execution_router() -> APIRouter:
             return
         try:
             user = await auth_provider.authenticate(token)
+        except AuthProviderUnavailable as provider_exc:
+            # Provider availability failure is a distinct outcome from an
+            # invalid token (auth/models.py: AuthProviderUnavailable; the HTTP
+            # path maps it to 503, not 401). The client may hold a VALID token,
+            # so closing 4001 here would wrongly tell it to re-authenticate
+            # instead of backing off (see docstring above). Surface to the
+            # operator and close with the transient/server-side code 1011, the
+            # WebSocket analogue of HTTP 503 used elsewhere in this function.
+            slog.error(
+                "websocket_auth_provider_unavailable",
+                run_id=run_id,
+                phase="authenticate",
+                error=str(provider_exc),
+            )
+            await websocket.close(code=1011, reason="Authentication provider unavailable")
+            return
         except AuthenticationError:
             await websocket.close(code=4001, reason="Invalid authentication token")
             return
@@ -866,6 +883,23 @@ def create_execution_router() -> APIRouter:
             if not run_ownership:
                 await websocket.close(code=4004, reason="Run not found")
                 return
+        except RunSessionIntegrityError as integrity_exc:
+            # Tier-1 sessions-DB corruption: an existing run references a
+            # session row that does not exist. This is NOT a Tier-3 not-found
+            # case — surfacing it as 4004 would launder internal referential
+            # corruption into a benign client response. Landscape carries the
+            # run audit, not this sessions-DB invariant breach, so slog is the
+            # operator channel (CLAUDE.md logging policy: audit-system
+            # failure). Close 1011 (internal error), mirroring the seed-snapshot
+            # integrity handling below.
+            slog.error(
+                "websocket_run_ownership_session_integrity_error",
+                run_id=run_id,
+                session_id=integrity_exc.session_id,
+                error=str(integrity_exc),
+            )
+            await websocket.close(code=1011, reason="Run ownership check failed internal integrity validation")
+            return
         except ValueError:
             await websocket.close(code=4004, reason="Run not found")
             return

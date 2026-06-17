@@ -631,10 +631,25 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
 def _state_source_blob_refs(state: CompositionState) -> frozenset[str]:
     """Blob refs bound to any pipeline source root."""
     refs: set[str] = set()
-    for source in state.sources.values():
-        blob_ref = source.options["blob_ref"] if "blob_ref" in source.options else None
-        if isinstance(blob_ref, str):
-            refs.add(blob_ref)
+    for source_name, source in state.sources.items():
+        if "blob_ref" not in source.options:
+            continue
+        blob_ref = source.options["blob_ref"]
+        if not isinstance(blob_ref, str):
+            # The canonical writer sets blob_ref exclusively from
+            # authoritative blob metadata as blob["id"] (a str) in
+            # sources.py::_resolve_source_blob, and every caller-injection
+            # path is rejected (_reject_manual_source_blob_ref, the
+            # patch_source_options blob_ref guard). A present-but-non-str
+            # blob_ref therefore cannot arise from any valid authoring path:
+            # it is a corruption of the audited CompositionState. Silently
+            # treating it as "not bound" would let _execute_update_blob mutate
+            # a blob that is in fact bound to a pipeline source, defeating the
+            # binding guard — so escalate rather than suppress.
+            raise AuditIntegrityError(
+                f"Source '{source_name}' has a non-str blob_ref ({type(blob_ref).__name__}); CompositionState integrity anomaly"
+            )
+        refs.add(blob_ref)
     return frozenset(refs)
 
 

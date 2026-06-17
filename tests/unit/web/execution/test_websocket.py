@@ -212,6 +212,37 @@ class TestWebSocketIDOR:
         assert websocket.close_code == 4004
         assert "not found" in (websocket.close_reason or "").lower()
 
+    @pytest.mark.asyncio
+    async def test_dangling_session_fk_closes_1011_not_4004(self) -> None:
+        """Existing run with a missing parent session → Tier-1 sessions-DB
+        corruption → 1011 internal-error close, NOT a benign 4004.
+
+        Regression: ``RunSessionIntegrityError`` (a plain Exception, NOT a
+        ValueError subclass) must not be laundered through the Tier-3
+        not-found path into a benign 4004. The handler logs to the operator
+        channel and closes 1011, mirroring the seed-snapshot integrity path.
+        """
+        from elspeth.web.auth.models import UserIdentity
+        from elspeth.web.execution.errors import RunSessionIntegrityError
+
+        auth = MagicMock()
+        user = UserIdentity(user_id=_TEST_USER_ID, username="testuser")
+        auth.authenticate = AsyncMock(return_value=user)
+
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(side_effect=RunSessionIntegrityError(run_id="run-1", session_id="missing-session"))
+
+        broadcaster = _make_broadcaster()
+        app = _create_ws_test_app(
+            auth_provider=auth,
+            execution_service=svc,
+            broadcaster=broadcaster,
+        )
+        websocket = await _call_websocket(app, "run-1", token="valid")
+        assert websocket.accepted is True
+        assert websocket.close_code == 1011
+        assert "not found" not in (websocket.close_reason or "").lower()
+
 
 class TestWebSocketTimeoutRecovery:
     """Timeout path must probe authoritative status, not send ad-hoc payloads."""

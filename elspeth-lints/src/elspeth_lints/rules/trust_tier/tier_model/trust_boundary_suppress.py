@@ -64,6 +64,7 @@ _ALLOWED_TRUST_BOUNDARY_KWARGS: frozenset[str] = frozenset(
         "invariant",
         "test_ref",
         "test_fingerprint",
+        "non_raising",
     }
 )
 
@@ -76,7 +77,11 @@ class BoundaryMetadata:
     ``source``, ``invariant``, ``test_ref``, and ``test_fingerprint`` are
     carried for the non-failing ``R_TB_SUPPRESSED`` observation stream, so an
     operator can audit which decorator metadata justified the hidden R1/R5
-    finding without re-reading the source file by hand.
+    finding without re-reading the source file by hand. ``non_raising`` records
+    whether the boundary declared the return-not-raise contract; it does not
+    change *what* this module suppresses (suppression is always scoped to
+    ``source_param``), only which honesty gate the ``trust_boundary.tests`` rule
+    applies (raising-test vs. the mechanical no-raise-on-boundary-path check).
     """
 
     suppresses: frozenset[str]
@@ -86,6 +91,7 @@ class BoundaryMetadata:
     invariant: str | None
     test_ref: str | None
     test_fingerprint: str | None
+    non_raising: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +442,12 @@ def extract_boundary_metadata(
     if invariant_raw is not None and not isinstance(invariant_raw, str):
         shape_errors.append(f"'invariant' must be a string when present, got {type(invariant_raw).__name__}")
 
+    non_raising_raw = parsed.get("non_raising")
+    if non_raising_raw is not None and not isinstance(non_raising_raw, bool):
+        # ``bool`` is a subclass of ``int``; reject ``non_raising=1`` so the
+        # honesty-gate claim cannot be smuggled in as a truthy non-bool.
+        shape_errors.append(f"'non_raising' must be a bool when present, got {type(non_raising_raw).__name__}")
+
     if shape_errors:
         diagnostics.append(
             BoundaryFinding(
@@ -451,6 +463,7 @@ def extract_boundary_metadata(
     assert isinstance(source_param_raw, str)
     assert source_raw is None or isinstance(source_raw, str)
     assert invariant_raw is None or isinstance(invariant_raw, str)
+    assert non_raising_raw is None or isinstance(non_raising_raw, bool)
     suppresses_strs: tuple[str, ...] = tuple(str(item) for item in suppresses_raw)
     test_ref = parsed.get("test_ref")
     test_fingerprint = parsed.get("test_fingerprint")
@@ -464,6 +477,7 @@ def extract_boundary_metadata(
         invariant=invariant_raw,
         test_ref=test_ref_value,
         test_fingerprint=test_fingerprint_value,
+        non_raising=bool(non_raising_raw),
     )
     return metadata, diagnostics
 

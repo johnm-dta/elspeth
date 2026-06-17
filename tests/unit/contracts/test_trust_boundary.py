@@ -264,3 +264,48 @@ def test_decorator_return_type_preserved_at_runtime() -> None:
 
     result = returns_complex({"a": 1, "b": 2})
     assert result == (2, "ok")
+
+
+def test_non_raising_defaults_false_and_records_true() -> None:
+    """``non_raising`` defaults to False and is recorded on the metadata when set."""
+
+    @trust_boundary(
+        tier=3,
+        source="LLM tool-call arguments",
+        source_param="arguments",
+        suppresses=("R5",),
+        invariant="returns None on malformed input; never raises on arguments",
+    )
+    def default_boundary(arguments: dict[str, Any]) -> Any:
+        return arguments.get("x")
+
+    @trust_boundary(
+        tier=3,
+        source="LLM tool-call arguments",
+        source_param="arguments",
+        suppresses=("R5",),
+        invariant="returns None on malformed input; never raises on arguments",
+        non_raising=True,
+    )
+    def nonraising_boundary(arguments: dict[str, Any]) -> Any:
+        return arguments.get("x")
+
+    assert default_boundary.__trust_boundary__.non_raising is False  # type: ignore[attr-defined]
+    assert nonraising_boundary.__trust_boundary__.non_raising is True  # type: ignore[attr-defined]
+
+
+def test_non_raising_rejects_test_ref() -> None:
+    """``non_raising=True`` is mutually exclusive with test_ref/test_fingerprint."""
+    with pytest.raises(TypeError, match="mutually exclusive with test_ref"):
+
+        @trust_boundary(
+            tier=3,
+            source="x",
+            source_param="arguments",
+            suppresses=("R5",),
+            invariant="returns None on malformed input",
+            non_raising=True,
+            test_ref="tests/unit/example.py::test_rejects_malformed",
+        )
+        def contradictory(arguments: dict[str, Any]) -> Any:
+            return arguments.get("x")

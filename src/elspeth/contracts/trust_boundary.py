@@ -91,6 +91,14 @@ class TrustBoundaryMetadata:
     * ``tier`` is :data:`Literal[3]` (int scalar).
     * ``source``, ``source_param``, ``invariant``, ``qualname`` are ``str``.
     * ``test_ref`` and ``test_fingerprint`` are ``str | None``.
+    * ``non_raising`` is a ``bool``. When ``True``, the boundary's contract is
+      that it RETURNS a sentinel (``None``/empty/result object) on malformed
+      ``source_param`` input and never raises on it — so a raising honesty
+      test is structurally impossible. The ``trust_boundary.tests`` gate then
+      replaces the raising-test requirement with a mechanical check that no
+      ``raise`` in the function body is control-dependent on a
+      ``source_param``-derived guard. ``non_raising=True`` is mutually
+      exclusive with ``test_ref``/``test_fingerprint``.
     * ``suppresses`` is a ``tuple`` of :data:`BoundaryRule` Literals.
     * ``func`` is the wrapped :class:`Callable` (not a container; not
       deep-freezable, but immutable in the sense that ``frozen=True``
@@ -109,6 +117,7 @@ class TrustBoundaryMetadata:
     func: Callable[..., Any]
     test_ref: str | None = None
     test_fingerprint: str | None = None
+    non_raising: bool = False
 
 
 def trust_boundary(
@@ -120,6 +129,7 @@ def trust_boundary(
     invariant: str,
     test_ref: str | None = None,
     test_fingerprint: str | None = None,
+    non_raising: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Mark a function as a Tier-3 external-data trust boundary.
 
@@ -154,6 +164,19 @@ def trust_boundary(
             ``test_ref`` is present and reports drift if the nodeid still
             resolves but the test function was renamed, repurposed, or edited
             after review.
+        non_raising: Declare that this boundary returns a sentinel
+            (``None``/empty/result object) on malformed ``source_param`` input
+            and never raises on it. Set this for optional-extraction,
+            advisory, and convert-to-result boundaries whose contract is
+            return-not-raise — a raising honesty test cannot exist for them.
+            When ``True``, the ``trust_boundary.tests`` gate skips the
+            raising-test requirement and instead mechanically verifies that no
+            ``raise`` in the function body is control-dependent on a
+            ``source_param``-derived guard (i.e. the boundary genuinely cannot
+            raise on bad input). Mutually exclusive with ``test_ref`` /
+            ``test_fingerprint`` — a boundary either raises-and-is-tested or is
+            non-raising, never both. Passing both raises :class:`TypeError` at
+            decoration time.
 
     Returns:
         A decorator that, when applied to a function, returns a wrapper
@@ -166,8 +189,10 @@ def trust_boundary(
     Raises:
         TypeError: If ``tier`` is not ``3``, or if ``source_param`` does
             not name a parameter of the wrapped function, or if the function
-            is already decorated with ``@trust_boundary``. These checks fire
-            at decoration time (module import) rather than at call time.
+            is already decorated with ``@trust_boundary``, or if
+            ``non_raising=True`` is combined with ``test_ref`` /
+            ``test_fingerprint``. These checks fire at decoration time
+            (module import) rather than at call time.
     """
     if tier != 3:
         # Offensive: catch misuse at the decoration site. Tier-1 and Tier-2
@@ -175,6 +200,16 @@ def trust_boundary(
         # decorator at those tiers is structurally wrong, not configurably
         # wrong, so we reject it at import rather than offering a flag.
         raise TypeError("@trust_boundary only applies to tier=3 trust boundaries; Tier-1 and Tier-2 must crash, not suppress.")
+
+    if non_raising and (test_ref is not None or test_fingerprint is not None):
+        # A non-raising boundary returns a sentinel on malformed input, so a
+        # raising honesty test cannot exist for it; carrying a test_ref would
+        # be a contradiction. Reject at the decoration site rather than letting
+        # the static honesty gate be the only place the lie is caught.
+        raise TypeError(
+            "@trust_boundary(non_raising=True) is mutually exclusive with test_ref/test_fingerprint; "
+            "a non-raising boundary returns a sentinel on malformed input and cannot have a raising test."
+        )
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         existing_metadata = func.__dict__["__trust_boundary__"] if "__trust_boundary__" in func.__dict__ else None
@@ -203,6 +238,7 @@ def trust_boundary(
             func=func,
             test_ref=test_ref,
             test_fingerprint=test_fingerprint,
+            non_raising=non_raising,
         )
 
         @functools.wraps(func)

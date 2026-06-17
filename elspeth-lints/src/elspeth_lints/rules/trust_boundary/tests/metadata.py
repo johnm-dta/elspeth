@@ -23,6 +23,19 @@ RULE_INVARIANT_MISMATCH = "R_TB_TESTS_INVARIANT_MISMATCH"
 RULE_INPUT_IRRELEVANT = "R_TB_TESTS_IRRELEVANT_INPUT"
 RULE_FINGERPRINT_MISSING = "R_TB_TESTS_FINGERPRINT_MISSING"
 RULE_FINGERPRINT_MISMATCH = "R_TB_TESTS_FINGERPRINT_MISMATCH"
+# Non-raising boundary honesty codes. A ``@trust_boundary(non_raising=True)``
+# declares it returns a sentinel on malformed ``source_param`` input and never
+# raises on it — so a raising test cannot exist. The gate replaces the
+# raising-test requirement with a mechanical check:
+#
+# * ``R_TB_NONRAISING_RAISES``: a ``raise`` in the function body IS
+#   control-dependent on a ``source_param``-derived guard, so the boundary
+#   demonstrably raises on bad input — the claim is false and a real raising
+#   test (``test_ref``) is both possible and required.
+# * ``R_TB_NONRAISING_HAS_TESTREF``: ``non_raising=True`` was combined with a
+#   ``test_ref`` — a contradiction (the runtime decorator rejects this too).
+RULE_NONRAISING_RAISES = "R_TB_NONRAISING_RAISES"
+RULE_NONRAISING_HAS_TESTREF = "R_TB_NONRAISING_HAS_TESTREF"
 
 SUGGESTION_MISSING = (
     "Every @trust_boundary must carry a test_ref pointing to a pytest node "
@@ -93,6 +106,22 @@ SUGGESTION_FINGERPRINT_MISMATCH = (
     "nodeid still resolves, but the test content drifted."
 )
 
+SUGGESTION_NONRAISING_RAISES = (
+    "This @trust_boundary(non_raising=True) declares it never raises on "
+    "source_param, but a raise in the body is guarded by a check on "
+    "source_param-derived data — so it DOES raise on malformed input. Either "
+    "remove non_raising=True and add a real test_ref proving the raising "
+    "behaviour, or restructure so the boundary returns a sentinel on bad input "
+    "instead of raising."
+)
+
+SUGGESTION_NONRAISING_HAS_TESTREF = (
+    "@trust_boundary(non_raising=True) is mutually exclusive with test_ref: a "
+    "non-raising boundary returns a sentinel on malformed input, so a raising "
+    "test cannot exist. Drop test_ref/test_fingerprint, or drop non_raising=True "
+    "and keep the raising test."
+)
+
 SUGGESTION_NONLITERAL = (
     "@trust_boundary kwargs must be static literals. The tests honesty gate "
     "cannot verify a test_ref nodeid that is a name reference, call, or "
@@ -115,6 +144,6 @@ RULE_METADATA = RuleMetadata(
     cwe=("CWE-1059", "CWE-754"),
     scope=RuleScope.WHOLE_REPO,
     path_filter=r".*\.py$",
-    examples_violation_count=3,
-    examples_clean_count=1,
+    examples_violation_count=5,
+    examples_clean_count=2,
 )

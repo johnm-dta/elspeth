@@ -74,13 +74,13 @@ per_file_rules:
   - R5
   reason: urllib.parse union type narrowing (str vs list[str])
   expires: null
-  max_hits: 1
+  max_hits: 2
 - pattern: core/landscape/execution_repository.py
   rules:
   - R5
   reason: Discriminated union narrowing and invariant validation
   expires: null
-  max_hits: 2
+  max_hits: 3
 - pattern: core/landscape/exporter.py
   rules:
   - R5

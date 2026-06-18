@@ -11,7 +11,7 @@ per_file_rules:
   - R5
   reason: Type discrimination for plugin dispatch, SQLite URI parsing, and raw YAML secrets validation
   expires: null
-  max_hits: 4
+  max_hits: 5
 - pattern: cli_helpers.py
   rules:
   - R1

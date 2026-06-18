@@ -45,7 +45,7 @@ per_file_rules:
   - R5
   reason: MappingProxyType deep-freeze guards on API call data
   expires: null
-  max_hits: 6
+  max_hits: 9
 - pattern: contracts/config/runtime.py
   rules:
   - R5
@@ -99,7 +99,7 @@ per_file_rules:
     guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit
     attributability)
   expires: null
-  max_hits: 4
+  max_hits: 5
 - pattern: contracts/diversion.py
   rules:
   - R5

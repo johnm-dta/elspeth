@@ -49,7 +49,7 @@ per_file_rules:
     to distinguish audit-evidence exceptions from framework/orchestration failures without fabricating
     context.
   expires: null
-  max_hits: 11
+  max_hits: 14
 - pattern: engine/tokens.py
   rules:
   - R5

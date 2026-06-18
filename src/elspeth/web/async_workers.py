@@ -4,8 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+
+_SHARED_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_shared_executor() -> ThreadPoolExecutor:
+    """Retrieve or construct the bounded process-wide ThreadPoolExecutor."""
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is None:
+        with _EXECUTOR_LOCK:
+            if _SHARED_EXECUTOR is None:
+                # Sensible limit to prevent unbounded thread creation.
+                # 16 concurrent workers is robust for typical Web IO tasks.
+                _SHARED_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=16,
+                    thread_name_prefix="async-worker",
+                )
+    return _SHARED_EXECUTOR
+
+
+async def shutdown_async_workers() -> None:
+    """Shut down the shared thread pool executor."""
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is not None:
+        loop = asyncio.get_running_loop()
+        executor = _SHARED_EXECUTOR
+        _SHARED_EXECUTOR = None
+        await loop.run_in_executor(None, executor.shutdown, True)
 
 
 def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
@@ -46,7 +75,7 @@ def _drain_future_exception[T](future: asyncio.Future[T]) -> None:
 
 
 async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-    """Run synchronous work in a one-call worker without blocking the loop.
+    """Run synchronous work in a process-wide shared worker pool without blocking the loop.
 
     The short wait loop keeps an explicit event-loop timer active while the
     worker runs.  This preserves the normal async-over-sync contract even in
@@ -54,7 +83,7 @@ async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwar
     promptly.
     """
     loop = asyncio.get_running_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
+    executor = _get_shared_executor()
     future = loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
     try:
         # ``asyncio.wait`` returns ``(done, pending)`` on each 0.1s tick rather
@@ -79,4 +108,3 @@ async def run_sync_in_worker[**P, T](func: Callable[P, T], *args: P.args, **kwar
         # ``_drain_future_exception``'s docstring.
         if not future.done():
             future.add_done_callback(_drain_future_exception)
-        executor.shutdown(wait=future.done(), cancel_futures=True)

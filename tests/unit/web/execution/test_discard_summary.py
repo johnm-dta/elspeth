@@ -118,3 +118,31 @@ def test_discard_summary_carries_stage_attribution_for_validation_and_transform_
             "count": 1,
         },
     ]
+
+
+def test_sqlite_database_file_missing_handles_uri_urls() -> None:
+    from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
+
+    # Non-existent files
+    assert _sqlite_database_file_missing("sqlite:///nonexistent.db") is True
+    assert _sqlite_database_file_missing("sqlite:///file:nonexistent.db?uri=true") is True
+    assert _sqlite_database_file_missing("sqlite:///file:/nonexistent/abs/audit.db?uri=true") is True
+
+    # Memory / Non-sqlite should return False (not missing / ignored)
+    assert _sqlite_database_file_missing("sqlite://") is False
+    assert _sqlite_database_file_missing("sqlite:///:memory:") is False
+    assert _sqlite_database_file_missing("postgresql://localhost/db") is False
+
+
+def test_sqlite_database_file_missing_with_existing_files(tmp_path) -> None:
+    from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
+
+    db_file = tmp_path / "audit.db"
+    db_file.touch()
+
+    # Normal SQLite path
+    assert _sqlite_database_file_missing(f"sqlite:///{db_file}") is False
+
+    # URI SQLite paths (various formats)
+    assert _sqlite_database_file_missing(f"sqlite:///file:{db_file}?uri=true") is False
+    assert _sqlite_database_file_missing(f"sqlite:///file:///{db_file}?uri=true") is False

@@ -4,7 +4,7 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## [0.6.0] - Unreleased (cross-process multi-worker run coordination)
+## [0.6.0] - 2026-06-19 (cross-process multi-worker run coordination)
 
 The single-worker-to-multi-worker transition. Multiple cooperating
 processes on one host may now operate against a single run backed by one
@@ -315,10 +315,11 @@ client as a streaming byte-limit (elspeth-a6f246d02a).
 
 ---
 
-## [0.5.4] - Unreleased
+## [0.5.4] - 2026-06-19 (maintenance fixes folded into 0.6.0)
 
 Maintenance line opened on top of RC-5.3, carrying correctness fixes that
-post-date the 0.5.3 cut.
+post-date the 0.5.3 cut. These fixes ship as part of the 0.6.0 release
+rather than as a standalone 0.5.4 tag.
 
 ### Fixed
 

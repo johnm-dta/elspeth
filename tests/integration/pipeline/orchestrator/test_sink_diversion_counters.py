@@ -45,7 +45,7 @@ class DivertSecondRowSink(_TestSinkBase):
             artifact=ArtifactDescriptor.for_file(
                 path=f"memory://{self.name}_{self._artifact_counter}",
                 size_bytes=len(str(primary_rows)),
-                content_hash=f"hash_{self._artifact_counter}",
+                content_hash=f"{self._artifact_counter:064x}",
             ),
             diversions=diversions,
         )

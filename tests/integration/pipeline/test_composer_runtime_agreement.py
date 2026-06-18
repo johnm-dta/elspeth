@@ -3205,8 +3205,11 @@ sinks:
         settings.landscape_passphrase = None
         settings.data_dir = str(tmp_path)
 
-        session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions"])
+        session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions", "append_run_event"])
         session_service.update_run_status = AsyncMock()
+        # ``_persist_and_broadcast_run_event`` awaits append_run_event to durably
+        # record + broadcast each lifecycle event (multi-worker run coordination).
+        session_service.append_run_event = AsyncMock()
         # ``_run_pipeline`` resolves the run's owning session (get_run().session_id)
         # to scope inline-blob access before any metadata enforcement
         # (IDOR contract, elspeth-195ecb1d58). Tests below set their owned

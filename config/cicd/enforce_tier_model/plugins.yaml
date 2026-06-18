@@ -537,16 +537,6 @@ allow_hits:
     exact code the judge inspected) could not be carried. The qname-level rationale
     above was re-verified against the current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=145040eda487d63d
-  owner: john
-  reason: |-
-    PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. In CSVSource._load_from_file (csv_source.py:458), `except csv.Error as e` catches a parser error raised by csv.reader (strict=True, line 269) while reading a DATA row in the main iteration loop via next_nonblank_record() -> next(reader). csv.Error is raised EXCLUSIVELY by the stdlib csv C-parser on malformed external CSV bytes; no config or our-code path produces it, so the catch is exhaustively external-origin. This is the Tier-3 source boundary (external file content we did not author). It is not a silent swallow: the handler increments row_num, captures the physical line number (reader.line_num), builds a raw_row with audit metadata, and calls ctx.record_validation_error(schema_mode='parse') UNCONDITIONALLY (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == 'discard', and then RETURNS to stop processing — a csv.Error can leave the parser in a corrupted state where subsequent next() calls skip, merge, or misattribute rows, so continuing would risk silent data loss; the error message says exactly this. The catch is narrow (csv.Error, never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); the per-line allowlist is the prescribed honest mechanism. Mirrors the already-signed skip_rows/header csv.Error handlers at lines 303 and 358.
-  safety: |-
-    Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
-  expires: '2026-08-31'
 - key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=f164d02404de5105
   owner: john
   reason: |-
@@ -764,46 +754,6 @@ allow_hits:
   owner: john
   reason: |-
     In DataverseSource.load (dataverse.py:620), the except ValueError wraps self._normalize_row_fields on a cleaned external API row (Tier 3). normalize_field_name raises ValueError when an arbitrary Dataverse field name normalizes to empty (all-special-character names); the handler quarantines the row via ctx.record_validation_error(schema_mode='field_normalization') and continues. Narrow catch, audited quarantine, no inferred/fabricated field — the absence of a usable field name is recorded, not papered over. Continuing per the configured failure policy is correct for Tier-3 user data. Matches the existing rationale.
-  safety: |-
-    Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
-  expires: '2026-09-03'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=e9ad65a49eeacbe0
-  owner: john
-  reason: |-
-    In DataverseSource.load (dataverse.py:641), the except ValidationError catches pydantic model_validate failure on a normalized external API row (Tier 3). Source-tier code is required to validate external data and quarantine failures: the handler records via ctx.record_validation_error(schema_mode='validation') and yields SourceRow.quarantined unless discard, then continues. The exception type is narrow (ValidationError), the malformation is recorded in the audit channel, and no values are fabricated. This is the textbook Tier-3 source-boundary pattern. Matches the existing rationale.
-  safety: |-
-    Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
-  expires: '2026-09-03'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=0f4614224ff9e32b
-  owner: john
-  reason: |-
-    In JSONSource._validate_and_yield (json_source.py:491), the except ValueError catches _normalize_row_keys raising when the external JSON row is not a usable mapping (Tier 3 source boundary). The handler routes the bad row through _record_validation_failure (records and yields a quarantined row) and returns cleanly. Narrow catch (ValueError), audited quarantine, no silent recovery or fabrication — the malformed row is preserved into the audit record. Matches the existing rationale.
-  safety: |-
-    Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
-  expires: '2026-09-03'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=5500503febb7f02e
-  owner: john
-  reason: |-
-    In JSONSource._validate_and_yield (json_source.py:540), the except ValidationError catches pydantic model_validate failure on an external JSON row (Tier 3). The handler records via _record_validation_failure (ctx.record_validation_error + quarantined SourceRow). The except scope is narrow (ValidationError specifically), the failure is recorded in the audit trail, and the row is quarantined per configured policy — the prescribed Tier-3 validate/record/quarantine pattern. Matches the existing rationale.
-  safety: |-
-    Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
-  expires: '2026-09-03'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=3aa0ad4e3190a198
-  owner: john
-  reason: |-
-    PRESCRIBED FORM — Tier-3 data-fault quarantine, recorded not swallowed, narrowed to the external-data marker. This except block in AzureBlobSource._validate_and_yield catches ONLY ExternalHeaderError (a ValueError subclass that is the field-normalization boundary's external-data marker) raised by _normalize_row_keys: either a non-object JSON/JSONL row (no field structure to normalise) or a collision in the external row's own keys after normalization — both Tier-3 bad source data. It is not a silent swallow: it builds error_msg, calls ctx.record_validation_error(...) UNCONDITIONALLY (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard". Critically, the catch is deliberately NARROW: config/our-code faults that _normalize_row_keys -> resolve_field_names raise as plain ValueError (a bad field_mapping: keys-not-found or creates-collision; a normalization-algorithm bug) are NOT caught here — they propagate and crash, because they are ours, exactly mirroring the CSV header path which catches only ExternalHeaderError and lets plain ValueError escape. (This handler was previously a broad `except ValueError` that masked those config/our-code faults as per-row quarantines; it was narrowed to ExternalHeaderError so the JSON/JSONL path discriminates data faults from config faults identically to the CSV path.) R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit handling. The method is a generator (yields, never raises), so @trust_boundary is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
     multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the

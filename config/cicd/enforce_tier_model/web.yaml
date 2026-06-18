@@ -2045,7 +2045,7 @@ allow_hits:
   owner: john
   reason: |-
     _validate_web_scrape_http_identity_not_placeholder (state.py:807) reads node.options.get("http") from composer state, which stores raw user/LLM-authored node options (Tier 3). A web_scrape node under construction may legitimately omit the optional HTTP block, so .get() with the following `isinstance(http, Mapping)` guard returns () (no advisory) on absence — the function is itself a boundary validator producing ValidationEntry diagnostics, and plugin schema validation remains the authoritative missing-field reporter. No fabrication; absence is handled by returning no error rather than inventing a value.
-    
+
     On the decorator nudge: the structural 3-question test resolves YES (external param `node`, rule R1, subject `node.options.get("http")` rooted at `node`), but @trust_boundary is INFEASIBLE here, not merely unused. TBE1 (elspeth-lints trust_boundary/tests, severity ERROR) requires a decorated function to bind `test_ref`/`test_fingerprint` to a pytest test asserting malformed-input REJECTION via a raise through the source_param. This function never raises on `node`: a missing or non-Mapping http block returns the empty tuple `()` (no advisory), and even a reserved-domain hit appends a ValidationEntry to the returned tuple rather than raising. It is a diagnostic collector, not a rejecting boundary — by design, because the plugin's pydantic schema is the authoritative missing/malformed-field reporter and this validator must not double-surface or crash on absence. No conforming TBE1 test can exist without inventing a spurious raise, which would be wrong. Therefore the decorator would fire TBE1 ERROR, and the per-line allowlist entry is the only honest suppression for this non-raising Tier-3 optional read.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2066,7 +2066,7 @@ allow_hits:
   owner: john
   reason: |-
     In _validate_web_scrape_http_identity_not_placeholder (line 808), node.options.get("http") is composer/LLM-authored node config read back from session state — Tier 3. `if not isinstance(http, Mapping): return ()` is isinstance type-dispatch at the boundary: it narrows the raw 'http' subobject to a Mapping before reading the wire-visible identity fields (abuse_contact, scraping_reason). This is a validator that emits ValidationEntry diagnostics, so a non-Mapping http simply yields no entries here (the plugin schema rule reports the shape problem), which is the correct quarantine-style behaviour at a Tier-3 boundary — not hiding a bug in our own code. Legitimate isinstance use at an external-origin config boundary; no fabrication.
-    
+
     On the decorator nudge: the 3-question test resolves YES (external param `node`, rule R5 in the suppressible set, subject `http` rooted at `node.options`), but @trust_boundary is INFEASIBLE here. TBE1 (elspeth-lints trust_boundary/tests, severity ERROR) requires a decorated function to bind `test_ref`/`test_fingerprint` to a pytest test asserting malformed-input REJECTION via a raise through the source_param. This function never raises on `node`: a non-Mapping or absent http block returns the empty tuple `()` (no advisory), and even a reserved/placeholder hit APPENDS a ValidationEntry to the returned tuple rather than raising. It is a diagnostic collector, not a rejecting boundary — by design, because the plugin's pydantic schema is the authoritative shape reporter and this validator must not crash on malformed composer state. No conforming TBE1 test can exist without inventing a spurious raise. So the decorator would fire TBE1 ERROR, and the per-line allowlist entry is the only honest suppression for this non-raising Tier-3 isinstance boundary. (This is the R5 sibling of the R1 entry on the same function, which signed ACCEPTED under the identical argument.)
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2125,7 +2125,7 @@ allow_hits:
   owner: john
   reason: |-
     In _validate_web_scrape_abuse_contact_not_reserved (state.py:777/780), `node.options.get("http")` and `http.get("abuse_contact")` read optional keys from Tier-3 composer-authored node configuration. Each `.get` returns None on absence, immediately narrowed by an `isinstance` guard that returns None (no advisory) — 'no http block / no abuse_contact means nothing to validate', the honest absence outcome. No default, no fabrication. The bare `.get(key)` is the clearest expression of an optional Tier-3 read; a membership-subscript rewrite would repeat the key literal and surface no decision. R1 over-fires; the per-line entry is the reviewed suppression.
-    
+
     The @trust_boundary nudge (source_param=node, rule R1) is INFEASIBLE per TBE1 (mandatory raising test_ref): this function NEVER raises on `node` — every absent/ill-typed branch returns None, and a reserved-domain match returns a ValidationEntry, not a raise. A non-raising boundary cannot satisfy the raising-test gate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2146,7 +2146,7 @@ allow_hits:
   owner: john
   reason: |-
     In _validate_web_scrape_abuse_contact_not_reserved (state.py:777/780), `node.options.get("http")` and `http.get("abuse_contact")` read optional keys from Tier-3 composer-authored node configuration. Each `.get` returns None on absence, immediately narrowed by an `isinstance` guard that returns None (no advisory) — 'no http block / no abuse_contact means nothing to validate', the honest absence outcome. No default, no fabrication. The bare `.get(key)` is the clearest expression of an optional Tier-3 read; a membership-subscript rewrite would repeat the key literal and surface no decision. R1 over-fires; the per-line entry is the reviewed suppression.
-    
+
     The @trust_boundary nudge (source_param=node, rule R1) is INFEASIBLE per TBE1 (mandatory raising test_ref): this function NEVER raises on `node` — every absent/ill-typed branch returns None, and a reserved-domain match returns a ValidationEntry, not a raise. A non-raising boundary cannot satisfy the raising-test gate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2167,7 +2167,7 @@ allow_hits:
   owner: john
   reason: |-
     In RunEvent._resolve_data_from_event_type (schemas.py:478/479), `values.get("event_type")` / `values.get("data")` run inside a Pydantic mode='before' validator. RunEvent extends _StrictResponse and is emitted (streamed) by us — it is never model_validate'd from external request input — so `values` is our own Tier-1 round-trip data. The `.get` is an OPTIONAL pre-resolution peek: when event_type/data are present it pre-builds the correct union member; when absent it falls through and lets standard Pydantic field validation enforce the required fields (the right place for that enforcement, not a KeyError here). `.get`-returns-None is the idiomatic before-validator optional read; a membership-subscript rewrite surfaces no decision. R1 over-fires; per-line entry is the reviewed suppression.
-    
+
     The @trust_boundary nudge (source_param=values, tier=3) is a MISLABEL (RunEvent is Tier-1, stream-only) and INFEASIBLE: the validator NEVER raises on `values` — it defers all required-field rejection to standard Pydantic validation. A non-raising boundary cannot satisfy TBE1's raising-test mandate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2188,7 +2188,7 @@ allow_hits:
   owner: john
   reason: |-
     In RunEvent._resolve_data_from_event_type (schemas.py:478/479), `values.get("event_type")` / `values.get("data")` run inside a Pydantic mode='before' validator. RunEvent extends _StrictResponse and is emitted (streamed) by us — it is never model_validate'd from external request input — so `values` is our own Tier-1 round-trip data. The `.get` is an OPTIONAL pre-resolution peek: when event_type/data are present it pre-builds the correct union member; when absent it falls through and lets standard Pydantic field validation enforce the required fields (the right place for that enforcement, not a KeyError here). `.get`-returns-None is the idiomatic before-validator optional read; a membership-subscript rewrite surfaces no decision. R1 over-fires; per-line entry is the reviewed suppression.
-    
+
     The @trust_boundary nudge (source_param=values, tier=3) is a MISLABEL (RunEvent is Tier-1, stream-only) and INFEASIBLE: the validator NEVER raises on `values` — it defers all required-field rejection to standard Pydantic validation. A non-raising boundary cannot satisfy TBE1's raising-test mandate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2589,7 +2589,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a prescribed Tier-3 redaction-boundary shape, not a Tier-1 audit-data read that must crash. The helper is explicitly an egress redactor for internal blob storage paths: `src/elspeth/web/composer/redaction.py:3095` defines `redact_source_storage_path(state_dict: dict[str, Any])`, and `src/elspeth/web/composer/redaction.py:3098-3101` says that when source options contain `blob_ref`, `path`/`file` point at an internal storage location that must not be exposed. The function then documents the exact polymorphic boundary contract at `src/elspeth/web/composer/redaction.py:3106-3118`: `state_dict` is a first-party serializer output, but `"source"`/`"options"` can legitimately be absent, and "The composer/LLM-authored VALUES inside ``options`` are Tier 3"; the redaction trigger is only the structural `"blob_ref"` marker.
-    
+
     The flagged guard at `src/elspeth/web/composer/redaction.py:3146` is therefore the boundary test that decides whether Tier-3-ish `options` is inspectable for the blob marker: `if options is None or not isinstance(options, Mapping) or "blob_ref" not in options:`. It does not hide a malformed first-party source object: that case is handled offensively just above at `src/elspeth/web/composer/redaction.py:3136-3142`, where present non-`Mapping` `source` raises `AuditIntegrityError`. The suppression is bound to this exact redaction-boundary contract: if the docstring no longer says option values are composer/LLM-authored Tier 3, or if `_redact_one` stops crashing on non-`Mapping` `source`, this justification should be considered stale.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2781,7 +2781,7 @@ allow_hits:
   owner: john
   reason: |-
     This `except ValueError:` is a legitimate Tier-3 WebSocket boundary for the external `run_id` path parameter, not a Tier-1 audit-data swallow. In `src/elspeth/web/execution/routes.py:881-885`, the handler calls `service.verify_run_ownership(user, run_id)` before subscribing, and maps a false ownership result to the same IDOR-safe close: `await websocket.close(code=4004, reason="Run not found")`. The flagged catch at `src/elspeth/web/execution/routes.py:903-905` does the same for malformed or absent external run IDs: `except ValueError:` followed by `await websocket.close(code=4004, reason="Run not found")`.
-    
+
     The callee documents the boundary at `src/elspeth/web/execution/service.py:910-914`: `UUID(run_id)` may raise `ValueError` for a malformed client-supplied ID, and `get_run` may raise `ValueError` when no run row matches; both are explicitly called "legitimate external not-found cases" mapped to an IDOR-safe 4004. Tier-1 corruption is not swallowed by this catch: `src/elspeth/web/execution/routes.py:886-902` catches `RunSessionIntegrityError` first, logs the operator detail, closes 1011, and returns. The callee also re-raises missing parent-session corruption as `RunSessionIntegrityError` at `src/elspeth/web/execution/service.py:922-925`, keeping it out of the broad `ValueError` boundary path.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2878,7 +2878,7 @@ allow_hits:
   owner: john
   reason: |-
     This is an explicit WebSocket boundary mapping for a run that disappears during progress streaming, not a swallowed Tier-1 integrity failure. The enclosing `websocket_run_progress` handler first verifies ownership (`src/elspeth/web/execution/routes.py:863-871`) and then subscribes to progress events. On idle timeout it re-checks the authoritative run status (`src/elspeth/web/execution/routes.py:917-922`). If `_load_run_status_snapshot_with_accounting(...)` reports `_RunStatusNotFoundError`, the handler sends the prescribed client-facing not-found outcome and exits the stream: `await websocket.close(code=4004, reason="Run not found")` followed by `break` (`src/elspeth/web/execution/routes.py:923-925`). That is a deliberate boundary response to the external WebSocket client, consistent with the file's IDOR-safe not-found handling, not silent continuation.
-    
+
     Future drift should invalidate this suppression if the handler stops closing the WebSocket with `4004`, stops exiting the loop, or starts catching `_RunStatusIntegrityError`/`ValidationError` on this path as not-found. Those integrity failures are handled separately as internal accounting errors with `1011` and operator logging (`src/elspeth/web/execution/routes.py:926-938`).
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -2956,7 +2956,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a legitimate Tier-3 websocket/network teardown boundary, not a Tier-1 audit-data or internal invariant defect. The handler is an external client stream endpoint declared at `src/elspeth/web/execution/routes.py:835-840` as `@router.websocket("/ws/runs/{run_id}")` and `async def websocket_run_progress(websocket: WebSocket, run_id: str, token: str | None = None)`. After accepting the external websocket at line 861, the outer handler already treats client/network disconnects as boundary conditions: line 952 catches `WebSocketDisconnect` with `pass  # Client disconnected — fall through to finally`, and lines 954-959 catch `ConnectionError`/`OSError` and log `slog.error("websocket_handler_error", run_id=run_id, error=str(exc))`.
-    
+
     The flagged inner catch at lines 960-963 is only for failure while attempting to send an internal-error close frame back over that same failing external socket: `await websocket.close(code=1011, reason="Internal server error")` followed by `except (WebSocketDisconnect, ConnectionError, OSError) as close_err:` and `slog.error("websocket_close_failed", run_id=run_id, error=str(close_err))`. Re-raising here would convert a best-effort client notification failure into a server crash after the connection has already failed; the code explicitly records the failed close attempt and then always executes `broadcaster.unsubscribe(run_id, queue)` at lines 964-965. This suppression is therefore site-specific to an external websocket close boundary and would drift if the catch stopped being limited to `WebSocketDisconnect, ConnectionError, OSError`, stopped logging `websocket_close_failed`, or enclosed internal/audit-state operations instead of `websocket.close(...)`.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -3148,7 +3148,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a site-specific Tier-3 boundary for composer/user-authored source configuration re-read from persisted session state, not Tier-1 audit data. In `src/elspeth/web/composer/tools/generation.py:1373-1387`, the enclosing `compute_proof_diagnostics` code states that `source.options` values were authored by the operator or composer LLM and that re-reading them here is a "FRESH Tier-3 boundary"; a `ValueError` is therefore recoverable malformed external-origin input that should become a diagnostic instead of crashing `preview_pipeline`.
-    
+
     The flagged catch at `src/elspeth/web/composer/tools/generation.py:1414-1424` wraps only `_csv_source_field_mapping(source.options)`, then records the concrete boundary failure via `_csv_source_field_resolution_error_diagnostic(...)` and sets `field_resolution_failed = True`. That is prescribed-form boundary handling: validate/coerce user-authored CSV field mapping at the boundary, reify the failure as a blocking proof diagnostic, and skip dependent schema analysis rather than swallowing it silently.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -3644,6 +3644,44 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[10]/body[17]/body[6]/body[2]/finalbody[1]/orelse[2]/handlers[0]/body[0]'
   judge_metadata_signature: 'hmac-sha256:v2:35f767f6f65c6a0e3c4d9b76691f3ee9151402fbbebbb65d450cf28435d1d41b'
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=78ec841513b47fad
+  owner: john
+  reason: |-
+    Legitimate Tier-3 boundary shape-narrowing in the /execute nested-transform path allowlist, not Tier-1 audit-data. At service.py:582-586, provider_config = node.options['provider_config'] is composer/user-authored transform config (Tier-3 external-origin per policy, regardless of typed container). 'if not isinstance(provider_config, Mapping): continue' skips a malformed/non-mapping provider_config from a crafted compose payload rather than crashing the security check before .get() traversal. Direct analog of the already-judged sibling source.options@540 and output.options@557 blocks: defensive border shape-guard with fail-closed rejection (resolve_data_path + PathAllowlistViolationError) for present values. /execute cannot rely on prior /validate (an authenticated user could skip it), so the confinement must hold for adversarial option shapes. No coercion or fabrication.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-16'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-18T08:06:41.562374+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. node.options['provider_config'] is composer/user-authored transform configuration — Tier-3 external-origin data per policy (persisted external-origin config re-read from our DB is Tier-3 at the read site, regardless of the typed container). The /execute endpoint cannot rely on /validate having run, so this is a genuine Tier-3 boundary path-allowlist enforcement. The isinstance check guards shape before traversing with .get() for path resolution, and the surrounding code fails closed via PathAllowlistViolationError on present values without coercion or fabrication — meaning-preserving boundary handling. The 'continue' on non-Mapping is acceptable here because the subsequent preflight validate_pipeline gate will reject malformed node options structurally; the isinstance is purely defensive shape-narrowing for the security check.
+  judge_signature_version: 2
+  scope_fingerprint: 07fe59fa633450316316df4718d1a9b7937c01ac089019ec0d34c267e658c28b
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[9]/body[14]/body[2]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:2c5a8a37891b0db976fc094f027575f5c663be2afb82a7b2c2b6b91c250fbd9b'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=95e48b61d3d30d45
+  owner: john
+  reason: |-
+    Legitimate Tier-3 optional-key read in the /execute nested-transform path allowlist, not Tier-1 audit access. At service.py:585-589, 'for key in NESTED_LOCAL_PATH_OPTION_KEYS: value = provider_config.get(key)' reads optional local-path keys from the Tier-3 transform provider_config mapping; absence is expected (a transform may not use that nested path option) and is skipped by the 'if value is not None' guard at 587. Replacing with provider_config[key] would crash on absent optional keys instead of validating the user-supplied path surface. Present values are confined to allowed_sink_dirs via resolve_data_path with PathAllowlistViolationError on escape (587-592). Direct analog of the already-judged source.options.get@540 / output.options.get@557 sibling entries. No fabrication.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-16'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-18T08:07:00.845428+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES. The provider_config mapping originates from user/composer-authored node.options re-read at execution time — Tier-3 external-origin config per policy ('persisted external-origin config re-read from our DB is Tier-3'). The code has already shape-guarded it with isinstance(provider_config, Mapping) at 583 and is iterating an optional-key list where absence is semantically meaningful (the transform may not use that nested path); the .get(key) followed by 'if value is not None' is the prescribed Tier-3 boundary form — validate present values via resolve_data_path/PathAllowlistViolationError, skip absent ones, no fabrication. Direct subscript would crash on legitimately-absent optional keys.
+  judge_signature_version: 2
+  scope_fingerprint: 07fe59fa633450316316df4718d1a9b7937c01ac089019ec0d34c267e658c28b
+  judge_transport: openrouter
+  ast_path: 'body[59]/body[9]/body[14]/body[2]/body[4]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:3e9c283d08bfe4962b29237cc63a70a70d81b0940e80de0c3172ba15999d7fbd'
 per_file_rules:
 - pattern: web/composer/tools/_common.py
   rules:

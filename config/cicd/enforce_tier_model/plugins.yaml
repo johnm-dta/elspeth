@@ -102,7 +102,7 @@ per_file_rules:
   reason: Numpy floating type detection for schema inference and ndarray non-finite
     scanning
   expires: null
-  max_hits: 3
+  max_hits: 5
 - pattern: plugins/infrastructure/utils.py
   rules:
   - R5

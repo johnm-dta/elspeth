@@ -258,7 +258,11 @@ def test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline(
                         "http": {
                             "abuse_contact": {"secret_ref": "ANY_SECRET"},
                             "scraping_reason": "research",
-                            "allowed_hosts": ["example.com"],
+                            # ``public_only`` is the sole allowed_hosts value web-authored
+                            # web_scrape pipelines may use; a list/CIDR allowlist now trips
+                            # the web_scrape_network_policy gate (14c2f4a73), which returns
+                            # is_valid=False BEFORE the secret_refs check this test exercises.
+                            "allowed_hosts": "public_only",
                         },
                     },
                     condition=None,

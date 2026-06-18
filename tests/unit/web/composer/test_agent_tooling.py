@@ -298,7 +298,10 @@ class TestUpdateBlob:
             session_id=blob_env["session_id"],
         )
         assert result.success is False
-        assert "not found" in result.data["error"]
+        # update_blob validates blob_id as a canonical UUID at the Tier-3
+        # boundary before the row lookup, so a non-UUID literal surfaces the
+        # more specific "not a valid UUID" repair hint rather than "not found".
+        assert "is not a valid UUID" in result.data["error"]
 
 
 class TestDeleteBlob:
@@ -987,10 +990,15 @@ class TestSetSourceFromBlob:
 
         state = _empty_state()
         catalog = _mock_catalog()
+        # blob_id must be a canonical UUID: set_source_from_blob now
+        # rejects malformed ids at the Tier-3 argument boundary, so a
+        # non-UUID literal would short-circuit before the row is read and
+        # the Tier-1 MIME guard under test would never run.
+        exotic_blob_id = str(uuid4())
         with blob_env["engine"].begin() as conn:
             conn.execute(
                 blobs_table.insert().values(
-                    id="exotic-blob",
+                    id=exotic_blob_id,
                     session_id=blob_env["session_id"],
                     filename="data.parquet",
                     mime_type="application/x-parquet",
@@ -1010,7 +1018,7 @@ class TestSetSourceFromBlob:
         with pytest.raises(AuditIntegrityError, match=r"blobs\.mime_type is 'application/x-parquet'"):
             execute_tool(
                 "set_source_from_blob",
-                {"blob_id": "exotic-blob", "on_success": "step1"},
+                {"blob_id": exotic_blob_id, "on_success": "step1"},
                 state,
                 catalog,
                 session_engine=blob_env["engine"],

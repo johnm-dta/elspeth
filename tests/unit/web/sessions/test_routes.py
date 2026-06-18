@@ -1780,6 +1780,13 @@ class TestIDORCoverageDrift:
             "list_blobs",
             "get_blob_metadata",
             "download_blob_content",
+            # 0.6.0: bounded inline-preview endpoint
+            # (``GET .../blobs/{blob_id}/preview``). Session-scoped like the
+            # rest of the blob family; routes through
+            # ``_verify_session_and_get_blob_service`` for IDOR safety. The
+            # cross-session 404 assertion lives in
+            # ``tests/unit/web/blobs/test_routes.py::TestIDORProtection``.
+            "preview_blob_content",
             "delete_blob",
         }
     )

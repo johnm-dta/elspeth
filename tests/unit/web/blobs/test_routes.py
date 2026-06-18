@@ -386,6 +386,17 @@ class TestIDORProtection:
         resp = bob.get(f"/api/sessions/{bob_session}/blobs/{blob['id']}/content")
         assert resp.status_code == 404
 
+    def test_blob_preview_from_wrong_session_returns_404(self, tmp_path) -> None:
+        """GET bounded preview for another user's blob returns 404."""
+        alice, bob = self._make_two_session_app(tmp_path)
+
+        alice_session = _create_session(alice, "Alice Session")
+        bob_session = _create_session(bob, "Bob Session")
+        blob = _upload_blob(alice, alice_session)
+
+        resp = bob.get(f"/api/sessions/{bob_session}/blobs/{blob['id']}/preview")
+        assert resp.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # Blob lifecycle enforcement — download guard (elspeth-182cbb262b)

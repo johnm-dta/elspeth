@@ -153,30 +153,35 @@ def test_reserve_sequence_range_requires_session_write_lock(service):
 
 @pytest.mark.timeout(5)
 def test_session_write_lock_serializes_sqlite_same_session_sequence_allocation(service: SessionServiceImpl) -> None:
-    """B3 regression: two same-session SQLite writers must not both read
-    the same MAX(sequence_no). This test uses the real StaticPool
-    in-memory SQLite engine from the shared fixture and two worker
-    threads. The sleep happens inside the session write lock to widen
-    the race window; without the process-wide per-session lock both
-    workers can reserve sequence_no=1 and one insert fails."""
-    import threading
-    import time
-    from concurrent.futures import ThreadPoolExecutor, wait
+    """B3 fixture coverage: successive same-session allocations under the
+    write lock must not reuse a sequence_no.
 
+    This uses the shared StaticPool in-memory engine, which multiplexes a
+    SINGLE DBAPI connection across every checkout. Since 92612cf91 the
+    session engine takes manual pysqlite begin control and issues an
+    explicit ``BEGIN IMMEDIATE`` for write-intent transactions; two
+    concurrent ``engine.begin()`` calls over StaticPool's one shared
+    connection would therefore (correctly) raise "cannot start a
+    transaction within a transaction" — StaticPool cannot model two
+    genuinely independent concurrent writers. The representative
+    concurrent-writer race proof lives in
+    ``test_file_backed_sqlite_lock_serializes_independent_connections``,
+    which uses file-backed SQLite with independently checked-out
+    connections. This test keeps the StaticPool variant honest about what
+    it can actually exercise: that the per-session write lock + sequence
+    allocator hand out monotonic, non-colliding sequence numbers across
+    successive transactions on the same connection."""
     from sqlalchemy import insert, select
 
     from elspeth.web.sessions import models
 
-    barrier = threading.Barrier(2)
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_sqlite_lock")
 
     def _writer(index: int) -> int:
-        barrier.wait()
         with service._engine.begin() as conn:  # noqa: SIM117
             with service._session_write_lock(conn, "s_sqlite_lock"):
                 seq = service._reserve_sequence_range(conn, "s_sqlite_lock", count=1)
-                time.sleep(0.01)
                 conn.execute(
                     insert(models.chat_messages_table).values(
                         id=f"m{index}",
@@ -190,16 +195,7 @@ def test_session_write_lock_serializes_sqlite_same_session_sequence_allocation(s
                 )
                 return seq
 
-    pool = ThreadPoolExecutor(max_workers=2)
-    try:
-        futures = [pool.submit(_writer, index) for index in (1, 2)]
-        done, not_done = wait(futures, timeout=2.0)
-        assert not not_done, (
-            "SQLite same-session sequence-allocation workers did not finish within 2s; likely deadlock or lock-order regression"
-        )
-        seqs = sorted(future.result(timeout=0) for future in done)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    seqs = sorted(_writer(index) for index in (1, 2))
 
     assert seqs == [1, 2]
     with service._engine.begin() as conn:

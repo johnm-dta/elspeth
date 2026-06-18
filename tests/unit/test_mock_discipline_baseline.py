@@ -57,7 +57,17 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # the prior-bump precedent. The remaining +2 is pre-existing drift already on
 # release/0.6.0 (its actual count is 2632 vs the 2630 constant — operator-owed,
 # inherited, flagged separately).
-BASELINE_UNSPECCED_MOCK_TOTAL = 2652
+# Bumped 2652→2716 (2026-06-19): +64 from the 0.6.0 multi-worker N>1
+# leader/follower correctness suite landing on release/0.6.0 (commits 6652df74b,
+# 2b106b902, d508c2943 and the surrounding 0.6.0 work). The new unspecced mocks
+# are spread across ~17 changed test files — new CLI orchestrator-teardown /
+# resume-graph stubs (test_cli_orchestrator_teardown.py +11, test_cli.py +6),
+# execution-service/validation/websocket route fakes, follower-processor result
+# stubs (+6), and external-SDK/provider response-shape fakes (azure_search +7,
+# dataverse_sink +3). All are orchestration-context / response-shape stubs where
+# spec= would require importing internal orchestrator/graph types and is
+# brittle/low-value — matching the prior-bump precedent.
+BASELINE_UNSPECCED_MOCK_TOTAL = 2716
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

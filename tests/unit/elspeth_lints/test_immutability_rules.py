@@ -658,7 +658,7 @@ def test_existing_yaml_loads_with_core_loader() -> None:
 
     path = Path("config/cicd/enforce_frozen_annotations/existing.yaml")
     result = load_allowlist(path, valid_rule_ids={"immutability.frozen_annotations"})
-    assert len(result.entries) == 9, f"expected 9 live entries, got {len(result.entries)}"
+    assert len(result.entries) == 8, f"expected 8 live entries, got {len(result.entries)}"
 
 
 def _analyze_freeze_guards(source: str) -> list[Finding]:

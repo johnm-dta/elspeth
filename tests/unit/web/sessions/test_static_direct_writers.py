@@ -1143,6 +1143,21 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/sessions/test_service.py",
+        enclosing_symbol="TestRunEvents.test_append_and_list_run_events_preserves_order_and_payload",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "0.6.0 run-events service test: seeds the session + composition_"
+            "states + runs FK chain so the test can exercise the production "
+            "append_run_event / list_run_events path. The composition_states "
+            "insert is only the parent-row anchor required by runs_table's "
+            "state_id FK; the test owns the in-memory SQLite engine and is "
+            "pinning the run-event ordering/payload, not the production "
+            "session writer."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/sessions/test_count_tool_responses_for_assistant.py",
         enclosing_symbol="_persist_assistant_with_tools",
         table="chat_messages",

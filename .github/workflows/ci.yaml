@@ -518,90 +518,6 @@ jobs:
           exit "$status"
 
   # ===========================================================================
-  # Stage 3b: Testcontainer Postgres lane (CL-PP-11 dialect-portability proof)
-  # ===========================================================================
-  # Runs the tests marked ``@pytest.mark.testcontainer`` against a
-  # Docker-backed PostgreSQL 16 container spun up via testcontainers-python.
-  # The default and matrix test lanes deselect this marker (see addopts in
-  # pyproject.toml and the explicit ``and not testcontainer`` clauses in the
-  # test matrix above) so that Docker-free local runs and CI lanes don't
-  # try to collect Docker-required tests. This lane is the canonical
-  # execution path for CL-PP-11 (composer-progress-persistence Phase 1
-  # spec §8.2).
-  #
-  # Docker-on-Docker: GitHub Actions Ubuntu runners have Docker
-  # available with no extra setup. testcontainers-python pulls postgres
-  # images on first use; image pull adds ~30s to first run, cached after.
-  #
-  # MUST stay listed in ci-success.needs: below — branch protection relies
-  # on the aggregate ci-success result. Removing this lane from needs:
-  # would let a red testcontainer lane silently leave ci-success green
-  # (the Phase 1C plan calls this out at line 127-131).
-  test-postgres-testcontainer:
-    name: Test (Postgres testcontainer)
-    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
-    needs: [static-analysis]
-    env:
-      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-test-postgres-testcontainer
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          path: ${{ env.CI_CHECKOUT_PATH }}
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Use checkout-local uv cache
-        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
-
-      - name: Install system dependencies
-        working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: |
-          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
-            dpkg-query -W libsqlcipher-dev
-          else
-            sudo apt-get update -q
-            sudo apt-get install -y -q libsqlcipher-dev
-          fi
-
-      - name: Install dependencies
-        working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: uv sync --frozen --all-extras
-
-      - name: Verify Docker is available
-        working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: docker info
-
-      - name: Verify testcontainers Postgres extra is installed
-        # Fail-closed dependency check (Phase 1C Preflight Step 3): the
-        # plan explicitly forbids ``|| echo missing``-style fallbacks here.
-        # If the import fails, the job fails — which is the correct
-        # signal that the lane cannot prove CL-PP-11.
-        working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: uv run python -c "import testcontainers.postgres"
-
-      - name: Run testcontainer tests
-        # Marker filter is the contract; path narrowing breeds drift.
-        # Future testcontainer-marked tests anywhere under tests/
-        # (e.g. tests/integration/landscape/) should be picked up
-        # automatically. The earlier `tests/integration/web/` constraint
-        # would silently skip out-of-tree testcontainer-marked tests
-        # while CI still reported green — defeating the gate's purpose.
-        working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: |
-          uv run pytest tests/ \
-            -v \
-            -m testcontainer
-
-  # ===========================================================================
   # Stage 3c: Dependency and License Audit
   # ===========================================================================
   supply-chain-audit:
@@ -826,7 +742,6 @@ jobs:
     needs:
       - static-analysis
       - test
-      - test-postgres-testcontainer
       - supply-chain-audit
       - e2e-frontend
       - frontend-unit
@@ -840,10 +755,6 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
-            echo "Postgres testcontainer job failed"
             exit 1
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then

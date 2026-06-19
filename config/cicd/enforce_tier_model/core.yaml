@@ -497,3 +497,22 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[29]/body[16]/body[1]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:635118c36d58c40655162ed24261e69999646c20e424d48acf0bfed7b81e4061'
+- key: core/landscape/run_coordination_repository.py:R6:_record_best_effort_event:fp=9a4208c0d0f37f5f
+  owner: john
+  reason: |-
+    Prescribed best-effort suppression, not a normal Tier-1 write path. _record_best_effort_event records a fence_refusal / heartbeat_degraded attribution row on a FRESH connection AFTER the triggering transaction rolled back; per ADR-030 section A.2 the row carries no durable state, so a lost event is benign. The catch MUST NOT raise: record_fence_refusal runs inside fenced_leader_transaction's `except RunLeadershipLostError: ... raise` unwind at src/elspeth/core/landscape/run_coordination_repository.py:276-288, so a raise here would replace the recoverable leadership-lost signal with a crash-class error, and on the record_heartbeat_degraded path it would crash the heartbeat thread before it latches coordination-lost. The catch is narrowed to SQLAlchemy DB-layer failures; non-DB programmer errors are not SQLAlchemyError and still surface. Transient write contention (database is locked) logs at WARNING; any other DB fault (FK miss on a vanished run, event_id dedup collision, real corruption) logs at ERROR so it stays visible and alarmable without crashing the leader. Same shape and discipline as the already-signed _read_registered_workers R6 waiver in this file. Future drift invalidates this suppression if the function becomes a primary audit write, is called outside a best-effort/unwind path, or broadens the catch beyond SQLAlchemy DB failures.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-17'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-19T03:25:12.802217+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. R6 fires correctly — this is a swallowed except — and the code is the policy-prescribed legitimate form: a documented best-effort attribution writer whose 'never raises' contract is load-bearing because it runs inside a leadership-lost unwind path and a heartbeat thread, where raising would convert a recoverable signal into a crash. The catch is narrowed to SQLAlchemyError (non-DB programmer errors still surface), failures are routed to WARNING for transient lock contention and ERROR otherwise so they remain alarmable, and the docstring in the excerpt independently corroborates the rationale. The fabrication test does not apply (no synthesized data; the event is simply lost, which §A.2 designates benign).
+  judge_signature_version: 2
+  scope_fingerprint: a05f51730fd348b4a1d5644615effafb2c34e8156873825d9f67f32024e3202c
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:726febe0da3d05ff4d5143017cf9e3da0fd15a4ec1013100396090761c40ecd8'

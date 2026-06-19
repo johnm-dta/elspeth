@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeIs, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
@@ -31,6 +31,11 @@ from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
+    # TypeIs (PEP 742) lives in typing on 3.13 but only typing_extensions on
+    # 3.12; it is used solely in an annotation (lazy under `from __future__
+    # import annotations`), so a type-checking-only import works on both.
+    from typing import TypeIs
+
     from sqlalchemy.engine import Connection
 
     from elspeth.contracts import Batch

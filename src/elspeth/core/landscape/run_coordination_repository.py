@@ -116,7 +116,10 @@ def _utc(value: datetime) -> datetime:
     return value
 
 
-def _is_database_locked(exc: OperationalError) -> bool:
+def _is_database_locked(exc: Exception) -> bool:
+    # Message-based, so it is safe to call on any DB-layer exception, not just
+    # OperationalError (lets the best-effort recorder split log severity without
+    # an isinstance branch).
     return "database is locked" in str(exc).lower()
 
 
@@ -202,7 +205,7 @@ def _record_best_effort_event(
                 context=context,
             )
     except SQLAlchemyError as exc:
-        level = logging.WARNING if isinstance(exc, OperationalError) and _is_database_locked(exc) else logging.ERROR
+        level = logging.WARNING if _is_database_locked(exc) else logging.ERROR
         logger.log(
             level,
             "best-effort coordination event %r for run %r (worker %r) could not be recorded: %s",

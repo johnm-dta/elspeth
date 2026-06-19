@@ -7,16 +7,7 @@
   "composer.exception_channel": [],
   "contract_invariants.session_engine_factory": [],
   "contract_invariants.validation_theatre": [],
-  "immutability.freeze_guards": [
-    {
-      "file_path": "contracts/node_state_context.py",
-      "fingerprint": "feada2bb480e8967"
-    },
-    {
-      "file_path": "web/sessions/protocol.py",
-      "fingerprint": "4d2fa53e59fcfd5b"
-    }
-  ],
+  "immutability.freeze_guards": [],
   "immutability.frozen_annotations": [],
   "manifest.contract_manifest": [],
   "manifest.symbol_inventory": [],
@@ -1785,6 +1776,10 @@
     {
       "file_path": "core/landscape/query_repository.py",
       "fingerprint": "928d9a5865302aae"
+    },
+    {
+      "file_path": "core/landscape/run_coordination_repository.py",
+      "fingerprint": "9a4208c0d0f37f5f"
     },
     {
       "file_path": "core/landscape/run_coordination_repository.py",

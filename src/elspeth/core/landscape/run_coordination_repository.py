@@ -171,13 +171,24 @@ def _record_best_effort_event(
     recorded_at: datetime,
     context: Mapping[str, object] | None = None,
 ) -> None:
-    """Write a ledger row on a FRESH connection; catch-all, log, never raise.
+    """Write a ledger row on a FRESH connection; best-effort, never raises.
 
     For events whose triggering transaction rolled back (``fence_refusal``) or
     whose writer must never crash (``heartbeat_degraded``, §A.3). Best-effort
-    attribution by design: a crash between the rollback and this write loses
-    the event, which is benign because the refused transaction left no durable
-    state needing explanation (§A.2).
+    attribution by design: losing the event is benign because the refused
+    transaction left no durable state needing explanation (§A.2).
+
+    "Never raises" is load-bearing, not a convenience. ``record_fence_refusal``
+    runs inside ``fenced_leader_transaction``'s
+    ``except RunLeadershipLostError: ... raise`` unwind: a raise here would
+    REPLACE the recoverable leadership-lost signal with a crash-class error, and
+    on the ``record_heartbeat_degraded`` path it would crash the heartbeat thread
+    before it latches coordination-lost. So every DB-layer write fault is
+    swallowed. Transient write contention ("database is locked") logs at WARNING;
+    any other DB fault (FK miss on a vanished run, ``event_id`` dedup collision,
+    real corruption) logs at ERROR so it stays visible and alarmable without
+    crashing the leader. Non-DB faults (e.g. a ``canonical_json`` ``TypeError``)
+    are not ``SQLAlchemyError`` and still surface as the programmer errors they are.
     """
     try:
         with begin_write(engine) as conn:
@@ -190,19 +201,15 @@ def _record_best_effort_event(
                 recorded_at=recorded_at,
                 context=context,
             )
-    except OperationalError as exc:
-        # Benign-loss applies ONLY to transient write contention (§A.2): a
-        # "database is locked" OperationalError under a held WAL writer. Any
-        # other failure (canonical_json encoding bug, unique-index violation
-        # on event_id, real DB corruption) is a Tier-1 audit-integrity fault
-        # and must propagate, not be swallowed as "best effort".
-        if not _is_database_locked(exc):
-            raise
-        logger.warning(
-            "best-effort coordination event %r for run %r (worker %r) could not be recorded due to write contention",
+    except SQLAlchemyError as exc:
+        level = logging.WARNING if isinstance(exc, OperationalError) and _is_database_locked(exc) else logging.ERROR
+        logger.log(
+            level,
+            "best-effort coordination event %r for run %r (worker %r) could not be recorded: %s",
             event_type,
             run_id,
             worker_id,
+            type(exc).__name__,
             exc_info=True,
         )
 

@@ -32,7 +32,7 @@ RUN npm run build
 # =============================================================================
 # Stage 2: Python Builder
 # =============================================================================
-FROM python:3.13-slim@sha256:b04b5d7233d2ad9c379e22ea8927cd1378cd15c60d4ef876c065b25ea8fb3bf3 AS builder
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS builder
 
 # Install uv for fast, deterministic dependency resolution
 # Using official installer (https://docs.astral.sh/uv/getting-started/installation/)
@@ -69,7 +69,7 @@ RUN . /opt/venv/bin/activate && \
 # =============================================================================
 # Stage 3: Runtime
 # =============================================================================
-FROM python:3.13-slim@sha256:b04b5d7233d2ad9c379e22ea8927cd1378cd15c60d4ef876c065b25ea8fb3bf3 AS runtime
+FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061 AS runtime
 
 # Labels for container registry
 LABEL org.opencontainers.image.title="ELSPETH"
